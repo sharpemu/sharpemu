@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Pad;
 
@@ -58,6 +59,7 @@ public static class PadExports
             return SetReturn(ctx, OrbisPadErrorDeviceNotConnected);
         }
 
+        Console.Error.WriteLine("[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options");
         return SetReturn(ctx, PrimaryPadHandle);
     }
 
@@ -162,10 +164,19 @@ public static class PadExports
     {
         Span<byte> data = stackalloc byte[PadDataSize];
         data.Clear();
-        data[0x04] = 128;
-        data[0x05] = 128;
-        data[0x06] = 128;
-        data[0x07] = 128;
+        var acceptsKeyboardInput = IsEmulatorWindowFocused();
+        var buttons = acceptsKeyboardInput ? ReadKeyboardButtons() : 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(data[0x00..], buttons);
+        var leftX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x41), IsKeyDown(0x44)) : (byte)128;
+        var leftY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x57), IsKeyDown(0x53)) : (byte)128;
+        var rightX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x4A), IsKeyDown(0x4C)) : (byte)128;
+        var rightY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x49), IsKeyDown(0x4B)) : (byte)128;
+        data[0x04] = leftX;
+        data[0x05] = leftY;
+        data[0x06] = rightX;
+        data[0x07] = rightY;
+        data[0x08] = acceptsKeyboardInput && IsKeyDown(0x52) ? (byte)255 : (byte)0;
+        data[0x09] = acceptsKeyboardInput && IsKeyDown(0x46) ? (byte)255 : (byte)0;
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
         data[0x4C] = 1;
         var timestampTicks = Stopwatch.GetTimestamp();
@@ -184,5 +195,59 @@ public static class PadExports
     {
         ctx[CpuRegister.Rax] = unchecked((ulong)result);
         return result;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+    private static bool IsKeyDown(int vk) =>
+        (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    private static bool IsEmulatorWindowFocused()
+    {
+        var foregroundWindow = GetForegroundWindow();
+        if (foregroundWindow == 0)
+        {
+            return false;
+        }
+
+        GetWindowThreadProcessId(foregroundWindow, out var processId);
+        return processId == (uint)Environment.ProcessId;
+    }
+
+    private static uint ReadKeyboardButtons()
+    {
+        uint buttons = 0;
+        // D-pad
+        if (IsKeyDown(0x25)) buttons |= 0x0080; // Left
+        if (IsKeyDown(0x27)) buttons |= 0x0020; // Right
+        if (IsKeyDown(0x26)) buttons |= 0x0010; // Up
+        if (IsKeyDown(0x28)) buttons |= 0x0040; // Down
+        // Face buttons
+        if (IsKeyDown(0x5A) || IsKeyDown(0x0D)) buttons |= 0x4000; // Z / Enter = Cross
+        if (IsKeyDown(0x58) || IsKeyDown(0x1B)) buttons |= 0x2000; // X / Escape = Circle
+        if (IsKeyDown(0x43))                     buttons |= 0x8000; // C = Square
+        if (IsKeyDown(0x56))                     buttons |= 0x1000; // V = Triangle
+        // Shoulder buttons
+        if (IsKeyDown(0x51))                     buttons |= 0x0400; // Q = L1
+        if (IsKeyDown(0x45))                     buttons |= 0x0800; // E = R1
+        if (IsKeyDown(0x52))                     buttons |= 0x0100; // R = L2 (digital)
+        if (IsKeyDown(0x46))                     buttons |= 0x0200; // F = R2 (digital)
+        // Options (Start)
+        if (IsKeyDown(0x09) || IsKeyDown(0x08)) buttons |= 0x0008; // Tab / Backspace = Options
+        return buttons;
+    }
+
+    private static byte ReadAnalogStick(bool negative, bool positive)
+    {
+        if (negative && !positive) return 0;
+        if (positive && !negative) return 255;
+        return 128;
     }
 }
