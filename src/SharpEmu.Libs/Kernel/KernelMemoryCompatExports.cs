@@ -103,6 +103,7 @@ public static class KernelMemoryCompatExports
     private static readonly Dictionary<ulong, DirectAllocation> _directAllocations = new();
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     private static readonly Dictionary<ulong, MappedRegion> _mappedRegions = new();
+    private static readonly Dictionary<ulong, string> _mappedRegionNames = new();
     private static readonly Dictionary<ulong, ulong> _tlsModuleBlocks = new();
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
@@ -229,6 +230,25 @@ public static class KernelMemoryCompatExports
         }
 
         return true;
+    }
+
+    internal static void RegisterReservedVirtualRange(ulong address, ulong length)
+    {
+        if (address == 0 || length == 0)
+        {
+            return;
+        }
+
+        lock (_memoryGate)
+        {
+            _mappedRegions[address] = new MappedRegion(
+                address,
+                length,
+                Protection: 0,
+                IsFlexible: false,
+                IsDirect: false,
+                DirectStart: 0);
+        }
     }
 
     [SysAbiExport(
@@ -2436,6 +2456,36 @@ public static class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+    Nid = "hwVSPCmp5tM",
+    ExportName = "sceKernelCheckedReleaseDirectMemory",
+    Target = Generation.Gen4 | Generation.Gen5,
+    LibraryName = "libKernel")]
+    public static int KernelCheckedReleaseDirectMemory(CpuContext ctx)
+    {
+        var start = ctx[CpuRegister.Rdi];
+        var length = ctx[CpuRegister.Rsi];
+
+        if (length == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        lock (_memoryGate)
+        {
+            if (!_directAllocations.TryGetValue(start, out var allocation) ||
+                allocation.Length != length)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            _directAllocations.Remove(start);
+            _nextPhysicalAddress = GetDirectMemoryHighWaterMarkLocked();
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "L-Q3LEjIbgA",
         ExportName = "sceKernelMapDirectMemory",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -2615,6 +2665,16 @@ public static class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "4h6F1LLbTiw",
+        ExportName = "sceKernelMapFlexibleMemoryInternal",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelMapFlexibleMemoryInternal(CpuContext ctx)
+    {
+        return KernelMapNamedFlexibleMemory(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "2SKEx6bSq-4",
         ExportName = "sceKernelBatchMap",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -2664,6 +2724,44 @@ public static class KernelMemoryCompatExports
             }
         }
 
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "DGMG3JshrZU",
+        ExportName = "sceKernelSetVirtualRangeName",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelSetVirtualRangeName(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var length = ctx[CpuRegister.Rsi];
+        var nameAddress = ctx[CpuRegister.Rdx];
+        if (nameAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!TryReadCString(ctx, nameAddress, OrbisKernelMaximumNameLength, out var nameBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var name = Encoding.UTF8.GetString(nameBytes);
+        lock (_memoryGate)
+        {
+            if (!TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) ||
+                length > region.Length ||
+                address < region.Address ||
+                length > region.Address + region.Length - address)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            _mappedRegionNames[region.Address] = name;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -2724,11 +2822,16 @@ public static class KernelMemoryCompatExports
         BinaryPrimitives.WriteInt32LittleEndian(payload[28..32], memoryType);
         payload[32] = unchecked((byte)stateFlags);
 
-        var name = region.IsDirect
-            ? "direct"
-            : region.IsFlexible
-                ? "flexible"
-                : string.Empty;
+        string name;
+        lock (_memoryGate)
+        {
+            name = _mappedRegionNames.GetValueOrDefault(region.Address)
+                ?? (region.IsDirect
+                    ? "direct"
+                    : region.IsFlexible
+                        ? "flexible"
+                        : string.Empty);
+        }
         if (!string.IsNullOrEmpty(name))
         {
             var nameBytes = Encoding.ASCII.GetBytes(name);
