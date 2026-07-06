@@ -7,6 +7,7 @@ using Silk.NET.Maths;
 using SharpEmu.Libs.Agc;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
+using Silk.NET.Vulkan.Extensions.EXT;
 using Silk.NET.Windowing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -846,6 +847,8 @@ internal static unsafe class VulkanVideoPresenter
         private delegate* unmanaged<CommandBuffer, void> _cmdEndDebugUtilsLabel;
         private Instance _instance;
         private SurfaceKHR _surface;
+        private DebugUtilsMessengerEXT _debugMessenger;
+        private ExtDebugUtils? _debugUtils;
         private PhysicalDevice _physicalDevice;
         private Device _device;
         private Queue _queue;
@@ -1241,6 +1244,9 @@ internal static unsafe class VulkanVideoPresenter
         private void CreateInstance()
         {
             var applicationName = (byte*)SilkMarshal.StringToPtr("SharpEmu");
+            var enableValidation = Environment.GetEnvironmentVariable("SHARPEMU_VK_VALIDATION") == "1";
+            byte* validationLayerName = null;
+            
             try
             {
                 var applicationInfo = new ApplicationInfo
@@ -1268,12 +1274,29 @@ internal static unsafe class VulkanVideoPresenter
                     enabledExtensions[enabledExtensionCount++] = debugUtilsExtension;
                 }
 
+                if (enableValidation && IsInstanceLayerAvailable("VK_LAYER_KHRONOS_validation"))
+                {
+                    validationLayerName = (byte*)SilkMarshal.StringToPtr("VK_LAYER_KHRONOS_validation");
+                }
+                else if (enableValidation)
+                {
+                    Console.Error.WriteLine("[LOADER][WARN] SHARPEMU_VK_VALIDATION=1 but VK_LAYER_KHRONOS_validation not found (Vulkan SDK installed?).");
+                }
+
+                var layers = stackalloc byte*[1];
+                if (validationLayerName is not null)
+                {
+                    layers[0] = validationLayerName;
+                }
+
                 var createInfo = new InstanceCreateInfo
                 {
                     SType = StructureType.InstanceCreateInfo,
                     PApplicationInfo = &applicationInfo,
                     EnabledExtensionCount = (uint)enabledExtensionCount,
                     PpEnabledExtensionNames = enabledExtensions,
+                    EnabledLayerCount = validationLayerName is not null ? 1u : 0u,
+                    PpEnabledLayerNames = validationLayerName is not null ? layers : null,
                 };
 
                 try
@@ -1282,6 +1305,13 @@ internal static unsafe class VulkanVideoPresenter
                     if (!_vk.TryGetInstanceExtension(_instance, out _surfaceApi))
                     {
                         throw new InvalidOperationException("VK_KHR_surface is unavailable.");
+                    }
+                    
+                    if (validationLayerName is not null && _vk.TryGetInstanceExtension(_instance, out ExtDebugUtils debugUtils))
+                    {
+                        _debugUtils = debugUtils;
+                        RegisterDebugMessenger(debugUtils);
+                        Console.Error.WriteLine("[LOADER][INFO] Vulkan Validation Layers active (SHARPEMU_VK_VALIDATION=1).");
                     }
                 }
                 finally
@@ -1295,9 +1325,74 @@ internal static unsafe class VulkanVideoPresenter
             finally
             {
                 SilkMarshal.Free((nint)applicationName);
+                if (validationLayerName is not null)
+                {
+                    SilkMarshal.Free((nint)validationLayerName);
+                }
             }
         }
 
+        private bool IsInstanceLayerAvailable(string layerName)
+        {
+            uint layerCount = 0;
+            if (_vk.EnumerateInstanceLayerProperties(&layerCount, null) != Result.Success || layerCount == 0)
+            {
+                return false;
+            }
+
+            var properties = new LayerProperties[layerCount];
+            fixed (LayerProperties* propertyPointer = properties)
+            {
+                if (_vk.EnumerateInstanceLayerProperties(&layerCount, propertyPointer) != Result.Success)
+                {
+                    return false;
+                }
+
+                var expected = Encoding.UTF8.GetBytes(layerName);
+                for (var index = 0; index < layerCount; index++)
+                {
+                    if (Utf8NullTerminatedEquals(propertyPointer[index].LayerName, expected))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        private void RegisterDebugMessenger(ExtDebugUtils debugUtils)
+        {
+            var messengerInfo = new DebugUtilsMessengerCreateInfoEXT
+            {
+                SType = StructureType.DebugUtilsMessengerCreateInfoExt,
+                MessageSeverity = DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt
+                                  | DebugUtilsMessageSeverityFlagsEXT.WarningBitExt,
+                MessageType = DebugUtilsMessageTypeFlagsEXT.ValidationBitExt
+                              | DebugUtilsMessageTypeFlagsEXT.PerformanceBitExt
+                              | DebugUtilsMessageTypeFlagsEXT.GeneralBitExt,
+                PfnUserCallback = new PfnDebugUtilsMessengerCallbackEXT(DebugCallback),
+            };
+
+            Check(debugUtils.CreateDebugUtilsMessenger(_instance, &messengerInfo, null, out _debugMessenger),
+                "vkCreateDebugUtilsMessengerEXT");
+        }
+        
+        private static unsafe uint DebugCallback(
+            DebugUtilsMessageSeverityFlagsEXT severity,
+            DebugUtilsMessageTypeFlagsEXT type,
+            DebugUtilsMessengerCallbackDataEXT* callbackData,
+            void* userData)
+        {
+            var message = SilkMarshal.PtrToString((nint)callbackData->PMessage);
+            var prefix = severity switch
+            {
+                DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt => "[VULKAN][ERROR]",
+                DebugUtilsMessageSeverityFlagsEXT.WarningBitExt => "[VULKAN][WARN]",
+                _ => "[VULKAN][INFO]",
+            };
+            Console.Error.WriteLine($"{prefix} {message}");
+            return Vk.False;
+        }
         private void CreateSurface()
         {
             var instanceHandle = new VkHandle(_instance.Handle);
@@ -1358,7 +1453,28 @@ internal static unsafe class VulkanVideoPresenter
                 QueueCount = 1,
                 PQueuePriorities = &priority,
             };
+            _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
+            var enabledFeatures = new PhysicalDeviceFeatures
+            {
+                VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
+                FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
+                ShaderInt64 = supportedFeatures.ShaderInt64,
+            };
 
+            if (!supportedFeatures.ShaderInt64)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support shaderInt64 " +
+                    "translated shaders using 64-bit integers will fail.");
+            }
+
+            if (!supportedFeatures.VertexPipelineStoresAndAtomics || !supportedFeatures.FragmentStoresAndAtomics)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support vertexPipelineStoresAndAtomics/fragmentStoresAndAtomics " +
+                    "translated shaders using storage buffers in vertex/fragment stages may fail.");
+            }
+            
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
             try
             {
@@ -1369,6 +1485,7 @@ internal static unsafe class VulkanVideoPresenter
                     PQueueCreateInfos = &queueInfo,
                     EnabledExtensionCount = 1,
                     PpEnabledExtensionNames = &swapchainExtension,
+                    PEnabledFeatures = &enabledFeatures,
                 };
 
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
@@ -5956,6 +6073,10 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
+            if (_debugUtils is not null && _debugMessenger.Handle != 0)
+            {
+                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
+            }
             _vulkanReady = false;
             _vk.DeviceWaitIdle(_device);
             CollectCompletedGuestSubmissions(waitForOldest: false);

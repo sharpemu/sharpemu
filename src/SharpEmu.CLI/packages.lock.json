@@ -81,6 +81,7 @@
         "dependencies": {
           "SharpEmu.HLE": "[1.0.0, )",
           "Silk.NET.Vulkan": "[2.23.0, )",
+          "Silk.NET.Vulkan.Extensions.EXT": "[2.23.0, )",
           "Silk.NET.Vulkan.Extensions.KHR": "[2.23.0, )",
           "Silk.NET.Windowing": "[2.23.0, )"
         }
@@ -101,6 +102,16 @@
         "contentHash": "3/irtlSWXZ3eTi8N6nelI6L34NTB8ZJHpqVMNzZx2aX7Ek9YEQ34NoQW8/Tljrtmkg8KRhHW8hKTEzZaKV8PgA==",
         "dependencies": {
           "Silk.NET.Core": "2.23.0"
+        }
+      },
+      "Silk.NET.Vulkan.Extensions.EXT": {
+        "type": "CentralTransitive",
+        "requested": "[2.23.0, )",
+        "resolved": "2.23.0",
+        "contentHash": "+Oth189ksRiL6HvGCwIdnsYHawqrbO8y49u1H61z3wsfcHhQZeVDYe/wF5LD7fk3NcdgDvwFD3mLm1QWhdZySw==",
+        "dependencies": {
+          "Silk.NET.Core": "2.23.0",
+          "Silk.NET.Vulkan": "2.23.0"
         }
       },
       "Silk.NET.Vulkan.Extensions.KHR": {
