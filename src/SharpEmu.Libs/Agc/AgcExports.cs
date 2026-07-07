@@ -3609,7 +3609,7 @@ public static class AgcExports
             ',',
             draw.GlobalMemoryBindings.Select((binding, index) =>
                 $"{index}:0x{binding.BaseAddress:X16}:{binding.Data.Length}:" +
-                Convert.ToHexString(binding.Data.AsSpan(0, Math.Min(binding.Data.Length, 32)))));
+                Convert.ToHexString(binding.Data.AsSpan(0, Math.Min(binding.Data.Length, 256)))));
         var indices = draw.IndexBuffer is { } indexBuffer
             ? $"{(indexBuffer.Is32Bit ? 32 : 16)}:" +
               Convert.ToHexString(indexBuffer.Data.AsSpan(0, Math.Min(indexBuffer.Data.Length, 32)))
@@ -3744,7 +3744,7 @@ public static class AgcExports
             descriptor.Width > 8192 ||
             descriptor.Height > 8192)
         {
-            texture = CreateFallbackGuestDrawTexture(isStorage);
+            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
 
@@ -3762,7 +3762,7 @@ public static class AgcExports
             sourceByteCount > MaxPresentedTextureBytes ||
             sourceByteCount > int.MaxValue)
         {
-            texture = CreateFallbackGuestDrawTexture(isStorage);
+            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
 
@@ -3825,7 +3825,7 @@ public static class AgcExports
         var source = new byte[(int)sourceByteCount];
         if (!ctx.Memory.TryRead(descriptor.Address, source))
         {
-            texture = CreateFallbackGuestDrawTexture(isStorage);
+            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
 
@@ -3868,18 +3868,25 @@ public static class AgcExports
         return true;
     }
 
-    private static VulkanGuestDrawTexture CreateFallbackGuestDrawTexture(bool isStorage = false) =>
-        new(
+    private static VulkanGuestDrawTexture CreateFallbackGuestDrawTexture(
+        bool isStorage,
+        uint format,
+        uint numberType)
+    {
+        var fallbackFormat = format == 0 ? 10u : format;
+        var fallbackNumberType = numberType;
+        return new(
             0,
             1,
             1,
-            56,
-            NumberType: 0,
+            fallbackFormat,
+            fallbackNumberType,
             [0, 0, 0, 255],
             IsFallback: true,
             IsStorage: isStorage,
             MipLevels: 1,
             MipLevel: 0);
+    }
 
     private static VulkanGuestSampler ToVulkanSampler(IReadOnlyList<uint> descriptor) =>
         descriptor.Count >= 4

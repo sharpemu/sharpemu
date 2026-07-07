@@ -1459,7 +1459,19 @@ internal static unsafe class VulkanVideoPresenter
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
                 ShaderInt64 = supportedFeatures.ShaderInt64,
+                ShaderImageGatherExtended = supportedFeatures.ShaderImageGatherExtended,
+                ShaderStorageImageExtendedFormats = supportedFeatures.ShaderStorageImageExtendedFormats,
+                ShaderStorageImageReadWithoutFormat = supportedFeatures.ShaderStorageImageReadWithoutFormat,
+                ShaderStorageImageWriteWithoutFormat = supportedFeatures.ShaderStorageImageWriteWithoutFormat,
+                RobustBufferAccess = supportedFeatures.RobustBufferAccess,
             };
+
+            if (!supportedFeatures.RobustBufferAccess)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support robustBufferAccess " +
+                    "translated shaders performing out-of-bounds buffer access may cause device loss.");
+            }
 
             if (!supportedFeatures.ShaderInt64)
             {
@@ -1474,18 +1486,96 @@ internal static unsafe class VulkanVideoPresenter
                     "[LOADER][WARN] GPU does not support vertexPipelineStoresAndAtomics/fragmentStoresAndAtomics " +
                     "translated shaders using storage buffers in vertex/fragment stages may fail.");
             }
-            
+
+            if (!supportedFeatures.ShaderImageGatherExtended)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support shaderImageGatherExtended " +
+                    "translated shaders using image gather with offsets/LOD/bias will fail.");
+            }
+
+            if (!supportedFeatures.ShaderStorageImageReadWithoutFormat ||
+                !supportedFeatures.ShaderStorageImageWriteWithoutFormat)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support shaderStorageImage(Read|Write)WithoutFormat " +
+                    "translated shaders using unformatted storage image load/store will fail.");
+            }
+
+            var maintenance8Features = new PhysicalDeviceMaintenance8FeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceMaintenance8FeaturesKhr,
+            };
+            var robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+                PNext = &maintenance8Features,
+            };
+            var featuresQuery = new PhysicalDeviceFeatures2
+            {
+                SType = StructureType.PhysicalDeviceFeatures2,
+                PNext = &robustness2Features,
+            };
+            _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
+            var supportsMaintenance8 = maintenance8Features.Maintenance8;
+            var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
+            var supportsNullDescriptor = robustness2Features.NullDescriptor;
+            var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
+            if (!supportsMaintenance8)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support VK_KHR_maintenance8 " +
+                    "translated shaders using a dynamic texel offset on non-gather image samples will fail.");
+            }
+
+            if (!supportsRobustImageAccess2)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support VK_EXT_robustness2 robustImageAccess2 " +
+                    "translated shaders performing out-of-bounds image access may cause device loss.");
+            }
+
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
+            var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
+            var robustness2Extension = (byte*)SilkMarshal.StringToPtr("VK_EXT_robustness2");
             try
             {
+                var extensions = stackalloc byte*[3];
+                var extensionCount = 0u;
+                extensions[extensionCount++] = swapchainExtension;
+                if (supportsMaintenance8)
+                {
+                    extensions[extensionCount++] = maintenance8Extension;
+                }
+
+                if (supportsRobustness2)
+                {
+                    extensions[extensionCount++] = robustness2Extension;
+                }
+
+                maintenance8Features.Maintenance8 = supportsMaintenance8;
+                maintenance8Features.PNext = null;
+                robustness2Features.RobustBufferAccess2 =
+                    supportsRobustImageAccess2 && supportedFeatures.RobustBufferAccess;
+                robustness2Features.RobustImageAccess2 = supportsRobustImageAccess2;
+                robustness2Features.NullDescriptor = supportsNullDescriptor;
+                robustness2Features.PNext = supportsMaintenance8 ? &maintenance8Features : null;
+                var features2 = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = supportsRobustness2
+                        ? &robustness2Features
+                        : (supportsMaintenance8 ? &maintenance8Features : null),
+                    Features = enabledFeatures,
+                };
                 var createInfo = new DeviceCreateInfo
                 {
                     SType = StructureType.DeviceCreateInfo,
+                    PNext = &features2,
                     QueueCreateInfoCount = 1,
                     PQueueCreateInfos = &queueInfo,
-                    EnabledExtensionCount = 1,
-                    PpEnabledExtensionNames = &swapchainExtension,
-                    PEnabledFeatures = &enabledFeatures,
+                    EnabledExtensionCount = extensionCount,
+                    PpEnabledExtensionNames = extensions,
                 };
 
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
@@ -1493,6 +1583,8 @@ internal static unsafe class VulkanVideoPresenter
             finally
             {
                 SilkMarshal.Free((nint)swapchainExtension);
+                SilkMarshal.Free((nint)maintenance8Extension);
+                SilkMarshal.Free((nint)robustness2Extension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
@@ -1655,6 +1747,39 @@ internal static unsafe class VulkanVideoPresenter
                     resources,
                     traceImages,
                     resources.DebugName));
+        }
+
+        private void SubmitGuestCommandBufferAndWait(CommandBuffer commandBuffer)
+        {
+            var fenceInfo = new FenceCreateInfo
+            {
+                SType = StructureType.FenceCreateInfo,
+            };
+            Fence fence;
+            Check(
+                _vk.CreateFence(_device, &fenceInfo, null, out fence),
+                "vkCreateFence(guest chunk)");
+            try
+            {
+                var submitInfo = new SubmitInfo
+                {
+                    SType = StructureType.SubmitInfo,
+                    CommandBufferCount = 1,
+                    PCommandBuffers = &commandBuffer,
+                };
+                Check(
+                    _vk.QueueSubmit(_queue, 1, &submitInfo, fence),
+                    "vkQueueSubmit(guest chunk)");
+                Check(
+                    _vk.WaitForFences(_device, 1, &fence, true, ulong.MaxValue),
+                    "vkWaitForFences(guest chunk)");
+            }
+            finally
+            {
+                _vk.DestroyFence(_device, fence, null);
+            }
+
+            _vk.FreeCommandBuffers(_device, _commandPool, 1, &commandBuffer);
         }
 
         private void EnsureGuestSubmissionCapacity()
@@ -2641,6 +2766,7 @@ internal static unsafe class VulkanVideoPresenter
                 var pipelineInfo = new ComputePipelineCreateInfo
                 {
                     SType = StructureType.ComputePipelineCreateInfo,
+                    Flags = PipelineCreateFlags.CreateDispatchBaseBit,
                     Stage = stage,
                     Layout = resources.PipelineLayout,
                 };
@@ -2986,9 +3112,13 @@ internal static unsafe class VulkanVideoPresenter
             }
             _vk.UnmapMemory(_device, stagingMemory);
 
+            var supportsAttachmentUsage = !IsBlockCompressedFormat(vkFormat);
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
+                Flags = supportsAttachmentUsage
+                    ? ImageCreateFlags.CreateMutableFormatBit | ImageCreateFlags.CreateExtendedUsageBit
+                    : 0,
                 ImageType = ImageType.Type2D,
                 Format = vkFormat,
                 Extent = new Extent3D(width, height, 1),
@@ -2996,7 +3126,13 @@ internal static unsafe class VulkanVideoPresenter
                 ArrayLayers = 1,
                 Samples = SampleCountFlags.Count1Bit,
                 Tiling = ImageTiling.Optimal,
-                Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+                Usage = supportsAttachmentUsage
+                    ? ImageUsageFlags.TransferDstBit |
+                      ImageUsageFlags.SampledBit |
+                      ImageUsageFlags.ColorAttachmentBit |
+                      ImageUsageFlags.StorageBit |
+                      ImageUsageFlags.TransferSrcBit
+                    : ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
                 SharingMode = SharingMode.Exclusive,
                 InitialLayout = ImageLayout.Undefined,
             };
@@ -3831,6 +3967,12 @@ internal static unsafe class VulkanVideoPresenter
                 _ => Format.Undefined,
             };
 
+        private static bool IsBlockCompressedFormat(Format format) =>
+            format is Format.BC1RgbaUnormBlock or
+                Format.BC1RgbaSrgbBlock or
+                Format.BC7UnormBlock or
+                Format.BC7SrgbBlock;
+
         private VkBuffer CreateBuffer(
             ulong size,
             BufferUsageFlags usage,
@@ -3884,8 +4026,19 @@ internal static unsafe class VulkanVideoPresenter
             throw new InvalidOperationException("No compatible Vulkan host-visible memory type was found.");
         }
 
+        private const uint MaxComputeZSlicesPerSubmission = 8;
+
         private void ExecuteComputeDispatch(VulkanComputeGuestDispatch work)
         {
+            if (AddressListContains("SHARPEMU_SKIP_COMPUTE_CS", work.ShaderAddress))
+            {
+                TraceVulkanShader(
+                    $"vk.compute_skip cs=0x{work.ShaderAddress:X16} " +
+                    $"groups={work.GroupCountX}x{work.GroupCountY}x{work.GroupCountZ} " +
+                    $"textures={work.Textures.Count}");
+                return;
+            }
+
             TranslatedDrawResources? resources = null;
             CommandBuffer commandBuffer = default;
             var submitted = false;
@@ -3893,59 +4046,95 @@ internal static unsafe class VulkanVideoPresenter
             {
                 EnsureGuestSubmissionCapacity();
                 resources = CreateComputeDispatchResources(work);
-                commandBuffer = AllocateGuestCommandBuffer();
-                _commandBuffer = commandBuffer;
-                var beginInfo = new CommandBufferBeginInfo
-                {
-                    SType = StructureType.CommandBufferBeginInfo,
-                    Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-                };
-                Check(
-                    _vk.BeginCommandBuffer(_commandBuffer, &beginInfo),
-                    "vkBeginCommandBuffer(compute)");
 
-                BeginDebugLabel(_commandBuffer, resources.DebugName);
-                RecordTextureUploads(resources, PipelineStageFlags.ComputeShaderBit);
-                RecordStorageImagesForWrite(resources, PipelineStageFlags.ComputeShaderBit);
-                _vk.CmdBindPipeline(
-                    _commandBuffer,
-                    PipelineBindPoint.Compute,
-                    resources.Pipeline);
-                if (resources.DescriptorSet.Handle != 0)
+                var batchCount = Math.Max(
+                    1u,
+                    (uint)Math.Ceiling(work.GroupCountZ / (double)MaxComputeZSlicesPerSubmission));
+
+                for (var batchIndex = 0u; batchIndex < batchCount; batchIndex++)
                 {
-                    var descriptorSet = resources.DescriptorSet;
-                    _vk.CmdBindDescriptorSets(
+                    var zStart = batchIndex * MaxComputeZSlicesPerSubmission;
+                    var zCount = Math.Min(MaxComputeZSlicesPerSubmission, work.GroupCountZ - zStart);
+                    var isFirstBatch = batchIndex == 0;
+                    var isLastBatch = batchIndex == batchCount - 1;
+
+                    commandBuffer = AllocateGuestCommandBuffer();
+                    _commandBuffer = commandBuffer;
+                    var beginInfo = new CommandBufferBeginInfo
+                    {
+                        SType = StructureType.CommandBufferBeginInfo,
+                        Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+                    };
+                    Check(
+                        _vk.BeginCommandBuffer(_commandBuffer, &beginInfo),
+                        "vkBeginCommandBuffer(compute)");
+
+                    BeginDebugLabel(_commandBuffer, resources.DebugName);
+                    if (isFirstBatch)
+                    {
+                        RecordTextureUploads(resources, PipelineStageFlags.ComputeShaderBit);
+                        RecordStorageImagesForWrite(resources, PipelineStageFlags.ComputeShaderBit);
+                    }
+
+                    _vk.CmdBindPipeline(
                         _commandBuffer,
                         PipelineBindPoint.Compute,
-                        resources.PipelineLayout,
-                        0,
-                        1,
-                        &descriptorSet,
-                        0,
-                        null);
+                        resources.Pipeline);
+                    if (resources.DescriptorSet.Handle != 0)
+                    {
+                        var descriptorSet = resources.DescriptorSet;
+                        _vk.CmdBindDescriptorSets(
+                            _commandBuffer,
+                            PipelineBindPoint.Compute,
+                            resources.PipelineLayout,
+                            0,
+                            1,
+                            &descriptorSet,
+                            0,
+                            null);
+                    }
+
+                    RecordChunkedComputeDispatch(_commandBuffer, work, zStart, zCount);
+
+                    if (isLastBatch)
+                    {
+                        RecordStorageImagesForRead(resources, PipelineStageFlags.ComputeShaderBit);
+                    }
+
+                    EndDebugLabel(_commandBuffer);
+                    Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer(compute)");
+
+                    TraceVulkanShader(
+                        $"vk.compute_submit cs=0x{work.ShaderAddress:X16} " +
+                        $"batch={batchIndex}/{batchCount} z={zStart}..{zStart + zCount}");
+                    if (isLastBatch)
+                    {
+                        SubmitGuestCommandBuffer(
+                            commandBuffer,
+                            resources,
+                            GetTraceImages(resources));
+                        submitted = true;
+                    }
+                    else
+                    {
+                        SubmitGuestCommandBufferAndWait(commandBuffer);
+                        commandBuffer = default;
+                    }
                 }
 
-                RecordChunkedComputeDispatch(_commandBuffer, work);
-                RecordStorageImagesForRead(resources, PipelineStageFlags.ComputeShaderBit);
-                EndDebugLabel(_commandBuffer);
-
-                Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer(compute)");
-                SubmitGuestCommandBuffer(
-                    commandBuffer,
-                    resources,
-                    GetTraceImages(resources));
-                submitted = true;
                 MarkSampledImagesInitialized(resources);
                 MarkStorageImagesInitialized(resources, traceContents: false);
                 TraceVulkanShader(
                     $"vk.compute_dispatch groups={work.GroupCountX}x" +
                     $"{work.GroupCountY}x{work.GroupCountZ} " +
-                    $"textures={work.Textures.Count} cs=0x{work.ShaderAddress:X16}");
+                    $"textures={work.Textures.Count} cs=0x{work.ShaderAddress:X16} " +
+                    $"batches={batchCount}");
             }
             catch (Exception exception)
             {
                 Console.Error.WriteLine(
-                    $"[LOADER][ERROR] Vulkan compute dispatch failed: {exception.Message}");
+                    $"[LOADER][ERROR] Vulkan compute dispatch failed " +
+                    $"cs=0x{work.ShaderAddress:X16}: {exception.Message}");
             }
             finally
             {
@@ -3968,7 +4157,9 @@ internal static unsafe class VulkanVideoPresenter
 
         private void RecordChunkedComputeDispatch(
             CommandBuffer commandBuffer,
-            VulkanComputeGuestDispatch work)
+            VulkanComputeGuestDispatch work,
+            uint zStart,
+            uint zCount)
         {
             const uint maxWorkgroupsPerCommand = 4096;
             var yChunk = Math.Max(
@@ -3978,7 +4169,7 @@ internal static unsafe class VulkanVideoPresenter
                     maxWorkgroupsPerCommand / Math.Max(work.GroupCountX, 1u)));
             var commandCount = 0u;
 
-            for (var z = 0u; z < work.GroupCountZ; z++)
+            for (var z = zStart; z < zStart + zCount; z++)
             {
                 for (var y = 0u; y < work.GroupCountY; y += yChunk)
                 {
@@ -4000,7 +4191,7 @@ internal static unsafe class VulkanVideoPresenter
                 TraceVulkanShader(
                     $"vk.compute_chunked cs=0x{work.ShaderAddress:X16} " +
                     $"groups={work.GroupCountX}x{work.GroupCountY}x{work.GroupCountZ} " +
-                    $"commands={commandCount} y_chunk={yChunk}");
+                    $"z_range={zStart}..{zStart + zCount} commands={commandCount} y_chunk={yChunk}");
             }
         }
 
@@ -4208,6 +4399,23 @@ internal static unsafe class VulkanVideoPresenter
                     existing.MipLevels == mipLevels &&
                     existing.Format == format)
                 {
+                    if (existing.RenderPass.Handle == 0)
+                    {
+                        var attachmentView = existing.MipViews.Length > 0
+                            ? existing.MipViews[0]
+                            : existing.View;
+                        var (promotedRenderPass, promotedFramebuffer) = CreateRenderPassAndFramebuffer(
+                            existing.Format,
+                            attachmentView,
+                            existing.Width,
+                            existing.Height);
+                        existing.RenderPass = promotedRenderPass;
+                        existing.Framebuffer = promotedFramebuffer;
+                        var promotedName = GuestImageDebugName(target, format);
+                        SetDebugName(ObjectType.RenderPass, promotedRenderPass.Handle, $"{promotedName} renderpass");
+                        SetDebugName(ObjectType.Framebuffer, promotedFramebuffer.Handle, $"{promotedName} framebuffer");
+                    }
+
                     return existing;
                 }
 
@@ -4288,6 +4496,48 @@ internal static unsafe class VulkanVideoPresenter
                 mipViews[mipLevel] = mipView;
             }
 
+            var (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
+                format,
+                mipViews[0],
+                target.Width,
+                target.Height);
+
+            var resource = new GuestImageResource
+            {
+                Address = target.Address,
+                Width = target.Width,
+                Height = target.Height,
+                MipLevels = mipLevels,
+                Format = format,
+                Image = image,
+                Memory = memory,
+                View = view,
+                MipViews = mipViews,
+                RenderPass = renderPass,
+                Framebuffer = framebuffer,
+            };
+            var debugName = GuestImageDebugName(target, format);
+            SetDebugName(ObjectType.Image, image.Handle, $"{debugName} image");
+            SetDebugName(ObjectType.ImageView, view.Handle, $"{debugName} view");
+            for (var mipLevel = 0; mipLevel < mipViews.Length; mipLevel++)
+            {
+                SetDebugName(
+                    ObjectType.ImageView,
+                    mipViews[mipLevel].Handle,
+                    $"{debugName} mip{mipLevel}");
+            }
+            SetDebugName(ObjectType.RenderPass, renderPass.Handle, $"{debugName} renderpass");
+            SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{debugName} framebuffer");
+            _guestImages.Add(target.Address, resource);
+            return resource;
+        }
+
+        private (RenderPass RenderPass, Framebuffer Framebuffer) CreateRenderPassAndFramebuffer(
+            Format format,
+            ImageView attachmentView,
+            uint width,
+            uint height)
+        {
             var colorAttachment = new AttachmentDescription
             {
                 Format = format,
@@ -4322,49 +4572,22 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.CreateRenderPass(_device, &renderPassInfo, null, out var renderPass),
                 "vkCreateRenderPass(offscreen)");
 
-            var attachment = mipViews[0];
+            var attachment = attachmentView;
             var framebufferInfo = new FramebufferCreateInfo
             {
                 SType = StructureType.FramebufferCreateInfo,
                 RenderPass = renderPass,
                 AttachmentCount = 1,
                 PAttachments = &attachment,
-                Width = target.Width,
-                Height = target.Height,
+                Width = width,
+                Height = height,
                 Layers = 1,
             };
             Check(
                 _vk.CreateFramebuffer(_device, &framebufferInfo, null, out var framebuffer),
                 "vkCreateFramebuffer(offscreen)");
 
-            var resource = new GuestImageResource
-            {
-                Address = target.Address,
-                Width = target.Width,
-                Height = target.Height,
-                MipLevels = mipLevels,
-                Format = format,
-                Image = image,
-                Memory = memory,
-                View = view,
-                MipViews = mipViews,
-                RenderPass = renderPass,
-                Framebuffer = framebuffer,
-            };
-            var debugName = GuestImageDebugName(target, format);
-            SetDebugName(ObjectType.Image, image.Handle, $"{debugName} image");
-            SetDebugName(ObjectType.ImageView, view.Handle, $"{debugName} view");
-            for (var mipLevel = 0; mipLevel < mipViews.Length; mipLevel++)
-            {
-                SetDebugName(
-                    ObjectType.ImageView,
-                    mipViews[mipLevel].Handle,
-                    $"{debugName} mip{mipLevel}");
-            }
-            SetDebugName(ObjectType.RenderPass, renderPass.Handle, $"{debugName} renderpass");
-            SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{debugName} framebuffer");
-            _guestImages.Add(target.Address, resource);
-            return resource;
+            return (renderPass, framebuffer);
         }
 
         private static uint ClampMipLevels(uint width, uint height, uint requestedMipLevels)

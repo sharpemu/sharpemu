@@ -467,9 +467,6 @@ internal static partial class Gen5SpirvTranslator
                 _imageBindingByPc.TryAdd(binding.Pc, index);
                 var isStorage =
                     Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
-                var isDepth =
-                    binding.Opcode.Contains("SampleC", StringComparison.Ordinal) ||
-                    binding.Opcode.Contains("Gather4C", StringComparison.Ordinal);
                 var (format, componentKind) =
                     DecodeImageFormat(binding.ResourceDescriptor);
                 var componentType = componentKind switch
@@ -494,7 +491,7 @@ internal static partial class Gen5SpirvTranslator
                 var imageType = _module.TypeImage(
                     componentType,
                     SpirvImageDim.Dim2D,
-                    depth: isDepth,
+                    depth: false,
                     arrayed: false,
                     multisampled: false,
                     sampled: isStorage ? 2u : 1u,
@@ -1661,18 +1658,14 @@ internal static partial class Gen5SpirvTranslator
                 var offset = hasOffset ? BuildImageOffset(image, 0) : 0u;
                 var imageOperands =
                     (explicitLod ? 2u : 0u) | (hasOffset ? 0x10u : 0u);
+                var reference = hasCompare
+                    ? Bitcast(_floatType, LoadV(image.GetAddressRegister(hasOffset ? 1 : 0)))
+                    : 0u;
                 var operands = new List<uint>
                 {
                     imageObject,
                     coordinates,
                 };
-                if (hasCompare)
-                {
-                    operands.Add(
-                        Bitcast(
-                            _floatType,
-                            LoadV(image.GetAddressRegister(hasOffset ? 1 : 0))));
-                }
 
                 if (imageOperands != 0)
                 {
@@ -1689,29 +1682,14 @@ internal static partial class Gen5SpirvTranslator
                 }
 
                 sampled = _module.AddInstruction(
-                    hasCompare
-                        ? explicitLod
-                            ? SpirvOp.ImageSampleDrefExplicitLod
-                            : SpirvOp.ImageSampleDrefImplicitLod
-                        : explicitLod
-                            ? SpirvOp.ImageSampleExplicitLod
-                            : SpirvOp.ImageSampleImplicitLod,
-                    hasCompare ? resource.ComponentType : resource.VectorType,
+                    explicitLod
+                        ? SpirvOp.ImageSampleExplicitLod
+                        : SpirvOp.ImageSampleImplicitLod,
+                    resource.VectorType,
                     [.. operands]);
                 if (hasCompare)
                 {
-                    var scalar = sampled;
-                    sampled = _module.AddInstruction(
-                        SpirvOp.CompositeConstruct,
-                        resource.VectorType,
-                        scalar,
-                        scalar,
-                        scalar,
-                        resource.ComponentKind == ImageComponentKind.Float
-                            ? Float(1)
-                            : resource.ComponentKind == ImageComponentKind.Uint
-                                ? UInt(1)
-                                : _module.Constant(_intType, 1));
+                    sampled = EmitManualDepthCompare(resource, sampled, reference);
                 }
             }
             else if (instruction.Opcode.StartsWith(
@@ -1725,6 +1703,9 @@ internal static partial class Gen5SpirvTranslator
                 var start = (hasOffset ? 1 : 0) + (hasCompare ? 1 : 0);
                 var coordinates = BuildFloatCoordinates(image, start);
                 var offset = hasOffset ? BuildImageOffset(image, 0) : 0u;
+                var reference = hasCompare
+                    ? Bitcast(_floatType, LoadV(image.GetAddressRegister(hasOffset ? 1 : 0)))
+                    : 0u;
                 var operands = new List<uint>
                 {
                     imageObject,
@@ -1732,10 +1713,7 @@ internal static partial class Gen5SpirvTranslator
                 };
                 if (hasCompare)
                 {
-                    operands.Add(
-                        Bitcast(
-                            _floatType,
-                            LoadV(image.GetAddressRegister(hasOffset ? 1 : 0))));
+                    operands.Add(UInt(0));
                 }
                 else
                 {
@@ -1756,11 +1734,28 @@ internal static partial class Gen5SpirvTranslator
                 }
 
                 sampled = _module.AddInstruction(
-                    hasCompare
-                        ? SpirvOp.ImageDrefGather
-                        : SpirvOp.ImageGather,
+                    SpirvOp.ImageGather,
                     resource.VectorType,
                     [.. operands]);
+                if (hasCompare)
+                {
+                    var compared = new uint[4];
+                    for (var component = 0u; component < 4; component++)
+                    {
+                        var texel = _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            resource.ComponentType,
+                            sampled,
+                            component);
+                        compared[component] = EmitDepthCompareScalar(resource, texel, reference);
+                    }
+
+                    sampled = _module.AddInstruction(
+                        SpirvOp.CompositeConstruct,
+                        resource.VectorType,
+                        compared);
+                }
+
                 writeAllComponents = true;
             }
             else
@@ -1792,6 +1787,67 @@ internal static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        private uint EmitDepthCompareScalar(
+            SpirvImageResource resource,
+            uint texel,
+            uint reference)
+        {
+            var texelAsFloat = resource.ComponentKind switch
+            {
+                ImageComponentKind.Uint => _module.AddInstruction(
+                    SpirvOp.ConvertUToF, _floatType, texel),
+                ImageComponentKind.Sint => _module.AddInstruction(
+                    SpirvOp.ConvertSToF, _floatType, texel),
+                _ => texel,
+            };
+            var passes = _module.AddInstruction(
+                SpirvOp.FOrdLessThanEqual,
+                _boolType,
+                reference,
+                texelAsFloat);
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                resource.ComponentType,
+                passes,
+                resource.ComponentKind switch
+                {
+                    ImageComponentKind.Uint => UInt(1),
+                    ImageComponentKind.Sint => _module.Constant(_intType, 1),
+                    _ => Float(1),
+                },
+                resource.ComponentKind switch
+                {
+                    ImageComponentKind.Uint => UInt(0),
+                    ImageComponentKind.Sint => _module.Constant(_intType, 0),
+                    _ => Float(0),
+                });
+        }
+
+        private uint EmitManualDepthCompare(
+            SpirvImageResource resource,
+            uint sampledVector,
+            uint reference)
+        {
+            var texel = _module.AddInstruction(
+                SpirvOp.CompositeExtract,
+                resource.ComponentType,
+                sampledVector,
+                0u);
+            var scalar = EmitDepthCompareScalar(resource, texel, reference);
+            return _module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                resource.VectorType,
+                scalar,
+                scalar,
+                scalar,
+                resource.ComponentKind switch
+                {
+                    ImageComponentKind.Uint => UInt(1),
+                    ImageComponentKind.Sint => _module.Constant(_intType, 1),
+                    _ => Float(1),
+                });
         }
 
         private uint BuildFloatCoordinates(Gen5ImageControl image, int start)
