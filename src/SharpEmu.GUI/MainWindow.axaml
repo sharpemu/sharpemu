@@ -1,0 +1,157 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SharpEmu.GUI.MainWindow"
+        Title="SharpEmu"
+        Width="1280" Height="800"
+        MinWidth="980" MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BgBrush}"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="PreferSystemChrome"
+        ExtendClientAreaTitleBarHeightHint="44"
+        Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico">
+
+  <Grid RowDefinitions="44,*,32">
+
+    <!-- Title bar -->
+    <Grid x:Name="TitleBar" Grid.Row="0" Background="{StaticResource ChromeBrush}">
+      <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
+        <Image Source="avares://SharpEmu.GUI/Assets/logo.png" Width="20" Height="20" />
+        <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+        <Border Classes="pill">
+          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+        </Border>
+      </StackPanel>
+    </Grid>
+
+    <!-- Main content -->
+    <Grid Grid.Row="1" Margin="14" ColumnDefinitions="360,14,*">
+
+      <!-- Game library -->
+      <Border Grid.Column="0" Classes="card" Padding="0">
+        <Grid RowDefinitions="Auto,Auto,*,Auto">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="16,16,16,10">
+            <TextBlock Classes="sectionTitle" Text="GAME LIBRARY" VerticalAlignment="Center" />
+            <Border Grid.Column="1" Classes="pill">
+              <TextBlock x:Name="GameCountText" Text="0" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+            </Border>
+          </Grid>
+
+          <TextBox Grid.Row="1" x:Name="SearchBox" Watermark="Search games…" Margin="12,0,12,8" CornerRadius="8" />
+
+          <ListBox Grid.Row="2" x:Name="GameList" Classes="library" Background="Transparent" Margin="8,0">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Margin="4,4" Spacing="2">
+                  <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                  <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" Margin="16,12,16,16">
+            <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" />
+            <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" />
+            <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" />
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- Right column -->
+      <Grid Grid.Column="2" RowDefinitions="Auto,12,Auto,12,*">
+
+        <!-- Selected game / launch -->
+        <Border Grid.Row="0" Classes="card">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="0" Spacing="6" VerticalAlignment="Center">
+              <TextBlock x:Name="SelectedGameTitle" Text="No game selected" FontSize="20" FontWeight="Bold" TextTrimming="CharacterEllipsis" />
+              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
+                         FontSize="12" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Ellipse x:Name="StatusDot" Width="9" Height="9" Fill="{StaticResource FaintBrush}" VerticalAlignment="Center" />
+                <TextBlock x:Name="StatusText" Text="Idle" FontSize="12" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+              </StackPanel>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" Margin="16,0,0,0">
+              <Button x:Name="LaunchButton" Classes="accent" Content="▶  Launch" IsEnabled="False" />
+              <Button x:Name="StopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- Launch options -->
+        <Border Grid.Row="2" Classes="card">
+          <StackPanel Spacing="12">
+            <TextBlock Classes="sectionTitle" Text="LAUNCH OPTIONS" />
+            <WrapPanel>
+              <StackPanel Margin="0,0,24,0">
+                <TextBlock Classes="fieldLabel" Text="CPU engine" />
+                <ComboBox x:Name="CpuEngineBox" Width="150" SelectedIndex="0" CornerRadius="8">
+                  <ComboBoxItem Content="Native" />
+                </ComboBox>
+              </StackPanel>
+              <StackPanel Margin="0,0,24,0">
+                <TextBlock Classes="fieldLabel" Text="Log level" />
+                <ComboBox x:Name="LogLevelBox" Width="150" SelectedIndex="2" CornerRadius="8">
+                  <ComboBoxItem Content="Trace" />
+                  <ComboBoxItem Content="Debug" />
+                  <ComboBoxItem Content="Info" />
+                  <ComboBoxItem Content="Warning" />
+                  <ComboBoxItem Content="Error" />
+                  <ComboBoxItem Content="Critical" />
+                </ComboBox>
+              </StackPanel>
+              <StackPanel Margin="0,0,24,0">
+                <TextBlock Classes="fieldLabel" Text="Import trace limit (0 = off)" />
+                <NumericUpDown x:Name="TraceImportsBox" Width="170" Minimum="0" Maximum="4096" Increment="16"
+                               Value="0" FormatString="0" CornerRadius="8" />
+              </StackPanel>
+              <StackPanel>
+                <TextBlock Classes="fieldLabel" Text="Strict dynlib resolution" />
+                <ToggleSwitch x:Name="StrictToggle" OnContent="On" OffContent="Off" />
+              </StackPanel>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+
+        <!-- Console -->
+        <Border Grid.Row="4" Classes="card" Padding="0">
+          <Grid RowDefinitions="Auto,*">
+            <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto" Margin="16,14,16,10">
+              <TextBlock Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
+              <CheckBox Grid.Column="1" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
+                        FontSize="12" Margin="0,0,12,0" />
+              <Button Grid.Column="2" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="12"
+                      Padding="10,4" Margin="0,0,8,0" />
+              <Button Grid.Column="3" x:Name="ClearLogButton" Classes="ghost" Content="Clear" FontSize="12"
+                      Padding="10,4" />
+            </Grid>
+            <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
+                     BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,10,10">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" />
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <!-- Status bar -->
+    <Grid Grid.Row="2" Background="{StaticResource ChromeBrush}" ColumnDefinitions="*,Auto">
+      <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="11"
+                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0"
+                 TextTrimming="CharacterEllipsis" />
+      <TextBlock x:Name="StatusBarRight" Grid.Column="1" Text="" FontSize="11"
+                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0" />
+    </Grid>
+  </Grid>
+</Window>

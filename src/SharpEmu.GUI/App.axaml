@@ -1,0 +1,118 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="SharpEmu.GUI.App"
+             RequestedThemeVariant="Dark">
+
+  <Application.Resources>
+    <Color x:Key="SystemAccentColor">#7C5CFC</Color>
+
+    <SolidColorBrush x:Key="BgBrush" Color="#0D1017" />
+    <SolidColorBrush x:Key="ChromeBrush" Color="#090C12" />
+    <SolidColorBrush x:Key="CardBrush" Color="#141924" />
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#232B3A" />
+    <SolidColorBrush x:Key="ElevatedBrush" Color="#1B2230" />
+    <SolidColorBrush x:Key="TextBrush" Color="#E8ECF4" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#8B94A7" />
+    <SolidColorBrush x:Key="FaintBrush" Color="#5A6478" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
+    <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
+    <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme />
+
+    <Style Selector="Window">
+      <Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="16" />
+    </Style>
+
+    <Style Selector="Border.pill">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="10,3" />
+    </Style>
+
+    <Style Selector="TextBlock.sectionTitle">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="1.5" />
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    </Style>
+
+    <Style Selector="TextBlock.fieldLabel">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+
+    <Style Selector="Button.accent">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Padding" Value="22,10" />
+      <Setter Property="CornerRadius" Value="8" />
+    </Style>
+    <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.danger">
+      <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Padding" Value="22,10" />
+      <Setter Property="CornerRadius" Value="8" />
+    </Style>
+    <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.ghost">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="CornerRadius" Value="8" />
+    </Style>
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+
+    <Style Selector="ListBox.console">
+      <Setter Property="Background" Value="#0B0E14" />
+      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New, monospace" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ListBox.console ListBoxItem">
+      <Setter Property="Padding" Value="10,1" />
+      <Setter Property="MinHeight" Value="0" />
+    </Style>
+
+    <Style Selector="ListBox.library ListBoxItem">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Margin" Value="4,2" />
+      <Setter Property="Padding" Value="8,4" />
+    </Style>
+  </Application.Styles>
+
+</Application>
