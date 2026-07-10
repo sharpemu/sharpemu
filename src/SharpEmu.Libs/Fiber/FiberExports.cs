@@ -968,9 +968,9 @@ public static class FiberExports
     private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int capacity, out string value)
     {
         var bytes = new byte[capacity];
+        Span<byte> current = stackalloc byte[1];
         for (var index = 0; index < bytes.Length; index++)
         {
-            Span<byte> current = stackalloc byte[1];
             if (!ctx.Memory.TryRead(address + (ulong)index, current))
             {
                 value = string.Empty;

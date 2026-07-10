@@ -287,9 +287,9 @@ public static class KernelSemaphoreCompatExports
         }
 
         var bytes = new byte[Math.Min(maxLength, 4096)];
+        Span<byte> current = stackalloc byte[1];
         for (var i = 0; i < bytes.Length; i++)
         {
-            Span<byte> current = stackalloc byte[1];
             if (!ctx.Memory.TryRead(address + (ulong)i, current))
             {
                 return false;
