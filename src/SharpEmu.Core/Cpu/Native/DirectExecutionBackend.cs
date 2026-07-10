@@ -4630,6 +4630,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// Native guest workers park idle once every guest thread has unwound; stop
 		// them before any executable stub or TLS index they reference is freed.
 		DisposeNativeGuestExecutors();
+
+		if (ReferenceEquals(_posixSignalBackend, this))
+		{
+			// The signal handlers stay installed (they chain to the previous
+			// action when no backend is active), but must stop dispatching
+			// into a disposed backend.
+			_posixSignalBackend = null;
+		}
 		ClearImportHandlerTrampolines();
 		_importEntries = Array.Empty<ImportStubEntry>();
 		_runtimeSymbolsByName.Clear();
