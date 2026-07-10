@@ -3,9 +3,11 @@
 
 namespace SharpEmu.GUI;
 
-public sealed record GameEntry(string Name, string Path, long SizeBytes)
+public sealed record GameEntry(string Name, string? TitleId, string Path, long SizeBytes)
 {
-    public string Detail => $"{FormatSize(SizeBytes)}  •  {Path}";
+    public string Detail => TitleId is not null
+        ? $"{TitleId}  •  {FormatSize(SizeBytes)}"
+        : $"{FormatSize(SizeBytes)}  •  {Path}";
 
     private static string FormatSize(long bytes)
     {

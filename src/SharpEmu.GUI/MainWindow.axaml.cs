@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Reflection;
+using System.Text.Json;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
@@ -248,7 +249,8 @@ public partial class MainWindow : Window
                     {
                     }
 
-                    games.Add(new GameEntry(GameNameFor(fullPath), fullPath, size));
+                    var (title, titleId) = TryReadParamJson(fullPath);
+                    games.Add(new GameEntry(title ?? GameNameFor(fullPath), titleId, fullPath, size));
                 }
             }
             catch (Exception)
@@ -259,6 +261,75 @@ public partial class MainWindow : Window
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
         return games;
+    }
+
+    /// <summary>
+    /// Reads the game title and title id from sce_sys/param.json next to the
+    /// executable, when present.
+    /// </summary>
+    private static (string? Title, string? TitleId) TryReadParamJson(string ebootPath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(ebootPath);
+            if (directory is null)
+            {
+                return (null, null);
+            }
+
+            var paramPath = Path.Combine(directory, "sce_sys", "param.json");
+            if (!File.Exists(paramPath))
+            {
+                return (null, null);
+            }
+
+            // ReadAllText handles a UTF-8 BOM, which JsonDocument rejects in
+            // raw bytes.
+            using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
+            var root = document.RootElement;
+
+            string? titleId = null;
+            if (root.TryGetProperty("titleId", out var idElement) && idElement.ValueKind == JsonValueKind.String)
+            {
+                titleId = idElement.GetString();
+            }
+
+            string? title = null;
+            if (root.TryGetProperty("localizedParameters", out var localized) &&
+                localized.ValueKind == JsonValueKind.Object)
+            {
+                if (localized.TryGetProperty("defaultLanguage", out var language) &&
+                    language.ValueKind == JsonValueKind.String &&
+                    localized.TryGetProperty(language.GetString()!, out var defaultBlock) &&
+                    defaultBlock.ValueKind == JsonValueKind.Object &&
+                    defaultBlock.TryGetProperty("titleName", out var titleName) &&
+                    titleName.ValueKind == JsonValueKind.String)
+                {
+                    title = titleName.GetString();
+                }
+                else
+                {
+                    foreach (var property in localized.EnumerateObject())
+                    {
+                        if (property.Value.ValueKind == JsonValueKind.Object &&
+                            property.Value.TryGetProperty("titleName", out var anyTitleName) &&
+                            anyTitleName.ValueKind == JsonValueKind.String)
+                        {
+                            title = anyTitleName.GetString();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return (
+                string.IsNullOrWhiteSpace(title) ? null : title,
+                string.IsNullOrWhiteSpace(titleId) ? null : titleId);
+        }
+        catch (Exception)
+        {
+            return (null, null);
+        }
     }
 
     private static string GameNameFor(string ebootPath)

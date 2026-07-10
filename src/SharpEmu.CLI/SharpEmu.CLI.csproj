@@ -12,12 +12,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- GUI subsystem so starting without arguments opens the frontend with no
+         console window; CLI mode re-attaches to the parent terminal's console. -->
+    <OutputType>WinExe</OutputType>
     <AssemblyName>SharpEmu</AssemblyName>
     <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64</RuntimeIdentifiers>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
-    <!-- <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract> -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -43,5 +45,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Visible>False</Visible>
     </Content>
   </ItemGroup>
+
+  <!-- Keep glfw as a loose file next to the executable; every other native
+       library is embedded into the single-file bundle. -->
+  <Target Name="KeepGlfwOutsideSingleFile" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_GlfwPublishFiles Include="@(ResolvedFileToPublish)"
+                         Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw'))" />
+      <ResolvedFileToPublish Remove="@(_GlfwPublishFiles)" />
+      <ResolvedFileToPublish Include="@(_GlfwPublishFiles)">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 
 </Project>

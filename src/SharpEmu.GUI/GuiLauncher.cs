@@ -35,12 +35,8 @@ public static class GuiLauncher
     {
         try
         {
-            var directory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "SharpEmu");
-            Directory.CreateDirectory(directory);
             File.AppendAllText(
-                Path.Combine(directory, "gui-crash.log"),
+                Path.Combine(AppContext.BaseDirectory, "gui-crash.log"),
                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}{Environment.NewLine}{Environment.NewLine}");
         }
         catch (Exception)

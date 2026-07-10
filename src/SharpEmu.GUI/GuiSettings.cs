@@ -22,10 +22,9 @@ public sealed class GuiSettings
 
     public string? EmulatorPath { get; set; }
 
-    public static string SettingsPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "SharpEmu",
-        "gui-settings.json");
+    // The emulator is portable and keeps its data next to the executable;
+    // the GUI follows the same convention.
+    public static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "gui-settings.json");
 
     public static GuiSettings Load()
     {
