@@ -22,6 +22,15 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe void SetupExceptionHandler()
 	{
+		if (!OperatingSystem.IsWindows())
+		{
+			// TODO(macos/linux): bridge the vectored handler logic onto
+			// sigaction(SIGSEGV/SIGBUS) + mcontext. Until then guest faults
+			// terminate the process instead of being recovered.
+			Console.Error.WriteLine("[LOADER][WARN] Vectored exception handling is not available on this platform; guest faults will not be recovered.");
+			return;
+		}
+
 		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RAW_HANDLER"), "1", StringComparison.Ordinal))
 		{
 			_rawExceptionHandlerStub = _faultHandling.CreateHandlerThunk(RawVectoredHandlerPtrManaged, _hostRspSlotTlsIndex, _tlsGetValueAddress);

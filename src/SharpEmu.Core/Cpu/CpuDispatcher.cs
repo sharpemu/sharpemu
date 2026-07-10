@@ -22,15 +22,19 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         ModuleInitializer,
     }
 
-    private const ulong StackBaseAddress = 0x7FFF_F000_0000UL;
+    // The top of the x86-64 user address space (0x7FFD..0x7FFF) is only
+    // freely mappable on Windows; on macOS/Linux it hosts the dyld shared
+    // cache / vdso and (under Rosetta 2) the translator runtime, so POSIX
+    // hosts use the equivalent layout one slot lower at 0x6FFx.
+    private static readonly ulong StackBaseAddress = OperatingSystem.IsWindows() ? 0x7FFF_F000_0000UL : 0x6FFF_F000_0000UL;
     private const ulong StackSize = 0x0020_0000UL;
-    private const ulong TlsBaseAddress = 0x7FFE_0000_0000UL;
+    private static readonly ulong TlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
     private const ulong TlsSize = 0x0001_0000UL;
     private const ulong TlsPrefixSize = 0x0000_1000UL;
-    private const ulong BootstrapStubBaseAddress = 0x7FFD_F000_0000UL;
-    private const ulong BootstrapPayloadBaseAddress = 0x7FFD_E000_0000UL;
-    private const ulong DynlibFallbackStubBaseAddress = 0x7FFD_D000_0000UL;
-    private const ulong ReturnToHostStubBaseAddress = 0x7FFD_C000_0000UL;
+    private static readonly ulong BootstrapStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_F000_0000UL : 0x6FFD_F000_0000UL;
+    private static readonly ulong BootstrapPayloadBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_E000_0000UL : 0x6FFD_E000_0000UL;
+    private static readonly ulong DynlibFallbackStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_D000_0000UL : 0x6FFD_D000_0000UL;
+    private static readonly ulong ReturnToHostStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_C000_0000UL : 0x6FFD_C000_0000UL;
     private const ulong BootstrapRegionSize = 0x0000_1000UL;
     private const ulong ReturnToHostStubStride = 0x0100_0000UL;
     private const ulong BootstrapPayloadResultOffset = 0x28UL;

@@ -16,7 +16,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
          console window; CLI mode re-attaches to the parent terminal's console. -->
     <OutputType>WinExe</OutputType>
     <AssemblyName>SharpEmu</AssemblyName>
-    <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- osx-x64 is the macOS target: the CPU backend executes guest x86-64
+         natively, so on Apple Silicon it runs under Rosetta 2. -->
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
