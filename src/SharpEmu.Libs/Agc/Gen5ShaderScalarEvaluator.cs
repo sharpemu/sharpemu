@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
-using System.Buffers.Binary;
 using System.Numerics;
 
 namespace SharpEmu.Libs.Agc;
@@ -1405,8 +1404,7 @@ internal static class Gen5ShaderScalarEvaluator
                 continue;
             }
 
-            if (!TryReadUInt32(
-                    ctx,
+            if (!ctx.TryReadUInt32(
                     address + (ulong)(index * sizeof(uint)),
                     out var value) &&
                 !TryReadUserDataScalarLoad(
@@ -1727,16 +1725,4 @@ internal static class Gen5ShaderScalarEvaluator
         opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
         opcode.StartsWith("ImageGather", StringComparison.Ordinal);
 
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
-        return true;
-    }
 }

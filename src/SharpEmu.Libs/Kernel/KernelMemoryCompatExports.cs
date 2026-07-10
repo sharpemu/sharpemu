@@ -7,9 +7,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
-using System.Threading;
 using System.Runtime.InteropServices;
-using System.Linq;
 using System.Globalization;
 
 namespace SharpEmu.Libs.Kernel;
@@ -4527,7 +4525,7 @@ public static class KernelMemoryCompatExports
                 continue;
             }
 
-            Span<byte> one = stackalloc byte[1];
+            var one = chunk.AsSpan(0, 1);
             if (!TryReadCompat(ctx, current, one))
             {
                 return false;

@@ -453,7 +453,7 @@ public static class AmprExports
         var offset = 0UL;
         while (offset < writeOffset)
         {
-            if (!TryReadUInt32(ctx, buffer + offset, out var recordType))
+            if (!ctx.TryReadUInt32(buffer + offset, out var recordType))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -880,19 +880,6 @@ public static class AmprExports
         }
 
         TraceAmpr(ctx, "complete_write_address", address, value, 0);
-        return true;
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
         return true;
     }
 

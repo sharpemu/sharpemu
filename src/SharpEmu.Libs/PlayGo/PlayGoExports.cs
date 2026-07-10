@@ -234,7 +234,7 @@ public static class PlayGoExports
         if (outChunkIdList == 0)
         {
             TracePlayGo($"get_chunk_id count_only entries={availableEntries} out_entries=0x{outEntries:X16}");
-            return TryWriteUInt32(ctx, outEntries, availableEntries)
+            return ctx.TryWriteUInt32(outEntries, availableEntries)
                 ? (int)OrbisGen2Result.ORBIS_GEN2_OK
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -256,7 +256,7 @@ public static class PlayGoExports
         }
 
         TracePlayGo($"get_chunk_id write requested={numberOfEntries} wrote={entriesToWrite} available={availableEntries}");
-        return TryWriteUInt32(ctx, outEntries, entriesToWrite)
+        return ctx.TryWriteUInt32(outEntries, entriesToWrite)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
@@ -503,7 +503,7 @@ public static class PlayGoExports
         }
 
         TracePlayGo($"get_todo requested={numberOfEntries} wrote=0");
-        return TryWriteUInt32(ctx, outEntries, 0)
+        return ctx.TryWriteUInt32(outEntries, 0)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
@@ -745,13 +745,6 @@ public static class PlayGoExports
     {
         Span<byte> buffer = stackalloc byte[sizeof(ushort)];
         BinaryPrimitives.WriteUInt16LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
         return ctx.Memory.TryWrite(address, buffer);
     }
 

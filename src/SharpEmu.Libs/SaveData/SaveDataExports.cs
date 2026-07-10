@@ -108,8 +108,8 @@ public static class SaveDataExports
             var setNum = result.DirNamesNum == 0
                 ? 0
                 : Math.Min(result.DirNamesNum, entries.Count);
-            if (!TryWriteUInt32(ctx, resultAddress + ResultHitNumOffset, checked((uint)entries.Count)) ||
-                !TryWriteUInt32(ctx, resultAddress + ResultSetNumOffset, checked((uint)setNum)))
+            if (!ctx.TryWriteUInt32(resultAddress + ResultHitNumOffset, checked((uint)entries.Count)) ||
+                !ctx.TryWriteUInt32(resultAddress + ResultSetNumOffset, checked((uint)setNum)))
             {
                 return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -173,9 +173,9 @@ public static class SaveDataExports
             !ctx.TryReadUInt64(mountAddress + 0x08, out var dirNameAddress) ||
             !ctx.TryReadUInt64(mountAddress + 0x10, out var blocks) ||
             !ctx.TryReadUInt64(mountAddress + 0x18, out var systemBlocks) ||
-            !TryReadUInt32(ctx, mountAddress + 0x20, out var mountMode) ||
-            !TryReadUInt32(ctx, mountAddress + 0x24, out var resource) ||
-            !TryReadUInt32(ctx, mountAddress + 0x28, out var mode) ||
+            !ctx.TryReadUInt32(mountAddress + 0x20, out var mountMode) ||
+            !ctx.TryReadUInt32(mountAddress + 0x24, out var resource) ||
+            !ctx.TryReadUInt32(mountAddress + 0x28, out var mode) ||
             dirNameAddress == 0 ||
             !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
         {
@@ -263,7 +263,7 @@ public static class SaveDataExports
 
         var id = (uint)Interlocked.Increment(ref _nextTransactionResource);
 
-        if (!TryWriteUInt32(ctx, resourceAddress, id))
+        if (!ctx.TryWriteUInt32(resourceAddress, id))
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -280,8 +280,8 @@ public static class SaveDataExports
         if (!TryReadInt32(ctx, address, out var userId) ||
             !ctx.TryReadUInt64(address + 0x08, out var titleIdAddress) ||
             !ctx.TryReadUInt64(address + 0x10, out var dirNameAddress) ||
-            !TryReadUInt32(ctx, address + 0x18, out var sortKey) ||
-            !TryReadUInt32(ctx, address + 0x1C, out var sortOrder))
+            !ctx.TryReadUInt32(address + 0x18, out var sortKey) ||
+            !ctx.TryReadUInt32(address + 0x1C, out var sortOrder))
         {
             return false;
         }
@@ -304,7 +304,7 @@ public static class SaveDataExports
     {
         result = default;
         if (!ctx.TryReadUInt64(address + ResultDirNamesOffset, out var dirNamesAddress) ||
-            !TryReadUInt32(ctx, address + ResultDirNamesNumOffset, out var dirNamesNum) ||
+            !ctx.TryReadUInt32(address + ResultDirNamesNumOffset, out var dirNamesNum) ||
             !ctx.TryReadUInt64(address + ResultParamsOffset, out var paramsAddress) ||
             !ctx.TryReadUInt64(address + ResultInfosOffset, out var infosAddress))
         {
@@ -516,26 +516,6 @@ public static class SaveDataExports
 
         value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
         return true;
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
     }
 
     private static int SetReturn(CpuContext ctx, int result)

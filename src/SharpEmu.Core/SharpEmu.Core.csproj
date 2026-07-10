@@ -1,4 +1,4 @@
-<!--
+﻿<!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
@@ -13,6 +13,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <PackageReference Include="Iced" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
 
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

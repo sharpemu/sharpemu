@@ -95,7 +95,7 @@ public static class AudioOut2Exports
         }
 
         var handle = (ulong)Interlocked.Increment(ref _nextContextHandle);
-        return TryWriteUInt64(ctx, outContextAddress, handle)
+        return ctx.TryWriteUInt64(outContextAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -125,7 +125,7 @@ public static class AudioOut2Exports
 
         var portId = unchecked((uint)Interlocked.Increment(ref _nextPortId)) & 0xFF;
         var handle = 0x2000_0000UL | ((ulong)(uint)type << 16) | portId;
-        return TryWriteUInt64(ctx, outPortAddress, handle)
+        return ctx.TryWriteUInt64(outPortAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -211,16 +211,9 @@ public static class AudioOut2Exports
         }
 
         var handle = (ulong)Interlocked.Increment(ref _nextUserHandle);
-        return TryWriteUInt64(ctx, outUserAddress, handle)
+        return ctx.TryWriteUInt64(outUserAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
-
-    private static bool TryWriteUInt64(CpuContext ctx, ulong address, ulong value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
-        BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
     }
 
     private static int SetReturn(CpuContext ctx, int result)

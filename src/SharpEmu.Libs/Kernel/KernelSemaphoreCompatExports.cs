@@ -1,9 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Text;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Kernel;
@@ -49,7 +47,7 @@ public static class KernelSemaphoreCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxSemaphoreNameLength, out var name))
+        if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxSemaphoreNameLength, out var name))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -68,7 +66,7 @@ public static class KernelSemaphoreCompatExports
             Count = initialCount,
         };
 
-        if (!TryWriteUInt32(ctx, semaphoreAddress, handle))
+        if (!ctx.TryWriteUInt32(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -110,12 +108,12 @@ public static class KernelSemaphoreCompatExports
 
             if (timeoutAddress != 0)
             {
-                if (!TryReadUInt32(ctx, timeoutAddress, out _))
+                if (!ctx.TryReadUInt32(timeoutAddress, out _))
                 {
                     return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
 
-                _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                _ = ctx.TryWriteUInt32(timeoutAddress, 0);
                 TraceSemaphore($"wait-timeout handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
             }
@@ -222,7 +220,7 @@ public static class KernelSemaphoreCompatExports
 
         lock (semaphore.Gate)
         {
-            if (waitingThreadsAddress != 0 && !TryWriteUInt32(ctx, waitingThreadsAddress, unchecked((uint)semaphore.WaitingThreads)))
+            if (waitingThreadsAddress != 0 && !ctx.TryWriteUInt32(waitingThreadsAddress, unchecked((uint)semaphore.WaitingThreads)))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -256,56 +254,6 @@ public static class KernelSemaphoreCompatExports
         var value = (int)result;
         ctx[CpuRegister.Rax] = unchecked((ulong)value);
         return value;
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int maxLength, out string value)
-    {
-        value = string.Empty;
-        if (address == 0 || maxLength <= 0)
-        {
-            return false;
-        }
-
-        var bytes = new byte[Math.Min(maxLength, 4096)];
-        for (var i = 0; i < bytes.Length; i++)
-        {
-            Span<byte> current = stackalloc byte[1];
-            if (!ctx.Memory.TryRead(address + (ulong)i, current))
-            {
-                return false;
-            }
-
-            if (current[0] == 0)
-            {
-                value = Encoding.UTF8.GetString(bytes, 0, i);
-                return true;
-            }
-
-            bytes[i] = current[0];
-        }
-
-        value = Encoding.UTF8.GetString(bytes);
-        return true;
     }
 
     private static void TraceSemaphore(string message)

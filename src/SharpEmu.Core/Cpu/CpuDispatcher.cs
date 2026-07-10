@@ -415,8 +415,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 
         const ulong entryParamsSize = 0x20;
         var entryParamsAddress = AlignDown(argv0Address - entryParamsSize, 16);
-        if (!TryWriteUInt32(context, entryParamsAddress + 0x00, 1) ||
-            !TryWriteUInt32(context, entryParamsAddress + 0x04, 0) ||
+        if (!context.TryWriteUInt32(entryParamsAddress + 0x00, 1) ||
+            !context.TryWriteUInt32(entryParamsAddress + 0x04, 0) ||
             !context.TryWriteUInt64(entryParamsAddress + 0x08, argv0Address) ||
             !context.TryWriteUInt64(entryParamsAddress + 0x10, 0) ||
             !context.TryWriteUInt64(entryParamsAddress + 0x18, 0))
@@ -454,13 +454,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private static ulong AlignDown(ulong value, ulong alignment)
     {
         return value & ~(alignment - 1);
-    }
-
-    private static bool TryWriteUInt32(CpuContext context, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return context.Memory.TryWrite(address, buffer);
     }
 
     private static string BuildEntryFrameDiagnostic(
