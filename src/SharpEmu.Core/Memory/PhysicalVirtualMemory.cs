@@ -55,7 +55,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private static extern nuint VirtualQuery(void* lpAddress, out MemoryBasicInformation64 lpBuffer, nuint dwLength);
 
     [DllImport("kernel32.dll")]
-    private static extern void FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
+    private static extern void* GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
 
     public bool TryAllocateAtExact(ulong desiredAddress, ulong size, bool executable, out ulong actualAddress)
     {
@@ -451,7 +455,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         if ((flags & ProgramHeaderFlags.Execute) != 0)
         {
-            FlushInstructionCache(null, (void*)address, (nuint)size);
+            FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)size);
         }
     }
 
@@ -699,7 +703,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 VirtualProtect(destPtr, (nuint)source.Length, oldProtect, out _);
                 if (IsExecutableProtection(oldProtect))
                 {
-                    FlushInstructionCache(null, destPtr, (nuint)source.Length);
+                    FlushInstructionCache(GetCurrentProcess(), destPtr, (nuint)source.Length);
                 }
             }
 
