@@ -30,7 +30,10 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private const ulong StackSize = 0x0020_0000UL;
     private static readonly ulong TlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
     private const ulong TlsSize = 0x0001_0000UL;
-    private const ulong TlsPrefixSize = 0x0000_1000UL;
+    // The static TLS blocks live at negative offsets from the TCB (FreeBSD
+    // amd64 variant II); libc.prx alone reaches beyond -0x1700, so give the
+    // prefix a full 64KB on POSIX. Windows keeps its historical 4KB prefix.
+    private static readonly ulong TlsPrefixSize = OperatingSystem.IsWindows() ? 0x0000_1000UL : 0x0001_0000UL;
     private static readonly ulong BootstrapStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_F000_0000UL : 0x6FFD_F000_0000UL;
     private static readonly ulong BootstrapPayloadBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_E000_0000UL : 0x6FFD_E000_0000UL;
     private static readonly ulong DynlibFallbackStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_D000_0000UL : 0x6FFD_D000_0000UL;

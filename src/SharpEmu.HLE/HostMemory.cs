@@ -214,21 +214,24 @@ public static unsafe class HostMemory
                 nint result;
                 if (address != null)
                 {
-                    // Win32 maps at exactly the requested address or fails; a
-                    // plain mmap treats it as a hint and silently relocates.
-                    // We only ever request our own tracked guest ranges, so
-                    // fail up front on any overlap we know about, then force the
-                    // fixed placement (NOREPLACE on Linux catches host
-                    // mappings too; macOS lacks it, so we rely on the overlap
-                    // table plus the well-separated guest layout).
+                    // Win32 maps at exactly the requested address or fails
+                    // without touching existing mappings. Fail up front on
+                    // any overlap we track, then place the mapping: Linux
+                    // gets MAP_FIXED_NOREPLACE (fails cleanly on host
+                    // mappings too). Darwin lacks NOREPLACE and plain
+                    // MAP_FIXED would silently clobber untracked host
+                    // memory (dyld, the runtime's JIT heap, Rosetta), so
+                    // pass the address as a hint instead -- the kernel
+                    // honors it when the range is free and relocates the
+                    // mapping otherwise, which we treat as failure.
                     if (OverlapsTrackedRegionLocked((ulong)address, alignedSize))
                     {
                         Trace($"exact overlap: addr=0x{(ulong)address:X16} size=0x{alignedSize:X}");
                         return null;
                     }
 
-                    var fixedFlags = flags | (OperatingSystem.IsMacOS() ? MAP_FIXED : MAP_FIXED_NOREPLACE);
-                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, fixedFlags, -1, 0);
+                    var exactFlags = OperatingSystem.IsMacOS() ? flags : flags | MAP_FIXED_NOREPLACE;
+                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, exactFlags, -1, 0);
                     if (result == MAP_FAILED || (ulong)result != (ulong)address)
                     {
                         Trace($"exact mmap failed: addr=0x{(ulong)address:X16} got=0x{(ulong)result:X16} size=0x{alignedSize:X} errno={Marshal.GetLastPInvokeError()}");

@@ -249,6 +249,43 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
 
+        // The desired address is only a search hint for these callers. On
+        // POSIX hosts the page-stepped probing below is pathological: the
+        // host owns arbitrary unmapped-looking ranges, and under Rosetta 2
+        // the kernel ignores placement hints for whole windows, so 64K
+        // mmap/munmap probes all fail. Ask the kernel for a placement
+        // directly instead and accept it when it satisfies the alignment.
+        if (!OperatingSystem.IsWindows())
+        {
+            // Over-allocate by the alignment so a kernel-chosen placement
+            // always contains an aligned start; the unused head/tail stays
+            // part of the tracked region and is simply never handed out.
+            var reserveSize = effectiveAlignment > PageSize
+                ? alignedSize + effectiveAlignment
+                : alignedSize;
+            try
+            {
+                var posixAddress = AllocateAt(cursor, reserveSize, executable, allowAlternative: true);
+                if (posixAddress != 0)
+                {
+                    var alignedBase = AlignUp(posixAddress, effectiveAlignment);
+                    if (alignedBase + alignedSize <= posixAddress + reserveSize)
+                    {
+                        actualAddress = alignedBase;
+                        UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, alignedBase + alignedSize);
+                        return true;
+                    }
+
+                    ReleaseUntrackedAllocation(posixAddress);
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
         for (var attempt = 0; attempt < 0x10000; attempt++)
         {
             if (cursor == 0 || ulong.MaxValue - cursor < alignedSize)
@@ -281,6 +318,28 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         return false;
+    }
+
+    private void ReleaseUntrackedAllocation(ulong address)
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            for (var i = 0; i < _regions.Count; i++)
+            {
+                if (_regions[i].VirtualAddress == address)
+                {
+                    _regions.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+
+        VirtualFree((void*)address, 0, MEM_RELEASE);
     }
 
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)

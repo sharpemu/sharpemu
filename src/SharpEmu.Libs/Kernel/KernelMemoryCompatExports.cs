@@ -125,6 +125,13 @@ public static class KernelMemoryCompatExports
 
     private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
+    // First guest virtual address handed out for direct/flexible mappings
+    // when the game does not request one. 4GB is free on Windows, but on
+    // POSIX hosts it belongs to the host image / runtime (the Mach-O image
+    // base is 0x100000000 on macOS), so search from a guest-owned window
+    // well clear of host mappings instead.
+    private static readonly ulong DefaultMapSearchBase =
+        OperatingSystem.IsWindows() ? 0x1_0000_0000UL : 0x20_0000_0000UL;
     private static ulong _mainDirectMemoryPoolBase = UnsetMainDirectMemoryPoolBase;
     private static ulong _allocatedFlexibleBytes;
     private static ulong _threadAtexitCountCallback;
@@ -241,7 +248,7 @@ public static class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             var desiredAddress = AlignUp(
-                _nextVirtualAddress == 0 ? 0x1_0000_0000UL : _nextVirtualAddress,
+                _nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress,
                 effectiveAlignment);
             if (!TryReserveGuestVirtualRange(ctx, desiredAddress, mappedLength, protection, effectiveAlignment, out address) ||
                 address == 0)
@@ -3185,7 +3192,7 @@ public static class KernelMemoryCompatExports
                 ? requestedAddress
                 : directMemoryStart != 0
                     ? AlignUp(directMemoryStart, effectiveAlignment)
-                    : AlignUp(_nextVirtualAddress == 0 ? 0x1_0000_0000UL : _nextVirtualAddress, effectiveAlignment);
+                    : AlignUp(_nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress, effectiveAlignment);
 
             var reserved = false;
             if (fixedMapping && requestedAddress != 0)
@@ -3291,7 +3298,7 @@ public static class KernelMemoryCompatExports
             var fixedMapping = (flags & 0x10UL) != 0;
             var desiredAddress = requestedAddress != 0
                 ? requestedAddress
-                : AlignUp(_nextVirtualAddress == 0 ? 0x1_0000_0000UL : _nextVirtualAddress, 0x1000UL);
+                : AlignUp(_nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress, 0x1000UL);
 
             if (fixedMapping && requestedAddress != 0)
             {
