@@ -5,14 +5,18 @@ using Avalonia;
 
 namespace SharpEmu.GUI;
 
-internal static class Program
+/// <summary>
+/// Entry point for the desktop frontend, hosted by the SharpEmu executable
+/// when it is started without command-line arguments.
+/// </summary>
+public static class GuiLauncher
 {
-    [STAThread]
-    public static void Main(string[] args)
+    public static int Run()
     {
         try
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(Array.Empty<string>());
+            return 0;
         }
         catch (Exception ex)
         {
@@ -20,6 +24,12 @@ internal static class Program
             throw;
         }
     }
+
+    public static AppBuilder BuildAvaloniaApp()
+        => AppBuilder.Configure<App>()
+            .UsePlatformDetect()
+            .WithInterFont()
+            .LogToTrace();
 
     private static void WriteCrashLog(Exception ex)
     {
@@ -38,10 +48,4 @@ internal static class Program
             // Crash logging is best-effort.
         }
     }
-
-    public static AppBuilder BuildAvaloniaApp()
-        => AppBuilder.Configure<App>()
-            .UsePlatformDetect()
-            .WithInterFont()
-            .LogToTrace();
 }

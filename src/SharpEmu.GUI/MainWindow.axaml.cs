@@ -150,6 +150,14 @@ public partial class MainWindow : Window
             candidates.Add(_settings.EmulatorPath);
         }
 
+        // The GUI and the CLI are the same executable: with arguments it runs
+        // the emulator, so the preferred child process is this process itself.
+        if (Environment.ProcessPath is { } selfPath &&
+            Path.GetFileNameWithoutExtension(selfPath).Equals("SharpEmu", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(selfPath);
+        }
+
         candidates.Add(Path.Combine(baseDirectory, exeName));
         candidates.Add(Path.Combine(baseDirectory, "win-x64", exeName));
         candidates.Add(Path.Combine(baseDirectory, "..", exeName));

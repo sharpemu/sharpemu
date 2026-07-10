@@ -3,6 +3,7 @@
 
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
+using SharpEmu.GUI;
 using SharpEmu.HLE;
 using SharpEmu.Logging;
 using System.Runtime.InteropServices;
@@ -24,12 +25,22 @@ internal static partial class Program
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_XTENDED_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
+    private const int SW_HIDE = 0;
 
+    [STAThread]
     private static int Main(string[] args)
     {
+        args = NormalizeInternalArguments(args, out var isMitigatedChild);
+        if (args.Length == 0 && !isMitigatedChild)
+        {
+            // No arguments: open the desktop frontend. Any argument selects
+            // the classic CLI behavior below.
+            HideConsoleWindowIfOwned();
+            return GuiLauncher.Run();
+        }
+
         Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
 
-        args = NormalizeInternalArguments(args, out var isMitigatedChild);
         if (!isMitigatedChild && TryRunMitigatedChild(args, out var childExitCode))
         {
             return childExitCode;
@@ -99,6 +110,28 @@ internal static partial class Program
         }
 
         return result == OrbisGen2Result.ORBIS_GEN2_OK ? 0 : 4;
+    }
+
+    private static void HideConsoleWindowIfOwned()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var consoleWindow = GetConsoleWindow();
+        if (consoleWindow == 0)
+        {
+            return;
+        }
+
+        // Only hide the console if this process is its sole owner (started by
+        // double-click), never a terminal the user launched us from.
+        var processList = new uint[2];
+        if (GetConsoleProcessList(processList, (uint)processList.Length) == 1)
+        {
+            _ = ShowWindow(consoleWindow, SW_HIDE);
+        }
     }
 
     private static string[] NormalizeInternalArguments(string[] args, out bool isMitigatedChild)
@@ -670,4 +703,14 @@ internal static partial class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(nint handle);
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetConsoleWindow();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetConsoleProcessList(uint[] processList, uint processCount);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint hWnd, int nCmdShow);
 }

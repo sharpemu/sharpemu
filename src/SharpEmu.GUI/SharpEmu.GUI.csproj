@@ -5,15 +5,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Class library: the GUI is hosted by SharpEmu.CLI, which opens it when
+       the executable is started without arguments. -->
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <AssemblyName>SharpEmu.GUI</AssemblyName>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Version>0.0.1</Version>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == ''">
-    <ApplicationIcon>..\..\assets\images\SharpEmu.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
