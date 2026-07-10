@@ -75,6 +75,38 @@ internal static partial class Program
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            // AppKit (and therefore GLFW windowing) must run on the process
+            // main thread on macOS. Emulation moves to a worker thread and
+            // the main thread services window work the video presenter posts.
+            var exitCode = 0;
+            HostMainThread.Enable();
+            var emulation = new Thread(() =>
+            {
+                try
+                {
+                    exitCode = RunEmulator(args, isMitigatedChild);
+                }
+                finally
+                {
+                    HostMainThread.Shutdown();
+                }
+            }, 32 * 1024 * 1024)
+            {
+                Name = "SharpEmu Emulation",
+            };
+            emulation.Start();
+            HostMainThread.Pump();
+            emulation.Join();
+            return exitCode;
+        }
+
+        return RunEmulator(args, isMitigatedChild);
+    }
+
+    private static int RunEmulator(string[] args, bool isMitigatedChild)
+    {
         Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
 
         if (!isMitigatedChild && TryRunMitigatedChild(args, out var childExitCode))
