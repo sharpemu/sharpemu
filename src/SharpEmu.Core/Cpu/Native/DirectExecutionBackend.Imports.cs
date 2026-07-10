@@ -358,12 +358,21 @@ public sealed partial class DirectExecutionBackend
 					}
 					orbisGen2Result = (OrbisGen2Result)returnValue;
 				}
-				else
-				{
-					dispatchResolved = false;
-					orbisGen2Result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-					cpuContext[CpuRegister.Rax] = unchecked((ulong)(int)orbisGen2Result);
-				}
+                else if (importStubEntry.Export is { } mismatchedExport)
+                {
+                    dispatchResolved = true;
+                    orbisGen2Result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED;
+                    cpuContext[CpuRegister.Rax] = unchecked((ulong)(int)orbisGen2Result);
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] Import#{num} not implemented for generation {cpuContext.TargetGeneration}: " +
+                        $"nid={importStubEntry.Nid} targets={mismatchedExport.Target} ret=0x{num7:X16}");
+                }
+                else
+                {
+                    dispatchResolved = false;
+                    orbisGen2Result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                    cpuContext[CpuRegister.Rax] = unchecked((ulong)(int)orbisGen2Result);
+                }
 			}
 			finally
 			{
