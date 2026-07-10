@@ -58,6 +58,8 @@ public static class AgcExports
     private const uint SpiShaderPgmHiEs = 0xC9;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
+    private const uint SpiShaderPgmLoGs = 0x8A;
+    private const uint SpiShaderPgmHiGs = 0x8B;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
     private const uint ComputePgmLo = 0x20C;
@@ -115,6 +117,7 @@ public static class AgcExports
     private const uint RegisterDefaultsVersion7 = 7;
     private const uint RegisterDefaultsVersion8 = 8;
     private const uint RegisterDefaultsVersion10 = 10;
+    private const uint RegisterDefaultsVersion13 = 13;
     private const int RegisterDefaultsSize = 0x40;
     private const int RegisterDefaultBlockSize = 16 * 8;
 
@@ -5089,6 +5092,7 @@ public static class AgcExports
             0 => ComputePgmLo,
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
+            4 => SpiShaderPgmLoGs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -5097,6 +5101,7 @@ public static class AgcExports
             0 => ComputePgmHi,
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
+            4 => SpiShaderPgmHiGs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
@@ -5113,7 +5118,7 @@ public static class AgcExports
     }
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
-        shaderType is 2 or 6;
+        shaderType is 2 or 4 or 6;
 
     private static int SetIndirectPatchAddress(CpuContext ctx, string registerSpace)
     {
@@ -5260,7 +5265,8 @@ public static class AgcExports
         return version is
             RegisterDefaultsVersion7 or
             RegisterDefaultsVersion8 or
-            RegisterDefaultsVersion10;
+            RegisterDefaultsVersion10 or
+            RegisterDefaultsVersion13;
     }
 
     private static bool TryGetRegisterDefaultsAllocation(
