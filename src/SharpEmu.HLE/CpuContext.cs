@@ -138,6 +138,51 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
         return true;
     }
 
+    public bool TryReadUInt16(ulong address, out ushort value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ushort)];
+        if (!Memory.TryRead(address, bytes))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt16LittleEndian(bytes);
+        return true;
+    }
+
+    public bool TryWriteUInt16(ulong address, ushort value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ushort)];
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer, value);
+        return Memory.TryWrite(address, buffer);
+    }
+
+    public bool TryReadInt32(ulong address, out int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        if (!Memory.TryRead(address, bytes))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
+        return true;
+    }
+
+    public bool TryWriteInt32(ulong address, int value, bool checkNil = false)
+    {
+        if (checkNil && address == 0)
+        {
+            return false;
+        }
+
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+        return Memory.TryWrite(address, bytes);
+    }
+
     public bool TryReadUInt32(ulong address, out uint value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
@@ -155,6 +200,13 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
+        return Memory.TryWrite(address, buffer);
+    }
+
+    public bool TryWriteInt64(ulong address, long value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(buffer, value);
         return Memory.TryWrite(address, buffer);
     }
 
@@ -223,5 +275,24 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
 
         this[CpuRegister.Rsp] = rsp + sizeof(ulong);
         return true;
+    }
+
+    public int SetReturn(int result, Type? cast = null)
+    {
+        var value = cast switch
+        {
+            null => (ulong)result,
+            _ when cast == typeof(long) => (ulong)(long)result,
+            _ => throw new NotSupportedException(),
+        };
+
+        this[CpuRegister.Rax] = unchecked(value);
+        return result;
+    }
+
+    public int SetReturn(OrbisGen2Result result)
+    {
+        this[CpuRegister.Rax] = unchecked((ulong)(int)result);
+        return (int)result;
     }
 }

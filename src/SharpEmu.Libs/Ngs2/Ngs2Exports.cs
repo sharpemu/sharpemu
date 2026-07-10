@@ -4,7 +4,6 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using System.Buffers.Binary;
-using System.Threading;
 
 namespace SharpEmu.Libs.Ngs2;
 
@@ -39,13 +38,13 @@ public static class Ngs2Exports
         var outHandleAddress = ctx[CpuRegister.Rdx];
         if (outHandleAddress == 0)
         {
-            return SetReturn(ctx, OrbisNgs2ErrorInvalidOutAddress);
+            return ctx.SetReturn(OrbisNgs2ErrorInvalidOutAddress);
         }
 
         if (!TryCreateHandle(ctx, type: 1, ownerHandle: 0, out var handle) ||
             !ctx.TryWriteUInt64(outHandleAddress, handle))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         lock (StateGate)
@@ -53,7 +52,7 @@ public static class Ngs2Exports
             Systems[handle] = new SystemState(unchecked((uint)Interlocked.Increment(ref _nextUid)));
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -68,7 +67,7 @@ public static class Ngs2Exports
         {
             if (!Systems.Remove(handle))
             {
-                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+                return ctx.SetReturn(OrbisNgs2ErrorInvalidSystemHandle);
             }
 
             var rackHandles = Racks
@@ -81,7 +80,7 @@ public static class Ngs2Exports
             }
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -98,19 +97,19 @@ public static class Ngs2Exports
         {
             if (!Systems.ContainsKey(systemHandle))
             {
-                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+                return ctx.SetReturn(OrbisNgs2ErrorInvalidSystemHandle);
             }
         }
 
         if (outHandleAddress == 0)
         {
-            return SetReturn(ctx, OrbisNgs2ErrorInvalidOutAddress);
+            return ctx.SetReturn(OrbisNgs2ErrorInvalidOutAddress);
         }
 
         if (!TryCreateHandle(ctx, type: 2, systemHandle, out var handle) ||
             !ctx.TryWriteUInt64(outHandleAddress, handle))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         lock (StateGate)
@@ -118,7 +117,7 @@ public static class Ngs2Exports
             Racks[handle] = new RackState(systemHandle, rackId);
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -133,13 +132,13 @@ public static class Ngs2Exports
         {
             if (!Racks.ContainsKey(handle))
             {
-                return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
+                return ctx.SetReturn(OrbisNgs2ErrorInvalidRackHandle);
             }
 
             RemoveRackLocked(handle);
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -156,7 +155,7 @@ public static class Ngs2Exports
         {
             if (!Racks.ContainsKey(rackHandle))
             {
-                return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
+                return ctx.SetReturn(OrbisNgs2ErrorInvalidRackHandle);
             }
 
             var existing = Voices.FirstOrDefault(
@@ -164,20 +163,20 @@ public static class Ngs2Exports
             if (existing.Key != 0)
             {
                 return ctx.TryWriteUInt64(outHandleAddress, existing.Key)
-                    ? SetReturn(ctx, 0)
-                    : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    ? ctx.SetReturn(0)
+                    : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
         if (outHandleAddress == 0)
         {
-            return SetReturn(ctx, OrbisNgs2ErrorInvalidOutAddress);
+            return ctx.SetReturn(OrbisNgs2ErrorInvalidOutAddress);
         }
 
         if (!TryCreateHandle(ctx, type: 4, rackHandle, out var handle) ||
             !ctx.TryWriteUInt64(outHandleAddress, handle))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         lock (StateGate)
@@ -185,7 +184,7 @@ public static class Ngs2Exports
             Voices[handle] = new VoiceState(rackHandle, voiceIndex);
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -197,9 +196,10 @@ public static class Ngs2Exports
     {
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
-                Voices.ContainsKey(ctx[CpuRegister.Rdi]) ? 0 : OrbisNgs2ErrorInvalidVoiceHandle);
+            return ctx.SetReturn(
+                Voices.ContainsKey(ctx[CpuRegister.Rdi]) 
+                    ? 0 
+                    : OrbisNgs2ErrorInvalidVoiceHandle);
         }
     }
 
@@ -224,13 +224,13 @@ public static class Ngs2Exports
         {
             if (!Systems.ContainsKey(systemHandle))
             {
-                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+                return ctx.SetReturn(OrbisNgs2ErrorInvalidSystemHandle);
             }
         }
 
         if (bufferInfoCount != 0 && bufferInfoAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         for (uint i = 0; i < bufferInfoCount; i++)
@@ -239,14 +239,14 @@ public static class Ngs2Exports
             if (!ctx.TryReadUInt64(entryAddress, out var bufferAddress) ||
                 !ctx.TryReadUInt64(entryAddress + 8, out var bufferSize))
             {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             if (bufferAddress != 0 && bufferSize != 0)
             {
                 if (bufferSize > MaximumRenderBufferSize || !TryClearGuestBuffer(ctx, bufferAddress, bufferSize))
                 {
-                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
             }
         }
@@ -258,7 +258,7 @@ public static class Ngs2Exports
                 $"[LOADER][TRACE] ngs2.render#{count} system=0x{systemHandle:X16} buffers={bufferInfoCount}");
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     private static bool TryCreateHandle(CpuContext ctx, uint type, ulong ownerHandle, out ulong handle)
@@ -313,10 +313,4 @@ public static class Ngs2Exports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_NGS2"),
             "1",
             StringComparison.Ordinal);
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
-    }
 }

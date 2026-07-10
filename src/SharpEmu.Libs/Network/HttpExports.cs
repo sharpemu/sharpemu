@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE;
 using System.Collections.Concurrent;
-using System.Threading;
 
 namespace SharpEmu.Libs.Network;
 
@@ -33,7 +32,7 @@ public static class HttpExports
         var poolSize = ctx[CpuRegister.Rdx];
         if (poolSize == 0)
         {
-            return SetReturn(ctx, HttpErrorInvalidValue);
+            return ctx.SetReturn(HttpErrorInvalidValue);
         }
 
         var id = Interlocked.Increment(ref _nextContextId);
@@ -53,7 +52,7 @@ public static class HttpExports
         var contextId = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!Contexts.ContainsKey(contextId))
         {
-            return SetReturn(ctx, HttpErrorInvalidId);
+            return ctx.SetReturn(HttpErrorInvalidId);
         }
 
         var userAgentAddress = ctx[CpuRegister.Rsi];
@@ -75,8 +74,8 @@ public static class HttpExports
     {
         var templateId = unchecked((int)ctx[CpuRegister.Rdi]);
         return Templates.TryRemove(templateId, out _)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, HttpErrorInvalidId);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(HttpErrorInvalidId);
     }
 
     [SysAbiExport(
@@ -89,7 +88,7 @@ public static class HttpExports
         var contextId = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!Contexts.TryRemove(contextId, out _))
         {
-            return SetReturn(ctx, HttpErrorInvalidId);
+            return ctx.SetReturn(HttpErrorInvalidId);
         }
 
         foreach (var pair in Templates)
@@ -100,13 +99,7 @@ public static class HttpExports
             }
         }
 
-        return SetReturn(ctx, 0);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.SetReturn(0);
     }
 
     private static void TraceHttp(string operation, int id, ulong arg0, ulong arg1, ulong arg2, ulong arg3)

@@ -73,7 +73,7 @@ public static class AppContentExports
         var valueAddress = ctx[CpuRegister.Rsi];
         if (valueAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         int value;
@@ -83,18 +83,18 @@ public static class AppContentExports
         }
         else if (!TryReadUserDefinedParam(paramId, out value))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> valueBytes = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
         if (!ctx.Memory.TryWrite(valueAddress, valueBytes))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAppContent($"app_param_get_int id={paramId} value={value}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -166,12 +166,6 @@ public static class AppContentExports
         {
             return true;
         }
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-        return (int)result;
     }
 
     private static void TraceAppContent(string message)

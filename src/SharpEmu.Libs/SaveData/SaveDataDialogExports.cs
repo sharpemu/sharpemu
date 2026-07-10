@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
-using System.Threading;
 
 namespace SharpEmu.Libs.SaveData;
 
@@ -35,10 +34,10 @@ public static class SaveDataDialogExports
     {
         if (Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone) != StatusNone)
         {
-            return SetReturn(ctx, ErrorAlreadyInitialized);
+            return ctx.SetReturn(ErrorAlreadyInitialized);
         }
 
-        return SetReturn(ctx, ErrorOk);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -51,12 +50,12 @@ public static class SaveDataDialogExports
         var paramAddress = ctx[CpuRegister.Rdi];
         if (paramAddress == 0)
         {
-            return SetReturn(ctx, ErrorArgNull);
+            return ctx.SetReturn(ErrorArgNull);
         }
 
         if (_status is not (StatusInitialized or StatusFinished))
         {
-            return SetReturn(ctx, ErrorNotInitialized);
+            return ctx.SetReturn(ErrorNotInitialized);
         }
 
         _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
@@ -66,7 +65,7 @@ public static class SaveDataDialogExports
         // guest polling sees a finished dialog instead of spinning forever.
         Interlocked.Exchange(ref _status, StatusFinished);
         TraceSaveDataDialog($"open mode={_lastMode} userData=0x{_lastUserData:X16} -> finished");
-        return SetReturn(ctx, ErrorOk);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -74,21 +73,21 @@ public static class SaveDataDialogExports
         ExportName = "sceSaveDataDialogGetStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogGetStatus(CpuContext ctx) => SetReturn(ctx, Volatile.Read(ref _status));
+    public static int SaveDataDialogGetStatus(CpuContext ctx) => ctx.SetReturn(Volatile.Read(ref _status));
 
     [SysAbiExport(
         Nid = "KK3Bdg1RWK0",
         ExportName = "sceSaveDataDialogUpdateStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogUpdateStatus(CpuContext ctx) => SetReturn(ctx, Volatile.Read(ref _status));
+    public static int SaveDataDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(Volatile.Read(ref _status));
 
     [SysAbiExport(
         Nid = "en7gNVnh878",
         ExportName = "sceSaveDataDialogIsReadyToDisplay",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogIsReadyToDisplay(CpuContext ctx) => SetReturn(ctx, 1);
+    public static int SaveDataDialogIsReadyToDisplay(CpuContext ctx) => ctx.SetReturn(1);
 
     [SysAbiExport(
         Nid = "yEiJ-qqr6Cg",
@@ -100,12 +99,12 @@ public static class SaveDataDialogExports
         var resultAddress = ctx[CpuRegister.Rdi];
         if (resultAddress == 0)
         {
-            return SetReturn(ctx, ErrorArgNull);
+            return ctx.SetReturn(ErrorArgNull);
         }
 
         if (Volatile.Read(ref _status) != StatusFinished)
         {
-            return SetReturn(ctx, ErrorNotFinished);
+            return ctx.SetReturn(ErrorNotFinished);
         }
 
         Span<byte> result = stackalloc byte[ResultSize];
@@ -117,10 +116,10 @@ public static class SaveDataDialogExports
 
         if (!ctx.Memory.TryWrite(resultAddress, result))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return SetReturn(ctx, ErrorOk);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -132,10 +131,10 @@ public static class SaveDataDialogExports
     {
         if (Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning) != StatusRunning)
         {
-            return SetReturn(ctx, ErrorNotRunning);
+            return ctx.SetReturn(ErrorNotRunning);
         }
 
-        return SetReturn(ctx, ErrorOk);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -147,12 +146,12 @@ public static class SaveDataDialogExports
     {
         if (Interlocked.Exchange(ref _status, StatusNone) == StatusNone)
         {
-            return SetReturn(ctx, ErrorNotInitialized);
+            return ctx.SetReturn(ErrorNotInitialized);
         }
 
         _lastMode = 0;
         _lastUserData = 0;
-        return SetReturn(ctx, ErrorOk);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -160,14 +159,14 @@ public static class SaveDataDialogExports
         ExportName = "sceSaveDataDialogProgressBarInc",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogProgressBarInc(CpuContext ctx) => SetReturn(ctx, ErrorOk);
+    public static int SaveDataDialogProgressBarInc(CpuContext ctx) => ctx.SetReturn(ErrorOk);
 
     [SysAbiExport(
         Nid = "hay1CfTmLyA",
         ExportName = "sceSaveDataDialogProgressBarSetValue",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogProgressBarSetValue(CpuContext ctx) => SetReturn(ctx, ErrorOk);
+    public static int SaveDataDialogProgressBarSetValue(CpuContext ctx) => ctx.SetReturn(ErrorOk);
 
     private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
     {
@@ -180,12 +179,6 @@ public static class SaveDataDialogExports
 
         value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
         return true;
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 
     private static void TraceSaveDataDialog(string message)

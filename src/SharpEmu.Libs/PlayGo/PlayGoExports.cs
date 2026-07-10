@@ -249,7 +249,7 @@ public static class PlayGoExports
         for (uint i = 0; i < entriesToWrite; i++)
         {
             var chunkId = chunkIds.Length == 0 ? (ushort)0 : chunkIds[i];
-            if (!TryWriteUInt16(ctx, outChunkIdList + (i * sizeof(ushort)), chunkId))
+            if (!ctx.TryWriteUInt16(outChunkIdList + (i * sizeof(ushort)), chunkId))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -292,7 +292,7 @@ public static class PlayGoExports
 
         return ValidateChunkIds(ctx, chunkIds, numberOfEntries) is { } chunkError && chunkError != 0
             ? chunkError
-            : TryWriteInt64(ctx, outEta, 0)
+            : ctx.TryWriteInt64(outEta, 0)
                 ? (int)OrbisGen2Result.ORBIS_GEN2_OK
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
@@ -324,7 +324,7 @@ public static class PlayGoExports
             speed = _installSpeed;
         }
 
-        return TryWriteInt32(ctx, outSpeed, speed)
+        return ctx.TryWriteInt32(outSpeed, speed)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
@@ -399,7 +399,7 @@ public static class PlayGoExports
         var loci = new byte[numberOfEntries];
         for (uint i = 0; i < numberOfEntries; i++)
         {
-            if (!TryReadUInt16(ctx, chunkIds + (i * sizeof(ushort)), out var chunkId))
+            if (!ctx.TryReadUInt16(chunkIds + (i * sizeof(ushort)), out var chunkId))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -648,7 +648,7 @@ public static class PlayGoExports
     {
         for (uint i = 0; i < numberOfEntries; i++)
         {
-            if (!TryReadUInt16(ctx, chunkIds + (i * sizeof(ushort)), out var chunkId))
+            if (!ctx.TryReadUInt16(chunkIds + (i * sizeof(ushort)), out var chunkId))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -726,40 +726,6 @@ public static class PlayGoExports
                 chunkIds.Add(chunkId);
             }
         }
-    }
-
-    private static bool TryReadUInt16(CpuContext ctx, ulong address, out ushort value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ushort)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt16LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryWriteUInt16(CpuContext ctx, ulong address, ushort value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ushort)];
-        BinaryPrimitives.WriteUInt16LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryWriteInt64(CpuContext ctx, ulong address, long value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(long)];
-        BinaryPrimitives.WriteInt64LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
     }
 
     private static void TracePlayGo(string message)

@@ -1,11 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
-using System.Threading;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Network;
@@ -35,7 +33,7 @@ public static class NetExports
     {
         _initialized = true;
         TraceNet("init", 0, 0, 0, 0);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -49,7 +47,7 @@ public static class NetExports
         _pools.Clear();
         _resolvers.Clear();
         TraceNet("term", 0, 0, 0, 0);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -65,7 +63,7 @@ public static class NetExports
 
         if (size <= 0)
         {
-            return SetReturn(ctx, NetErrorInvalidArgument);
+            return ctx.SetReturn(NetErrorInvalidArgument);
         }
 
         var name = TryReadUtf8Z(ctx, nameAddress, MaxNameLength, out var value)
@@ -90,11 +88,11 @@ public static class NetExports
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!_pools.TryRemove(id, out _))
         {
-            return SetReturn(ctx, NetErrorBadFileDescriptor);
+            return ctx.SetReturn(NetErrorBadFileDescriptor);
         }
 
         TraceNet("pool.destroy", id, 0, 0, _initialized ? 1UL : 0UL);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -109,7 +107,7 @@ public static class NetExports
         var flags = unchecked((int)ctx[CpuRegister.Rdx]);
         if (flags != 0)
         {
-            return SetReturn(ctx, NetErrorInvalidArgument);
+            return ctx.SetReturn(NetErrorInvalidArgument);
         }
 
         var name = TryReadUtf8Z(ctx, nameAddress, MaxNameLength, out var value)
@@ -131,8 +129,8 @@ public static class NetExports
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         return _resolvers.TryRemove(id, out _)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, NetErrorBadFileDescriptor);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(NetErrorBadFileDescriptor);
     }
 
     [SysAbiExport(
@@ -146,25 +144,19 @@ public static class NetExports
         var statusAddress = ctx[CpuRegister.Rsi];
         if (statusAddress == 0)
         {
-            return SetReturn(ctx, NetErrorInvalidArgument);
+            return ctx.SetReturn(NetErrorInvalidArgument);
         }
 
         if (!_resolvers.TryGetValue(id, out var resolver))
         {
-            return SetReturn(ctx, NetErrorBadFileDescriptor);
+            return ctx.SetReturn(NetErrorBadFileDescriptor);
         }
 
         Span<byte> status = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(status, resolver.LastError);
         return ctx.Memory.TryWrite(statusAddress, status)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     private static bool TryReadUtf8Z(CpuContext ctx, ulong address, int maxLength, out string value)

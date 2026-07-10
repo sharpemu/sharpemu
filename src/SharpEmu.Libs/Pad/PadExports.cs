@@ -30,7 +30,7 @@ public static class PadExports
     public static int PadInit(CpuContext ctx)
     {
         _initialized = true;
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -46,21 +46,21 @@ public static class PadExports
         var parameterAddress = ctx[CpuRegister.Rcx];
         if (!_initialized)
         {
-            return SetReturn(ctx, OrbisPadErrorNotInitialized);
+            return ctx.SetReturn(OrbisPadErrorNotInitialized);
         }
 
         if (userId == -1)
         {
-            return SetReturn(ctx, OrbisPadErrorDeviceNoHandle);
+            return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
         }
 
         if (userId != PrimaryUserId || type != StandardPortType || index != 0 || parameterAddress != 0)
         {
-            return SetReturn(ctx, OrbisPadErrorDeviceNotConnected);
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
         Console.Error.WriteLine("[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options");
-        return SetReturn(ctx, PrimaryPadHandle);
+        return ctx.SetReturn(PrimaryPadHandle);
     }
 
     [SysAbiExport(
@@ -72,8 +72,8 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         return handle == PrimaryPadHandle
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, OrbisPadErrorInvalidHandle);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
 
     [SysAbiExport(
@@ -87,12 +87,12 @@ public static class PadExports
         var informationAddress = ctx[CpuRegister.Rsi];
         if (handle != PrimaryPadHandle)
         {
-            return SetReturn(ctx, OrbisPadErrorInvalidHandle);
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
         if (informationAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> information = stackalloc byte[ControllerInformationSize];
@@ -107,8 +107,8 @@ public static class PadExports
         BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
 
         return ctx.Memory.TryWrite(informationAddress, information)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -122,17 +122,17 @@ public static class PadExports
         var dataAddress = ctx[CpuRegister.Rsi];
         if (handle != PrimaryPadHandle)
         {
-            return SetReturn(ctx, OrbisPadErrorInvalidHandle);
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
         if (dataAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         return WriteNeutralPadData(ctx, dataAddress)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -147,17 +147,17 @@ public static class PadExports
         var count = unchecked((int)ctx[CpuRegister.Rdx]);
         if (handle != PrimaryPadHandle)
         {
-            return SetReturn(ctx, OrbisPadErrorInvalidHandle);
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
         if (dataAddress == 0 || count < 1 || count > 64)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         return WriteNeutralPadData(ctx, dataAddress)
-            ? SetReturn(ctx, 1)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(1)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -167,7 +167,7 @@ public static class PadExports
     LibraryName = "libScePad")]
     public static int PadSetVibrationMode(CpuContext ctx)
     {
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)
@@ -199,12 +199,6 @@ public static class PadExports
         data[0x68] = 1;
 
         return ctx.Memory.TryWrite(dataAddress, data);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 
     [DllImport("user32.dll")]

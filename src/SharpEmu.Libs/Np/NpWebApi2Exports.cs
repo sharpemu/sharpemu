@@ -1,8 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System;
-using System.Threading;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Np;
@@ -25,12 +23,12 @@ public static class NpWebApi2Exports
 
         if (httpContextId <= 0 || poolSize == 0)
         {
-            return SetReturn(ctx, NpWebApi2ErrorInvalidArgument);
+            return ctx.SetReturn(NpWebApi2ErrorInvalidArgument);
         }
 
         Interlocked.Exchange(ref _initialized, 1);
         TraceNpWebApi2("init", httpContextId, poolSize);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -43,13 +41,7 @@ public static class NpWebApi2Exports
         var libraryContextId = unchecked((int)ctx[CpuRegister.Rdi]);
         Interlocked.Exchange(ref _initialized, 0);
         TraceNpWebApi2("term", libraryContextId, 0);
-        return SetReturn(ctx, 0);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.SetReturn(0);
     }
 
     private static void TraceNpWebApi2(string operation, int id, ulong arg0)

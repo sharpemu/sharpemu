@@ -50,15 +50,15 @@ public static class SaveDataExports
         try
         {
             Directory.CreateDirectory(ResolveSaveDataRoot());
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0);
         }
         catch (IOException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
         catch (UnauthorizedAccessException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
     }
 
@@ -73,18 +73,18 @@ public static class SaveDataExports
         var resultAddress = ctx[CpuRegister.Rsi];
         if (condAddress == 0 || resultAddress == 0)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
         if (!TryReadSearchCond(ctx, condAddress, out var cond) ||
             !TryReadSearchResult(ctx, resultAddress, out var result))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (cond.UserId < 0 || cond.SortKey > SortKeyFreeBlocks || cond.SortOrder > SortOrderDescent)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
         try
@@ -96,7 +96,7 @@ public static class SaveDataExports
             }
             else if (!TryReadFixedAscii(ctx, cond.TitleIdAddress, SaveDataTitleIdSize, out titleId))
             {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             var root = ResolveTitleSaveRoot(cond.UserId, titleId);
@@ -111,18 +111,18 @@ public static class SaveDataExports
             if (!ctx.TryWriteUInt32(resultAddress + ResultHitNumOffset, checked((uint)entries.Count)) ||
                 !ctx.TryWriteUInt32(resultAddress + ResultSetNumOffset, checked((uint)setNum)))
             {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             if (setNum == 0)
             {
                 TraceSaveData($"dir_name_search user={cond.UserId} title={titleId} hits={entries.Count} set=0 root='{root}'");
-                return SetReturn(ctx, 0);
+                return ctx.SetReturn(0);
             }
 
             if (result.DirNamesAddress == 0)
             {
-                return SetReturn(ctx, OrbisSaveDataErrorParameter);
+                return ctx.SetReturn(OrbisSaveDataErrorParameter);
             }
 
             for (var i = 0; i < setNum; i++)
@@ -138,20 +138,20 @@ public static class SaveDataExports
                     (result.InfosAddress != 0 &&
                      !TryWriteSearchInfo(ctx, result.InfosAddress + ((ulong)i * SaveDataSearchInfoSize), entry)))
                 {
-                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
             }
 
             TraceSaveData($"dir_name_search user={cond.UserId} title={titleId} hits={entries.Count} set={setNum} root='{root}'");
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0);
         }
         catch (IOException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
         catch (UnauthorizedAccessException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
     }
 
@@ -166,10 +166,10 @@ public static class SaveDataExports
         var resultAddress = ctx[CpuRegister.Rsi];
         if (mountAddress == 0 || resultAddress == 0)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
-        if (!TryReadInt32(ctx, mountAddress, out var userId) ||
+        if (!ctx.TryReadInt32(mountAddress, out var userId) ||
             !ctx.TryReadUInt64(mountAddress + 0x08, out var dirNameAddress) ||
             !ctx.TryReadUInt64(mountAddress + 0x10, out var blocks) ||
             !ctx.TryReadUInt64(mountAddress + 0x18, out var systemBlocks) ||
@@ -179,12 +179,12 @@ public static class SaveDataExports
             dirNameAddress == 0 ||
             !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (userId < 0 || string.IsNullOrWhiteSpace(dirName))
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
         try
@@ -199,12 +199,12 @@ public static class SaveDataExports
 
             if (!existed && !create && !createIfMissing)
             {
-                return SetReturn(ctx, OrbisSaveDataErrorNotFound);
+                return ctx.SetReturn(OrbisSaveDataErrorNotFound);
             }
 
             if (existed && create)
             {
-                return SetReturn(ctx, OrbisSaveDataErrorExists);
+                return ctx.SetReturn(OrbisSaveDataErrorExists);
             }
 
             if (!existed)
@@ -221,26 +221,26 @@ public static class SaveDataExports
             BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
             if (!ctx.Memory.TryWrite(resultAddress, result))
             {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             TraceSaveData(
                 $"mount3 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
                 $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
                 $"mount_point={mountPoint} created={!existed} root='{savePath}'");
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0);
         }
         catch (IOException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
         catch (UnauthorizedAccessException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+            return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
         catch (ArgumentException)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
     }
 
@@ -258,26 +258,26 @@ public static class SaveDataExports
 
         if (resourceAddress == 0)
         {
-            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+            return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
         var id = (uint)Interlocked.Increment(ref _nextTransactionResource);
 
         if (!ctx.TryWriteUInt32(resourceAddress, id))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceSaveData(
             $"create_transaction_resource user={userId} reserved=0x{reserved:X} resource_addr=0x{resourceAddress:X} id={id}");
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     private static bool TryReadSearchCond(CpuContext ctx, ulong address, out SearchCond cond)
     {
         cond = default;
-        if (!TryReadInt32(ctx, address, out var userId) ||
+        if (!ctx.TryReadInt32(address, out var userId) ||
             !ctx.TryReadUInt64(address + 0x08, out var titleIdAddress) ||
             !ctx.TryReadUInt64(address + 0x10, out var dirNameAddress) ||
             !ctx.TryReadUInt32(address + 0x18, out var sortKey) ||
@@ -503,25 +503,6 @@ public static class SaveDataExports
             var ch = value[i];
             destination[i] = ch <= 0x7F ? (byte)ch : (byte)'?';
         }
-    }
-
-    private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 
     private static void TraceSaveData(string message)

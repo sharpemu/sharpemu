@@ -46,8 +46,7 @@ public static class AvPlayerExports
         var dataAddress = ctx[CpuRegister.Rsi];
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
+            return ctx.SetReturn(
                 handle != 0 && dataAddress != 0 && Players.Contains(handle)
                     ? 0
                     : InvalidParameters);
@@ -63,15 +62,7 @@ public static class AvPlayerExports
     {
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
-                Players.Remove(ctx[CpuRegister.Rdi]) ? 0 : InvalidParameters);
+            return ctx.SetReturn(Players.Remove(ctx[CpuRegister.Rdi]) ? 0 : InvalidParameters);
         }
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 }

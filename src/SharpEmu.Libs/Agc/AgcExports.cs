@@ -407,11 +407,11 @@ public static class AgcExports
         var version = (uint)ctx[CpuRegister.Rsi];
         if (stateAddress == 0 || !IsSupportedRegisterDefaultsVersion(version))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         TraceAgc($"agc.init state=0x{stateAddress:X16} version={version}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -442,19 +442,19 @@ public static class AgcExports
         var codeAddress = ctx[CpuRegister.Rdx];
         if (headerAddress == 0 || codeAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryReadUInt32(headerAddress, out var fileHeader) ||
             !ctx.TryReadUInt32(headerAddress + sizeof(uint), out var version))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (fileHeader != ShaderFileHeader || version != ShaderVersion)
         {
             TraceCreateShader(destinationAddress, headerAddress, codeAddress, $"invalid-header file=0x{fileHeader:X8} version=0x{version:X8}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!RelocatePointerField(ctx, headerAddress + ShaderCxRegistersOffset) ||
@@ -465,12 +465,12 @@ public static class AgcExports
             !RelocatePointerField(ctx, headerAddress + ShaderOutputSemanticsOffset) ||
             !ctx.TryWriteUInt64(headerAddress + ShaderCodeOffset, codeAddress))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!ctx.TryReadUInt64(headerAddress + ShaderUserDataOffset, out var userDataAddress))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (userDataAddress != 0 &&
@@ -480,18 +480,18 @@ public static class AgcExports
              !RelocatePointerField(ctx, userDataAddress + 0x18) ||
              !RelocatePointerField(ctx, userDataAddress + 0x20)))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!PatchShaderProgramRegisters(ctx, headerAddress, codeAddress))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (destinationAddress != 0 &&
             !ctx.TryWriteUInt64(destinationAddress, headerAddress))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         lock (_submitTraceGate)
@@ -567,14 +567,14 @@ public static class AgcExports
 
         if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || hullShaderAddress != 0 || geometryShaderAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryReadByte(geometryShaderAddress + ShaderTypeOffset, out var shaderType) || !IsEsGeometryShaderType(shaderType) ||
             !ctx.TryReadUInt64(geometryShaderAddress + ShaderSpecialsOffset, out var specialsAddress) ||
             specialsAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!CopyShaderRegister(ctx, specialsAddress + ShaderSpecialVgtShaderStagesEnOffset, cxRegistersAddress) ||
@@ -584,7 +584,7 @@ public static class AgcExports
             !ctx.TryWriteUInt32(ucRegistersAddress + 16, VgtPrimitiveType) ||
             !ctx.TryWriteUInt32(ucRegistersAddress + 20, primitiveType))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
@@ -605,13 +605,13 @@ public static class AgcExports
 
         if (registersAddress == 0 || geometryShaderAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryReadUInt64(geometryShaderAddress + ShaderOutputSemanticsOffset, out var outputSemanticsAddress) ||
             !ctx.TryReadUInt32(geometryShaderAddress + ShaderNumOutputSemanticsOffset, out var outputSemanticsCount))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         ulong inputSemanticsAddress = 0;
@@ -619,7 +619,7 @@ public static class AgcExports
             (!ctx.TryReadUInt64(pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
              !ctx.TryReadUInt32(pixelShaderAddress + ShaderNumInputSemanticsOffset, out _)))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         for (uint i = 0; i < 32; i++)
@@ -641,7 +641,7 @@ public static class AgcExports
             if (!ctx.TryWriteUInt32(destination, SpiPsInputCntl0 + i) ||
                 !ctx.TryWriteUInt32(destination + sizeof(uint), value))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
@@ -662,7 +662,7 @@ public static class AgcExports
         var type = (int)ctx[CpuRegister.Rdx];
         if (outputAddress == 0 || commandAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var payloadAddress = commandAddress + 8;
@@ -670,7 +670,7 @@ public static class AgcExports
         {
             if (!ctx.TryReadUInt32(commandAddress, out var header))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             payloadAddress = (header & 0x3FFF_0000u) == 0x3FFF_0000u
@@ -680,7 +680,7 @@ public static class AgcExports
 
         if (!ctx.TryWriteUInt64(outputAddress, payloadAddress))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (ShouldTraceHotPath(ref _packetPayloadTraceCount))
@@ -705,20 +705,20 @@ public static class AgcExports
         var dwordCount = (uint)ctx[CpuRegister.Rsi];
         if (commandBufferAddress == 0 || dwordCount < 2 || dwordCount > 0x4001)
         {
-            return ReturnPointer(ctx, 0);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, dwordCount, out var commandAddress) ||
             !ctx.TryWriteUInt32(commandAddress, Pm4(dwordCount, ItNop, RZero)))
         {
-            return ReturnPointer(ctx, 0);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         for (uint index = 1; index < dwordCount; index++)
         {
             if (!ctx.TryWriteUInt32(commandAddress + ((ulong)index * sizeof(uint)), 0))
             {
-                return ReturnPointer(ctx, 0);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
@@ -1738,12 +1738,12 @@ public static class AgcExports
             op != ItNop ||
             register != RDmaData)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         return ctx.TryWriteUInt64(commandAddress + 16, destinationAddress)
-            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
-            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -1757,7 +1757,7 @@ public static class AgcExports
         var address = ctx[CpuRegister.Rsi];
         if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var fieldOffset = op == ItWaitRegMem
@@ -1767,12 +1767,12 @@ public static class AgcExports
                 : 0;
         if (fieldOffset == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         return ctx.TryWriteUInt64(commandAddress + fieldOffset, address)
-            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
-            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -1788,12 +1788,12 @@ public static class AgcExports
             op != ItNop ||
             register != RReleaseMem)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         return ctx.TryWriteUInt64(commandAddress + 12, address)
-            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
-            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -1934,11 +1934,11 @@ public static class AgcExports
                 KernelEventQueueCompatExports.KernelEventFilterGraphics,
                 userData))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         TraceAgc($"agc.driver_add_eq_event eq=0x{equeue:X16} id=0x{eventId:X16} udata=0x{userData:X16}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -1955,11 +1955,11 @@ public static class AgcExports
                 eventId,
                 KernelEventQueueCompatExports.KernelEventFilterGraphics))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         TraceAgc($"agc.driver_delete_eq_event eq=0x{equeue:X16} id=0x{eventId:X16}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -1974,7 +1974,7 @@ public static class AgcExports
             !ctx.TryReadUInt64(packetAddress, out var commandAddress) ||
             !ctx.TryReadUInt32(packetAddress + 8, out var dwordCount))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var tracePackets = false;
@@ -2014,7 +2014,7 @@ public static class AgcExports
             !ctx.TryReadUInt64(packetAddress, out var commandAddress) ||
             !ctx.TryReadUInt32(packetAddress + 8, out var dwordCount))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var tracePackets = false;
@@ -2060,16 +2060,16 @@ public static class AgcExports
 
         if (outAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryWriteUInt32(outAddress, 256))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.driver_get_resource_registration_max_name_length out=0x{outAddress:X16} value=256");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private const uint DefaultAgcOwner = 1;
@@ -2084,16 +2084,16 @@ public static class AgcExports
 
         if (ownerAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryWriteUInt32(ownerAddress, DefaultAgcOwner))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.driver_get_default_owner out=0x{ownerAddress:X16} owner={DefaultAgcOwner}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -2113,7 +2113,7 @@ public static class AgcExports
             $"agc.driver_register_resource resource=0x{resourceAddress:X16} owner={owner} " +
             $"name=0x{nameAddress:X16} type={type} flags={flags}");
 
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -2128,7 +2128,7 @@ public static class AgcExports
             $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
             $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
 
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -5118,13 +5118,13 @@ public static class AgcExports
         var registersAddress = ctx[CpuRegister.Rsi];
         if (commandAddress == 0 || registersAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryWriteUInt32(commandAddress + 8, (uint)(registersAddress & 0xFFFF_FFFFUL)) ||
             !ctx.TryWriteUInt32(commandAddress + 12, (uint)(registersAddress >> 32)))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
@@ -5138,13 +5138,13 @@ public static class AgcExports
         var registerCount = (uint)ctx[CpuRegister.Rsi];
         if (commandAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryReadUInt32(commandAddress + 4, out var currentCount) ||
             !ctx.TryWriteUInt32(commandAddress + 4, currentCount + registerCount))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.patch_{registerSpace}_add cmd=0x{commandAddress:X16} add={registerCount} total={currentCount + registerCount}");
@@ -5386,12 +5386,6 @@ public static class AgcExports
     {
         ctx[CpuRegister.Rax] = pointer;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-        return (int)result;
     }
 
     private static uint Pm4(uint lengthDwords, uint op, uint register) =>

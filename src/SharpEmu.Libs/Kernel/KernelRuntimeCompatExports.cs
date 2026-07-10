@@ -4,14 +4,11 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Fiber;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -259,8 +256,8 @@ public static class KernelRuntimeCompatExports
         }
 
         if (timezoneAddress != 0 &&
-            (!TryWriteInt32(ctx, timezoneAddress, 0) ||
-             !TryWriteInt32(ctx, timezoneAddress + sizeof(int), 0)))
+            (!ctx.TryWriteInt32(timezoneAddress, 0) ||
+             !ctx.TryWriteInt32(timezoneAddress + sizeof(int), 0)))
         {
             return -1;
         }
@@ -617,7 +614,7 @@ public static class KernelRuntimeCompatExports
     internal static bool TrySetErrno(CpuContext ctx, int value)
     {
         var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
-        return address != 0 && TryWriteInt32(ctx, address, value);
+        return address != 0 && ctx.TryWriteInt32(address, value);
     }
 
     [SysAbiExport(
@@ -827,7 +824,7 @@ public static class KernelRuntimeCompatExports
         }
 
         var moduleHandle = ResolveModuleHandleByAddress(queriedAddress);
-        if (!TryWriteInt32(ctx, outInfoAddress + ModuleInfoHandleOffset, moduleHandle))
+        if (!ctx.TryWriteInt32(outInfoAddress + ModuleInfoHandleOffset, moduleHandle))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -857,7 +854,7 @@ public static class KernelRuntimeCompatExports
         }
 
         var moduleHandle = ResolveModuleHandleByAddress(queriedAddress);
-        if (!TryWriteInt32(ctx, outInfoAddress + ModuleInfoHandleOffset, moduleHandle))
+        if (!ctx.TryWriteInt32(outInfoAddress + ModuleInfoHandleOffset, moduleHandle))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1058,7 +1055,7 @@ public static class KernelRuntimeCompatExports
     public static int KernelStopUnloadModule(CpuContext ctx)
     {
         var resultAddress = ctx[CpuRegister.R9];
-        if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, 0))
+        if (resultAddress != 0 && !ctx.TryWriteInt32(resultAddress, 0))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1076,7 +1073,7 @@ public static class KernelRuntimeCompatExports
     {
         var modulePathAddress = ctx[CpuRegister.Rdi];
         var resultAddress = ctx[CpuRegister.R9];
-        if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, 0))
+        if (resultAddress != 0 && !ctx.TryWriteInt32(resultAddress, 0))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1233,8 +1230,8 @@ public static class KernelRuntimeCompatExports
             : 0;
         var minutesWest = unchecked((int)-offset.TotalMinutes);
 
-        if (!TryWriteInt32(ctx, timezoneAddress, minutesWest) ||
-            !TryWriteInt32(ctx, timezoneAddress + sizeof(int), dstSeconds / 60))
+        if (!ctx.TryWriteInt32(timezoneAddress, minutesWest) ||
+            !ctx.TryWriteInt32(timezoneAddress + sizeof(int), dstSeconds / 60))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1244,7 +1241,7 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (dstSecondsAddress != 0 && !TryWriteInt32(ctx, dstSecondsAddress, dstSeconds))
+        if (dstSecondsAddress != 0 && !ctx.TryWriteInt32(dstSecondsAddress, dstSeconds))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1304,7 +1301,7 @@ public static class KernelRuntimeCompatExports
             _loadedSysmodules.Add(moduleId);
         }
 
-        if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, 0))
+        if (resultAddress != 0 && !ctx.TryWriteInt32(resultAddress, 0))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1394,7 +1391,7 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        if (!TryWriteInt32(ctx, outInfoAddress + ModuleInfoHandleOffset, module.Handle))
+        if (!ctx.TryWriteInt32(outInfoAddress + ModuleInfoHandleOffset, module.Handle))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1431,7 +1428,7 @@ public static class KernelRuntimeCompatExports
         var writableCount = (int)Math.Min(Math.Min(capacity, (ulong)int.MaxValue), (ulong)handles.Length);
         for (var i = 0; i < writableCount; i++)
         {
-            if (!TryWriteInt32(ctx, handlesAddress + (ulong)(i * sizeof(int)), handles[i]))
+            if (!ctx.TryWriteInt32(handlesAddress + (ulong)(i * sizeof(int)), handles[i]))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -1502,13 +1499,6 @@ public static class KernelRuntimeCompatExports
         }
 
         return unchecked(ctx.FsBase + offset);
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
     }
 
     private static nint AllocateStackChkGuardObject()

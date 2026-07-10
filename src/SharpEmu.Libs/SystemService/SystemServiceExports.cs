@@ -24,7 +24,7 @@ public static class SystemServiceExports
         var valueAddress = ctx[CpuRegister.Rsi];
         if (valueAddress == 0)
         {
-            return SetReturn(ctx, OrbisSystemServiceErrorParameter);
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
         }
 
         var value = parameterId switch
@@ -37,8 +37,8 @@ public static class SystemServiceExports
         Span<byte> valueBytes = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
         return ctx.Memory.TryWrite(valueAddress, valueBytes)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -51,7 +51,7 @@ public static class SystemServiceExports
         var statusAddress = ctx[CpuRegister.Rdi];
         if (statusAddress == 0)
         {
-            return SetReturn(ctx, OrbisSystemServiceErrorParameter);
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
         }
 
         Span<byte> status = stackalloc byte[SystemServiceStatusSize];
@@ -60,8 +60,8 @@ public static class SystemServiceExports
         status[0x06] = 1;
 
         return ctx.Memory.TryWrite(statusAddress, status)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -74,7 +74,7 @@ public static class SystemServiceExports
         var infoAddress = ctx[CpuRegister.Rdi];
         if (infoAddress == 0)
         {
-            return SetReturn(ctx, OrbisSystemServiceErrorParameter);
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
         }
 
         Span<byte> info = stackalloc byte[DisplaySafeAreaInfoSize];
@@ -82,8 +82,8 @@ public static class SystemServiceExports
         BinaryPrimitives.WriteSingleLittleEndian(info, 1.0f);
 
         return ctx.Memory.TryWrite(infoAddress, info)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -94,12 +94,6 @@ public static class SystemServiceExports
     public static int SystemServiceHideSplashScreen(CpuContext ctx)
     {
         VulkanVideoPresenter.HideSplashScreen();
-        return SetReturn(ctx, 0);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.SetReturn(0);
     }
 }

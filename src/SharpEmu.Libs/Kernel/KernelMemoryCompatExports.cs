@@ -2903,7 +2903,7 @@ public static class KernelMemoryCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
 
-                if (protectionOut != 0 && !TryWriteInt32(ctx, protectionOut, region.Protection))
+                if (protectionOut != 0 && !ctx.TryWriteInt32(protectionOut, region.Protection))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
@@ -2942,7 +2942,7 @@ public static class KernelMemoryCompatExports
 
                 if (!ctx.TryWriteUInt64(infoAddress, block.Start) ||
                     !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), block.Start + block.Length) ||
-                    !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), block.MemoryType))
+                    !ctx.TryWriteInt32(infoAddress + (sizeof(ulong) * 2), block.MemoryType))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
@@ -3800,7 +3800,7 @@ public static class KernelMemoryCompatExports
                         var addr = argumentSource.NextGpArg();
                         if (addr != 0)
                         {
-                            _ = TryWriteInt32(ctx, addr, sb.Length);
+                            _ = ctx.TryWriteInt32(addr, sb.Length);
                         }
                     }
                     break;
@@ -4964,7 +4964,7 @@ public static class KernelMemoryCompatExports
             processedCount++;
         }
 
-        if (processedOutAddress != 0 && !TryWriteInt32(ctx, processedOutAddress, processedCount))
+        if (processedOutAddress != 0 && !ctx.TryWriteInt32(processedOutAddress, processedCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -5799,13 +5799,6 @@ public static class KernelMemoryCompatExports
         const uint writableMask = HostPageReadWrite | HostPageWriteCopy | HostPageExecuteReadWrite | HostPageExecuteWriteCopy;
         var expected = writeAccess ? writableMask : readableMask;
         return (protect & expected) != 0;
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BitConverter.TryWriteBytes(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
     }
 
     private static bool TryWriteOpenDescriptorStat(CpuContext ctx, int fd, ulong statAddress)

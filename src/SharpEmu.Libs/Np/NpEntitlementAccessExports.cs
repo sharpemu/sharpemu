@@ -26,12 +26,12 @@ public static class NpEntitlementAccessExports
             clear.Clear();
             if (!ctx.Memory.TryWrite(bootParam, clear))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
         TraceNpEntitlementAccess($"initialize init=0x{initParam:X16} boot=0x{bootParam:X16}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -48,20 +48,14 @@ public static class NpEntitlementAccessExports
             emptyList.Clear();
             if (!ctx.Memory.TryWrite(listAddress, emptyList))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
         TraceNpEntitlementAccess(
             $"get_addcont_info_list service=0x{ctx[CpuRegister.Rdi]:X16} list=0x{listAddress:X16} " +
             $"max={ctx[CpuRegister.Rdx]} flags=0x{ctx[CpuRegister.Rcx]:X16} -> empty");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-        return (int)result;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static void TraceNpEntitlementAccess(string message)

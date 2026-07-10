@@ -3,8 +3,6 @@
 
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
-using System.Buffers.Binary;
-using System.Threading;
 using System.Diagnostics.CodeAnalysis;
 
 namespace SharpEmu.Libs.Kernel;
@@ -389,42 +387,42 @@ public static class KernelPthreadCompatExports
         var initRoutine = ctx[CpuRegister.Rsi];
         if (onceAddress == 0 || initRoutine == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadInt32(ctx, onceAddress, out var onceValue))
+        if (!ctx.TryReadInt32(onceAddress, out var onceValue))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (onceValue == PthreadOnceDone)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
 
         var gate = GetPthreadOnceGate(onceAddress);
         var shouldCall = false;
         lock (gate)
         {
-            if (!TryReadInt32(ctx, onceAddress, out onceValue))
+            if (!ctx.TryReadInt32(onceAddress, out onceValue))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             while (onceValue == PthreadOnceInProgress)
             {
                 Monitor.Wait(gate, TimeSpan.FromMilliseconds(1));
-                if (!TryReadInt32(ctx, onceAddress, out onceValue))
+                if (!ctx.TryReadInt32(onceAddress, out onceValue))
                 {
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
             }
 
             if (onceValue != PthreadOnceDone)
             {
-                if (!TryWriteInt32(ctx, onceAddress, PthreadOnceInProgress))
+                if (!ctx.TryWriteInt32(onceAddress, PthreadOnceInProgress))
                 {
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
 
                 shouldCall = true;
@@ -440,21 +438,21 @@ public static class KernelPthreadCompatExports
             {
                 lock (gate)
                 {
-                    _ = TryWriteInt32(ctx, onceAddress, PthreadOnceUninitialized);
+                    _ = ctx.TryWriteInt32(onceAddress, PthreadOnceUninitialized);
                     Monitor.PulseAll(gate);
                 }
 
                 TracePthreadOnce(onceAddress, initRoutine, "failed", error);
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
             }
 
             lock (gate)
             {
-                if (!TryWriteInt32(ctx, onceAddress, PthreadOnceDone))
+                if (!ctx.TryWriteInt32(onceAddress, PthreadOnceDone))
                 {
-                    _ = TryWriteInt32(ctx, onceAddress, PthreadOnceUninitialized);
+                    _ = ctx.TryWriteInt32(onceAddress, PthreadOnceUninitialized);
                     Monitor.PulseAll(gate);
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
 
                 Monitor.PulseAll(gate);
@@ -462,7 +460,7 @@ public static class KernelPthreadCompatExports
         }
 
         TracePthreadOnce(onceAddress, initRoutine, shouldCall ? "call" : "done", null);
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static int PthreadMutexInitCore(CpuContext ctx, ulong mutexAddress, ulong attrAddress)
@@ -1319,32 +1317,6 @@ public static class KernelPthreadCompatExports
 
             return gate;
         }
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-        return (int)result;
-    }
-
-    private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
     }
 
     private static bool CreateImplicitMutexState(CpuContext ctx, ulong mutexAddress, int type, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state)

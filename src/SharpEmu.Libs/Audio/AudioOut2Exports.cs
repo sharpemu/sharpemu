@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
-using System.Threading;
 
 namespace SharpEmu.Libs.Audio;
 
@@ -37,7 +36,7 @@ public static class AudioOut2Exports
         var paramAddress = ctx[CpuRegister.Rdi];
         if (paramAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> param = stackalloc byte[AudioOut2ContextParamSize];
@@ -48,8 +47,8 @@ public static class AudioOut2Exports
         BinaryPrimitives.WriteUInt32LittleEndian(param[0x0C..], 0x400);
 
         return ctx.Memory.TryWrite(paramAddress, param)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -63,7 +62,7 @@ public static class AudioOut2Exports
         var memoryInfoAddress = ctx[CpuRegister.Rsi];
         if (paramAddress == 0 || memoryInfoAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> memoryInfo = stackalloc byte[0x20];
@@ -74,8 +73,8 @@ public static class AudioOut2Exports
         BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x18..], AudioOut2ContextMemoryAlignment);
 
         return ctx.Memory.TryWrite(memoryInfoAddress, memoryInfo)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -91,13 +90,13 @@ public static class AudioOut2Exports
         var outContextAddress = ctx[CpuRegister.Rcx];
         if (paramAddress == 0 || memoryAddress == 0 || memorySize == 0 || outContextAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var handle = (ulong)Interlocked.Increment(ref _nextContextHandle);
         return ctx.TryWriteUInt64(outContextAddress, handle)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -105,7 +104,7 @@ public static class AudioOut2Exports
         ExportName = "sceAudioOut2ContextDestroy",
         Target = Generation.Gen5,
         LibraryName = "libSceAudioOut2")]
-    public static int AudioOut2ContextDestroy(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int AudioOut2ContextDestroy(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "JK2wamZPzwM",
@@ -120,14 +119,14 @@ public static class AudioOut2Exports
         var contextAddress = ctx[CpuRegister.Rcx];
         if (type < 0 || type > 255 || paramAddress == 0 || outPortAddress == 0 || contextAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var portId = unchecked((uint)Interlocked.Increment(ref _nextPortId)) & 0xFF;
         var handle = 0x2000_0000UL | ((ulong)(uint)type << 16) | portId;
         return ctx.TryWriteUInt64(outPortAddress, handle)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -141,7 +140,7 @@ public static class AudioOut2Exports
         var stateAddress = ctx[CpuRegister.Rsi];
         if (handle == 0 || stateAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var type = (int)((handle >> 16) & 0xFF);
@@ -154,8 +153,8 @@ public static class AudioOut2Exports
         BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], -1);
 
         return ctx.Memory.TryWrite(stateAddress, state)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -168,7 +167,7 @@ public static class AudioOut2Exports
         var infoAddress = ctx[CpuRegister.Rdi];
         if (infoAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> info = stackalloc byte[0x40];
@@ -178,8 +177,8 @@ public static class AudioOut2Exports
         BinaryPrimitives.WriteUInt32LittleEndian(info[0x08..], 48000);
 
         return ctx.Memory.TryWrite(infoAddress, info)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -187,14 +186,14 @@ public static class AudioOut2Exports
         ExportName = "sceAudioOut2PortDestroy",
         Target = Generation.Gen5,
         LibraryName = "libSceAudioOut2")]
-    public static int AudioOut2PortDestroy(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int AudioOut2PortDestroy(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "IaZXJ9M79uo",
         ExportName = "sceAudioOut2UserDestroy",
         Target = Generation.Gen5,
         LibraryName = "libSceAudioOut2")]
-    public static int AudioOut2UserDestroy(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int AudioOut2UserDestroy(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "xywYcRB7nbQ",
@@ -207,18 +206,12 @@ public static class AudioOut2Exports
         var outUserAddress = ctx[CpuRegister.Rsi];
         if ((userId != 0 && userId != 1 && userId != 255) || outUserAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         var handle = (ulong)Interlocked.Increment(ref _nextUserHandle);
         return ctx.TryWriteUInt64(outUserAddress, handle)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 }

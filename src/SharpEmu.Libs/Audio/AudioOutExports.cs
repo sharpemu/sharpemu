@@ -5,7 +5,6 @@ using SharpEmu.HLE;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Threading;
 
 namespace SharpEmu.Libs.Audio;
 
@@ -84,7 +83,7 @@ public static class AudioOutExports
         ExportName = "sceAudioOutInit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAudioOut")]
-    public static int AudioOutInit(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int AudioOutInit(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "ekNvsT22rsY",
@@ -101,7 +100,7 @@ public static class AudioOutExports
         if (bufferLength == 0 || frequency == 0 ||
             !TryGetFormat(format, out var channels, out var bytesPerSample, out var isFloat))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         WinMmAudioPort? backend = null;
@@ -133,7 +132,7 @@ public static class AudioOutExports
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
             $"{channels} ch, {(isFloat ? "float32" : "s16")}, " +
             $"{bufferLength} frames, backend={backendName}");
-        return SetReturn(ctx, handle);
+        return ctx.SetReturn(handle);
     }
 
     [SysAbiExport(
@@ -146,11 +145,11 @@ public static class AudioOutExports
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!Ports.TryRemove(handle, out var port))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         port.Dispose();
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -164,12 +163,12 @@ public static class AudioOutExports
         var sourceAddress = ctx[CpuRegister.Rsi];
         if (!Ports.TryGetValue(handle, out var port))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (sourceAddress == 0)
         {
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0);
         }
 
         var buffer = ArrayPool<byte>.Shared.Rent(port.BufferByteLength);
@@ -178,7 +177,7 @@ public static class AudioOutExports
             var source = buffer.AsSpan(0, port.BufferByteLength);
             if (!ctx.Memory.TryRead(sourceAddress, source))
             {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             if (port.Backend is null ||
@@ -192,7 +191,7 @@ public static class AudioOutExports
                 port.PaceSilence();
             }
 
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0);
         }
         finally
         {
@@ -208,17 +207,10 @@ public static class AudioOutExports
     public static int AudioOutSetVolume(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return SetReturn(
-            ctx,
+        return ctx.SetReturn(
             Ports.ContainsKey(handle)
                 ? 0
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 
     private static bool TryGetFormat(

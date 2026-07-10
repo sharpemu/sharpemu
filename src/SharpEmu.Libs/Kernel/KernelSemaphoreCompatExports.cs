@@ -44,12 +44,12 @@ public static class KernelSemaphoreCompatExports
             initialCount > maxCount ||
             optionAddress != 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxSemaphoreNameLength, out var name))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         var handle = unchecked((uint)Interlocked.Increment(ref _nextSemaphoreHandle));
@@ -69,11 +69,11 @@ public static class KernelSemaphoreCompatExports
         if (!ctx.TryWriteUInt32(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceSemaphore($"create handle=0x{handle:X8} name='{name}' attr=0x{attr:X} init={initialCount} max={maxCount}");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -89,12 +89,12 @@ public static class KernelSemaphoreCompatExports
 
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         if (needCount < 1 || needCount > semaphore.MaxCount)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         lock (semaphore.Gate)
@@ -103,30 +103,30 @@ public static class KernelSemaphoreCompatExports
             {
                 semaphore.Count -= needCount;
                 TraceSemaphore($"wait handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
             }
 
             if (timeoutAddress != 0)
             {
                 if (!ctx.TryReadUInt32(timeoutAddress, out _))
                 {
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
 
                 _ = ctx.TryWriteUInt32(timeoutAddress, 0);
                 TraceSemaphore($"wait-timeout handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
             }
 
             if (!GuestThreadExecution.RequestCurrentThreadBlock(ctx, "sceKernelWaitSema"))
             {
                 TraceSemaphore($"wait-would-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
             }
 
             semaphore.WaitingThreads++;
             TraceSemaphore($"wait-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
     }
 
@@ -142,12 +142,12 @@ public static class KernelSemaphoreCompatExports
 
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         if (needCount < 1 || needCount > semaphore.MaxCount)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         lock (semaphore.Gate)
@@ -155,12 +155,12 @@ public static class KernelSemaphoreCompatExports
             if (semaphore.Count < needCount)
             {
                 TraceSemaphore($"poll-busy handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
             }
 
             semaphore.Count -= needCount;
             TraceSemaphore($"poll handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
     }
 
@@ -176,24 +176,24 @@ public static class KernelSemaphoreCompatExports
 
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         if (signalCount <= 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         lock (semaphore.Gate)
         {
             if (semaphore.Count > semaphore.MaxCount - signalCount)
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             }
 
             semaphore.Count += signalCount;
             TraceSemaphore($"signal handle=0x{handle:X8} name='{semaphore.Name}' signal={signalCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
     }
 
@@ -210,25 +210,25 @@ public static class KernelSemaphoreCompatExports
 
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         if (setCount > semaphore.MaxCount)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         lock (semaphore.Gate)
         {
             if (waitingThreadsAddress != 0 && !ctx.TryWriteUInt32(waitingThreadsAddress, unchecked((uint)semaphore.WaitingThreads)))
             {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             semaphore.Count = setCount < 0 ? semaphore.InitialCount : setCount;
             semaphore.WaitingThreads = 0;
             TraceSemaphore($"cancel handle=0x{handle:X8} name='{semaphore.Name}' set={setCount} count={semaphore.Count}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
     }
 
@@ -242,18 +242,11 @@ public static class KernelSemaphoreCompatExports
         var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
         if (!_semaphores.TryRemove(handle, out var semaphore))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         TraceSemaphore($"delete handle=0x{handle:X8} name='{semaphore.Name}'");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        var value = (int)result;
-        ctx[CpuRegister.Rax] = unchecked((ulong)value);
-        return value;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static void TraceSemaphore(string message)

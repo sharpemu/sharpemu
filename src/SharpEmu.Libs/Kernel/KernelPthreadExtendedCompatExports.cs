@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
-using System.Threading;
 using System.Diagnostics.CodeAnalysis;
 
 namespace SharpEmu.Libs.Kernel;
@@ -279,7 +277,7 @@ public static class KernelPthreadExtendedCompatExports
             priority = GetOrCreateThreadStateLocked(thread).Priority;
         }
 
-        if (!TryWriteInt32(ctx, outPriorityAddress, priority))
+        if (!ctx.TryWriteInt32(outPriorityAddress, priority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -326,7 +324,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!TryReadInt32(ctx, schedParamAddress, out var schedPriority))
+        if (!ctx.TryReadInt32(schedParamAddress, out var schedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -496,7 +494,7 @@ public static class KernelPthreadExtendedCompatExports
             state = GetOrCreateAttrStateLocked(attrAddress);
         }
 
-        if (!TryWriteInt32(ctx, outStateAddress, state.DetachState))
+        if (!ctx.TryWriteInt32(outStateAddress, state.DetachState))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -739,7 +737,7 @@ public static class KernelPthreadExtendedCompatExports
             state = GetOrCreateAttrStateLocked(attrAddress);
         }
 
-        if (!TryWriteInt32(ctx, schedParamAddress, state.SchedPriority))
+        if (!ctx.TryWriteInt32(schedParamAddress, state.SchedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -762,7 +760,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!TryReadInt32(ctx, schedParamAddress, out var schedPriority))
+        if (!ctx.TryReadInt32(schedParamAddress, out var schedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1114,7 +1112,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        if (!TryWriteInt32(ctx, outKeyAddress, key))
+        if (!ctx.TryWriteInt32(outKeyAddress, key))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1450,25 +1448,5 @@ public static class KernelPthreadExtendedCompatExports
         utf8.AsSpan(0, payloadLength).CopyTo(payload);
         payload[^1] = 0;
         return ctx.Memory.TryWrite(address, payload);
-    }
-
-    private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
     }
 }

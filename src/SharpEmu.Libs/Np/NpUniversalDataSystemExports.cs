@@ -3,7 +3,6 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
-using System.Threading;
 
 namespace SharpEmu.Libs.Np;
 
@@ -22,13 +21,13 @@ public static class NpUniversalDataSystemExports
         var parameterAddress = ctx[CpuRegister.Rdi];
         if (parameterAddress == 0)
         {
-            return SetReturn(ctx, NpUniversalDataSystemErrorInvalidArgument);
+            return ctx.SetReturn(NpUniversalDataSystemErrorInvalidArgument, typeof(long));
         }
 
         Span<byte> parameters = stackalloc byte[16];
         return ctx.Memory.TryRead(parameterAddress, parameters)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0, typeof(long))
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
     }
 
     [SysAbiExport(
@@ -41,14 +40,14 @@ public static class NpUniversalDataSystemExports
         var contextAddress = ctx[CpuRegister.Rdi];
         if (contextAddress == 0)
         {
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0, typeof(long));
         }
 
         Span<byte> context = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(context, 1);
         return ctx.Memory.TryWrite(contextAddress, context)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0, typeof(long))
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
     }
 
     [SysAbiExport(
@@ -59,13 +58,13 @@ public static class NpUniversalDataSystemExports
     public static int NpUniversalDataSystemCreateHandle(CpuContext ctx)
     {
         var handle = Interlocked.Increment(ref _nextHandle);
-        if (TryWriteInt32(ctx, ctx[CpuRegister.Rdi], handle) ||
-            TryWriteInt32(ctx, ctx[CpuRegister.Rsi], handle))
+        if (ctx.TryWriteInt32(ctx[CpuRegister.Rdi], handle, checkNil: true) ||
+            ctx.TryWriteInt32(ctx[CpuRegister.Rsi], handle, checkNil: true))
         {
-            return SetReturn(ctx, 0);
+            return ctx.SetReturn(0, typeof(long));
         }
 
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
     }
 
     [SysAbiExport(
@@ -75,24 +74,6 @@ public static class NpUniversalDataSystemExports
         LibraryName = "libSceNpUniversalDataSystem")]
     public static int NpUniversalDataSystemRegisterContext(CpuContext ctx)
     {
-        return SetReturn(ctx, 0);
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        if (address == 0)
-        {
-            return false;
-        }
-
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
-        return result;
+        return ctx.SetReturn(0, typeof(long));
     }
 }

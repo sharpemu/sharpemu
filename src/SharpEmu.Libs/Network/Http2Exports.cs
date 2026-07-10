@@ -1,9 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System;
 using System.Collections.Concurrent;
-using System.Threading;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Network;
@@ -32,7 +30,7 @@ public static class Http2Exports
 
         if (poolSize == 0 || maxRequests <= 0)
         {
-            return SetReturn(ctx, Http2ErrorInvalidArgument);
+            return ctx.SetReturn(Http2ErrorInvalidArgument);
         }
 
         var id = Interlocked.Increment(ref _nextContextId);
@@ -53,17 +51,11 @@ public static class Http2Exports
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!_contexts.TryRemove(id, out _))
         {
-            return SetReturn(ctx, Http2ErrorInvalidId);
+            return ctx.SetReturn(Http2ErrorInvalidId);
         }
 
         TraceHttp2("term", id, 0, 0, 0, 0);
-        return SetReturn(ctx, 0);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.SetReturn(0);
     }
 
     private static void TraceHttp2(string operation, int id, ulong arg0, ulong arg1, ulong arg2, ulong arg3)

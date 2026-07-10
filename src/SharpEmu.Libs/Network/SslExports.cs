@@ -1,9 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System;
 using System.Collections.Concurrent;
-using System.Threading;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Network;
@@ -28,7 +26,7 @@ public static class SslExports
         var poolSize = ctx[CpuRegister.Rdi];
         if (poolSize == 0)
         {
-            return SetReturn(ctx, SslErrorOutOfSize);
+            return ctx.SetReturn(SslErrorOutOfSize);
         }
 
         var id = Interlocked.Increment(ref _nextContextId);
@@ -49,11 +47,11 @@ public static class SslExports
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!_contexts.TryRemove(id, out _))
         {
-            return SetReturn(ctx, SslErrorInvalidId);
+            return ctx.SetReturn(SslErrorInvalidId);
         }
 
         TraceSsl("term", id, 0);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -65,13 +63,7 @@ public static class SslExports
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         TraceSsl("close", id, 0);
-        return SetReturn(ctx, 0);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.SetReturn(0);
     }
 
     private static void TraceSsl(string operation, int id, ulong arg0)

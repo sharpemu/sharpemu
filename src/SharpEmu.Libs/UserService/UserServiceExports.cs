@@ -4,7 +4,6 @@
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Text;
-using System.Threading;
 
 namespace SharpEmu.Libs.UserService;
 
@@ -40,12 +39,12 @@ public static class UserServiceExports
         var userIdAddress = ctx[CpuRegister.Rdi];
         if (userIdAddress == 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
-        return TryWriteInt32(ctx, userIdAddress, PrimaryUserId)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return ctx.TryWriteInt32(userIdAddress, PrimaryUserId)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -58,7 +57,7 @@ public static class UserServiceExports
         var userIdListAddress = ctx[CpuRegister.Rdi];
         if (userIdListAddress == 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
         Span<byte> userIds = stackalloc byte[sizeof(int) * 4];
@@ -67,8 +66,8 @@ public static class UserServiceExports
         BinaryPrimitives.WriteInt32LittleEndian(userIds[0x08..], InvalidUserId);
         BinaryPrimitives.WriteInt32LittleEndian(userIds[0x0C..], InvalidUserId);
         return ctx.Memory.TryWrite(userIdListAddress, userIds)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -81,20 +80,20 @@ public static class UserServiceExports
         var eventAddress = ctx[CpuRegister.Rdi];
         if (eventAddress == 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
         if (Interlocked.Exchange(ref _loginEventDelivered, 1) != 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorNoEvent);
+            return ctx.SetReturn(OrbisUserServiceErrorNoEvent);
         }
 
         Span<byte> payload = stackalloc byte[sizeof(int) * 2];
         BinaryPrimitives.WriteInt32LittleEndian(payload[0..], 0);
         BinaryPrimitives.WriteInt32LittleEndian(payload[sizeof(int)..], PrimaryUserId);
         return ctx.Memory.TryWrite(eventAddress, payload)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -109,25 +108,25 @@ public static class UserServiceExports
         var capacity = ctx[CpuRegister.Rdx];
         if (userId != PrimaryUserId)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidParameter);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidParameter);
         }
 
         if (nameAddress == 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
         var nameBytes = Encoding.UTF8.GetBytes(PrimaryUserName);
         if (capacity <= (ulong)nameBytes.Length)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorBufferTooShort);
+            return ctx.SetReturn(OrbisUserServiceErrorBufferTooShort);
         }
 
         Span<byte> output = stackalloc byte[nameBytes.Length + 1];
         nameBytes.CopyTo(output);
         return ctx.Memory.TryWrite(nameAddress, output)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -141,29 +140,16 @@ public static class UserServiceExports
         var valueAddress = ctx[CpuRegister.Rsi];
         if (parameterId != 1000)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidParameter);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidParameter);
         }
 
         if (valueAddress == 0)
         {
-            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
-        return TryWriteInt32(ctx, valueAddress, 0)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
-
-    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        return ctx.TryWriteInt32(valueAddress, 0)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 }

@@ -76,14 +76,14 @@ public static class NpManagerExports
         var stateAddress = ctx[CpuRegister.Rsi];
         if (stateAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> stateBytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(stateBytes, 1);
         return ctx.Memory.TryWrite(stateAddress, stateBytes)
-            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
-            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -97,7 +97,7 @@ public static class NpManagerExports
         var titleSecretAddress = ctx[CpuRegister.Rsi];
         if (titleIdAddress == 0 || titleSecretAddress == 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> titleId = stackalloc byte[NpTitleIdSize];
@@ -105,17 +105,11 @@ public static class NpManagerExports
         if (!ctx.Memory.TryRead(titleIdAddress, titleId) ||
             !ctx.Memory.TryRead(titleSecretAddress, titleSecret))
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceNp($"set_np_title_id title='{ReadTitleId(titleId)}'");
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-    }
-
-    private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)(int)result);
-        return (int)result;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static string ReadTitleId(ReadOnlySpan<byte> bytes)

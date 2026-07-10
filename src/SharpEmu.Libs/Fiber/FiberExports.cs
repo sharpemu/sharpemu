@@ -104,17 +104,17 @@ public static class FiberExports
         var optParam = ctx[CpuRegister.Rdi];
         if (optParam == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         if ((optParam & 7) != 0)
         {
-            return SetReturn(ctx, FiberErrorAlignment);
+            return ctx.SetReturn(FiberErrorAlignment);
         }
 
         return ctx.TryWriteUInt32(optParam, FiberOptSignature)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorInvalid);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorInvalid);
     }
 
     [SysAbiExport(
@@ -127,24 +127,24 @@ public static class FiberExports
         var fiber = ctx[CpuRegister.Rdi];
         if (!TryValidateFiber(ctx, fiber, out var error))
         {
-            return SetReturn(ctx, error);
+            return ctx.SetReturn(error);
         }
 
         if (!ctx.TryReadUInt32(fiber + FiberStateOffset, out var state))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (state != FiberStateIdle)
         {
-            return SetReturn(ctx, FiberErrorState);
+            return ctx.SetReturn(FiberErrorState);
         }
 
         _continuations.TryRemove(fiber, out _);
         _returnTargets.TryRemove(fiber, out _);
         _stackRanges.TryRemove(fiber, out _);
         _ = ctx.TryWriteUInt32(fiber + FiberStateOffset, FiberStateTerminated);
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -229,20 +229,20 @@ public static class FiberExports
         var fiberAddress = ResolveCurrentFiberAddress(ctx);
         if (fiberAddress == 0)
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
 
         if (GuestThreadExecution.Scheduler is not { SupportsGuestContextTransfer: true } ||
             !GuestThreadExecution.TryGetCurrentImportCallFrame(out var frame))
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
 
         var returnArgument = ctx[CpuRegister.Rdi];
         var argOnRunAddress = ctx[CpuRegister.Rsi];
         if (argOnRunAddress != 0 && !ctx.TryWriteUInt64(argOnRunAddress, 0))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         GuestCpuContinuation transferTarget;
@@ -256,7 +256,7 @@ public static class FiberExports
             if (!_returnTargets.TryRemove(fiberAddress, out var returnTarget))
             {
                 _continuations.TryRemove(fiberAddress, out _);
-                return SetReturn(ctx, FiberErrorPermission);
+                return ctx.SetReturn(FiberErrorPermission);
             }
 
             previousFiber = returnTarget.PreviousFiber;
@@ -267,7 +267,7 @@ public static class FiberExports
                     !ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateRun))
                 {
                     _continuations.TryRemove(fiberAddress, out _);
-                    return SetReturn(ctx, FiberErrorState);
+                    return ctx.SetReturn(FiberErrorState);
                 }
 
                 transferTarget = previousContinuation.Context with { Rax = 0 };
@@ -278,7 +278,7 @@ public static class FiberExports
                     !TryWriteResumeArgument(ctx, returnTarget.ThreadContinuation.Value, returnArgument))
                 {
                     _continuations.TryRemove(fiberAddress, out _);
-                    return SetReturn(ctx, FiberErrorState);
+                    return ctx.SetReturn(FiberErrorState);
                 }
 
                 transferTarget = returnTarget.ThreadContinuation.Value.Context with { Rax = 0 };
@@ -286,7 +286,7 @@ public static class FiberExports
 
             if (!ctx.TryWriteUInt32(fiberAddress + FiberStateOffset, FiberStateIdle))
             {
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
         }
 
@@ -296,7 +296,7 @@ public static class FiberExports
         TraceFiber(
             $"return fiber=0x{fiberAddress:X16} to=0x{previousFiber:X16} " +
             $"resume=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{returnArgument:X16}");
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -309,18 +309,18 @@ public static class FiberExports
         var outAddress = ctx[CpuRegister.Rdi];
         if (outAddress == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         var fiberAddress = ResolveCurrentFiberAddress(ctx);
         if (fiberAddress == 0)
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
 
         return ctx.TryWriteUInt64(outAddress, fiberAddress)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorInvalid);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorInvalid);
     }
 
     [SysAbiExport(
@@ -334,22 +334,22 @@ public static class FiberExports
         var info = ctx[CpuRegister.Rsi];
         if (info == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         if (!TryValidateFiber(ctx, fiber, out var error))
         {
-            return SetReturn(ctx, error);
+            return ctx.SetReturn(error);
         }
 
         if (!ctx.TryReadUInt64(info, out var size) || size != FiberInfoSize)
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (!TryReadFiberFields(ctx, fiber, out var fields))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (!ctx.TryWriteUInt64(info + 8, fields.Entry) ||
@@ -359,10 +359,10 @@ public static class FiberExports
             !TryWriteName(ctx, info + 40, fields.Name) ||
             !ctx.TryWriteUInt64(info + 72, ulong.MaxValue))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -376,22 +376,22 @@ public static class FiberExports
         var nameAddress = ctx[CpuRegister.Rsi];
         if (!TryValidateFiber(ctx, fiber, out var error))
         {
-            return SetReturn(ctx, error);
+            return ctx.SetReturn(error);
         }
 
         if (nameAddress == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxNameLength + 1, out var name))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         return TryWriteName(ctx, fiber + FiberNameOffset, name)
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorInvalid);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorInvalid);
     }
 
     [SysAbiExport(
@@ -403,12 +403,12 @@ public static class FiberExports
     {
         if (ctx[CpuRegister.Rdi] != 0)
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         return Interlocked.Exchange(ref _contextSizeCheck, 1) == 0
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorState);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorState);
     }
 
     [SysAbiExport(
@@ -419,8 +419,8 @@ public static class FiberExports
     public static int FiberStopContextSizeCheck(CpuContext ctx)
     {
         return Interlocked.Exchange(ref _contextSizeCheck, 0) == 1
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorState);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorState);
     }
 
     [SysAbiExport(
@@ -433,17 +433,17 @@ public static class FiberExports
         var outAddress = ctx[CpuRegister.Rdi];
         if (outAddress == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         if (ResolveCurrentFiberAddress(ctx) == 0)
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
 
         return ctx.TryWriteUInt64(outAddress, ctx[CpuRegister.Rbp])
-            ? SetReturn(ctx, 0)
-            : SetReturn(ctx, FiberErrorInvalid);
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(FiberErrorInvalid);
     }
 
     private static int FiberInitializeCore(
@@ -459,37 +459,37 @@ public static class FiberExports
     {
         if (fiber == 0 || nameAddress == 0 || entry == 0)
         {
-            return SetReturn(ctx, FiberErrorNull);
+            return ctx.SetReturn(FiberErrorNull);
         }
 
         if ((fiber & 7) != 0 ||
             (contextAddress & 15) != 0 ||
             (optParam & 7) != 0)
         {
-            return SetReturn(ctx, FiberErrorAlignment);
+            return ctx.SetReturn(FiberErrorAlignment);
         }
 
         if (contextSize != 0 && contextSize < FiberContextMinimumSize)
         {
-            return SetReturn(ctx, FiberErrorRange);
+            return ctx.SetReturn(FiberErrorRange);
         }
 
         if ((contextSize & 15) != 0 ||
             (contextAddress == 0 && contextSize != 0) ||
             (contextAddress != 0 && contextSize == 0))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (optParam != 0 &&
             (!ctx.TryReadUInt32(optParam, out var optMagic) || optMagic != FiberOptSignature))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxNameLength + 1, out var name))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (Volatile.Read(ref _contextSizeCheck) != 0)
@@ -510,14 +510,14 @@ public static class FiberExports
             !ctx.TryWriteUInt64(fiber + FiberContextEndOffset, contextAddress == 0 ? 0 : contextAddress + contextSize) ||
             !ctx.TryWriteUInt32(fiber + FiberMagicEndOffset, FiberSignature1))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (contextAddress != 0)
         {
             if (!ctx.TryWriteUInt64(contextAddress, FiberStackSignature))
             {
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
 
             if ((flags & FiberFlagContextSizeCheck) != 0)
@@ -532,7 +532,7 @@ public static class FiberExports
         }
 
         TraceFiber($"init fiber=0x{fiber:X16} entry=0x{entry:X16} ctx=0x{contextAddress:X16} size=0x{contextSize:X} name='{name}'");
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     private static int FiberRunCore(
@@ -547,12 +547,12 @@ public static class FiberExports
     {
         if (!TryValidateFiber(ctx, fiber, out var error))
         {
-            return SetReturn(ctx, error);
+            return ctx.SetReturn(error);
         }
 
         if (!TryReadFiberFields(ctx, fiber, out var fields))
         {
-            return SetReturn(ctx, FiberErrorInvalid);
+            return ctx.SetReturn(FiberErrorInvalid);
         }
 
         if (attachContextAddress != 0 || attachContextSize != 0)
@@ -560,7 +560,7 @@ public static class FiberExports
             var attachResult = AttachContext(ctx, fiber, attachContextAddress, attachContextSize, ref fields);
             if (attachResult != 0)
             {
-                return SetReturn(ctx, attachResult);
+                return ctx.SetReturn(attachResult);
             }
         }
 
@@ -568,16 +568,16 @@ public static class FiberExports
         if ((isSwitch && previousFiber == 0) ||
             (!isSwitch && previousFiber != 0))
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
         if (previousFiber == fiber)
         {
-            return SetReturn(ctx, FiberErrorState);
+            return ctx.SetReturn(FiberErrorState);
         }
         if (GuestThreadExecution.Scheduler is not { SupportsGuestContextTransfer: true } ||
             !GuestThreadExecution.TryGetCurrentImportCallFrame(out var frame))
         {
-            return SetReturn(ctx, FiberErrorPermission);
+            return ctx.SetReturn(FiberErrorPermission);
         }
 
         GuestCpuContinuation transferTarget;
@@ -586,12 +586,12 @@ public static class FiberExports
         {
             if (!TryReadFiberFields(ctx, fiber, out fields))
             {
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
             if (fields.State != FiberStateIdle)
             {
                 TraceFiber($"run-state-error reason={reason} fiber=0x{fiber:X16} state=0x{fields.State:X8}");
-                return SetReturn(ctx, FiberErrorState);
+                return ctx.SetReturn(FiberErrorState);
             }
 
             FiberContinuation targetContinuation;
@@ -602,12 +602,12 @@ public static class FiberExports
             }
             else if (!TryCreateInitialContinuation(ctx, fields, argOnRun, out targetContinuation))
             {
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
 
             if (resumed && !TryWriteResumeArgument(ctx, targetContinuation, argOnRun))
             {
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
 
             var callerContinuation = new FiberContinuation(
@@ -620,7 +620,7 @@ public static class FiberExports
                     previousState != FiberStateRun ||
                     !ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateIdle))
                 {
-                    return SetReturn(ctx, FiberErrorState);
+                    return ctx.SetReturn(FiberErrorState);
                 }
 
                 _continuations[previousFiber] = callerContinuation;
@@ -639,7 +639,7 @@ public static class FiberExports
                     _ = ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateRun);
                 }
                 _returnTargets.TryRemove(fiber, out _);
-                return SetReturn(ctx, FiberErrorInvalid);
+                return ctx.SetReturn(FiberErrorInvalid);
             }
 
             if (resumed)
@@ -656,7 +656,7 @@ public static class FiberExports
         TraceFiber(
             $"transfer reason={reason} from=0x{previousFiber:X16} to=0x{fiber:X16} resume={resumed} " +
             $"rip=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{argOnRun:X16}");
-        return SetReturn(ctx, 0);
+        return ctx.SetReturn(0);
     }
 
     private static bool TryCreateInitialContinuation(
@@ -923,12 +923,6 @@ public static class FiberExports
 
         value = Encoding.UTF8.GetString(buffer[..length]);
         return true;
-    }
-
-    private static int SetReturn(CpuContext ctx, int result)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
     }
 
     private static void TraceFiber(string message)
