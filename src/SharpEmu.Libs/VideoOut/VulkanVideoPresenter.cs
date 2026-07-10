@@ -1205,6 +1205,8 @@ internal static unsafe class VulkanVideoPresenter
         private bool _swapchainRecreateDeferred;
         private bool _tracedPresentedSwapchain;
         private bool _swapchainReadbackPending;
+        private static int _guestImageDumpSequence;
+        private readonly System.Collections.Concurrent.ConcurrentQueue<GuestImageResource> _pendingAliasImageDumps = new();
         private bool _deviceLost;
         private bool _deviceLostLogged;
         private int _directPresentationCount;
@@ -3516,6 +3518,17 @@ internal static unsafe class VulkanVideoPresenter
                         $"tile={texture.TileMode} format={vkFormat}");
                 }
 
+                if (string.Equals(
+                        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES"),
+                        "alias",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    _tracedGuestImageContents.Add(guestImage.Address))
+                {
+                    // Deferred: reading back here would clobber the command
+                    // buffer mid-recording; drained after the next present.
+                    _pendingAliasImageDumps.Enqueue(guestImage);
+                }
+
                 if (TryCreateCpuTextureRefreshResource(texture, guestImage, view, out var refresh))
                 {
                     return refresh;
@@ -4609,6 +4622,14 @@ internal static unsafe class VulkanVideoPresenter
                 checked((uint)(bottom - top)));
         }
 
+        private static readonly float ViewportDebugEpsilon = float.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_VIEWPORT_EPSILON"),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var viewportEpsilon)
+            ? viewportEpsilon
+            : 0f;
+
         private static Viewport ClampViewport(VulkanGuestViewport? viewport, Extent2D extent)
         {
             if (viewport is not { } rect)
@@ -4616,21 +4637,26 @@ internal static unsafe class VulkanVideoPresenter
                 return new Viewport(0, 0, extent.Width, extent.Height, 0, 1);
             }
 
-            var maxX = (float)extent.Width;
-            var maxY = (float)extent.Height;
-            var left = Math.Clamp(rect.X, 0f, maxX);
-            var right = Math.Clamp(rect.X + rect.Width, left, maxX);
-            var yOrigin = Math.Clamp(rect.Y, 0f, maxY);
-            var yEnd = Math.Clamp(rect.Y + rect.Height, 0f, maxY);
+            // Do NOT trim the rectangle to the render target: Vulkan allows
+            // viewports that extend beyond the framebuffer (rendering is
+            // confined by the scissor), and trimming changes the guest's
+            // scale and offset. That skews texel addressing on 1:1 draws -
+            // source rows get skipped or duplicated - which shredded the
+            // game's pre-composed tile surfaces. Only guard what the spec
+            // requires: a positive width and hardware viewport bounds.
+            const float bound = 32767f;
+            var x = Math.Clamp(rect.X, -bound, bound);
+            var y = Math.Clamp(rect.Y, -bound, bound);
+            var width = Math.Clamp(rect.Width, 1e-3f, bound);
+            var height = Math.Clamp(rect.Height, -bound, bound);
+            if (height == 0f)
+            {
+                height = extent.Height;
+            }
+
             var minDepth = Math.Clamp(rect.MinDepth, 0f, 1f);
             var maxDepth = Math.Clamp(rect.MaxDepth, minDepth, 1f);
-            return new Viewport(
-                left,
-                yOrigin,
-                right - left,
-                yEnd - yOrigin,
-                minDepth,
-                maxDepth);
+            return new Viewport(x, y, width, height, minDepth, maxDepth);
         }
 
         private static byte[] CreateFallbackTexturePixels(uint format, uint width, uint height, ulong expectedSize)
@@ -5220,10 +5246,12 @@ internal static unsafe class VulkanVideoPresenter
                         }
                     }
                 }
-
                 foreach (var target in targets)
                 {
-                    if (ShouldTraceGuestImageWriteForDiagnostics(target.Address))
+                    var traceSmallWrites =
+                        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITES") == "small" &&
+                        target.Width <= 512 && target.Height <= 256;
+                    if (ShouldTraceGuestImageWriteForDiagnostics(target.Address) || traceSmallWrites)
                     {
                         var writeCount = _tracedGuestWriteCounts.TryGetValue(
                             target.Address,
@@ -5231,7 +5259,7 @@ internal static unsafe class VulkanVideoPresenter
                             ? previousCount + 1
                             : 1;
                         _tracedGuestWriteCounts[target.Address] = writeCount;
-                        if (writeCount <= 3)
+                        if (writeCount <= (traceSmallWrites ? 48 : 3))
                         {
                             _commandBuffer = _presentationCommandBuffer;
                             Check(
@@ -6047,7 +6075,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _directPresentationCount++;
                 if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                    _directPresentationCount is 1 or 30 or 120)
+                    (_directPresentationCount is 1 or 30 or 120 ||
+                     _directPresentationCount % 600 == 0))
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][TRACE] vk.present_sample frame={_directPresentationCount} " +
@@ -6239,6 +6268,10 @@ internal static unsafe class VulkanVideoPresenter
             {
                 CompletePendingPresentation(wait: true);
                 TraceSwapchainReadback();
+            }
+            while (_pendingAliasImageDumps.TryDequeue(out var aliasImage))
+            {
+                TraceGuestImageContents(aliasImage);
             }
             CollectCompletedGuestSubmissions(waitForOldest: false);
 
@@ -6450,9 +6483,10 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             Directory.CreateDirectory(directory);
+            var sequence = Interlocked.Increment(ref _guestImageDumpSequence);
             var path = Path.Combine(
                 directory,
-                $"0x{image.Address:X16}-{image.Width}x{image.Height}-{image.Format}.rgba");
+                $"{sequence:D4}-0x{image.Address:X16}-{image.Width}x{image.Height}-{image.Format}.rgba");
             File.WriteAllBytes(path, bytes.ToArray());
         }
 
@@ -6905,6 +6939,11 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             var drawViewport = ClampViewport(resources.Viewport, extent);
+            if (ViewportDebugEpsilon != 0f)
+            {
+                drawViewport.X += ViewportDebugEpsilon;
+                drawViewport.Y += ViewportDebugEpsilon;
+            }
             _vk.CmdSetViewport(_commandBuffer, 0, 1, &drawViewport);
             if (resources.VertexBuffers.Length != 0)
             {
@@ -7211,6 +7250,14 @@ internal static unsafe class VulkanVideoPresenter
                     1),
                 DstOffsets = destinationOffsets,
             };
+            // Nearest keeps integer upscales pixel-crisp, but any fractional
+            // scale (e.g. a 3840x2160 guest frame into a 2560x1440 swapchain)
+            // must blend neighbours or it silently drops every Nth source
+            // row/column, which shreds 1-2px features in the guest frame.
+            var isIntegerUpscale =
+                source.Width != 0 && source.Height != 0 &&
+                _extent.Width >= source.Width && _extent.Height >= source.Height &&
+                _extent.Width % source.Width == 0 && _extent.Height % source.Height == 0;
             _vk.CmdBlitImage(
                 _commandBuffer,
                 source.Image,
@@ -7219,7 +7266,7 @@ internal static unsafe class VulkanVideoPresenter
                 ImageLayout.TransferDstOptimal,
                 1,
                 &region,
-                Filter.Nearest);
+                isIntegerUpscale ? Filter.Nearest : Filter.Linear);
 
             if (traceDestination)
             {

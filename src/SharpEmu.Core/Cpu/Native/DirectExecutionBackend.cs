@@ -1978,26 +1978,54 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			throw new OutOfMemoryException("Failed to allocate TLS handler");
 		}
+		// The handler runs in place of a patched guest `mov reg, fs:[0]`,
+		// which preserves every register and the flags. TlsGetValue (and the
+		// Win64 ABI in general) clobbers rcx/rdx/r8-r11 and the arithmetic
+		// flags, so save them all: guest code legitimately keeps live values
+		// and comparison results across TLS reads, and losing them corrupted
+		// deterministic computations (e.g. procedural texture generation).
 		byte* tlsHandlerAddress = (byte*)_tlsHandlerAddress;
 		int num = 0;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 131;
-		tlsHandlerAddress[num++] = 236;
-		tlsHandlerAddress[num++] = 40;
-		tlsHandlerAddress[num++] = 185;
+		tlsHandlerAddress[num++] = 0x9C;                    // pushfq
+		tlsHandlerAddress[num++] = 0x51;                    // push rcx
+		tlsHandlerAddress[num++] = 0x52;                    // push rdx
+		tlsHandlerAddress[num++] = 0x41;                    // push r8
+		tlsHandlerAddress[num++] = 0x50;
+		tlsHandlerAddress[num++] = 0x41;                    // push r9
+		tlsHandlerAddress[num++] = 0x51;
+		tlsHandlerAddress[num++] = 0x41;                    // push r10
+		tlsHandlerAddress[num++] = 0x52;
+		tlsHandlerAddress[num++] = 0x41;                    // push r11
+		tlsHandlerAddress[num++] = 0x53;
+		tlsHandlerAddress[num++] = 0x48;                    // sub rsp, 0x20
+		tlsHandlerAddress[num++] = 0x83;
+		tlsHandlerAddress[num++] = 0xEC;
+		tlsHandlerAddress[num++] = 0x20;
+		tlsHandlerAddress[num++] = 0xB9;                    // mov ecx, index
 		*(uint*)(tlsHandlerAddress + num) = _guestTlsBaseTlsIndex;
 		num += 4;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 184;
+		tlsHandlerAddress[num++] = 0x48;                    // mov rax, TlsGetValue
+		tlsHandlerAddress[num++] = 0xB8;
 		*(long*)(tlsHandlerAddress + num) = _tlsGetValueAddress;
 		num += 8;
-		tlsHandlerAddress[num++] = byte.MaxValue;
-		tlsHandlerAddress[num++] = 208;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 131;
-		tlsHandlerAddress[num++] = 196;
-		tlsHandlerAddress[num++] = 40;
-		tlsHandlerAddress[num++] = 195;
+		tlsHandlerAddress[num++] = 0xFF;                    // call rax
+		tlsHandlerAddress[num++] = 0xD0;
+		tlsHandlerAddress[num++] = 0x48;                    // add rsp, 0x20
+		tlsHandlerAddress[num++] = 0x83;
+		tlsHandlerAddress[num++] = 0xC4;
+		tlsHandlerAddress[num++] = 0x20;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r11
+		tlsHandlerAddress[num++] = 0x5B;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r10
+		tlsHandlerAddress[num++] = 0x5A;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r9
+		tlsHandlerAddress[num++] = 0x59;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r8
+		tlsHandlerAddress[num++] = 0x58;
+		tlsHandlerAddress[num++] = 0x5A;                    // pop rdx
+		tlsHandlerAddress[num++] = 0x59;                    // pop rcx
+		tlsHandlerAddress[num++] = 0x9D;                    // popfq
+		tlsHandlerAddress[num++] = 0xC3;                    // ret
 		_tlsPatchStubOffset = (num + 15) & ~15;
 		uint num2 = default(uint);
 		if (!_hostMemory.Protect((ulong)(void*)_tlsHandlerAddress, TlsHandlerRegionSize, HostPageProtection.ReadExecute, out num2))

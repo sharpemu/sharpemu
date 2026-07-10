@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Agc;
@@ -3379,6 +3380,7 @@ public static class AgcExports
                 $"agc.rt_writer seq={drawSequence} target=0x{target.Address:X16} " +
                 $"fmt={target.Format} tile={target.TileMode} " +
                 $"size={target.Width}x{target.Height} vertices={vertexCount} " +
+                $"prim=0x{primitiveType:X} indexed={indexed} " +
                 $"es=0x{(hasExportShader ? exportShaderAddress : 0):X16} " +
                 $"ps=0x{(hasPixelShader ? pixelShaderAddress : 0):X16}");
         }
@@ -3415,6 +3417,8 @@ public static class AgcExports
                     CreateVulkanGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                 var vertexBuffers =
                     CreateVulkanGuestVertexBuffers(translatedDraw.VertexInputs);
+                TraceRectListVertices(translatedDraw, vertexBuffers);
+                TraceGrassDrawVertices(translatedDraw, textures, vertexBuffers);
                 VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
                     translatedDraw.PixelSpirv,
                     textures,
@@ -4486,6 +4490,7 @@ public static class AgcExports
             $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
             $"dst=0x{descriptor.DstSelect:X3} " +
             $"bytes={source.Length} nonzero64={nonZero}");
+        DumpTextureSourceIfRequested(descriptor, sourceWidth, source);
 
         var rgba = source;
         texture = new VulkanGuestDrawTexture(
@@ -4504,6 +4509,131 @@ public static class AgcExports
             DstSelect: descriptor.DstSelect,
             Sampler: ToVulkanSampler(samplerDescriptor));
         return true;
+    }
+
+
+
+    private static int _grassTraceCount;
+
+    private static void TraceGrassDrawVertices(
+        TranslatedGuestDraw draw,
+        IReadOnlyList<VulkanGuestDrawTexture> textures,
+        IReadOnlyList<VulkanGuestVertexBuffer> vertexBuffers)
+    {
+        if (_grassTraceCount >= 6 ||
+            !textures.Any(texture => texture.Width == 288 && texture.Height == 160) ||
+            vertexBuffers.Count == 0 ||
+            Interlocked.Increment(ref _grassTraceCount) > 6)
+        {
+            return;
+        }
+
+        var text = new System.Text.StringBuilder();
+        text.Append($"agc.grassdraw prim=0x{draw.PrimitiveType:X} verts={draw.VertexCount} ");
+        text.Append($"indexed={draw.IndexBuffer is not null} buffers={vertexBuffers.Count}");
+        foreach (var buffer in vertexBuffers)
+        {
+            text.Append(
+                $"\n  loc={buffer.Location} fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount} " +
+                $"stride={buffer.Stride} offset={buffer.OffsetBytes} bytes={buffer.Data.Length}");
+            var stride = Math.Max(buffer.Stride, 4u);
+            var maxVerts = Math.Min(6, (int)((buffer.Data.Length - buffer.OffsetBytes) / stride));
+            for (var vertex = 0; vertex < maxVerts; vertex++)
+            {
+                var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
+                var components = Math.Min(4, (int)((buffer.Data.Length - baseOffset) / 4));
+                text.Append($"\n    v{vertex}:");
+                for (var c = 0; c < components; c++)
+                {
+                    text.Append($" {BitConverter.ToSingle(buffer.Data, baseOffset + c * 4):0.#####}");
+                }
+            }
+        }
+
+        TraceAgcShader(text.ToString());
+    }
+
+    private static int _rectListTraceCount;
+
+    private static void TraceRectListVertices(
+        TranslatedGuestDraw draw,
+        IReadOnlyList<VulkanGuestVertexBuffer> vertexBuffers)
+    {
+        if (draw.PrimitiveType != 0x11 ||
+            draw.IndexBuffer is not null ||
+            vertexBuffers.Count == 0 ||
+            _rectListTraceCount >= 8 ||
+            Interlocked.Increment(ref _rectListTraceCount) > 8)
+        {
+            return;
+        }
+
+        var buffer = vertexBuffers[0];
+        var stride = Math.Max(buffer.Stride, 4u);
+        var text = new System.Text.StringBuilder();
+        for (var vertex = 0; vertex < 3; vertex++)
+        {
+            var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
+            if (baseOffset + 16 > buffer.Data.Length)
+            {
+                break;
+            }
+
+            var x = BitConverter.ToSingle(buffer.Data, baseOffset);
+            var y = BitConverter.ToSingle(buffer.Data, baseOffset + 4);
+            var z = BitConverter.ToSingle(buffer.Data, baseOffset + 8);
+            var w = BitConverter.ToSingle(buffer.Data, baseOffset + 12);
+            text.Append($" v{vertex}=({x:0.###},{y:0.###},{z:0.###},{w:0.###})");
+        }
+
+        TraceAgcShader(
+            $"agc.rectlist verts={draw.VertexCount} stride={buffer.Stride} " +
+            $"fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount}{text}");
+    }
+
+    private static int _textureDumpCount;
+    private static readonly ConcurrentDictionary<string, int> _textureDumpKeys = new();
+
+    /// <summary>
+    /// Writes raw sampled-texture bytes (as read from guest memory) when
+    /// SHARPEMU_TEXTURE_DUMP_DIR is set, so upload-time content can be
+    /// inspected offline. File name records size and effective pitch.
+    /// </summary>
+    private static void DumpTextureSourceIfRequested(
+        in TextureDescriptor descriptor,
+        uint sourcePitch,
+        byte[] source)
+    {
+        var directory = Environment.GetEnvironmentVariable("SHARPEMU_TEXTURE_DUMP_DIR");
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        var key = $"0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}";
+        var occurrence = _textureDumpKeys.AddOrUpdate(key, 1, static (_, count) => count + 1);
+        // First uses plus periodic later snapshots (the game reuses the same
+        // allocation for successive full-screen images).
+        if ((occurrence > 3 && occurrence % 500 >= 3) ||
+            Interlocked.Increment(ref _textureDumpCount) > 200)
+        {
+            return;
+        }
+
+        var index = _textureDumpCount;
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(
+                directory,
+                $"{index:D3}-0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}" +
+                $"-p{sourcePitch}-f{descriptor.Format}-t{descriptor.TileMode}.bin");
+            File.WriteAllBytes(path, source);
+        }
+        catch (IOException)
+        {
+        }
     }
 
     private static VulkanGuestDrawTexture CreateFallbackGuestDrawTexture(
