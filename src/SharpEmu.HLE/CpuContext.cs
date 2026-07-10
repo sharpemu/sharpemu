@@ -2,25 +2,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
 
 namespace SharpEmu.HLE;
 
-public sealed class CpuContext
+public sealed class CpuContext(ICpuMemory memory, Generation generation)
 {
     private readonly ulong[] _registers = new ulong[16];
     private readonly ulong[] _xmmRegisters = new ulong[32];
     private readonly ulong[] _ymmUpperRegisters = new ulong[32];
     private bool _raxWritten;
 
-    public CpuContext(ICpuMemory memory, Generation generation)
-    {
-        Memory = memory ?? throw new ArgumentNullException(nameof(memory));
-        TargetGeneration = generation;
-    }
+    public ICpuMemory Memory { get; } = memory ?? throw new ArgumentNullException(nameof(memory));
 
-    public ICpuMemory Memory { get; }
-
-    public Generation TargetGeneration { get; }
+    public Generation TargetGeneration { get; } = generation;
 
     public ulong Rip { get; set; }
 
@@ -130,6 +125,39 @@ public sealed class CpuContext
         SetYmmUpper(registerIndex, highLow, highHigh);
     }
 
+    public bool TryReadByte(ulong address, out byte value)
+    {
+        Span<byte> buffer = stackalloc byte[1];
+        if (!Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = buffer[0];
+        return true;
+    }
+
+    public bool TryReadUInt32(ulong address, out uint value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        if (!Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+        return true;
+    }
+
+    public bool TryWriteUInt32(ulong address, uint value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
+        return Memory.TryWrite(address, buffer);
+    }
+
     public bool TryReadUInt64(ulong address, out ulong value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
@@ -148,6 +176,33 @@ public sealed class CpuContext
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
         return Memory.TryWrite(address, buffer);
+    }
+
+    public bool TryReadNullTerminatedUtf8(ulong address, int capacity, out string value)
+    {
+        value = string.Empty;
+        if (address == 0 || capacity <= 0)
+        {
+            return false;
+        }
+
+        var bytes = new byte[capacity];
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            if (!Memory.TryRead(address + (ulong)index, bytes.AsSpan(index, 1)))
+            {
+                return false;
+            }
+
+            if (bytes[index] == 0)
+            {
+                value = Encoding.UTF8.GetString(bytes, 0, index);
+                return true;
+            }
+        }
+
+        value = Encoding.UTF8.GetString(bytes);
+        return true;
     }
 
     public bool PushUInt64(ulong value)

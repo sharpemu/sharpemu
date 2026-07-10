@@ -60,7 +60,7 @@ public static class SaveDataDialogExports
         }
 
         _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
-        _lastUserData = TryReadUInt64(ctx, paramAddress + 0xC8, out var userData) ? userData : 0;
+        _lastUserData = ctx.TryReadUInt64(paramAddress + 0xC8, out var userData) ? userData : 0;
 
         // There is no host save dialog yet. Complete immediately with OK so
         // guest polling sees a finished dialog instead of spinning forever.
@@ -179,19 +179,6 @@ public static class SaveDataDialogExports
         }
 
         value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
-        return true;
-    }
-
-    private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
-    {
-        value = 0;
-        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
         return true;
     }
 

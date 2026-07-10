@@ -922,9 +922,9 @@ public static class VideoOutExports
     private static bool TryReadBufferAttribute(CpuContext ctx, ulong attributeAddress, bool attribute2, out BufferAttribute attribute)
     {
         attribute = default;
-        if (!TryReadUInt32(ctx, attributeAddress + 0x04, out var tilingMode) ||
-            !TryReadUInt32(ctx, attributeAddress + 0x0C, out var width) ||
-            !TryReadUInt32(ctx, attributeAddress + 0x10, out var height))
+        if (!ctx.TryReadUInt32(attributeAddress + 0x04, out var tilingMode) ||
+            !ctx.TryReadUInt32(attributeAddress + 0x0C, out var width) ||
+            !ctx.TryReadUInt32(attributeAddress + 0x10, out var height))
         {
             return false;
         }
@@ -941,10 +941,10 @@ public static class VideoOutExports
             return true;
         }
 
-        if (!TryReadUInt32(ctx, attributeAddress + 0x00, out var pixelFormat32) ||
-            !TryReadUInt32(ctx, attributeAddress + 0x08, out var aspectRatio) ||
-            !TryReadUInt32(ctx, attributeAddress + 0x14, out var pitchInPixel) ||
-            !TryReadUInt32(ctx, attributeAddress + 0x18, out var option32))
+        if (!ctx.TryReadUInt32(attributeAddress + 0x00, out var pixelFormat32) ||
+            !ctx.TryReadUInt32(attributeAddress + 0x08, out var aspectRatio) ||
+            !ctx.TryReadUInt32(attributeAddress + 0x14, out var pitchInPixel) ||
+            !ctx.TryReadUInt32(attributeAddress + 0x18, out var option32))
         {
             return false;
         }
@@ -1280,19 +1280,6 @@ public static class VideoOutExports
     private static bool TryReadStackUInt32(CpuContext ctx, int stackIndex, out uint value)
     {
         var address = ctx[CpuRegister.Rsp] + 0x08 + ((ulong)stackIndex * 0x08);
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, buffer))
         {

@@ -1018,19 +1018,12 @@ public static class KernelPthreadCompatExports
     }
 
     private static bool InitializeMutexObject(CpuContext ctx, ulong address, PthreadMutexState state) =>
-        TryWriteUInt32(ctx, address + 0x20, unchecked((uint)state.Type)) &&
-        TryWriteUInt32(ctx, address + 0x3C, unchecked((uint)state.Protocol));
+        ctx.TryWriteUInt32(address + 0x20, unchecked((uint)state.Type)) &&
+        ctx.TryWriteUInt32(address + 0x3C, unchecked((uint)state.Protocol));
 
     private static bool WriteMutexAttrObject(CpuContext ctx, ulong address, PthreadMutexAttrState state) =>
-        TryWriteUInt32(ctx, address, unchecked((uint)state.Type)) &&
-        TryWriteUInt32(ctx, address + 4, unchecked((uint)state.Protocol));
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        BitConverter.TryWriteBytes(bytes, value);
-        return ctx.Memory.TryWrite(address, bytes);
-    }
+        ctx.TryWriteUInt32(address, unchecked((uint)state.Type)) &&
+        ctx.TryWriteUInt32(address + 4, unchecked((uint)state.Protocol));
 
     private static int PthreadCondInitCore(CpuContext ctx, ulong condAddress)
     {

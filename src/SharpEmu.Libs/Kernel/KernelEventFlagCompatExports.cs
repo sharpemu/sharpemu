@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using SharpEmu.HLE;
@@ -55,7 +54,7 @@ public static class KernelEventFlagCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxEventFlagNameLength + 1, out var name))
+        if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxEventFlagNameLength + 1, out var name))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -219,7 +218,7 @@ public static class KernelEventFlagCompatExports
         }
 
         uint timeoutUsec = 0;
-        if (timeoutAddress != 0 && !TryReadUInt32(ctx, timeoutAddress, out timeoutUsec))
+        if (timeoutAddress != 0 && !ctx.TryReadUInt32(timeoutAddress, out timeoutUsec))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -234,7 +233,7 @@ public static class KernelEventFlagCompatExports
 
             if (timeoutAddress != 0)
             {
-                _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                _ = ctx.TryWriteUInt32(timeoutAddress, 0);
                 _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
                 TraceEventFlag($"wait-timeout handle=0x{handle:X16} pattern=0x{pattern:X16} timeout={timeoutUsec} ret=0x{returnRip:X16}");
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
@@ -340,7 +339,7 @@ public static class KernelEventFlagCompatExports
         lock (state.Gate)
         {
             if (waiterCountAddress != 0 &&
-                !TryWriteUInt32(ctx, waiterCountAddress, unchecked((uint)state.WaitingThreads)))
+                !ctx.TryWriteUInt32(waiterCountAddress, unchecked((uint)state.WaitingThreads)))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -453,77 +452,6 @@ public static class KernelEventFlagCompatExports
     private static bool TryWriteResultPattern(CpuContext ctx, ulong address, ulong bits) =>
         address == 0 || ctx.TryWriteUInt64(address, bits);
 
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryReadByte(CpuContext ctx, ulong address, out byte value)
-    {
-        Span<byte> buffer = stackalloc byte[1];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = buffer[0];
-        return true;
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int capacity, out string value)
-    {
-        var bytes = new byte[capacity];
-        for (var index = 0; index < bytes.Length; index++)
-        {
-            Span<byte> current = stackalloc byte[1];
-            if (!ctx.Memory.TryRead(address + (ulong)index, current))
-            {
-                value = string.Empty;
-                return false;
-            }
-
-            if (current[0] == 0)
-            {
-                value = Encoding.UTF8.GetString(bytes, 0, index);
-                return true;
-            }
-
-            bytes[index] = current[0];
-        }
-
-        value = Encoding.UTF8.GetString(bytes);
-        return true;
-    }
-
     private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
     {
         var value = (int)result;
@@ -614,7 +542,7 @@ public static class KernelEventFlagCompatExports
 
     private static void AppendByte(StringBuilder builder, CpuContext ctx, ulong address, string name)
     {
-        if (TryReadByte(ctx, address, out var value))
+        if (ctx.TryReadByte(address, out var value))
         {
             builder.Append($" {name}=0x{value:X2}");
         }
@@ -622,7 +550,7 @@ public static class KernelEventFlagCompatExports
 
     private static void AppendUInt32(StringBuilder builder, CpuContext ctx, ulong address, string name)
     {
-        if (TryReadUInt32(ctx, address, out var value))
+        if (ctx.TryReadUInt32(address, out var value))
         {
             builder.Append($" {name}=0x{value:X8}");
         }
@@ -630,7 +558,7 @@ public static class KernelEventFlagCompatExports
 
     private static void AppendUInt64(StringBuilder builder, CpuContext ctx, ulong address, string name)
     {
-        if (TryReadUInt64(ctx, address, out var value))
+        if (ctx.TryReadUInt64(address, out var value))
         {
             builder.Append($" {name}=0x{value:X16}");
         }

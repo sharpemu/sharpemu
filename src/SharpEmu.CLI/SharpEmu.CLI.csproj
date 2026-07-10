@@ -38,6 +38,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Win32Icon>..\..\assets\images\SharpEmu.ico</Win32Icon>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  
   <ItemGroup>
     <Content Include="..\..\LICENSE.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>

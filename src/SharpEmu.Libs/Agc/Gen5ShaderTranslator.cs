@@ -294,7 +294,7 @@ internal static class Gen5ShaderTranslator
         var instructionCount = 0;
         for (uint pc = 0; instructionCount < MaxInstructions;)
         {
-            if (!TryReadUInt32(ctx, address + pc, out var word))
+            if (!ctx.TryReadUInt32(address + pc, out var word))
             {
                 error = $"read-failed pc=0x{pc:X}";
                 return false;
@@ -317,7 +317,7 @@ internal static class Gen5ShaderTranslator
             words[0] = word;
             for (uint wordIndex = 1; wordIndex < sizeDwords; wordIndex++)
             {
-                if (!TryReadUInt32(ctx, address + pc + wordIndex * sizeof(uint), out words[wordIndex]))
+                if (!ctx.TryReadUInt32(address + pc + wordIndex * sizeof(uint), out words[wordIndex]))
                 {
                     error = $"read-failed pc=0x{pc + wordIndex * sizeof(uint):X}";
                     return false;
@@ -397,7 +397,7 @@ internal static class Gen5ShaderTranslator
             case 0x34:
             case 0x35:
                 encoding = Gen5ShaderEncoding.Vop3;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var vop3Extra))
+                if (!ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var vop3Extra))
                 {
                     error = $"vop3-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -418,7 +418,7 @@ internal static class Gen5ShaderTranslator
                 return DecodeFlat(word, out name, out sizeDwords, out error);
             case 0x38:
                 encoding = Gen5ShaderEncoding.Mubuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mubufExtra))
+                if (!ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var mubufExtra))
                 {
                     error = $"mubuf-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -427,7 +427,7 @@ internal static class Gen5ShaderTranslator
                 return DecodeMubuf(word, mubufExtra, out name, out sizeDwords, out error);
             case 0x3A:
                 encoding = Gen5ShaderEncoding.Mtbuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mtbufExtra))
+                if (!ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var mtbufExtra))
                 {
                     error = $"mtbuf-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -1739,19 +1739,6 @@ internal static class Gen5ShaderTranslator
     {
         counts.TryGetValue(key, out var count);
         counts[key] = count + 1;
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
-        return true;
     }
 
     private readonly record struct ShaderDecodeInfo(

@@ -18,9 +18,9 @@ internal static class Gen5ShaderMetadataReader
         out Gen5ShaderMetadata metadata)
     {
         metadata = default!;
-        if (!TryReadUInt64(ctx, shaderHeaderAddress + ShaderUserDataOffset, out var userDataAddress) ||
+        if (!ctx.TryReadUInt64(shaderHeaderAddress + ShaderUserDataOffset, out var userDataAddress) ||
             userDataAddress == 0 ||
-            !TryReadUInt64(ctx, userDataAddress, out var directResourceOffsetsAddress))
+            !ctx.TryReadUInt64(userDataAddress, out var directResourceOffsetsAddress))
         {
             return false;
         }
@@ -28,8 +28,7 @@ internal static class Gen5ShaderMetadataReader
         var resourceOffsets = new ulong[ResourceClassCount];
         for (var resourceClass = 0; resourceClass < ResourceClassCount; resourceClass++)
         {
-            if (!TryReadUInt64(
-                    ctx,
+            if (!ctx.TryReadUInt64(
                     userDataAddress + 0x08 + (ulong)(resourceClass * sizeof(ulong)),
                     out resourceOffsets[resourceClass]))
             {
@@ -136,19 +135,6 @@ internal static class Gen5ShaderMetadataReader
         }
 
         value = BinaryPrimitives.ReadUInt16LittleEndian(bytes);
-        return true;
-    }
-
-    private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
-    {
-        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
         return true;
     }
 }

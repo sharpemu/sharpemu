@@ -112,7 +112,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorAlignment);
         }
 
-        return TryWriteUInt32(ctx, optParam, FiberOptSignature)
+        return ctx.TryWriteUInt32(optParam, FiberOptSignature)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, FiberErrorInvalid);
     }
@@ -130,7 +130,7 @@ public static class FiberExports
             return SetReturn(ctx, error);
         }
 
-        if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var state))
+        if (!ctx.TryReadUInt32(fiber + FiberStateOffset, out var state))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -143,7 +143,7 @@ public static class FiberExports
         _continuations.TryRemove(fiber, out _);
         _returnTargets.TryRemove(fiber, out _);
         _stackRanges.TryRemove(fiber, out _);
-        _ = TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateTerminated);
+        _ = ctx.TryWriteUInt32(fiber + FiberStateOffset, FiberStateTerminated);
         return SetReturn(ctx, 0);
     }
 
@@ -240,7 +240,7 @@ public static class FiberExports
 
         var returnArgument = ctx[CpuRegister.Rdi];
         var argOnRunAddress = ctx[CpuRegister.Rsi];
-        if (argOnRunAddress != 0 && !TryWriteUInt64(ctx, argOnRunAddress, 0))
+        if (argOnRunAddress != 0 && !ctx.TryWriteUInt64(argOnRunAddress, 0))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -264,7 +264,7 @@ public static class FiberExports
             {
                 if (!_continuations.TryRemove(previousFiber, out var previousContinuation) ||
                     !TryWriteResumeArgument(ctx, previousContinuation, returnArgument) ||
-                    !TryWriteUInt32(ctx, previousFiber + FiberStateOffset, FiberStateRun))
+                    !ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateRun))
                 {
                     _continuations.TryRemove(fiberAddress, out _);
                     return SetReturn(ctx, FiberErrorState);
@@ -284,7 +284,7 @@ public static class FiberExports
                 transferTarget = returnTarget.ThreadContinuation.Value.Context with { Rax = 0 };
             }
 
-            if (!TryWriteUInt32(ctx, fiberAddress + FiberStateOffset, FiberStateIdle))
+            if (!ctx.TryWriteUInt32(fiberAddress + FiberStateOffset, FiberStateIdle))
             {
                 return SetReturn(ctx, FiberErrorInvalid);
             }
@@ -318,7 +318,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorPermission);
         }
 
-        return TryWriteUInt64(ctx, outAddress, fiberAddress)
+        return ctx.TryWriteUInt64(outAddress, fiberAddress)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, FiberErrorInvalid);
     }
@@ -342,7 +342,7 @@ public static class FiberExports
             return SetReturn(ctx, error);
         }
 
-        if (!TryReadUInt64(ctx, info, out var size) || size != FiberInfoSize)
+        if (!ctx.TryReadUInt64(info, out var size) || size != FiberInfoSize)
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -352,12 +352,12 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorInvalid);
         }
 
-        if (!TryWriteUInt64(ctx, info + 8, fields.Entry) ||
-            !TryWriteUInt64(ctx, info + 16, fields.ArgOnInitialize) ||
-            !TryWriteUInt64(ctx, info + 24, fields.ContextAddress) ||
-            !TryWriteUInt64(ctx, info + 32, fields.ContextSize) ||
+        if (!ctx.TryWriteUInt64(info + 8, fields.Entry) ||
+            !ctx.TryWriteUInt64(info + 16, fields.ArgOnInitialize) ||
+            !ctx.TryWriteUInt64(info + 24, fields.ContextAddress) ||
+            !ctx.TryWriteUInt64(info + 32, fields.ContextSize) ||
             !TryWriteName(ctx, info + 40, fields.Name) ||
-            !TryWriteUInt64(ctx, info + 72, ulong.MaxValue))
+            !ctx.TryWriteUInt64(info + 72, ulong.MaxValue))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -384,7 +384,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorNull);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxNameLength + 1, out var name))
+        if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxNameLength + 1, out var name))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -441,7 +441,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorPermission);
         }
 
-        return TryWriteUInt64(ctx, outAddress, ctx[CpuRegister.Rbp])
+        return ctx.TryWriteUInt64(outAddress, ctx[CpuRegister.Rbp])
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, FiberErrorInvalid);
     }
@@ -482,12 +482,12 @@ public static class FiberExports
         }
 
         if (optParam != 0 &&
-            (!TryReadUInt32(ctx, optParam, out var optMagic) || optMagic != FiberOptSignature))
+            (!ctx.TryReadUInt32(optParam, out var optMagic) || optMagic != FiberOptSignature))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxNameLength + 1, out var name))
+        if (!ctx.TryReadNullTerminatedUtf8(nameAddress, MaxNameLength + 1, out var name))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -497,25 +497,25 @@ public static class FiberExports
             flags |= FiberFlagContextSizeCheck;
         }
 
-        if (!TryWriteUInt32(ctx, fiber + FiberMagicStartOffset, FiberSignature0) ||
-            !TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateIdle) ||
-            !TryWriteUInt64(ctx, fiber + FiberEntryOffset, entry) ||
-            !TryWriteUInt64(ctx, fiber + FiberArgOnInitializeOffset, argOnInitialize) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextAddressOffset, contextAddress) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextSizeOffset, contextSize) ||
+        if (!ctx.TryWriteUInt32(fiber + FiberMagicStartOffset, FiberSignature0) ||
+            !ctx.TryWriteUInt32(fiber + FiberStateOffset, FiberStateIdle) ||
+            !ctx.TryWriteUInt64(fiber + FiberEntryOffset, entry) ||
+            !ctx.TryWriteUInt64(fiber + FiberArgOnInitializeOffset, argOnInitialize) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextAddressOffset, contextAddress) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextSizeOffset, contextSize) ||
             !TryWriteName(ctx, fiber + FiberNameOffset, name) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextPointerOffset, 0) ||
-            !TryWriteUInt32(ctx, fiber + FiberFlagsOffset, flags) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextStartOffset, contextAddress) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextEndOffset, contextAddress == 0 ? 0 : contextAddress + contextSize) ||
-            !TryWriteUInt32(ctx, fiber + FiberMagicEndOffset, FiberSignature1))
+            !ctx.TryWriteUInt64(fiber + FiberContextPointerOffset, 0) ||
+            !ctx.TryWriteUInt32(fiber + FiberFlagsOffset, flags) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextStartOffset, contextAddress) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextEndOffset, contextAddress == 0 ? 0 : contextAddress + contextSize) ||
+            !ctx.TryWriteUInt32(fiber + FiberMagicEndOffset, FiberSignature1))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
 
         if (contextAddress != 0)
         {
-            if (!TryWriteUInt64(ctx, contextAddress, FiberStackSignature))
+            if (!ctx.TryWriteUInt64(contextAddress, FiberStackSignature))
             {
                 return SetReturn(ctx, FiberErrorInvalid);
             }
@@ -616,9 +616,9 @@ public static class FiberExports
 
             if (previousFiber != 0)
             {
-                if (!TryReadUInt32(ctx, previousFiber + FiberStateOffset, out var previousState) ||
+                if (!ctx.TryReadUInt32(previousFiber + FiberStateOffset, out var previousState) ||
                     previousState != FiberStateRun ||
-                    !TryWriteUInt32(ctx, previousFiber + FiberStateOffset, FiberStateIdle))
+                    !ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateIdle))
                 {
                     return SetReturn(ctx, FiberErrorState);
                 }
@@ -631,12 +631,12 @@ public static class FiberExports
                 _returnTargets[fiber] = new FiberReturnTarget(0, callerContinuation);
             }
 
-            if (!TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateRun))
+            if (!ctx.TryWriteUInt32(fiber + FiberStateOffset, FiberStateRun))
             {
                 if (previousFiber != 0)
                 {
                     _continuations.TryRemove(previousFiber, out _);
-                    _ = TryWriteUInt32(ctx, previousFiber + FiberStateOffset, FiberStateRun);
+                    _ = ctx.TryWriteUInt32(previousFiber + FiberStateOffset, FiberStateRun);
                 }
                 _returnTargets.TryRemove(fiber, out _);
                 return SetReturn(ctx, FiberErrorInvalid);
@@ -673,7 +673,7 @@ public static class FiberExports
 
         var stackEnd = fields.ContextAddress + fields.ContextSize;
         var entryRsp = (stackEnd & ~15UL) - sizeof(ulong);
-        if (!TryWriteUInt64(ctx, entryRsp, 0))
+        if (!ctx.TryWriteUInt64(entryRsp, 0))
         {
             return false;
         }
@@ -708,7 +708,7 @@ public static class FiberExports
         FiberContinuation continuation,
         ulong argument) =>
         continuation.ArgOnRunAddress == 0 ||
-        TryWriteUInt64(ctx, continuation.ArgOnRunAddress, argument);
+        ctx.TryWriteUInt64(continuation.ArgOnRunAddress, argument);
 
     private static GuestCpuContinuation CaptureContinuation(
         CpuContext ctx,
@@ -779,11 +779,11 @@ public static class FiberExports
             return FiberErrorInvalid;
         }
 
-        if (!TryWriteUInt64(ctx, fiber + FiberContextAddressOffset, contextAddress) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextSizeOffset, contextSize) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextStartOffset, contextAddress) ||
-            !TryWriteUInt64(ctx, fiber + FiberContextEndOffset, contextAddress + contextSize) ||
-            !TryWriteUInt64(ctx, contextAddress, FiberStackSignature))
+        if (!ctx.TryWriteUInt64(fiber + FiberContextAddressOffset, contextAddress) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextSizeOffset, contextSize) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextStartOffset, contextAddress) ||
+            !ctx.TryWriteUInt64(fiber + FiberContextEndOffset, contextAddress + contextSize) ||
+            !ctx.TryWriteUInt64(contextAddress, FiberStackSignature))
         {
             return FiberErrorInvalid;
         }
@@ -839,8 +839,8 @@ public static class FiberExports
             return false;
         }
 
-        if (!TryReadUInt32(ctx, fiber + FiberMagicStartOffset, out var magicStart) ||
-            !TryReadUInt32(ctx, fiber + FiberMagicEndOffset, out var magicEnd) ||
+        if (!ctx.TryReadUInt32(fiber + FiberMagicStartOffset, out var magicStart) ||
+            !ctx.TryReadUInt32(fiber + FiberMagicEndOffset, out var magicEnd) ||
             magicStart != FiberSignature0 ||
             magicEnd != FiberSignature1)
         {
@@ -855,12 +855,12 @@ public static class FiberExports
     private static bool TryReadFiberFields(CpuContext ctx, ulong fiber, out FiberFields fields)
     {
         fields = default;
-        if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var state) ||
-            !TryReadUInt64(ctx, fiber + FiberEntryOffset, out var entry) ||
-            !TryReadUInt64(ctx, fiber + FiberArgOnInitializeOffset, out var argOnInitialize) ||
-            !TryReadUInt64(ctx, fiber + FiberContextAddressOffset, out var contextAddress) ||
-            !TryReadUInt64(ctx, fiber + FiberContextSizeOffset, out var contextSize) ||
-            !TryReadUInt32(ctx, fiber + FiberFlagsOffset, out var flags) ||
+        if (!ctx.TryReadUInt32(fiber + FiberStateOffset, out var state) ||
+            !ctx.TryReadUInt64(fiber + FiberEntryOffset, out var entry) ||
+            !ctx.TryReadUInt64(fiber + FiberArgOnInitializeOffset, out var argOnInitialize) ||
+            !ctx.TryReadUInt64(fiber + FiberContextAddressOffset, out var contextAddress) ||
+            !ctx.TryReadUInt64(fiber + FiberContextSizeOffset, out var contextSize) ||
+            !ctx.TryReadUInt32(fiber + FiberFlagsOffset, out var flags) ||
             !TryReadInlineName(ctx, fiber + FiberNameOffset, out var name))
         {
             return false;
@@ -898,46 +898,6 @@ public static class FiberExports
         return 0;
     }
 
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryWriteUInt64(CpuContext ctx, ulong address, ulong value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
-        BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
     private static bool TryWriteName(CpuContext ctx, ulong address, string name)
     {
         Span<byte> buffer = stackalloc byte[MaxNameLength + 1];
@@ -962,31 +922,6 @@ public static class FiberExports
         }
 
         value = Encoding.UTF8.GetString(buffer[..length]);
-        return true;
-    }
-
-    private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int capacity, out string value)
-    {
-        var bytes = new byte[capacity];
-        for (var index = 0; index < bytes.Length; index++)
-        {
-            Span<byte> current = stackalloc byte[1];
-            if (!ctx.Memory.TryRead(address + (ulong)index, current))
-            {
-                value = string.Empty;
-                return false;
-            }
-
-            if (current[0] == 0)
-            {
-                value = Encoding.UTF8.GetString(bytes, 0, index);
-                return true;
-            }
-
-            bytes[index] = current[0];
-        }
-
-        value = Encoding.UTF8.GetString(bytes);
         return true;
     }
 

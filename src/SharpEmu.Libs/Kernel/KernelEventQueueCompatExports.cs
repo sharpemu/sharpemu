@@ -287,13 +287,13 @@ public static class KernelEventQueueCompatExports
         }
 
         uint timeoutUsec = 0;
-        if (timeoutAddress != 0 && !TryReadUInt32(ctx, timeoutAddress, out timeoutUsec))
+        if (timeoutAddress != 0 && !ctx.TryReadUInt32(timeoutAddress, out timeoutUsec))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         var deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
+        if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -336,7 +336,7 @@ public static class KernelEventQueueCompatExports
             }
 
             deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-            if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
+            if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -541,7 +541,7 @@ public static class KernelEventQueueCompatExports
         ulong outCountAddress)
     {
         var deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
+        if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -654,29 +654,8 @@ public static class KernelEventQueueCompatExports
             return;
         }
 
-        var returnRip = 0UL;
-        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out returnRip);
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out ulong returnRip);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} ret=0x{returnRip:X16}");
-    }
-
-    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
-    }
-
-    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
-    {
-        Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
-        return true;
     }
 }

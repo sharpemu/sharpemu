@@ -8,6 +8,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="Aerolib\aerolib.bin" />
   </ItemGroup>
