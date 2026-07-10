@@ -980,6 +980,60 @@ internal static unsafe class VulkanVideoPresenter
         Volatile.Write(ref _presenterCloseRequested, true);
     }
 
+    /// <summary>
+    /// GLFW resolves Vulkan with dlopen("libvulkan.1.dylib"), which cannot
+    /// find the app-local MoltenVK on macOS (Homebrew's Vulkan libraries are
+    /// arm64-only and this is an x86-64 process). GLFW 3.4 accepts the
+    /// loader entry point directly instead, so hand it MoltenVK's
+    /// vkGetInstanceProcAddr before any window exists.
+    /// </summary>
+    private static unsafe void InitializeMacVulkanLoader()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        try
+        {
+            nint vulkan = 0;
+            foreach (var candidate in new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "libvulkan.1.dylib"),
+                Path.Combine(AppContext.BaseDirectory, "libMoltenVK.dylib"),
+                "libvulkan.1.dylib",
+                "libMoltenVK.dylib",
+            })
+            {
+                if (System.Runtime.InteropServices.NativeLibrary.TryLoad(candidate, out vulkan))
+                {
+                    break;
+                }
+            }
+
+            if (vulkan == 0 ||
+                !System.Runtime.InteropServices.NativeLibrary.TryGetExport(
+                    vulkan, "vkGetInstanceProcAddr", out var procAddr))
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] No Vulkan loader for GLFW; place a universal libMoltenVK.dylib " +
+                    "next to SharpEmu as libvulkan.1.dylib.");
+                return;
+            }
+
+            var glfw = System.Runtime.InteropServices.NativeLibrary.Load(
+                Path.Combine(AppContext.BaseDirectory, "libglfw.3.dylib"));
+            var initVulkanLoader = (delegate* unmanaged<nint, void>)
+                System.Runtime.InteropServices.NativeLibrary.GetExport(glfw, "glfwInitVulkanLoader");
+            initVulkanLoader(procAddr);
+            Console.Error.WriteLine("[LOADER][INFO] GLFW Vulkan loader wired to MoltenVK.");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] GLFW Vulkan loader setup failed: {exception.Message}");
+        }
+    }
+
     private static void Run()
     {
         uint width;
@@ -989,6 +1043,8 @@ internal static unsafe class VulkanVideoPresenter
             width = _windowWidth == 0 ? _latestPresentation?.Width ?? 1280 : _windowWidth;
             height = _windowHeight == 0 ? _latestPresentation?.Height ?? 720 : _windowHeight;
         }
+
+        InitializeMacVulkanLoader();
 
         try
         {

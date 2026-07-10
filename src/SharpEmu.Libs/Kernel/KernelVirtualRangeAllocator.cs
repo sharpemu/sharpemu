@@ -54,7 +54,10 @@ internal static class KernelVirtualRangeAllocator
         }
         catch
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt invocation threw");
+            // Expected when a fixed-address request cannot be satisfied on
+            // this host; the caller falls back or reports the failure.
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] {traceName}: no host mapping at 0x{desiredAddress:X16} len=0x{length:X}");
             return false;
         }
     }

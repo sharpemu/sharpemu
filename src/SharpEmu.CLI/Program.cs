@@ -77,6 +77,8 @@ internal static partial class Program
 
         if (OperatingSystem.IsMacOS())
         {
+            PreloadMacVulkanLoader();
+
             // AppKit (and therefore GLFW windowing) must run on the process
             // main thread on macOS. Emulation moves to a worker thread and
             // the main thread services window work the video presenter posts.
@@ -103,6 +105,43 @@ internal static partial class Program
         }
 
         return RunEmulator(args, isMitigatedChild);
+    }
+
+    /// <summary>
+    /// Makes a Vulkan loader visible to GLFW's dlopen("libvulkan.1.dylib").
+    /// Homebrew's Vulkan libraries are arm64-only and cannot load into this
+    /// x86-64 (Rosetta 2) process, so a universal libMoltenVK.dylib placed
+    /// next to the executable (named libvulkan.1.dylib) is preloaded here;
+    /// dyld then resolves GLFW's bare-name dlopen to the loaded image.
+    /// </summary>
+    private static void PreloadMacVulkanLoader()
+    {
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "libvulkan.1.dylib"),
+            Path.Combine(AppContext.BaseDirectory, "libMoltenVK.dylib"),
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".sharpemu", "x64lib", "libvulkan.1.dylib"),
+        };
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out _))
+            {
+                Console.Error.WriteLine($"[LOADER][INFO] Vulkan loader preloaded: {candidate}");
+                return;
+            }
+        }
+
+        if (NativeLibrary.TryLoad("libvulkan.1.dylib", out _))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            "[LOADER][WARN] No x86-64 Vulkan loader found; video output will be unavailable. " +
+            "Place a universal libMoltenVK.dylib (from the MoltenVK releases) next to SharpEmu " +
+            "as libvulkan.1.dylib.");
     }
 
     private static int RunEmulator(string[] args, bool isMitigatedChild)
