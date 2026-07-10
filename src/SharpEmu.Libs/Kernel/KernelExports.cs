@@ -8,7 +8,6 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelExports
 {
-    private static int _nextFileDescriptor = 2;
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
     private static readonly object _coredumpGate = new();
