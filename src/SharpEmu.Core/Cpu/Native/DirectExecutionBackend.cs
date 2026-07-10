@@ -1679,10 +1679,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 65;
 			ptr2[num++] = 95;
 			ptr2[num++] = 195;
-			uint num2 = default(uint);
-			VirtualProtect(ptr, 192u, 32u, &num2);
-			FlushInstructionCache(GetCurrentProcess(), ptr, 192u);
-			return (nint)ptr;
+		uint num2 = default(uint);
+		if (!VirtualProtect(ptr, 192u, 32u, &num2))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for import dispatch stub at 0x{(nint)ptr:X16}");
+			return 0;
+		}
+		FlushInstructionCache(GetCurrentProcess(), ptr, 192u);
+		return (nint)ptr;
 		}
 		catch
 		{
@@ -1763,7 +1767,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		tlsHandlerAddress[num++] = 195;
 		_tlsPatchStubOffset = (num + 15) & ~15;
 		uint num2 = default(uint);
-		VirtualProtect((void*)_tlsHandlerAddress, TlsHandlerRegionSize, 32u, &num2);
+		if (!VirtualProtect((void*)_tlsHandlerAddress, TlsHandlerRegionSize, 32u, &num2))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for TLS handler at 0x{_tlsHandlerAddress:X16}");
+			return;
+		}
 		FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, TlsHandlerRegionSize);
 		Console.Error.WriteLine($"[LOADER][INFO] TLS handler at 0x{_tlsHandlerAddress:X16}");
 	}
@@ -1784,7 +1792,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[i] = 144;
 		}
 		uint num = default(uint);
-		VirtualProtect(ptr, 4096u, 32u, &num);
+		if (!VirtualProtect(ptr, 4096u, 32u, &num))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for unresolved return stub at 0x{(nint)ptr:X16}");
+			return 0;
+		}
 		FlushInstructionCache(GetCurrentProcess(), ptr, 16u);
 		return (nint)ptr;
 	}
@@ -1831,7 +1843,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0xC3);
 
 		uint oldProtect = default;
-		VirtualProtect(ptr, stubSize, 32u, &oldProtect);
+		if (!VirtualProtect(ptr, stubSize, 32u, &oldProtect))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for guest return stub at 0x{(nint)ptr:X16}");
+			return 0;
+		}
 		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
 		return (nint)ptr;
 	}
@@ -1923,7 +1939,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		*(int*)(code + guestRestoreJump) = restoreOffset - (guestRestoreJump + sizeof(int));
 
 		uint oldProtect = default;
-		VirtualProtect(ptr, stubSize, 32u, &oldProtect);
+		if (!VirtualProtect(ptr, stubSize, 32u, &oldProtect))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for exception handler trampoline at 0x{(nint)ptr:X16}");
+			return 0;
+		}
 		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
 		return (nint)ptr;
 	}
@@ -2254,7 +2274,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr[num2++] = 144;
 		}
 		uint flNewProtect = default(uint);
-		VirtualProtect((void*)num, 32u, 32u, &flNewProtect);
+		if (!VirtualProtect((void*)num, 32u, 32u, &flNewProtect))
+		{
+			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for TLS store helper at 0x{num:X16}");
+			return 0;
+		}
 		FlushInstructionCache(GetCurrentProcess(), (void*)num, 32u);
 		return num;
 	}
@@ -3591,7 +3615,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return GuestNativeCallExitReason.Exception;
 			}
 			uint oldProtect = default(uint);
-			VirtualProtect(ptr, stubSize, 64u, &oldProtect);
+			if (!VirtualProtect(ptr, stubSize, 64u, &oldProtect))
+			{
+				reason = $"VirtualProtect failed for guest thread entry stub at 0x{(nint)ptr:X16}";
+				return GuestNativeCallExitReason.Exception;
+			}
 			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
 			TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
 			ActiveGuestThreadYieldRequested = false;
@@ -3728,7 +3756,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return GuestNativeCallExitReason.Exception;
 			}
 			uint oldProtect = default(uint);
-			VirtualProtect(ptr, stubSize, 64u, &oldProtect);
+			if (!VirtualProtect(ptr, stubSize, 64u, &oldProtect))
+			{
+				reason = $"VirtualProtect failed for guest continuation stub at 0x{(nint)ptr:X16}";
+				return GuestNativeCallExitReason.Exception;
+			}
 			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
 			TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
 			ActiveGuestThreadYieldRequested = false;
@@ -3988,7 +4020,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return false;
 			}
 			uint num5 = default(uint);
-			VirtualProtect(ptr, stubSize, 64u, &num5);
+			if (!VirtualProtect(ptr, stubSize, 64u, &num5))
+			{
+				LastError = $"VirtualProtect failed for guest entry stub at 0x{(nint)ptr:X16}";
+				result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+				return false;
+			}
 			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
 			if (_hostRspSlotStorage != 0)
 			{
