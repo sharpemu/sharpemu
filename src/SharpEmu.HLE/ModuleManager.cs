@@ -47,6 +47,7 @@ public sealed class ModuleManager : IModuleManager
                     var handler = CreateHandler(type, method, instances);
                     if (!_dispatchTable.TryAdd(exportInfo.Value.Nid, handler))
                     {
+                        Console.Error.WriteLine($"[HLE] Duplicate NID '{exportInfo.Value.Nid}' ({exportInfo.Value.ExportName}) — already registered, skipping.");
                         continue;
                     }
 
@@ -105,6 +106,7 @@ public sealed class ModuleManager : IModuleManager
 
         if (!_dispatchTable.TryGetValue(nid, out var function) || !_exportTable.TryGetValue(nid, out var export))
         {
+            Console.Error.WriteLine($"[HLE] NID '{nid}' not found in dispatch table.");
             context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             return false;
@@ -112,10 +114,12 @@ public sealed class ModuleManager : IModuleManager
 
         if ((export.Target & context.TargetGeneration) == 0)
         {
-            context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-            result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            Console.Error.WriteLine($"[HLE] NID '{nid}' ({export.Name}) found but not implemented for generation {context.TargetGeneration} (targets: {export.Target}).");
+            context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
+            result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED;
             return false;
         }
+
 
         context.ClearRaxWriteFlag();
         int ret = ((SysAbiFunction)function).Invoke(context);
