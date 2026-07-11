@@ -13,6 +13,8 @@ public static class KernelExports
     private static readonly object _coredumpGate = new();
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
+    private const uint Gen4CompiledSdkVersion = 0x05000000;
+    private const uint Gen5CompiledSdkVersion = 0x09000000;
 
     private readonly record struct CxaDestructorEntry(
         ulong Function,
@@ -26,7 +28,24 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int KernelGetCompiledSdkVersion(CpuContext ctx)
     {
-        _ = ctx;
+        var versionAddress = ctx[CpuRegister.Rdi];
+        if (versionAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var sdkVersion = ctx.TargetGeneration == Generation.Gen5
+            ? Gen5CompiledSdkVersion
+            : Gen4CompiledSdkVersion;
+
+        if (!ctx.TryWriteUInt32(versionAddress, sdkVersion))
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
