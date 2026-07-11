@@ -11,7 +11,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Application.Resources>
     <Color x:Key="SystemAccentColor">#7C5CFC</Color>
 
-    <SolidColorBrush x:Key="BgBrush" Color="#0D1017" />
+    <LinearGradientBrush x:Key="BgBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+      <GradientStop Offset="0" Color="#12151F" />
+      <GradientStop Offset="0.55" Color="#0D1017" />
+      <GradientStop Offset="1" Color="#0B0D14" />
+    </LinearGradientBrush>
+
     <SolidColorBrush x:Key="ChromeBrush" Color="#090C12" />
     <SolidColorBrush x:Key="CardBrush" Color="#141924" />
     <SolidColorBrush x:Key="CardBorderBrush" Color="#232B3A" />
@@ -24,6 +29,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
     <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
     <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
+    <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
+    <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
   </Application.Resources>
 
   <Application.Styles>
@@ -38,7 +45,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="{StaticResource CardBrush}" />
       <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Padding" Value="16" />
     </Style>
 
@@ -59,6 +66,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
       <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+
+    <Style Selector="TextBox">
+      <Setter Property="CornerRadius" Value="8" />
     </Style>
 
     <Style Selector="Button.accent">
@@ -98,6 +109,41 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     </Style>
 
+    <Style Selector="ToggleButton.ghost">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="CornerRadius" Value="8" />
+    </Style>
+    <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+    <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+
+    <Style Selector="ContextMenu">
+      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Padding" Value="6" />
+    </Style>
+    <Style Selector="ContextMenu MenuItem">
+      <Setter Property="Padding" Value="10,7" />
+      <Setter Property="CornerRadius" Value="7" />
+    </Style>
+    <Style Selector="ContextMenu Separator">
+      <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="Height" Value="1" />
+      <Setter Property="Margin" Value="8,4" />
+    </Style>
+
     <Style Selector="ListBox.console">
       <Setter Property="Background" Value="#0B0E14" />
       <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New, monospace" />
@@ -108,10 +154,44 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="MinHeight" Value="0" />
     </Style>
 
-    <Style Selector="ListBox.library ListBoxItem">
-      <Setter Property="CornerRadius" Value="8" />
-      <Setter Property="Margin" Value="4,2" />
-      <Setter Property="Padding" Value="8,4" />
+    <!-- Cover-art library grid -->
+    <Style Selector="ListBox.tileGrid ListBoxItem">
+      <Setter Property="Padding" Value="10" />
+      <Setter Property="Margin" Value="5" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover">
+      <Setter Property="RenderTransform" Value="translateY(-3px)" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+    </Style>
+
+    <Style Selector="Border.coverShadow">
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="BoxShadow" Value="0 6 14 0 #55000000" />
+    </Style>
+    <Style Selector="Border.coverClip">
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     </Style>
   </Application.Styles>
 

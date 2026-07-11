@@ -14,6 +14,9 @@ public sealed class GuiSettings
 
     public List<string> GameFolders { get; set; } = new();
 
+    /// <summary>Eboot paths hidden from the library via "Remove from library".</summary>
+    public List<string> ExcludedGames { get; set; } = new();
+
     public string LogLevel { get; set; } = "Info";
 
     public int ImportTraceLimit { get; set; }
