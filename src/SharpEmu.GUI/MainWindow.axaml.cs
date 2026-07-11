@@ -44,6 +44,13 @@ public partial class MainWindow : Window
     private string? _emulatorExePath;
     private bool _isRunning;
     private int _autoScrollTicks;
+
+    // Discord Rich Presence state.
+    private readonly long _launcherStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    private DiscordRichPresence? _discord;
+    private string? _runningGameName;
+    private string? _runningGameTitleId;
+    private long _runningSinceUnixSeconds;
     private int _detailLoadGeneration;
     private int _backdropGeneration;
 
@@ -82,12 +89,17 @@ public partial class MainWindow : Window
         RescanButton.Click += async (_, _) => await RescanLibraryAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
-        StopButton.Click += (_, _) => _emulator?.Stop();
+        StopButton.Click += (_, _) => StopEmulator();
         ClearLogButton.Click += (_, _) => _consoleLines.Clear();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         OptionsToggle.IsCheckedChanged += (_, _) => OptionsPanel.IsVisible = OptionsToggle.IsChecked == true;
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true;
         TitleMusicToggle.IsCheckedChanged += (_, _) => OnTitleMusicToggled();
+        DiscordToggle.IsCheckedChanged += (_, _) =>
+        {
+            _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
+            UpdateDiscordPresence();
+        };
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
@@ -164,7 +176,7 @@ public partial class MainWindow : Window
 
         if ((pressed & 0x2000) != 0) // Circle
         {
-            _emulator?.Stop();
+            StopEmulator();
         }
 
         _previousPadButtons = pad.Buttons;
@@ -235,7 +247,43 @@ public partial class MainWindow : Window
         _settings = GuiSettings.Load();
         ApplySettingsToControls();
         LocateEmulator();
+        UpdateDiscordPresence();
         await RescanLibraryAsync();
+    }
+
+    // ---- Discord Rich Presence ----
+
+    /// <summary>
+    /// Publishes the launcher state to Discord: browsing while idle, the
+    /// running game (with elapsed time) during emulation. No-ops when
+    /// disabled or when no Discord application ID is configured.
+    /// </summary>
+    private void UpdateDiscordPresence()
+    {
+        if (!_settings.DiscordRichPresence || _settings.DiscordClientId.Length == 0)
+        {
+            _discord?.Dispose();
+            _discord = null;
+            return;
+        }
+
+        _discord ??= new DiscordRichPresence(_settings.DiscordClientId);
+        if (_isRunning && _runningGameName is { } gameName)
+        {
+            _discord.SetPresence(
+                $"Playing {gameName}",
+                _runningGameTitleId,
+                _runningSinceUnixSeconds);
+        }
+        else
+        {
+            // Discord does not render activities without timestamps, so the
+            // browsing state carries the launcher's start time.
+            _discord.SetPresence(
+                "Browsing the library",
+                $"{_allGames.Count} game(s)",
+                _launcherStartUnixSeconds);
+        }
     }
 
     private void OnWindowClosing()
@@ -245,6 +293,7 @@ public partial class MainWindow : Window
         _consoleFlushTimer.Stop();
         _gamepadTimer.Stop();
         _sndPreview.Stop();
+        _discord?.Dispose();
         _emulator?.Dispose();
         DropFileLog();
     }
@@ -275,6 +324,7 @@ public partial class MainWindow : Window
         StrictToggle.IsChecked = _settings.StrictDynlibResolution;
         LogToFileToggle.IsChecked = _settings.LogToFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
+        DiscordToggle.IsChecked = _settings.DiscordRichPresence;
     }
 
     private void ReadControlsIntoSettings()
@@ -284,6 +334,7 @@ public partial class MainWindow : Window
         _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         _settings.LogToFile = LogToFileToggle.IsChecked == true;
         _settings.PlayTitleMusic = TitleMusicToggle.IsChecked == true;
+        _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
     }
 
     private string SelectedLogLevel()
@@ -382,6 +433,7 @@ public partial class MainWindow : Window
         _allGames.AddRange(games);
         RefreshVisibleGames();
         LoadGameDetailsInBackground(games);
+        UpdateDiscordPresence();
         StatusBarRight.Text = folders.Length == 0
             ? "Add a game folder to populate the library."
             : $"Library scanned: {games.Count} game(s) in {folders.Length} folder(s).";
@@ -1009,10 +1061,38 @@ public partial class MainWindow : Window
 
         _emulator = emulator;
         _isRunning = true;
+        _runningGameName = displayName;
+        _runningGameTitleId = _allGames
+            .FirstOrDefault(game => game.Path.Equals(ebootPath, StringComparison.OrdinalIgnoreCase))?
+            .TitleId;
+        _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         StatusDot.Fill = SuccessLineBrush;
         StatusText.Text = $"Running — {displayName}";
         StatusBarRight.Text = $"Running {displayName}";
         UpdateRunButtons();
+        UpdateDiscordPresence();
+    }
+
+    /// <summary>
+    /// Stops the running game and updates status/presence immediately. The
+    /// process-exit path still runs when the corpse is collected, but a game
+    /// wedged in a GPU driver call can keep its process alive for a long
+    /// time after termination — the launcher should not look (or tell
+    /// Discord it is) "playing" during that window.
+    /// </summary>
+    private void StopEmulator()
+    {
+        if (!_isRunning)
+        {
+            return;
+        }
+
+        _emulator?.Stop();
+        _runningGameName = null;
+        _runningGameTitleId = null;
+        StatusText.Text = "Stopping…";
+        StatusBarRight.Text = "Stopping…";
+        UpdateDiscordPresence();
     }
 
     /// <summary>
@@ -1069,7 +1149,10 @@ public partial class MainWindow : Window
         StatusDot.Fill = exitCode == 0 ? (IBrush)SuccessLineBrush : ErrorLineBrush;
         StatusText.Text = $"Exited with code {exitCode} ({meaning})";
         StatusBarRight.Text = "Idle";
+        _runningGameName = null;
+        _runningGameTitleId = null;
         UpdateRunButtons();
+        UpdateDiscordPresence();
     }
 
     private void UpdateRunButtons()

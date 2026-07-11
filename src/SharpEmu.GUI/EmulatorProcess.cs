@@ -85,6 +85,14 @@ internal sealed class EmulatorProcess : IDisposable
                 return;
             }
 
+            // Prefer terminating the job: it kills the whole tree, including
+            // any children the emulator spawned, even when the main process
+            // is wedged in a GPU driver call.
+            if (_jobHandle != 0)
+            {
+                _ = TerminateJobObject(_jobHandle, 1);
+            }
+
             if (_processHandle != 0)
             {
                 _ = TerminateProcess(_processHandle, 1);
@@ -638,6 +646,10 @@ internal sealed class EmulatorProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(nint process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(nint job, uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

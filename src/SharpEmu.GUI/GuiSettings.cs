@@ -31,6 +31,16 @@ public sealed class GuiSettings
 
     public string? EmulatorPath { get; set; }
 
+    /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
+    public bool DiscordRichPresence { get; set; } = true;
+
+    /// <summary>
+    /// Discord application ID used for Rich Presence; the default is the
+    /// SharpEmu application. Override to rebrand what Discord shows as
+    /// "Playing …" (register at discord.com/developers/applications).
+    /// </summary>
+    public string DiscordClientId { get; set; } = "1525606762248540221";
+
     // The emulator is portable and keeps its data next to the executable;
     // the GUI follows the same convention.
     public static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "gui-settings.json");
