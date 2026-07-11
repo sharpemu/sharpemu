@@ -953,10 +953,11 @@ internal static unsafe class VulkanVideoPresenter
     {
         if (HostMainThread.IsAvailable)
         {
-            // AppKit (and therefore GLFW) traps when touched off the process
-            // main thread on macOS, so hand the whole window loop to the
-            // main-thread pump the CLI parked for us. _thread only marks the
-            // presenter as running; Run() clears it on exit either way.
+            // GLFW windowing must run on the process main thread (AppKit on
+            // macOS, X11's single event queue on Linux), so hand the whole
+            // window loop to the main-thread pump the CLI parked for us.
+            // _thread only marks the presenter as running; Run() clears it on
+            // exit either way.
             _thread = Thread.CurrentThread;
             HostMainThread.SetShutdownRequestHandler(RequestClose);
             HostMainThread.Post(Run);

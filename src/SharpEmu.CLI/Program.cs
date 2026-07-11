@@ -80,13 +80,21 @@ internal static partial class Program
             return 5;
         }
 
-        if (OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())
         {
-            PreloadMacVulkanLoader();
+            if (OperatingSystem.IsMacOS())
+            {
+                PreloadMacVulkanLoader();
+            }
 
-            // AppKit (and therefore GLFW windowing) must run on the process
-            // main thread on macOS. Emulation moves to a worker thread and
-            // the main thread services window work the video presenter posts.
+            // GLFW requires window creation and event processing on the
+            // process main thread: AppKit demands it on macOS, and X11 has a
+            // single event queue that must be serviced from the main thread
+            // (a window created and polled off it may never map, which showed
+            // as a running game with no visible window on Linux). Emulation
+            // moves to a worker thread and the main thread services the window
+            // work the video presenter posts. Windows keeps a per-thread event
+            // queue, so its window stays on the presenter's own thread.
             var exitCode = 0;
             HostMainThread.Enable();
             var emulation = new Thread(() =>
