@@ -400,6 +400,22 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
         string processImageName)
     {
+        // Real libc reads procParam->sceLibcParam during its own initialization — before
+        // any other module or application initializer — and calls the title's replacement
+        // allocator bootstrap (user_malloc_init). Skipping this leaves the title's global
+        // allocator unconstructed and its static-init cascade dereferencing null.
+        // Note: if a real (LLE) libc module is ever preloaded successfully, its own init
+        // performs this call and this HLE bootstrap must be skipped instead.
+        var mallocReplaceResult = RunLibcMallocReplaceInitializer(
+            mainImage,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols);
+        if (mallocReplaceResult is not null)
+        {
+            return mallocReplaceResult;
+        }
+
         var moduleStartResult = RunPreloadedModuleInitializers(
             loadedModuleImages,
             generation,
@@ -413,6 +429,42 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         // On current PS5 dumps DT_INIT commonly resolves to imageBase+0x10, which is inside
         // the mapped ELF header rather than a callable guest routine. Startup must remain
         // guest-driven until the PS5 init/module ABI is identified precisely.
+        return null;
+    }
+
+    private OrbisGen2Result? RunLibcMallocReplaceInitializer(
+        SelfImage mainImage,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
+    {
+        if (!LibcParamBootstrap.TryResolveUserMallocInit(
+                _virtualMemory,
+                mainImage.ProcParamAddress,
+                out var userMallocInit,
+                out var detail))
+        {
+            Log.Info($"sceLibcParam malloc replace: skipped ({detail})");
+            return null;
+        }
+
+        Log.Info($"sceLibcParam malloc replace: {detail}");
+        Log.Info($"Calling user_malloc_init at 0x{userMallocInit:X16}");
+
+        var result = _cpuDispatcher.DispatchModuleInitializer(
+            userMallocInit,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            "sceLibcParam:user_malloc_init",
+            _cpuExecutionOptions);
+        if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            Log.Error($"user_malloc_init failed: {result}");
+            return result;
+        }
+
+        Log.Info("user_malloc_init completed");
         return null;
     }
 
