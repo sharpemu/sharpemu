@@ -75,6 +75,11 @@ internal static partial class Program
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
 
+        if (!CheckHostArchitecture())
+        {
+            return 5;
+        }
+
         if (OperatingSystem.IsMacOS())
         {
             PreloadMacVulkanLoader();
@@ -105,6 +110,37 @@ internal static partial class Program
         }
 
         return RunEmulator(args, isMitigatedChild);
+    }
+
+    /// <summary>
+    /// The supported host execution model, checked before any emulation
+    /// starts: the CPU backend executes guest x86-64 code natively, so the
+    /// host process must be x86-64 — win-x64/linux-x64 on x64 hardware, or
+    /// osx-x64 under Rosetta 2 on Apple Silicon (Rosetta translates the
+    /// whole process, so it still reports as X64 here). An arm64 process
+    /// (e.g. the osx-arm64 build) can browse the GUI but cannot run games;
+    /// failing up front distinguishes that from MoltenVK, signal-handler,
+    /// or guest-memory startup problems.
+    /// </summary>
+    private static bool CheckHostArchitecture()
+    {
+        if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
+        {
+            return true;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][ERROR] Unsupported process architecture " +
+            $"{RuntimeInformation.ProcessArchitecture}: guest code executes " +
+            "natively, so SharpEmu must run as an x86-64 process.");
+        if (OperatingSystem.IsMacOS())
+        {
+            Console.Error.WriteLine(
+                "[LOADER][ERROR] On Apple Silicon, use the osx-x64 build under " +
+                "Rosetta 2 (install with: softwareupdate --install-rosetta).");
+        }
+
+        return false;
     }
 
     /// <summary>
