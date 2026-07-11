@@ -14,6 +14,7 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelRuntimeCompatExports
 {
+    private const int Efault = 14;
     private const ulong TlsErrnoOffset = 0x40;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
     private const ulong StackChkGuardFieldOffset = 0x10;
@@ -226,8 +227,11 @@ public static class KernelRuntimeCompatExports
         var now = DateTimeOffset.UtcNow;
         var seconds = now.ToUnixTimeSeconds();
         var microseconds = (now.Ticks % TimeSpan.TicksPerSecond) / 10;
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)microseconds)))
+
+        Span<byte> timevalBuffer = stackalloc byte[16];
+        BinaryPrimitives.WriteInt64LittleEndian(timevalBuffer, seconds);
+        BinaryPrimitives.WriteInt64LittleEndian(timevalBuffer[sizeof(long)..], microseconds);
+        if (!ctx.Memory.TryWrite(timeAddress, timevalBuffer))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -249,18 +253,28 @@ public static class KernelRuntimeCompatExports
         var seconds = now.ToUnixTimeSeconds();
         var microseconds = (now.Ticks % TimeSpan.TicksPerSecond) / 10;
 
-        if (timeAddress != 0 &&
-            (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-             !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)microseconds))))
+        if (timeAddress != 0)
         {
-            return -1;
+            Span<byte> timevalBuffer = stackalloc byte[16];
+            BinaryPrimitives.WriteInt64LittleEndian(timevalBuffer, seconds);
+            BinaryPrimitives.WriteInt64LittleEndian(timevalBuffer[sizeof(long)..], microseconds);
+            if (!ctx.Memory.TryWrite(timeAddress, timevalBuffer))
+            {
+                TrySetErrno(ctx, Efault);
+                return -1;
+            }
         }
 
-        if (timezoneAddress != 0 &&
-            (!ctx.TryWriteInt32(timezoneAddress, 0) ||
-             !ctx.TryWriteInt32(timezoneAddress + sizeof(int), 0)))
+        if (timezoneAddress != 0)
         {
-            return -1;
+            Span<byte> timezoneBuffer = stackalloc byte[8];
+            BinaryPrimitives.WriteInt32LittleEndian(timezoneBuffer, 0);
+            BinaryPrimitives.WriteInt32LittleEndian(timezoneBuffer[sizeof(int)..], 0);
+            if (!ctx.Memory.TryWrite(timezoneAddress, timezoneBuffer))
+            {
+                TrySetErrno(ctx, Efault);
+                return -1;
+            }
         }
 
         ctx[CpuRegister.Rax] = 0;
