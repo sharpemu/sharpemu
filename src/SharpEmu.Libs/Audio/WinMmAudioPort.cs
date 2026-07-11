@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Audio;
 
-internal sealed class WinMmAudioPort : IDisposable
+internal sealed class WinMmAudioPort : IAudioBackend
 {
     private const uint WaveMapper = uint.MaxValue;
     private const uint CallbackEvent = 0x0005_0000;

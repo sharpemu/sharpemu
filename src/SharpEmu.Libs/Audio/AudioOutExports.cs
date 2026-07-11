@@ -27,7 +27,7 @@ public static class AudioOutExports
             int channels,
             int bytesPerSample,
             bool isFloat,
-            WinMmAudioPort? backend)
+            IAudioBackend? backend)
         {
             UserId = userId;
             Type = type;
@@ -48,7 +48,7 @@ public static class AudioOutExports
         public int Channels { get; }
         public int BytesPerSample { get; }
         public bool IsFloat { get; }
-        public WinMmAudioPort? Backend { get; }
+        public IAudioBackend? Backend { get; }
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
 
@@ -103,18 +103,35 @@ public static class AudioOutExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        WinMmAudioPort? backend = null;
-        string backendName;
-        try
+        IAudioBackend? backend = null;
+        string backendName = "silent";
+        if (OperatingSystem.IsWindows())
         {
-            backend = new WinMmAudioPort(frequency);
-            backendName = "winmm";
+            try
+            {
+                backend = new WinMmAudioPort(frequency);
+                backendName = "winmm";
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] AudioOut winmm backend unavailable: {exception.Message}");
+            }
         }
-        catch (Exception exception)
+
+        if (backend is null)
         {
-            backendName = "silent";
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] AudioOut host backend unavailable: {exception.Message}");
+            try
+            {
+                backend = new OpenAlAudioPort(frequency);
+                backendName = "openal";
+            }
+            catch (Exception exception)
+            {
+                backendName = "silent";
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] AudioOut host backend unavailable: {exception.Message}");
+            }
         }
 
         var handle = Interlocked.Increment(ref _nextPortHandle);
