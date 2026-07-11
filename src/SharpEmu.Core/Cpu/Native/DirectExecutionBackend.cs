@@ -1120,10 +1120,35 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				0x75, 0xF5,
 				0xC3,
 			],
-			// "Q3VBxCXhUHs" (memcpy) intentionally excluded: the earlier "rep movsb" intrinsic
-			// had no bounds/null checking and crashed with a read at -1 right after a null-dst
-			// memset recovery in the same NGS2 audio streaming code path. The C# HLE memcpy
-			// already fails safely via TryReadCompat/TryWriteCompat instead of crashing.
+			// memcpy: guarded native copy. The first "rep movsb" intrinsic had no bounds/null
+			// checking and crashed with a read at -1 right after a null-dst memset recovery in
+			// the NGS2 audio streaming code path, so it was temporarily pulled in favor of the
+			// safe C# HLE memcpy. That detour costs a full import dispatch per call - far too
+			// slow for a function this hot - so this stub keeps the native leaf path and adds
+			// the same guards as memset below: it silently returns dst without copying when dst
+			// or src is null/low-page (< 0x10000) or outside canonical user space, or when len
+			// is 0 or absurd (> 512MB).
+			"Q3VBxCXhUHs" =>
+			[
+				0x48, 0x89, 0xF8,                                           // mov rax, rdi (return dst)
+				0x48, 0x81, 0xFF, 0x00, 0x00, 0x01, 0x00,                   // cmp rdi, 0x10000
+				0x72, 0x31,                                                 // jb done
+				0x49, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, // mov r8, 0x800000000000
+				0x4C, 0x39, 0xC7,                                           // cmp rdi, r8
+				0x73, 0x22,                                                 // jae done
+				0x48, 0x81, 0xFE, 0x00, 0x00, 0x01, 0x00,                   // cmp rsi, 0x10000
+				0x72, 0x19,                                                 // jb done
+				0x4C, 0x39, 0xC6,                                           // cmp rsi, r8
+				0x73, 0x14,                                                 // jae done
+				0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x20,                   // cmp rdx, 0x20000000
+				0x77, 0x0B,                                                 // ja done
+				0x48, 0x85, 0xD2,                                           // test rdx, rdx
+				0x74, 0x06,                                                 // jz done
+				0x48, 0x89, 0xD1,                                           // mov rcx, rdx
+				0xFC,                                                       // cld
+				0xF3, 0xA4,                                                 // rep movsb
+				0xC3,                                                       // done: ret
+			],
 			// memset: guarded native fill. An earlier unguarded version crashed with a write AV
 			// at address 0 (NGS2 audio streaming init memsets a never-populated buffer field),
 			// so this one mirrors the HLE guards and silently returns dst without writing when
@@ -1380,11 +1405,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return exportName switch
 		{
 			"memmove" or
-			// memset/memcpy excluded: the HLE implementations in KernelMemoryCompatExports.cs
-			// fail safely (return an error code) on bad pointers via TryReadCompat/TryWriteCompat
-			// null/bounds checks (observed hit during Quake's CL_Init, where a still-unidentified
-			// upstream bug calls memcpy/memset with a null destination); the raw LLE routines have
-			// no such guard and crash with an access violation instead.
+			// memset/memcpy excluded: the raw LLE routines have no null/bounds guard and crash
+			// with an access violation on bad pointers (observed hit during Quake's CL_Init,
+			// where a still-unidentified upstream bug calls memcpy/memset with a null
+			// destination). Both are instead served by the guarded native intrinsics in
+			// TryCreateNativeImportIntrinsic, which fail safely without leaving the leaf path.
 			"memcmp" or
 			// _Getpctype must come from the game's own Dinkumware libc when one is bundled:
 			// it returns a pointer to that CRT's ctype bitmask table, whose bit layout
