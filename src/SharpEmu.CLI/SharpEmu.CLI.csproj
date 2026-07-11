@@ -65,7 +65,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Target Name="KeepGlfwOutsideSingleFile" AfterTargets="ComputeResolvedFilesToPublishList">
     <ItemGroup>
       <_GlfwPublishFiles Include="@(ResolvedFileToPublish)"
-                         Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw'))" />
+                         Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw')) Or $([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('libglfw'))" />
       <ResolvedFileToPublish Remove="@(_GlfwPublishFiles)" />
       <ResolvedFileToPublish Include="@(_GlfwPublishFiles)">
         <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
