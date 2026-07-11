@@ -76,6 +76,8 @@ internal static partial class Program
 
         SharpEmuLog.MinimumLevel = logLevel;
 
+        Log.Info(BuildInfo.Banner);
+
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
 
