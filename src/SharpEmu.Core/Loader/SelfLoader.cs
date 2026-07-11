@@ -10,11 +10,13 @@ using SharpEmu.Core;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Loader;
 
 public sealed class SelfLoader : ISelfLoader
 {
+    private static readonly SharpEmuLogger Log = SharpEmuLog.For("Loader");
     private const uint SelfMagic = 0x4F153D1D;
     private const ulong SelfSegmentFlag = 0x800;
     private const int PageSize = 0x1000;
@@ -155,7 +157,7 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         var tlsModuleId = _nextTlsModuleId == 0 ? 1u : _nextTlsModuleId;
-        Console.Error.WriteLine($"[LOADER][TLS] load_start clear={clearVirtualMemory} next={_nextTlsModuleId} assigned={tlsModuleId}");
+        Log.Debug($"TLS load_start clear={clearVirtualMemory} next={_nextTlsModuleId} assigned={tlsModuleId}");
 
         var loadContext = ParseLayout(imageData);
         var elfHeader = ReadUnmanaged<ElfHeader>(imageData, loadContext.ElfOffset);
@@ -255,7 +257,7 @@ public sealed class SelfLoader : ISelfLoader
         {
             _nextTlsModuleId++;
         }
-        Console.Error.WriteLine($"[LOADER][TLS] load_done assigned={tlsModuleId} next={_nextTlsModuleId}");
+        Log.Debug($"TLS load_done assigned={tlsModuleId} next={_nextTlsModuleId}");
 
         return new SelfImage(
             loadContext.IsSelf,
@@ -403,15 +405,15 @@ public sealed class SelfLoader : ISelfLoader
 
             var virtualAddress = header.VirtualAddress + imageBase;
 
-            Console.Error.WriteLine($"[LOADER] Segment {index}: VAddr=0x{virtualAddress:X16}, FileSize=0x{header.FileSize:X}, MemSize=0x{header.MemorySize:X}, Align=0x{header.Alignment:X}");
+            Log.Debug($"Segment {index}: VAddr=0x{virtualAddress:X16}, FileSize=0x{header.FileSize:X}, MemSize=0x{header.MemorySize:X}, Align=0x{header.Alignment:X}");
             if (header.Alignment > 1)
             {
                 var vaddrMod = virtualAddress % header.Alignment;
                 var offsetMod = header.Offset % header.Alignment;
                 if (vaddrMod != offsetMod)
                 {
-                    Console.Error.WriteLine(
-                        $"[LOADER] WARNING: Segment {index} ELF alignment mismatch! " +
+                    Log.Warning(
+                        $"Segment {index} ELF alignment mismatch! " +
                         $"VAddr=0x{virtualAddress:X}, Offset=0x{header.Offset:X}, Align=0x{header.Alignment:X}, " +
                         $"VAddr%Align=0x{vaddrMod:X}, Offset%Align=0x{offsetMod:X}");
                 }
@@ -671,13 +673,13 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (descriptor.ValueKind == RelocationValueKind.TlsModuleId)
                 {
-                    Console.Error.WriteLine(
-                        $"[LOADER][TLS] Patching DTPMOD64 at 0x{descriptor.TargetAddress:X} with module id 0x{targetValue:X}");
+                    Log.Debug(
+                        $"Patching DTPMOD64 at 0x{descriptor.TargetAddress:X} with module id 0x{targetValue:X}");
                 }
                 else
                 {
-                    Console.Error.WriteLine($"[LOADER] !!! CRITICAL !!! Patching address 0x{descriptor.TargetAddress:X} with INVALID value 0x{targetValue:X} for NID {descriptor.ImportNid ?? "(null)"}");
-                    Console.Error.WriteLine($"[LOADER]   SymbolValue=0x{descriptor.SymbolValue:X}, Addend=0x{descriptor.Addend:X}, StubAddress=0x{(addressesByNid.TryGetValue(descriptor.ImportNid ?? "", out var sa) ? sa : 0):X}");
+                    Log.Warning($"!!! CRITICAL !!! Patching address 0x{descriptor.TargetAddress:X} with INVALID value 0x{targetValue:X} for NID {descriptor.ImportNid ?? "(null)"}");
+                    Log.Warning($"  SymbolValue=0x{descriptor.SymbolValue:X}, Addend=0x{descriptor.Addend:X}, StubAddress=0x{(addressesByNid.TryGetValue(descriptor.ImportNid ?? "", out var sa) ? sa : 0):X}");
                 }
             }
 
@@ -689,8 +691,8 @@ public sealed class SelfLoader : ISelfLoader
             if (descriptor.TargetAddress >= 0x00000008030FC300UL &&
                 descriptor.TargetAddress <= 0x00000008030FC3F0UL)
             {
-                Console.Error.WriteLine(
-                    $"[LOADER][RELOC] target=0x{descriptor.TargetAddress:X16} value=0x{targetValue:X16} addend=0x{descriptor.Addend:X} nid={(descriptor.ImportNid ?? "<sym>")}");
+                Log.Debug(
+                    $"[RELOC] target=0x{descriptor.TargetAddress:X16} value=0x{targetValue:X16} addend=0x{descriptor.Addend:X} nid={(descriptor.ImportNid ?? "<sym>")}");
             }
         }
 
@@ -783,15 +785,15 @@ public sealed class SelfLoader : ISelfLoader
         {
             if (IsFocusRelocationOffset(relocation.Offset, imageBase))
             {
-                Console.Error.WriteLine(
-                    $"[LOADER][FOCUS][SCAN] off=0x{relocation.Offset:X16} type={relocation.Type} sym={relocation.SymbolIndex} addend=0x{relocation.Addend:X}");
+                Log.Debug(
+                    $"[FOCUS][SCAN] off=0x{relocation.Offset:X16} type={relocation.Type} sym={relocation.SymbolIndex} addend=0x{relocation.Addend:X}");
             }
 
             if (!IsSupportedRelocationType(relocation.Type))
             {
                 if (IsFocusRelocationOffset(relocation.Offset, imageBase))
                 {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] unsupported type={relocation.Type}");
+                    Log.Debug($"[FOCUS][SKIP] unsupported type={relocation.Type}");
                 }
                 continue;
             }
@@ -800,7 +802,7 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (IsFocusRelocationOffset(relocation.Offset, imageBase))
                 {
-                    Console.Error.WriteLine("[LOADER][FOCUS][SKIP] target address not mapped");
+                    Log.Debug("[FOCUS][SKIP] target address not mapped");
                 }
                 continue;
             }
@@ -840,7 +842,7 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
                 {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol read failed index={symbolIndex}");
+                    Log.Debug($"[FOCUS][SKIP] symbol read failed index={symbolIndex}");
                 }
                 continue;
             }
@@ -852,10 +854,9 @@ public sealed class SelfLoader : ISelfLoader
                 var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
                 if (symbolAddress == 0)
                 {
-                    Console.Error.WriteLine(
-                        $"[LOADER] Skipping local relocation with invalid symbol value 0x{symbol.Value:X} " +
+                    Log.Warning(
+                        $"Skipping local relocation with invalid symbol value 0x{symbol.Value:X} " +
                         $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
-                    continue;
                 }
 
                 descriptors.Add(new RelocationDescriptor(
@@ -873,10 +874,9 @@ public sealed class SelfLoader : ISelfLoader
                 var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
                 if (symbolAddress == 0)
                 {
-                    Console.Error.WriteLine(
-                        $"[LOADER] Skipping relocation with invalid symbol value 0x{symbol.Value:X} " +
+                    Log.Warning(
+                        $"Skipping relocation with invalid symbol value 0x{symbol.Value:X} " +
                         $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
-                    continue;
                 }
 
                 descriptors.Add(new RelocationDescriptor(
@@ -893,7 +893,7 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
                 {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] bind={symbolBind} not importable");
+                    Log.Debug($"[FOCUS][SKIP] bind={symbolBind} not importable");
                 }
                 continue;
             }
@@ -902,7 +902,7 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
                 {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol name read failed offset={symbol.NameOffset}");
+                    Log.Debug($"[FOCUS][SKIP] symbol name read failed offset={symbol.NameOffset}");
                 }
                 continue;
             }
@@ -950,8 +950,8 @@ public sealed class SelfLoader : ISelfLoader
 
         if (sectionSymbols > 0 || dynamicSymbols > 0)
         {
-            Console.Error.WriteLine(
-                $"[LOADER] Runtime symbol index populated: section={sectionSymbols}, dynamic={dynamicSymbols}, total={runtimeSymbols.Count}");
+            Log.Info(
+                $"Runtime symbol index populated: section={sectionSymbols}, dynamic={dynamicSymbols}, total={runtimeSymbols.Count}");
         }
     }
 
@@ -1025,8 +1025,8 @@ public sealed class SelfLoader : ISelfLoader
 
         if (preInitializers.Count != 0 || initializers.Count != 0)
         {
-            Console.Error.WriteLine(
-                $"[LOADER] Initializers discovered: preinit={preInitializers.Count}, init={initializers.Count}");
+            Log.Info(
+                $"Initializers discovered: preinit={preInitializers.Count}, init={initializers.Count}");
         }
     }
 
@@ -1409,8 +1409,8 @@ public sealed class SelfLoader : ISelfLoader
 
         var requiredBytes = checked((ulong)orderedImportNids.Count * ImportStubSlotSize);
         var mapSize = AlignUp(Math.Max(requiredBytes, (ulong)PageSize), PageSize);
-        Console.Error.WriteLine(
-            $"[LOADER] CreateImportStubMapping: nids={orderedImportNids.Count}, required=0x{requiredBytes:X}, map_size=0x{mapSize:X}");
+        Log.Debug(
+            $"CreateImportStubMapping: nids={orderedImportNids.Count}, required=0x{requiredBytes:X}, map_size=0x{mapSize:X}");
         if (mapSize > int.MaxValue)
         {
             throw new NotSupportedException("Import stub mapping exceeds 2 GB and is not supported.");
@@ -1842,16 +1842,16 @@ public sealed class SelfLoader : ISelfLoader
         tableBytes = GC.AllocateUninitializedArray<byte>((int)size);
 
         var guestAddr = location + imageBase;
-        Console.Error.WriteLine($"[LOADER] TryLoadTableBytes: trying guest address 0x{guestAddr:X}");
+        Log.Debug($"TryLoadTableBytes: trying guest address 0x{guestAddr:X}");
         if (virtualMemory.TryRead(guestAddr, tableBytes))
         {
-            Console.Error.WriteLine($"[LOADER] TryLoadTableBytes: loaded from guest memory at 0x{guestAddr:X}");
+            Log.Debug($"TryLoadTableBytes: loaded from guest memory at 0x{guestAddr:X}");
             return true;
         }
 
         if (virtualMemory.TryRead(location, tableBytes))
         {
-            Console.Error.WriteLine($"[LOADER] TryLoadTableBytes: loaded from absolute guest address 0x{location:X}");
+            Log.Debug($"TryLoadTableBytes: loaded from absolute guest address 0x{location:X}");
             return true;
         }
 
@@ -1859,11 +1859,11 @@ public sealed class SelfLoader : ISelfLoader
         {
             var slice = elfData.Slice((int)location, (int)size);
             tableBytes = slice.ToArray();
-            Console.Error.WriteLine($"[LOADER] TryLoadTableBytes: loaded from elfData as file offset at 0x{location:X}");
+            Log.Debug($"TryLoadTableBytes: loaded from elfData as file offset at 0x{location:X}");
             return true;
         }
 
-        Console.Error.WriteLine($"[LOADER] TryLoadTableBytes: FAILED for location 0x{location:X}");
+        Log.Warning($"TryLoadTableBytes: FAILED for location 0x{location:X}");
         tableBytes = Array.Empty<byte>();
         return false;
     }
@@ -1920,17 +1920,17 @@ public sealed class SelfLoader : ISelfLoader
 
     private static ulong ResolveMappedAddressOrFallback(IVirtualMemory virtualMemory, ulong address, ulong imageBase)
     {
-        Console.Error.WriteLine($"[LOADER][TEST] ResolveMappedAddressOrFallback addr=0x{address:X} imageBase=0x{imageBase:X16}");
+        Log.Debug($"ResolveMappedAddressOrFallback addr=0x{address:X} imageBase=0x{imageBase:X16}");
 
         if (address == 0)
         {
-            Console.Error.WriteLine("[LOADER][TEST] -> return 0 (null)");
+            Log.Debug("-> return 0 (null)");
             return 0;
         }
 
         if (TryResolveMappedAddress(virtualMemory, address, imageBase, 1, out var resolved))
         {
-            Console.Error.WriteLine($"[LOADER][TEST] -> resolved raw 0x{resolved:X16}");
+            Log.Debug($"-> resolved raw 0x{resolved:X16}");
             return resolved;
         }
 
@@ -1939,18 +1939,18 @@ public sealed class SelfLoader : ISelfLoader
             var rebased = address + imageBase;
             if (TryResolveMappedAddress(virtualMemory, rebased, imageBase, 1, out var resolvedRebased))
             {
-                Console.Error.WriteLine($"[LOADER][TEST] -> resolved rebased 0x{resolvedRebased:X16}");
+                Log.Debug($"-> resolved rebased 0x{resolvedRebased:X16}");
                 return resolvedRebased;
             }
         }
 
         if (address < 0x10000)
         {
-            Console.Error.WriteLine($"[LOADER][TEST] -> reject small 0x{address:X}");
+            Log.Debug($"-> reject small 0x{address:X}");
             return 0;
         }
 
-        Console.Error.WriteLine($"[LOADER][TEST] -> fallback raw 0x{address:X}");
+        Log.Debug($"-> fallback raw 0x{address:X}");
         return address;
     }
 

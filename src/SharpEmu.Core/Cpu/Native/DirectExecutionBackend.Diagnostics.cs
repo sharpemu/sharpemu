@@ -8,6 +8,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -43,7 +44,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO]   Recent import calls ({_recentImportTraceCount}):");
+		Log.Info($"   Recent import calls ({_recentImportTraceCount}):");
 		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + _recentImportTrace.Length) % _recentImportTrace.Length;
 		for (int i = 0; i < _recentImportTraceCount; i++)
 		{
@@ -51,8 +52,8 @@ public sealed partial class DirectExecutionBackend
 			var entry = _recentImportTrace[num2];
 			if (!string.IsNullOrEmpty(entry.Nid))
 			{
-				Console.Error.WriteLine(
-					$"[LOADER][INFO]     #{entry.DispatchIndex} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
+				Log.Info(
+					$"     #{entry.DispatchIndex} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
 					$"rdi=0x{entry.Arg0:X16} rsi=0x{entry.Arg1:X16} rdx=0x{entry.Arg2:X16}");
 			}
 		}
@@ -91,12 +92,12 @@ public sealed partial class DirectExecutionBackend
 						list.Add(num7);
 						if (num2 < 32)
 						{
-							Console.Error.WriteLine($"[LOADER][INFO] Suspicious unresolved pointer: slot=0x{num7:X16} value=0x{value2:X16}");
+							Log.Info($"Suspicious unresolved pointer: slot=0x{num7:X16} value=0x{value2:X16}");
 							num2++;
 						}
 						if (num >= 16384)
 						{
-							Console.Error.WriteLine($"[LOADER][WARNING] Suspicious unresolved pointer scan reached cap ({16384}); truncating.");
+							Log.Warning($"Suspicious unresolved pointer scan reached cap ({16384}); truncating.");
 							return list;
 						}
 					}
@@ -106,7 +107,7 @@ public sealed partial class DirectExecutionBackend
 		}
 		if (num != 0)
 		{
-			Console.Error.WriteLine($"[LOADER][WARNING] Suspicious unresolved pointer hits: {num}");
+			Log.Warning($"Suspicious unresolved pointer hits: {num}");
 		}
 		return list;
 	}
@@ -121,18 +122,18 @@ public sealed partial class DirectExecutionBackend
 		Span<byte> destination = stackalloc byte[128];
 		if (!cpuContext.Memory.TryRead(returnRip, destination))
 		{
-			Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} return-rip probe: unreadable @0x{returnRip:X16}");
+			Log.Debug($"Import#{dispatchIndex} return-rip probe: unreadable @0x{returnRip:X16}");
 			return;
 		}
 		string value = BitConverter.ToString(destination.ToArray()).Replace("-", " ");
-		Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} return-rip bytes @0x{returnRip:X16}: {value}");
+		Log.Debug($"Import#{dispatchIndex} return-rip bytes @0x{returnRip:X16}: {value}");
 		if (destination[0] == byte.MaxValue && (destination[1] == 21 || destination[1] == 37))
 		{
 			int num = BitConverter.ToInt32(destination.Slice(2, 4));
 			ulong num2 = returnRip + 6 + (ulong)num;
 			if (cpuContext.TryReadUInt64(num2, out var value2))
 			{
-				Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} return-rip slot: [0x{num2:X16}] = 0x{value2:X16}");
+				Log.Debug($"Import#{dispatchIndex} return-rip slot: [0x{num2:X16}] = 0x{value2:X16}");
 			}
 		}
 		if (destination[0] == 72 && destination[1] == 139 && destination[2] == 5)
@@ -141,7 +142,7 @@ public sealed partial class DirectExecutionBackend
 			ulong num4 = returnRip + 7 + (ulong)num3;
 			if (cpuContext.TryReadUInt64(num4, out var value3))
 			{
-				Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} return-rip mov-slot: [0x{num4:X16}] = 0x{value3:X16}");
+				Log.Debug($"Import#{dispatchIndex} return-rip mov-slot: [0x{num4:X16}] = 0x{value3:X16}");
 			}
 		}
 		for (int i = 0; i + 6 <= destination.Length; i++)
@@ -153,7 +154,7 @@ public sealed partial class DirectExecutionBackend
 				ulong num7 = num6 + 6 + (ulong)num5;
 				if (cpuContext.TryReadUInt64(num7, out var value4))
 				{
-					Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} near-indirect @{num6:X16}: slot=0x{num7:X16} val=0x{value4:X16}");
+					Log.Debug($"Import#{dispatchIndex} near-indirect @{num6:X16}: slot=0x{num7:X16} val=0x{value4:X16}");
 				}
 			}
 		}
@@ -168,7 +169,7 @@ public sealed partial class DirectExecutionBackend
 			int rel32 = BitConverter.ToInt32(destination.Slice(i + 1, 4));
 			ulong callRip = returnRip + (ulong)i;
 			ulong target = unchecked((ulong)((long)(callRip + 5) + rel32));
-			Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} near-call @{callRip:X16}: target=0x{target:X16}");
+			Log.Debug($"Import#{dispatchIndex} near-call @{callRip:X16}: target=0x{target:X16}");
 			for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
 			{
 				if (_importEntries[importIndex].Address != target)
@@ -179,21 +180,21 @@ public sealed partial class DirectExecutionBackend
 				string nid = _importEntries[importIndex].Nid;
 				if (_moduleManager.TryGetExport(nid, out var export))
 				{
-					Console.Error.WriteLine(
-						$"[LOADER][TRACE] Import#{dispatchIndex} near-call import: index={importIndex} {export.LibraryName}:{export.Name} ({nid})");
+					Log.Debug(
+						$"Import#{dispatchIndex} near-call import: index={importIndex} {export.LibraryName}:{export.Name} ({nid})");
 				}
 				else
 				{
-					Console.Error.WriteLine(
-						$"[LOADER][TRACE] Import#{dispatchIndex} near-call import: index={importIndex} nid={nid}");
+					Log.Debug(
+						$"Import#{dispatchIndex} near-call import: index={importIndex} nid={nid}");
 				}
 				break;
 			}
 
 			if (cpuContext.Memory.TryRead(target, targetBytes))
 			{
-				Console.Error.WriteLine(
-					$"[LOADER][TRACE] Import#{dispatchIndex} near-call target bytes @0x{target:X16}: " +
+				Log.Debug(
+					$"Import#{dispatchIndex} near-call target bytes @0x{target:X16}: " +
 					BitConverter.ToString(targetBytes.ToArray()).Replace("-", " "));
 				if (targetBytes[0] == 0xFF && targetBytes[1] == 0x25)
 				{
@@ -201,8 +202,8 @@ public sealed partial class DirectExecutionBackend
 					ulong slot = unchecked((ulong)((long)(target + 6) + slotRel32));
 					if (cpuContext.TryReadUInt64(slot, out var slotTarget))
 					{
-						Console.Error.WriteLine(
-							$"[LOADER][TRACE] Import#{dispatchIndex} near-call PLT slot: [0x{slot:X16}] = 0x{slotTarget:X16}");
+						Log.Debug(
+							$"Import#{dispatchIndex} near-call PLT slot: [0x{slot:X16}] = 0x{slotTarget:X16}");
 						for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
 						{
 							if (_importEntries[importIndex].Address != slotTarget)
@@ -213,13 +214,13 @@ public sealed partial class DirectExecutionBackend
 							string nid = _importEntries[importIndex].Nid;
 							if (_moduleManager.TryGetExport(nid, out var export))
 							{
-								Console.Error.WriteLine(
-									$"[LOADER][TRACE] Import#{dispatchIndex} near-call PLT import: index={importIndex} {export.LibraryName}:{export.Name} ({nid})");
+								Log.Debug(
+									$"Import#{dispatchIndex} near-call PLT import: index={importIndex} {export.LibraryName}:{export.Name} ({nid})");
 							}
 							else
 							{
-								Console.Error.WriteLine(
-									$"[LOADER][TRACE] Import#{dispatchIndex} near-call PLT import: index={importIndex} nid={nid}");
+								Log.Debug(
+									$"Import#{dispatchIndex} near-call PLT import: index={importIndex} nid={nid}");
 							}
 							break;
 						}

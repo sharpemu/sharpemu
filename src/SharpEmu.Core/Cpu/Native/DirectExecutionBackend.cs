@@ -11,11 +11,13 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu.Native;
 
 public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, IGuestThreadScheduler, IDisposable
 {
+	private static readonly SharpEmuLogger Log = SharpEmuLog.For("Native");
 	private const int ImportLoopHistoryLength = 2048;
 
 	private const int ImportLoopWideDiversityWindow = 768;
