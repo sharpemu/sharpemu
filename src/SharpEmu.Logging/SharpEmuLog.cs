@@ -12,9 +12,7 @@ public static class SharpEmuLog
         new(StringComparer.Ordinal);
     private static readonly object ConfigurationSync = new();
     private static volatile LogLevel _minimumLevel = ResolveMinimumLevelFromEnvironment();
-    private static ISharpEmuLogSink _sink = new ConsoleLogSink(
-        useColors: ResolveColorEnabledFromEnvironment(),
-        includeTimestamp: false);
+    private static ISharpEmuLogSink _sink = ResolveSinkFromEnvironment();
 
     public static LogLevel MinimumLevel
     {
@@ -37,11 +35,26 @@ public static class SharpEmuLog
             ArgumentNullException.ThrowIfNull(value);
             lock (ConfigurationSync)
             {
+                if (ReferenceEquals(_sink, value))
+                {
+                    return;
+                }
+
+                if (_sink is IDisposable disposable)
+                {
+                    try
+                    {
+                        disposable.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 _sink = value;
             }
         }
     }
-
     public static void Configure(LogLevel? minimumLevel = null, ISharpEmuLogSink? sink = null)
     {
         if (minimumLevel.HasValue)
@@ -52,6 +65,22 @@ public static class SharpEmuLog
         if (sink is not null)
         {
             Sink = sink;
+        }
+    }
+
+    /// <summary>
+    /// Disposes the active sink if it implements <see cref="IDisposable"/>.
+    /// Call at shutdown to flush file buffers. Logging after this call
+    /// continues to work for non-disposable sinks (e.g. <see cref="ConsoleLogSink"/>).
+    /// </summary>
+    public static void Shutdown()
+    {
+        lock (ConfigurationSync)
+        {
+            if (_sink is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
         }
     }
 
@@ -144,6 +173,30 @@ public static class SharpEmuLog
 
         var raw = Environment.GetEnvironmentVariable("SHARPEMU_LOG_NO_COLOR");
         return !IsTrueLike(raw);
+    }
+
+    private static ISharpEmuLogSink ResolveSinkFromEnvironment()
+    {
+        var consoleSink = new ConsoleLogSink(
+            useColors: ResolveColorEnabledFromEnvironment(),
+            includeTimestamp: false);
+
+        var logFilePath = Environment.GetEnvironmentVariable("SHARPEMU_LOG_FILE");
+        if (!string.IsNullOrWhiteSpace(logFilePath))
+        {
+            try
+            {
+                var fileSink = new FileLogSink(logFilePath, append: true, includeTimestamp: true);
+                return new CompositeLogSink(consoleSink, fileSink);
+            }
+            catch (Exception ex)
+            {
+                // Bootstrapping — the logging system is not yet active, so stderr is the only channel.
+                Console.Error.WriteLine($"[SHARPEMU_LOG] Failed to open log file '{logFilePath}': {ex.Message}");
+            }
+        }
+
+        return consoleSink;
     }
 
     private static bool IsTrueLike(string? text)

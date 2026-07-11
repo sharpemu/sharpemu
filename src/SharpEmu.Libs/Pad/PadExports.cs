@@ -30,6 +30,7 @@ public static class PadExports
     public static int PadInit(CpuContext ctx)
     {
         _initialized = true;
+        DualSenseReader.EnsureStarted();
         return ctx.SetReturn(0);
     }
 
@@ -59,7 +60,10 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
-        Console.Error.WriteLine("[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options");
+        DualSenseReader.EnsureStarted();
+        Console.Error.WriteLine(DualSenseReader.TryGetState(out _)
+            ? "[LOADER][INFO] Controls: DualSense connected (keyboard fallback also active)."
+            : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense will be used automatically when plugged in.");
         return ctx.SetReturn(PrimaryPadHandle);
     }
 
@@ -170,23 +174,116 @@ public static class PadExports
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    [SysAbiExport(
+        Nid = "yFVnOdGxvZY",
+        ExportName = "scePadSetVibration",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetVibration(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var parameterAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadVibrationParam: { uint8_t largeMotor; uint8_t smallMotor; }
+        Span<byte> parameter = stackalloc byte[2];
+        if (!ctx.Memory.TryRead(parameterAddress, parameter))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        DualSenseReader.SetRumble(parameter[0], parameter[1]);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "RR4novUEENY",
+        ExportName = "scePadSetLightBar",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetLightBar(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var parameterAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadColor: { uint8_t r; uint8_t g; uint8_t b; uint8_t reserved; }
+        Span<byte> color = stackalloc byte[4];
+        if (!ctx.Memory.TryRead(parameterAddress, color))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        DualSenseReader.SetLightbar(color[0], color[1], color[2]);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "DscD1i9HX1w",
+        ExportName = "scePadResetLightBar",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadResetLightBar(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        DualSenseReader.ResetLightbar();
+        return ctx.SetReturn(0);
+    }
+
     private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)
     {
         Span<byte> data = stackalloc byte[PadDataSize];
         data.Clear();
         var acceptsKeyboardInput = IsEmulatorWindowFocused();
         var buttons = acceptsKeyboardInput ? ReadKeyboardButtons() : 0;
-        BinaryPrimitives.WriteUInt32LittleEndian(data[0x00..], buttons);
         var leftX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x41), IsKeyDown(0x44)) : (byte)128;
         var leftY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x57), IsKeyDown(0x53)) : (byte)128;
         var rightX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x4A), IsKeyDown(0x4C)) : (byte)128;
         var rightY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x49), IsKeyDown(0x4B)) : (byte)128;
+        var l2 = acceptsKeyboardInput && IsKeyDown(0x52) ? (byte)255 : (byte)0;
+        var r2 = acceptsKeyboardInput && IsKeyDown(0x46) ? (byte)255 : (byte)0;
+
+        if (DualSenseReader.TryGetState(out var pad))
+        {
+            buttons |= pad.Buttons;
+            // The controller stick wins whenever it is deflected past a
+            // small deadzone; otherwise any keyboard value stays.
+            leftX = MergeAxis(pad.LeftX, leftX);
+            leftY = MergeAxis(pad.LeftY, leftY);
+            rightX = MergeAxis(pad.RightX, rightX);
+            rightY = MergeAxis(pad.RightY, rightY);
+            l2 = Math.Max(l2, pad.L2);
+            r2 = Math.Max(r2, pad.R2);
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(data[0x00..], buttons);
         data[0x04] = leftX;
         data[0x05] = leftY;
         data[0x06] = rightX;
         data[0x07] = rightY;
-        data[0x08] = acceptsKeyboardInput && IsKeyDown(0x52) ? (byte)255 : (byte)0;
-        data[0x09] = acceptsKeyboardInput && IsKeyDown(0x46) ? (byte)255 : (byte)0;
+        data[0x08] = l2;
+        data[0x09] = r2;
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
         data[0x4C] = 1;
         var timestampTicks = Stopwatch.GetTimestamp();
@@ -253,5 +350,11 @@ public static class PadExports
         if (negative && !positive) return 0;
         if (positive && !negative) return 255;
         return 128;
+    }
+
+    private static byte MergeAxis(byte controller, byte keyboard)
+    {
+        const int Deadzone = 10;
+        return Math.Abs(controller - 128) > Deadzone ? controller : keyboard;
     }
 }
