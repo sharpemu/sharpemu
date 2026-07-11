@@ -180,9 +180,13 @@ public static unsafe class HostMemory
                     // Commit inside an existing mapping: the pages are already
                     // backed (demand paged), so only apply the protection.
                     var start = AlignDown((ulong)address, PageSize);
-                    var end = Math.Min(existing.End, AlignUp((ulong)address + alignedSize, PageSize));
-                    if (end <= start)
+                    var end = AlignUp((ulong)address + alignedSize, PageSize);
+                    if (end <= start || end > existing.End)
                     {
+                        // Win32 fails a commit that runs past its reservation
+                        // instead of committing a prefix; committing partially
+                        // here would let callers believe the whole range is
+                        // usable.
                         return null;
                     }
 

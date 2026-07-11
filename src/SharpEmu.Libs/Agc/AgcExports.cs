@@ -4631,8 +4631,12 @@ public static class AgcExports
                 $"-p{sourcePitch}-f{descriptor.Format}-t{descriptor.TileMode}.bin");
             File.WriteAllBytes(path, source);
         }
-        catch (IOException)
+        catch (Exception exception)
         {
+            // A bad SHARPEMU_TEXTURE_DUMP_DIR (permissions, invalid path)
+            // must not take the emulator down; the dump is a debug aid.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Texture dump failed: {exception.Message}");
         }
     }
 

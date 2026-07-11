@@ -72,7 +72,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
     {
         lock (_gate)
         {
-            if (_disposed)
+            if (_disposed || _queue == 0)
             {
                 return false;
             }
@@ -84,10 +84,16 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
                 Monitor.Exit(_gate);
                 try
                 {
+                    // Dispose can free the event while this thread waits
+                    // outside the gate; treat that like a timed-out wait.
                     if (!_completion.WaitOne(TimeSpan.FromSeconds(1)))
                     {
                         return false;
                     }
+                }
+                catch (ObjectDisposedException)
+                {
+                    return false;
                 }
                 finally
                 {
@@ -135,6 +141,13 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
             {
                 if (AudioQueueStart(_queue, 0) != 0)
                 {
+                    // A queue that never starts never drains, so later
+                    // submits would block on backpressure until their
+                    // timeout. Tear the queue down and fail fast instead.
+                    _ = AudioQueueDispose(_queue, true);
+                    _queue = 0;
+                    _queuedPcmBytes = 0;
+                    _freeBuffers.Clear();
                     return false;
                 }
 
@@ -164,6 +177,10 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
             }
 
             _freeBuffers.Clear();
+            // Wake any submitter waiting on backpressure before the event
+            // goes away; a late waiter observes ObjectDisposedException and
+            // bails out in Submit.
+            _completion.Set();
             _completion.Dispose();
             if (_selfHandle.IsAllocated)
             {
