@@ -194,13 +194,14 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
-            seconds = elapsedTicks / Stopwatch.Frequency;
-            nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
+            GetProcessMonotonicTime(out seconds, out nanoseconds);
         }
 
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        Span<byte> timespecBuffer = stackalloc byte[16];
+        BinaryPrimitives.WriteInt64LittleEndian(timespecBuffer, seconds);
+        BinaryPrimitives.WriteInt64LittleEndian(timespecBuffer[sizeof(long)..], nanoseconds);
+
+        if (!ctx.Memory.TryWrite(timeAddress, timespecBuffer))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -615,6 +616,13 @@ public static class KernelRuntimeCompatExports
     {
         var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
         return address != 0 && ctx.TryWriteInt32(address, value);
+    }
+
+    internal static void GetProcessMonotonicTime(out long seconds, out long nanoseconds)
+    {
+        var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
+        seconds = elapsedTicks / Stopwatch.Frequency;
+        nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
     }
 
     [SysAbiExport(
@@ -1713,7 +1721,7 @@ public static class KernelRuntimeCompatExports
                 return null;
             }
 
-            Span<byte> stub = stackalloc byte[]
+            ReadOnlySpan<byte> stub = stackalloc byte[]
             {
                 0x0F, 0x31,
                 0x48, 0xC1, 0xE2, 0x20,
@@ -1721,7 +1729,14 @@ public static class KernelRuntimeCompatExports
                 0xC3,
             };
 
-            Marshal.Copy(stub.ToArray(), 0, stubAddress, stub.Length);
+            unsafe
+            {
+                fixed (byte* src = stub)
+                {
+                    Buffer.MemoryCopy(src, (void*)stubAddress, stub.Length, stub.Length);
+                }
+            }
+
             return Marshal.GetDelegateForFunctionPointer<RdtscDelegate>(stubAddress);
         }
         catch

@@ -67,6 +67,13 @@ public static class KernelMemoryCompatExports
     private const int Einval = 22;
     private const int Erange = 34;
     private const int Struncate = 80;
+    private const int ClockRealtime = 0;
+    private const int ClockVirtual = 1;
+    private const int ClockProf = 2;
+    private const int ClockMonotonic = 4;
+    private const int ClockUptime = 5;
+    private const int ClockRealtimeFast = 10;
+    private const int ClockMonotonicFast = 12;
     private const nuint DefaultLibcHeapAlignment = 16;
     private const ushort KernelStatModeDirectory = 0x41FF;
     private const ushort KernelStatModeRegular = 0x81FF;
@@ -1993,23 +2000,55 @@ public static class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int ClockGettime(CpuContext ctx)
     {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
         var timespecAddress = ctx[CpuRegister.Rsi];
         if (timespecAddress == 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+            ctx[CpuRegister.Rax] = unchecked((ulong)-1);
+            return -1;
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var seconds = now.ToUnixTimeSeconds();
-        var nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
-        if (!ctx.TryWriteUInt64(timespecAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timespecAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        long seconds;
+        long nanoseconds;
+        switch (clockId)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            case ClockRealtime:
+            case ClockRealtimeFast:
+            case ClockVirtual:
+            case ClockProf:
+            {
+                var now = DateTimeOffset.UtcNow;
+                seconds = now.ToUnixTimeSeconds();
+                nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+                break;
+            }
+
+            case ClockMonotonic:
+            case ClockMonotonicFast:
+            case ClockUptime:
+                KernelRuntimeCompatExports.GetProcessMonotonicTime(out seconds, out nanoseconds);
+                break;
+
+            default:
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+                ctx[CpuRegister.Rax] = unchecked((ulong)-1);
+                return -1;
+        }
+
+        Span<byte> timespecBuffer = stackalloc byte[16];
+        BinaryPrimitives.WriteInt64LittleEndian(timespecBuffer, seconds);
+        BinaryPrimitives.WriteInt64LittleEndian(timespecBuffer[sizeof(long)..], nanoseconds);
+
+        if (!ctx.Memory.TryWrite(timespecAddress, timespecBuffer))
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+            ctx[CpuRegister.Rax] = unchecked((ulong)-1);
+            return -1;
         }
 
         ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return 0;
     }
 
     [SysAbiExport(
