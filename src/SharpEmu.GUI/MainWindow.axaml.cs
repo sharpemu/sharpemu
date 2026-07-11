@@ -40,7 +40,7 @@ public partial class MainWindow : Window
     private string? _emulatorExePath;
     private bool _isRunning;
     private int _autoScrollTicks;
-    private int _coverLoadGeneration;
+    private int _detailLoadGeneration;
 
     public MainWindow()
     {
@@ -238,24 +238,27 @@ public partial class MainWindow : Window
         _allGames.Clear();
         _allGames.AddRange(games);
         RefreshVisibleGames();
-        LoadCoversInBackground(games);
+        LoadGameDetailsInBackground(games);
         StatusBarRight.Text = folders.Length == 0
             ? "Add a game folder to populate the library."
             : $"Library scanned: {games.Count} game(s) in {folders.Length} folder(s).";
     }
 
     /// <summary>
-    /// Decodes cover art off the UI thread and attaches each bitmap to its
-    /// game as it becomes ready. A newer scan invalidates older loads.
+    /// Enriches games off the UI thread — decodes cover art and totals each
+    /// game's install folder size — posting results back as they become
+    /// ready. A newer scan invalidates older loads.
     /// </summary>
-    private void LoadCoversInBackground(IReadOnlyList<GameEntry> games)
+    private void LoadGameDetailsInBackground(IReadOnlyList<GameEntry> games)
     {
-        var generation = ++_coverLoadGeneration;
+        var generation = ++_detailLoadGeneration;
         _ = Task.Run(() =>
         {
+            // Covers first: they are cheap and the most visible, so the grid
+            // fills with art before the (potentially slow) size pass runs.
             foreach (var game in games)
             {
-                if (generation != _coverLoadGeneration)
+                if (generation != _detailLoadGeneration)
                 {
                     return;
                 }
@@ -271,7 +274,7 @@ public partial class MainWindow : Window
                     var bitmap = Bitmap.DecodeToWidth(stream, 312);
                     Dispatcher.UIThread.Post(() =>
                     {
-                        if (generation == _coverLoadGeneration)
+                        if (generation == _detailLoadGeneration)
                         {
                             game.Cover = bitmap;
                         }
@@ -282,7 +285,60 @@ public partial class MainWindow : Window
                     // A missing or undecodable image keeps the placeholder.
                 }
             }
+
+            foreach (var game in games)
+            {
+                if (generation != _detailLoadGeneration)
+                {
+                    return;
+                }
+
+                var size = ComputeInstallSize(game.Path);
+                if (size > 0)
+                {
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (generation == _detailLoadGeneration)
+                        {
+                            game.SizeBytes = size;
+                        }
+                    });
+                }
+            }
         });
+    }
+
+    /// <summary>
+    /// Totals the size of the game's install folder (the directory holding
+    /// the eboot), which is far more accurate than the eboot alone.
+    /// </summary>
+    private static long ComputeInstallSize(string ebootPath)
+    {
+        var directory = Path.GetDirectoryName(ebootPath);
+        if (directory is null)
+        {
+            return 0;
+        }
+
+        long total = 0;
+        try
+        {
+            var enumeration = new EnumerationOptions
+            {
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = true,
+            };
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", enumeration))
+            {
+                total += file.Length;
+            }
+        }
+        catch (Exception)
+        {
+            // Fall back to whatever was accumulated so far.
+        }
+
+        return total;
     }
 
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)

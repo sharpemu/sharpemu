@@ -26,13 +26,14 @@ public sealed class GameEntry : INotifyPropertyChanged
 
     private Bitmap? _cover;
     private IBrush? _placeholderBrush;
+    private long _sizeBytes;
 
     public GameEntry(string name, string? titleId, string path, long sizeBytes, string? coverPath)
     {
         Name = name;
         TitleId = titleId;
         Path = path;
-        SizeBytes = sizeBytes;
+        _sizeBytes = sizeBytes;
         CoverPath = coverPath;
         Initials = ComputeInitials(name);
     }
@@ -45,7 +46,26 @@ public sealed class GameEntry : INotifyPropertyChanged
 
     public string Path { get; }
 
-    public long SizeBytes { get; }
+    /// <summary>
+    /// Total size of the game. Initially the eboot's own size from the scan;
+    /// replaced with the full install folder size once computed in the
+    /// background.
+    /// </summary>
+    public long SizeBytes
+    {
+        get => _sizeBytes;
+        set
+        {
+            if (_sizeBytes == value)
+            {
+                return;
+            }
+
+            _sizeBytes = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SizeBytes)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Detail)));
+        }
+    }
 
     /// <summary>Path to the cover art image shipped with the game, if found.</summary>
     public string? CoverPath { get; }
