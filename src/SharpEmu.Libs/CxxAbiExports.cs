@@ -93,7 +93,7 @@ public static class CxaGuardExports
     }
 
     [SysAbiExport(
-        Nid = "",
+        Nid = "9rAeANT2tyE",
         ExportName = "__cxa_guard_release",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
@@ -142,7 +142,7 @@ public static class CxaGuardExports
     }
 
     [SysAbiExport(
-        Nid = "",
+        Nid = "2emaaluWzUw",
         ExportName = "__cxa_guard_abort",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]

@@ -74,6 +74,21 @@ public static class KernelExports
     public static int Exit(CpuContext ctx) => RequestProcessExit(ctx, "exit");
 
     [SysAbiExport(
+        Nid = "L1SBTkC+Cvw",
+        ExportName = "abort",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Abort(CpuContext ctx)
+    {
+        // Route through the same graceful guest-entry-exit path as exit(): letting the call
+        // fall through to the host's native abort() does not unwind the guest thread cleanly.
+        Console.Error.WriteLine("[LOADER][INFO] abort() called by guest - terminating");
+        GuestThreadExecution.RequestCurrentEntryExit("abort", -1);
+        ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "XKRegsFpEpk",
         ExportName = "catchReturnFromMain",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -263,20 +278,14 @@ public static class KernelExports
         ExportName = "pthread_create",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadCreate(CpuContext ctx)
-    {
-        return PthreadCreate(ctx);
-    }
+    public static int PosixPthreadCreate(CpuContext ctx) => PthreadCreate(ctx);
 
     [SysAbiExport(
         Nid = "Jmi+9w9u0E4",
         ExportName = "pthread_create_name_np",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadCreateNameNp(CpuContext ctx)
-    {
-        return PthreadCreate(ctx);
-    }
+    public static int PosixPthreadCreateNameNp(CpuContext ctx) => PthreadCreate(ctx);
 
     [SysAbiExport(
         Nid = "3kg7rT0NQIs",
@@ -353,10 +362,7 @@ public static class KernelExports
         ExportName = "pthread_join",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadJoin(CpuContext ctx)
-    {
-        return PthreadJoin(ctx);
-    }
+    public static int PosixPthreadJoin(CpuContext ctx) => PthreadJoin(ctx);
 
     [SysAbiExport(
         Nid = "wuCroIGjt2g",
@@ -453,5 +459,68 @@ public static class KernelExports
         GuestThreadExecution.RequestCurrentEntryExit(syscallName, status);
         ctx[CpuRegister.Rax] = unchecked((ulong)status);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Unidentified kernel NIDs observed at runtime; stubbed to return 0 until they are
+    // resolved against scripts/ps5_names.txt.
+    [SysAbiExport(
+        Nid = "9T2pDF2Ryqg",
+        ExportName = "sceKernelUnknown9T2p",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknown9T2p(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "TU-d9PfIHPM",
+        ExportName = "sceKernelUnknownTU",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknownTU(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "iWQWrwiSt8A",
+        ExportName = "sceKernelUnknowniWQW",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknowniWQW(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "KuOmgKoqCdY",
+        ExportName = "sceKernelUnknownKuOmg",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknownKuOmg(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "RenI1lL1WFk",
+        ExportName = "sceKernelUnknownRenI",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknownRenI(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "pQGpHYopAIY",
+        ExportName = "sceKernelUnknownpQGp",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknownpQGp(CpuContext ctx) => SetZeroReturn(ctx);
+
+    [SysAbiExport(
+        Nid = "Rbvt+5Y2iEw",
+        ExportName = "sceKernelUnknownRbvt",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUnknownRbvt(CpuContext ctx) => SetZeroReturn(ctx);
+
+    // NOTE: "SHtAad20YYM"/"DIxvoy7Ngvk" are sce::Json::Value::getType/getInteger, and
+    // "3GPpjQdAMTw"/"9rAeANT2tyE"/"tsvEmnenz48" are __cxa_guard_acquire/__cxa_guard_release/
+    // __cxa_atexit (verified by hashing against scripts/ps5_names.txt). Do not register them
+    // here as kernel mutex functions: the cxa guards are implemented in CxxAbiExports.cs and
+    // shadowing them breaks every C++ static-init guard in the game.
+
+    private static int SetZeroReturn(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return 0;
     }
 }

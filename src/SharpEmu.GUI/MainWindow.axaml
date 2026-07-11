@@ -263,9 +263,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <TextBlock Classes="fieldLabel" Text="Override log file" />
               <ToggleSwitch x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off" />
             </StackPanel>
-            <StackPanel>
+            <StackPanel Margin="0,0,24,0">
               <TextBlock Classes="fieldLabel" Text="Title music" />
               <ToggleSwitch x:Name="TitleMusicToggle" OnContent="On" OffContent="Off" IsChecked="True" />
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Classes="fieldLabel" Text="Discord presence" />
+              <ToggleSwitch x:Name="DiscordToggle" OnContent="On" OffContent="Off" />
             </StackPanel>
           </WrapPanel>
         </StackPanel>

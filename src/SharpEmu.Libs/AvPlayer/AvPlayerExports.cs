@@ -36,6 +36,42 @@ public static class AvPlayerExports
     }
 
     [SysAbiExport(
+        Nid = "JdksQu8pNdQ",
+        ExportName = "sceAvPlayerGetVideoDataEx",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerGetVideoDataEx(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // "UbQoYawOsfY" is sceAvPlayerIsActive, not sceAvPlayerGetVideoDataEx (the previous NID here
+    // was wrong - verified by hashing both names against scripts/ps5_names.txt). No player is
+    // ever actually active in this HLE implementation, so report false/inactive.
+    [SysAbiExport(
+        Nid = "UbQoYawOsfY",
+        ExportName = "sceAvPlayerIsActive",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerIsActive(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "Wnp1OVcrZgk",
+        ExportName = "sceAvPlayerGetAudioData",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerGetAudioData(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "HD1YKVU26-M",
         ExportName = "sceAvPlayerPostInit",
         Target = Generation.Gen4 | Generation.Gen5,

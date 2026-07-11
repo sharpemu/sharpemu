@@ -182,6 +182,13 @@ internal static unsafe class VulkanVideoPresenter
     private static long _enqueuedGuestWorkSequence;
     private static long _completedGuestWorkSequence;
 
+    private static bool ShouldTracePresentedGuestImageContentsForDiagnostics()
+    {
+        var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
+        return string.Equals(mode, "1", StringComparison.Ordinal) ||
+               string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static void EnsureStarted(uint width, uint height)
     {
         if (width == 0 || height == 0)
@@ -279,6 +286,11 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=Submit {width}x{height}");
+        }
+
         lock (_gate)
         {
             if (_closed)
@@ -317,6 +329,11 @@ internal static unsafe class VulkanVideoPresenter
         if (drawKind == GuestDrawKind.None || width == 0 || height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=SubmitGuestDraw({drawKind}) {width}x{height}");
         }
 
         lock (_gate)
@@ -374,6 +391,12 @@ internal static unsafe class VulkanVideoPresenter
         if (pixelSpirv.Length == 0 || width == 0 || height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] vk.submit_call kind=SubmitTranslatedDraw {width}x{height} textures={textures.Count}");
         }
 
         lock (_gate)
@@ -440,6 +463,13 @@ internal static unsafe class VulkanVideoPresenter
             target.Height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] vk.submit_call kind=SubmitOffscreenTranslatedDraw " +
+                $"target=0x{target.Address:X16} {target.Width}x{target.Height} textures={textures.Count}");
         }
 
         lock (_gate)
@@ -569,9 +599,31 @@ internal static unsafe class VulkanVideoPresenter
         var traceSubmission = false;
         lock (_gate)
         {
-            if (_closed ||
-                !_availableGuestImages.ContainsKey(address))
+            var known = _availableGuestImages.ContainsKey(address);
+            if (ShouldTracePresentedGuestImageContentsForDiagnostics())
             {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] vk.submit_call kind=TrySubmitGuestImage addr=0x{address:X16} " +
+                    $"{width}x{height} known={known}");
+            }
+
+            if (_closed)
+            {
+                return false;
+            }
+
+            // The caller (VideoOutExports.SubmitFlip) reports the flip as successful either
+            // way, so an unregistered address means the frame is dropped silently; warn once
+            // per address so that shows up in the log.
+            if (!known)
+            {
+                if (_tracedGuestImageSubmissions.Add((address, width, height)))
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.submit_guest_image_unknown addr=0x{address:X16} " +
+                        $"{width}x{height} - flip target was never registered as a render output");
+                }
+
                 return false;
             }
 
@@ -588,6 +640,19 @@ internal static unsafe class VulkanVideoPresenter
                 RequiredGuestWorkSequence: 0,
                 IsSplash: false,
                 GuestImageAddress: address);
+            if (_thread is not null)
+            {
+                return true;
+            }
+
+            _windowWidth = width;
+            _windowHeight = height;
+            _thread = new Thread(Run)
+            {
+                IsBackground = true,
+                Name = "SharpEmu Vulkan VideoOut",
+            };
+            _thread.Start();
         }
 
         if (traceSubmission)
@@ -599,6 +664,21 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         return true;
+    }
+
+    // Display buffers registered through sceVideoOutRegisterBuffers are valid flip targets
+    // even when no AGC render-target write to them was ever observed.
+    internal static void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
+    {
+        if (address == 0 || guestFormat == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            _availableGuestImages[address] = guestFormat;
+        }
     }
 
     internal static bool IsGpuGuestImageAvailable(
@@ -5033,14 +5113,19 @@ internal static unsafe class VulkanVideoPresenter
                         _renderPass,
                         _extent);
                     if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                        !_firstGuestDrawPresented &&
-                        translatedResources.Textures is
-                        [
-                        { GuestImage: { } guestImage },
-                        ] &&
-                        _tracedGuestImageContents.Add(guestImage.Address))
+                        !_firstGuestDrawPresented)
                     {
-                        TraceGuestImageContents(guestImage);
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] vk.translated_draw kind={presentation.DrawKind} " +
+                            $"textures={translatedResources.Textures.Length}");
+                        foreach (var boundTexture in translatedResources.Textures)
+                        {
+                            if (boundTexture.GuestImage is { } guestImage &&
+                                _tracedGuestImageContents.Add(guestImage.Address))
+                            {
+                                TraceGuestImageContents(guestImage);
+                            }
+                        }
                     }
                 }
                 catch (Exception exception)
@@ -5808,13 +5893,6 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             return false;
-        }
-
-        private static bool ShouldTracePresentedGuestImageContentsForDiagnostics()
-        {
-            var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
-            return string.Equals(mode, "1", StringComparison.Ordinal) ||
-                   string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool ShouldTraceVulkanResources() =>

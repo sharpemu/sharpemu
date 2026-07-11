@@ -860,7 +860,12 @@ public sealed partial class DirectExecutionBackend
 			"vz+pg2zdopI" or // sceKernelGetEventUserData
 			"mJ7aghmgvfc" or // sceKernelGetEventId
 			"23CPPI1tyBY" or // sceKernelGetEventFilter
-			"kwGyyjohI50";   // sceKernelGetEventData
+			"kwGyyjohI50" or // sceKernelGetEventData
+			// _Getpctype is a per-character ctype table lookup; the embedded mcpp preprocessor
+			// re-fetches the table pointer on every isdigit()/isalpha() check, so classifying a
+			// large input legitimately calls it hundreds of thousands of times back-to-back -
+			// real, finite work that would otherwise trip the loop guard.
+			"sUP1hBaouOw";   // _Getpctype
 	}
 
 	private long NextImportDispatchIndex()
