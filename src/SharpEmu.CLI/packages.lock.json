@@ -4,9 +4,9 @@
     "net10.0": {
       "Microsoft.NET.ILLink.Tasks": {
         "type": "Direct",
-        "requested": "[10.0.9, )",
-        "resolved": "10.0.9",
-        "contentHash": "4Iw41e2h7I4t70SJcX2GCmbyKJIlA273Cfm9RJMM050/3VBejGAG1KcthP5Z2L6SQcbfbf6BhNWO26+ZG+GzMg=="
+        "requested": "[10.0.3, )",
+        "resolved": "10.0.3",
+        "contentHash": "0B6nZyCHWXnvmlB559oduOspVdNOnpNXPjhpWVMovLPAsDVG7A4jJR9rzECf67JUzxP8/ee/wA8clwIzJcWNFA=="
       },
       "Avalonia.Angle.Windows.Natives": {
         "type": "Transitive",
@@ -211,6 +211,7 @@
           "Avalonia.Desktop": "[11.3.18, )",
           "Avalonia.Fonts.Inter": "[11.3.18, )",
           "Avalonia.Themes.Fluent": "[11.3.18, )",
+          "SharpEmu.Logging": "[1.0.0, )",
           "Tmds.DBus.Protocol": "[0.21.3, )"
         }
       },
