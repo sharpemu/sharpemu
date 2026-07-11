@@ -1034,6 +1034,43 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    /// <summary>
+    /// GLFW's native Wayland backend does not reliably map the Vulkan window
+    /// with some drivers (notably NVIDIA): the surface presents frames but the
+    /// window never becomes visible, so the game runs with no picture while
+    /// audio works. XWayland is dependable, so on a Wayland session that also
+    /// exposes an X server (DISPLAY set) we steer GLFW to its X11 backend by
+    /// clearing WAYLAND_DISPLAY for our own process before GLFW initializes.
+    /// Empty (rather than unset) makes libwayland's wl_display_connect fail
+    /// instead of falling back to the default "wayland-0" socket, which is
+    /// what makes GLFW pick X11. Opt back into native Wayland with
+    /// SHARPEMU_ENABLE_WAYLAND=1.
+    /// </summary>
+    private static void PreferX11OnLinuxWayland()
+    {
+        if (!OperatingSystem.IsLinux() ||
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_WAYLAND"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var waylandDisplay = Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
+        var x11Display = Environment.GetEnvironmentVariable("DISPLAY");
+        if (string.IsNullOrEmpty(waylandDisplay) || string.IsNullOrEmpty(x11Display))
+        {
+            // Not a Wayland session, or no X server to fall back to — leave it.
+            return;
+        }
+
+        Environment.SetEnvironmentVariable("WAYLAND_DISPLAY", string.Empty);
+        Console.Error.WriteLine(
+            "[LOADER][INFO] Wayland session detected; steering GLFW to X11/XWayland " +
+            "for a reliable window (set SHARPEMU_ENABLE_WAYLAND=1 to force native Wayland).");
+    }
+
     private static void Run()
     {
         uint width;
@@ -1045,6 +1082,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         InitializeMacVulkanLoader();
+        PreferX11OnLinuxWayland();
 
         try
         {
