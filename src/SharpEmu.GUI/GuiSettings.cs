@@ -23,8 +23,19 @@ public sealed class GuiSettings
 
     public bool StrictDynlibResolution { get; set; }
 
-    /// <summary>Mirror emulator output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log.</summary>
+    /// <summary>
+    /// Mirror emulator output to user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log, if <see cref="LogFilePath"/> is null.
+    /// </summary>
     public bool LogToFile { get; set; }
+
+    /// <summary>If <see cref="LogToFile"/> is true it logs to this file path.</summary>
+    public string? LogFilePath { get; set; }
+
+    /// <summary> 
+    /// If <see cref="OverrideLogFile"/> is false it appends &lt;titleId&gt;-&lt;timestamp&gt; to the filename specified by 
+    /// <see cref="LogFilePath"/>. Otherwise it uses the exact filename from <see cref="LogFilePath"/>
+    /// </summary>
+    public bool OverrideLogFile { get; set; }
 
     /// <summary>Loop the selected game's sce_sys/snd0.at9 preview music.</summary>
     public bool PlayTitleMusic { get; set; } = true;
