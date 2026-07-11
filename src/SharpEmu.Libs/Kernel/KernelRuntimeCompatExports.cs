@@ -1469,26 +1469,42 @@ public static class KernelRuntimeCompatExports
             return false;
         }
 
-        var bytes = new List<byte>(Math.Min(maxLength, 64));
-        Span<byte> one = stackalloc byte[1];
-        for (var i = 0; i < maxLength; i++)
+        const int pageSize = 4096;
+        const int inlineChunkSize = 64;
+        Span<byte> buffer = stackalloc byte[Math.Min(maxLength, 512)];
+        var length = 0;
+
+        for (var offset = 0; offset < maxLength && length < buffer.Length;)
         {
-            if (!ctx.Memory.TryRead(address + (ulong)i, one))
+            var current = address + (ulong)offset;
+            var pageRemaining = pageSize - (int)(current & (pageSize - 1));
+            var chunkSize = Math.Min(
+                buffer.Length - length,
+                Math.Min(maxLength - offset, Math.Min(inlineChunkSize, pageRemaining)));
+
+            if (chunkSize <= 0)
             {
                 return false;
             }
 
-            if (one[0] == 0)
+            var chunk = buffer.Slice(length, chunkSize);
+            if (!ctx.Memory.TryRead(current, chunk))
             {
-                value = Encoding.UTF8.GetString(bytes.ToArray());
+                return false;
+            }
+
+            var nulIndex = chunk.IndexOf((byte)0);
+            if (nulIndex >= 0)
+            {
+                value = Encoding.UTF8.GetString(buffer[..(length + nulIndex)]);
                 return true;
             }
 
-            bytes.Add(one[0]);
+            length += chunkSize;
+            offset += chunkSize;
         }
 
-        value = Encoding.UTF8.GetString(bytes.ToArray());
-        return true;
+        return false;
     }
 
     private static ulong GetTlsScratchAddress(CpuContext ctx, ulong offset)

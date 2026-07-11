@@ -52,14 +52,7 @@ public static class KernelExports
         ExportName = "exit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int Exit(CpuContext ctx)
-    {
-        var status = unchecked((int)ctx[CpuRegister.Rdi]);
-        Console.Error.WriteLine($"[LOADER][INFO] exit(status={status})");
-        GuestThreadExecution.RequestCurrentEntryExit("exit", status);
-        ctx[CpuRegister.Rax] = unchecked((ulong)status);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    public static int Exit(CpuContext ctx) => RequestProcessExit(ctx, "exit");
 
     [SysAbiExport(
         Nid = "XKRegsFpEpk",
@@ -172,11 +165,7 @@ public static class KernelExports
         ExportName = "_exit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int UnderscoreExit(CpuContext ctx)
-    {
-        _ = ctx;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    public static int UnderscoreExit(CpuContext ctx) => RequestProcessExit(ctx, "_exit");
 
     [SysAbiExport(
         Nid = "Ac86z8q7T8A",
@@ -436,5 +425,14 @@ public static class KernelExports
     private static bool ShouldTracePthread()
     {
         return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
+    }
+
+    private static int RequestProcessExit(CpuContext ctx, string syscallName)
+    {
+        var status = unchecked((int)ctx[CpuRegister.Rdi]);
+        Console.Error.WriteLine($"[LOADER][INFO] {syscallName}(status={status})");
+        GuestThreadExecution.RequestCurrentEntryExit(syscallName, status);
+        ctx[CpuRegister.Rax] = unchecked((ulong)status);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }
