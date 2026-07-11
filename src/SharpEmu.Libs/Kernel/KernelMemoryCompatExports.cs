@@ -67,13 +67,6 @@ public static class KernelMemoryCompatExports
     private const int Einval = 22;
     private const int Erange = 34;
     private const int Struncate = 80;
-    private const int ClockRealtime = 0;
-    private const int ClockVirtual = 1;
-    private const int ClockProf = 2;
-    private const int ClockMonotonic = 4;
-    private const int ClockUptime = 5;
-    private const int ClockRealtimeFast = 10;
-    private const int ClockMonotonicFast = 12;
     private const nuint DefaultLibcHeapAlignment = 16;
     private const ushort KernelStatModeDirectory = 0x41FF;
     private const ushort KernelStatModeRegular = 0x81FF;
@@ -2011,29 +2004,11 @@ public static class KernelMemoryCompatExports
 
         long seconds;
         long nanoseconds;
-        switch (clockId)
+        if (!KernelRuntimeCompatExports.ResolveClockTime(clockId, out seconds, out nanoseconds))
         {
-            case ClockRealtime:
-            case ClockRealtimeFast:
-            case ClockVirtual:
-            case ClockProf:
-            {
-                var now = DateTimeOffset.UtcNow;
-                seconds = now.ToUnixTimeSeconds();
-                nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
-                break;
-            }
-
-            case ClockMonotonic:
-            case ClockMonotonicFast:
-            case ClockUptime:
-                KernelRuntimeCompatExports.GetProcessMonotonicTime(out seconds, out nanoseconds);
-                break;
-
-            default:
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
-                ctx[CpuRegister.Rax] = unchecked((ulong)-1);
-                return -1;
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+            ctx[CpuRegister.Rax] = unchecked((ulong)-1);
+            return -1;
         }
 
         Span<byte> timespecBuffer = stackalloc byte[16];

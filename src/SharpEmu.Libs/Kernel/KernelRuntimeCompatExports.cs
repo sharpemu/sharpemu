@@ -14,6 +14,15 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelRuntimeCompatExports
 {
+    internal const int ClockRealtime = 0;
+    internal const int ClockVirtual = 1;
+    internal const int ClockProf = 2;
+    internal const int ClockMonotonic = 4;
+    internal const int ClockUptime = 5;
+    internal const int ClockRealtimePrecise = 9;
+    internal const int ClockMonotonicPrecise = 11;
+    internal const int ClockRealtimeFast = 10;
+    internal const int ClockMonotonicFast = 12;
     private const int Efault = 14;
     private const ulong TlsErrnoOffset = 0x40;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
@@ -187,15 +196,9 @@ public static class KernelRuntimeCompatExports
 
         long seconds;
         long nanoseconds;
-        if (clockId == 0)
+        if (!ResolveClockTime(clockId, out seconds, out nanoseconds))
         {
-            var now = DateTimeOffset.UtcNow;
-            seconds = now.ToUnixTimeSeconds();
-            nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
-        }
-        else
-        {
-            GetProcessMonotonicTime(out seconds, out nanoseconds);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         Span<byte> timespecBuffer = stackalloc byte[16];
@@ -630,6 +633,36 @@ public static class KernelRuntimeCompatExports
     {
         var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
         return address != 0 && ctx.TryWriteInt32(address, value);
+    }
+
+    internal static bool ResolveClockTime(int clockId, out long seconds, out long nanoseconds)
+    {
+        switch (clockId)
+        {
+            case ClockRealtime:
+            case ClockRealtimePrecise:
+            case ClockRealtimeFast:
+            case ClockVirtual:
+            case ClockProf:
+            {
+                var now = DateTimeOffset.UtcNow;
+                seconds = now.ToUnixTimeSeconds();
+                nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+                return true;
+            }
+
+            case ClockMonotonic:
+            case ClockMonotonicPrecise:
+            case ClockMonotonicFast:
+            case ClockUptime:
+                GetProcessMonotonicTime(out seconds, out nanoseconds);
+                return true;
+
+            default:
+                seconds = 0;
+                nanoseconds = 0;
+                return false;
+        }
     }
 
     internal static void GetProcessMonotonicTime(out long seconds, out long nanoseconds)
