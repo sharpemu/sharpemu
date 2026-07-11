@@ -16,6 +16,11 @@ body:
         Example title:
         Demon’s Souls (PPSA01341)
 
+        **Before reporting:**
+        - Test the game on a **fresh build from `main`**, not an old release.
+        - Copy the **exact commit SHA** shown at the top of the log.
+        - `DEBUG` and `TRACE` lines are diagnostic context, not errors by themselves; report the last milestone or the first `WARNING`, `ERROR`, or `CRITICAL` line connected to the stop.
+
   - type: input
     id: game_name
     attributes:
@@ -73,10 +78,19 @@ body:
     id: logs
     attributes:
       label: Log File
-      description: Drag and drop your log file here, or click to browse
+      description: Attach the **full** log file (`.log`, `.txt`, or `.zip`). Do not paste only a fragment — the maintainer needs the complete log from launch to crash.
     validations:
-      required: false
+      required: true
       accept: ".log,.txt,.zip"
+
+  - type: input
+    id: last_milestone_first_error
+    attributes:
+      label: Last Milestone / First Error
+      description: Paste the **last useful milestone line** or the **first `WARNING`, `ERROR`, or `CRITICAL` line connected to the stop** from the log. `DEBUG`/`TRACE` lines do not count unless a real error follows them.
+      placeholder: e.g. CpuEngine: native-only  OR  [ERROR] Native backend FAILED: ...
+    validations:
+      required: true
 
   - type: dropdown
     id: operating_system
@@ -119,7 +133,8 @@ body:
     id: emulator_version
     attributes:
       label: Emulator Version / Commit
-      placeholder: e.g. v0.0.1 / a1b2c3d
+      description: Copy the **exact short SHA** from the top of the log. Do not enter just `0.0.1` without a commit hash.
+      placeholder: e.g. a1b2c3d
     validations:
       required: true
 
