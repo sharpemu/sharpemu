@@ -53,6 +53,20 @@ internal static class DualSenseReader
     private static DualSenseState _state;
     private static bool _started;
 
+    // Output (rumble/lightbar) state, all guarded by Gate.
+    private static string? _devicePath;
+    private static bool _bluetooth;
+    private static bool _outputReady;
+    private static bool _lightbarSetupPending;
+    private static byte _outputSequence;
+    private static FileStream? _outputStream;
+    private static byte _motorLeft;
+    private static byte _motorRight;
+    private static byte _lightbarRed;
+    private static byte _lightbarGreen;
+    private static byte _lightbarBlue = 64; // PS-style blue default
+    private static byte _playerLeds = 0x04; // center LED = player 1
+
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
     internal static void EnsureStarted()
     {
@@ -96,6 +110,169 @@ internal static class DualSenseReader
         }
     }
 
+    /// <summary>Sets rumble; large = left/strong motor, small = right/weak.</summary>
+    internal static void SetRumble(byte largeMotor, byte smallMotor)
+    {
+        lock (Gate)
+        {
+            if (_motorLeft == largeMotor && _motorRight == smallMotor)
+            {
+                return;
+            }
+
+            _motorLeft = largeMotor;
+            _motorRight = smallMotor;
+            SendOutputLocked();
+        }
+    }
+
+    internal static void SetLightbar(byte red, byte green, byte blue)
+    {
+        lock (Gate)
+        {
+            if (_lightbarRed == red && _lightbarGreen == green && _lightbarBlue == blue)
+            {
+                return;
+            }
+
+            _lightbarRed = red;
+            _lightbarGreen = green;
+            _lightbarBlue = blue;
+            SendOutputLocked();
+        }
+    }
+
+    internal static void ResetLightbar() => SetLightbar(0, 0, 64);
+
+    private static void OnDeviceIdentified(string path, bool bluetooth)
+    {
+        lock (Gate)
+        {
+            _devicePath = path;
+            _bluetooth = bluetooth;
+            _outputReady = true;
+            _lightbarSetupPending = true;
+            // Announce ourselves on the hardware: default lightbar + player 1 LED.
+            SendOutputLocked();
+        }
+    }
+
+    private static void OnDeviceLost()
+    {
+        lock (Gate)
+        {
+            _devicePath = null;
+            _outputReady = false;
+            _motorLeft = 0;
+            _motorRight = 0;
+            _outputStream?.Dispose();
+            _outputStream = null;
+        }
+    }
+
+    private static void SendOutputLocked()
+    {
+        if (!_outputReady || _devicePath is null)
+        {
+            return; // flushed by OnDeviceIdentified once connected
+        }
+
+        try
+        {
+            if (_outputStream is null)
+            {
+                var handle = HidNative.CreateFile(
+                    _devicePath,
+                    HidNative.GenericRead | HidNative.GenericWrite,
+                    HidNative.FileShareRead | HidNative.FileShareWrite,
+                    0, HidNative.OpenExisting, 0, 0);
+                if (handle.IsInvalid)
+                {
+                    handle.Dispose();
+                    return; // read-only device access: outputs unavailable
+                }
+
+                _outputStream = new FileStream(handle, FileAccess.Write, bufferSize: 1);
+            }
+
+            var report = BuildOutputReportLocked();
+            _outputStream.Write(report, 0, report.Length);
+            _outputStream.Flush();
+        }
+        catch (Exception)
+        {
+            _outputStream?.Dispose();
+            _outputStream = null;
+        }
+    }
+
+    private static byte[] BuildOutputReportLocked()
+    {
+        // Common 47-byte output payload (offsets per the DualSense output
+        // report layout, same as Linux hid-playstation).
+        Span<byte> common = stackalloc byte[47];
+        common[0] = 0x03;                    // valid_flag0: compatible vibration + haptics select
+        common[1] = 0x04 | 0x10;             // valid_flag1: lightbar + player indicator
+        common[2] = _motorRight;             // right (weak) motor
+        common[3] = _motorLeft;              // left (strong) motor
+        if (_lightbarSetupPending)
+        {
+            common[38] |= 0x02;              // valid_flag2: lightbar setup control enable
+            common[41] = 0x01;               // lightbar_setup: light on
+            _lightbarSetupPending = false;
+        }
+
+        common[43] = _playerLeds;
+        common[44] = _lightbarRed;
+        common[45] = _lightbarGreen;
+        common[46] = _lightbarBlue;
+
+        if (!_bluetooth)
+        {
+            var usbReport = new byte[48];
+            usbReport[0] = 0x02;
+            common.CopyTo(usbReport.AsSpan(1));
+            return usbReport;
+        }
+
+        // Bluetooth: 0x31 wrapper with sequence tag and CRC32 over a 0xA2
+        // seed byte plus the first 74 report bytes.
+        var btReport = new byte[78];
+        btReport[0] = 0x31;
+        btReport[1] = (byte)((_outputSequence & 0x0F) << 4);
+        _outputSequence = (byte)((_outputSequence + 1) & 0x0F);
+        btReport[2] = 0x10;
+        common.CopyTo(btReport.AsSpan(3));
+        var crc = Crc32(0xA2, btReport.AsSpan(0, 74));
+        btReport[74] = (byte)crc;
+        btReport[75] = (byte)(crc >> 8);
+        btReport[76] = (byte)(crc >> 16);
+        btReport[77] = (byte)(crc >> 24);
+        return btReport;
+    }
+
+    private static uint Crc32(byte seed, ReadOnlySpan<byte> data)
+    {
+        var crc = Crc32Update(0xFFFFFFFFu, seed);
+        foreach (var value in data)
+        {
+            crc = Crc32Update(crc, value);
+        }
+
+        return ~crc;
+    }
+
+    private static uint Crc32Update(uint crc, byte value)
+    {
+        crc ^= value;
+        for (var bit = 0; bit < 8; bit++)
+        {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint)-(int)(crc & 1));
+        }
+
+        return crc;
+    }
+
     private static void ReadLoop()
     {
         var announcedConnect = false;
@@ -104,8 +281,8 @@ internal static class DualSenseReader
             SafeFileHandle? handle = null;
             try
             {
-                handle = OpenDualSense();
-                if (handle is null)
+                handle = OpenDualSense(out var devicePath);
+                if (handle is null || devicePath is null)
                 {
                     SetState(default);
                     announcedConnect = false;
@@ -129,6 +306,7 @@ internal static class DualSenseReader
                 using var stream = new FileStream(handle, FileAccess.Read, bufferSize: 1);
                 handle = null; // stream owns it now
                 var buffer = new byte[256];
+                var transportKnown = false;
                 while (true)
                 {
                     var read = stream.Read(buffer, 0, buffer.Length);
@@ -139,6 +317,14 @@ internal static class DualSenseReader
 
                     if (TryParseReport(buffer.AsSpan(0, read), out var state))
                     {
+                        if (!transportKnown)
+                        {
+                            // The first parsed report tells us the transport,
+                            // which the output (rumble/lightbar) path needs.
+                            transportKnown = true;
+                            OnDeviceIdentified(devicePath, bluetooth: buffer[0] == 0x31);
+                        }
+
                         SetState(state);
                     }
                 }
@@ -158,13 +344,15 @@ internal static class DualSenseReader
                 announcedConnect = false;
             }
 
+            OnDeviceLost();
             SetState(default);
             Thread.Sleep(1000);
         }
     }
 
-    private static SafeFileHandle? OpenDualSense()
+    private static SafeFileHandle? OpenDualSense(out string? devicePath)
     {
+        devicePath = null;
         foreach (var path in HidNative.EnumerateHidDevicePaths())
         {
             // Open without access rights just to query VID/PID.
@@ -201,6 +389,7 @@ internal static class DualSenseReader
 
             if (!handle.IsInvalid)
             {
+                devicePath = path;
                 return handle;
             }
 

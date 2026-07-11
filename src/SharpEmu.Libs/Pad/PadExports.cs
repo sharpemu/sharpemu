@@ -174,6 +174,83 @@ public static class PadExports
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    [SysAbiExport(
+        Nid = "yFVnOdGxvZY",
+        ExportName = "scePadSetVibration",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetVibration(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var parameterAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadVibrationParam: { uint8_t largeMotor; uint8_t smallMotor; }
+        Span<byte> parameter = stackalloc byte[2];
+        if (!ctx.Memory.TryRead(parameterAddress, parameter))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        DualSenseReader.SetRumble(parameter[0], parameter[1]);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "RR4novUEENY",
+        ExportName = "scePadSetLightBar",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetLightBar(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var parameterAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadColor: { uint8_t r; uint8_t g; uint8_t b; uint8_t reserved; }
+        Span<byte> color = stackalloc byte[4];
+        if (!ctx.Memory.TryRead(parameterAddress, color))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        DualSenseReader.SetLightbar(color[0], color[1], color[2]);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "DscD1i9HX1w",
+        ExportName = "scePadResetLightBar",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadResetLightBar(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        DualSenseReader.ResetLightbar();
+        return ctx.SetReturn(0);
+    }
+
     private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)
     {
         Span<byte> data = stackalloc byte[PadDataSize];
