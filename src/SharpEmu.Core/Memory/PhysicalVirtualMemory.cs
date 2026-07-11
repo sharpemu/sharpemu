@@ -4,11 +4,14 @@
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
 public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IDisposable
 {
+    private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
+
     private readonly ReaderWriterLockSlim _gate = new(LockRecursionPolicy.SupportsRecursion);
     private readonly object _guestAllocationGate = new();
     private readonly object _allocationSearchHintGate = new();
@@ -1052,7 +1055,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return;
         }
 
-        Console.Error.WriteLine($"[VMEM] {message}");
+        Log.Debug(message);
     }
 
     public void Dispose()
