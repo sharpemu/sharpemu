@@ -15,6 +15,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using SharpEmu.Libs.Pad;
 
 namespace SharpEmu.GUI;
 
@@ -41,6 +42,15 @@ public partial class MainWindow : Window
     private bool _isRunning;
     private int _autoScrollTicks;
     private int _detailLoadGeneration;
+    private int _backdropGeneration;
+
+    // Controller navigation state.
+    private readonly DispatcherTimer _gamepadTimer;
+    private uint _previousPadButtons;
+    private long _navLeftNextAt;
+    private long _navRightNextAt;
+    private long _navUpNextAt;
+    private long _navDownNextAt;
 
     public MainWindow()
     {
@@ -86,6 +96,121 @@ public partial class MainWindow : Window
 
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
+
+        DualSenseReader.EnsureStarted();
+        _gamepadTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(50),
+        };
+        _gamepadTimer.Tick += (_, _) => PollGamepad();
+        _gamepadTimer.Start();
+    }
+
+    // ---- Controller navigation ----
+
+    private void PollGamepad()
+    {
+        if (!DualSenseReader.TryGetState(out var pad))
+        {
+            _previousPadButtons = 0;
+            return;
+        }
+
+        if (!IsActive)
+        {
+            // Ignore input while the launcher is in the background (e.g. the
+            // game window is focused and using the same controller).
+            _previousPadButtons = pad.Buttons;
+            return;
+        }
+
+        var now = Environment.TickCount64;
+        var left = (pad.Buttons & 0x0080) != 0 || pad.LeftX < 64;
+        var right = (pad.Buttons & 0x0020) != 0 || pad.LeftX > 192;
+        var up = (pad.Buttons & 0x0010) != 0 || pad.LeftY < 64;
+        var down = (pad.Buttons & 0x0040) != 0 || pad.LeftY > 192;
+
+        if (ShouldNavigate(left, ref _navLeftNextAt, now))
+        {
+            MoveSelection(-1);
+        }
+
+        if (ShouldNavigate(right, ref _navRightNextAt, now))
+        {
+            MoveSelection(1);
+        }
+
+        if (ShouldNavigate(up, ref _navUpNextAt, now))
+        {
+            MoveSelection(-TilesPerRow());
+        }
+
+        if (ShouldNavigate(down, ref _navDownNextAt, now))
+        {
+            MoveSelection(TilesPerRow());
+        }
+
+        var pressed = pad.Buttons & ~_previousPadButtons;
+        if ((pressed & 0x4000) != 0) // Cross
+        {
+            LaunchSelected();
+        }
+
+        if ((pressed & 0x2000) != 0) // Circle
+        {
+            _emulator?.Stop();
+        }
+
+        _previousPadButtons = pad.Buttons;
+    }
+
+    /// <summary>
+    /// Edge-triggered with hold-to-repeat: fires on press, then repeats
+    /// after 400ms at 130ms intervals while held.
+    /// </summary>
+    private static bool ShouldNavigate(bool held, ref long nextAt, long now)
+    {
+        if (!held)
+        {
+            nextAt = 0;
+            return false;
+        }
+
+        if (nextAt == 0)
+        {
+            nextAt = now + 400;
+            return true;
+        }
+
+        if (now >= nextAt)
+        {
+            nextAt = now + 130;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void MoveSelection(int delta)
+    {
+        if (_visibleGames.Count == 0)
+        {
+            return;
+        }
+
+        var index = GameList.SelectedIndex < 0
+            ? 0
+            : Math.Clamp(GameList.SelectedIndex + delta, 0, _visibleGames.Count - 1);
+        GameList.SelectedIndex = index;
+        GameList.ScrollIntoView(index);
+    }
+
+    private int TilesPerRow()
+    {
+        // Tile footprint: 128 content + 20 item padding + 10 item margin.
+        const double TileOuterWidth = 158;
+        var width = GameList.Bounds.Width;
+        return width > TileOuterWidth ? (int)(width / TileOuterWidth) : 1;
     }
 
     private async Task OnOpenedAsync()
@@ -107,6 +232,7 @@ public partial class MainWindow : Window
         ReadControlsIntoSettings();
         _settings.Save();
         _consoleFlushTimer.Stop();
+        _gamepadTimer.Stop();
         _emulator?.Dispose();
     }
 
@@ -380,7 +506,8 @@ public partial class MainWindow : Window
 
                     var (title, titleId) = TryReadParamJson(fullPath);
                     games.Add(new GameEntry(
-                        title ?? GameNameFor(fullPath), titleId, fullPath, size, FindCoverFor(fullPath)));
+                        title ?? GameNameFor(fullPath), titleId, fullPath, size,
+                        FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
                 }
             }
             catch (Exception)
@@ -481,6 +608,31 @@ public partial class MainWindow : Window
             if (File.Exists(coverPath))
             {
                 return coverPath;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Finds the key art shipped with the game (sce_sys/pic0.png, falling
+    /// back to pic1.png), used as the window backdrop when selected.
+    /// </summary>
+    private static string? FindBackgroundFor(string ebootPath)
+    {
+        var directory = Path.GetDirectoryName(ebootPath);
+        if (directory is null)
+        {
+            return null;
+        }
+
+        var sceSys = Path.Combine(directory, "sce_sys");
+        foreach (var candidate in new[] { "pic0.png", "pic1.png" })
+        {
+            var backgroundPath = Path.Combine(sceSys, candidate);
+            if (File.Exists(backgroundPath))
+            {
+                return backgroundPath;
             }
         }
 
@@ -625,15 +777,56 @@ public partial class MainWindow : Window
             SelectedGameTitle.Text = game.Name;
             SelectedGamePath.Text = game.Path;
             SelectedCoverPanel.DataContext = game;
+            _ = UpdateBackdropAsync(game);
         }
         else
         {
             SelectedGameTitle.Text = "No game selected";
             SelectedGamePath.Text = "Pick a game from the library, or open an eboot.bin directly.";
             SelectedCoverPanel.DataContext = null;
+            _ = UpdateBackdropAsync(null);
         }
 
         UpdateRunButtons();
+    }
+
+    /// <summary>
+    /// Fades the window backdrop to the selected game's key art. The image
+    /// decodes off the UI thread and is cached on the entry; a newer
+    /// selection cancels the fade-in of an older one.
+    /// </summary>
+    private async Task UpdateBackdropAsync(GameEntry? game)
+    {
+        var generation = ++_backdropGeneration;
+        BackdropImage.Opacity = 0;
+
+        if (game?.BackgroundPath is null)
+        {
+            return;
+        }
+
+        if (game.Background is null)
+        {
+            try
+            {
+                var path = game.BackgroundPath;
+                game.Background = await Task.Run(() =>
+                {
+                    using var stream = File.OpenRead(path);
+                    return Bitmap.DecodeToWidth(stream, 1600);
+                });
+            }
+            catch (Exception)
+            {
+                return; // undecodable key art: keep the plain background
+            }
+        }
+
+        if (generation == _backdropGeneration)
+        {
+            BackdropImage.Source = game.Background;
+            BackdropImage.Opacity = 1.0;
+        }
     }
 
     // ---- Launching ----

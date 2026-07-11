@@ -18,6 +18,28 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <Grid RowDefinitions="44,*,32">
 
+    <!-- Selected-game backdrop: key art behind the main content, dimmed by
+         a scrim so tiles and text stay readable. Fades on selection. -->
+    <Panel Grid.Row="1" ClipToBounds="True">
+      <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
+             HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Image.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity" Duration="0:0:0.35" />
+          </Transitions>
+        </Image.Transitions>
+      </Image>
+      <Border>
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="#730D1017" />
+            <GradientStop Offset="0.55" Color="#BF0D1017" />
+            <GradientStop Offset="1" Color="#EB0D1017" />
+          </LinearGradientBrush>
+        </Border.Background>
+      </Border>
+    </Panel>
+
     <!-- Title bar -->
     <Grid x:Name="TitleBar" Grid.Row="0" Background="{StaticResource ChromeBrush}">
       <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
@@ -95,12 +117,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </ListBox.ItemsPanel>
           <ListBox.ItemTemplate>
             <DataTemplate>
-              <StackPanel Width="156" Height="216" Spacing="8">
-                <Border Classes="coverShadow" Width="156" Height="156">
+              <StackPanel Width="128" Height="186" Spacing="7">
+                <Border Classes="coverShadow" Width="128" Height="128">
                   <Border Classes="coverClip">
                     <Panel>
                       <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                        <TextBlock Text="{Binding Initials}" FontSize="44" FontWeight="Bold"
+                        <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
                                    Foreground="#E8ECF4" Opacity="0.85"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                       </Border>

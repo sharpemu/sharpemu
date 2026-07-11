@@ -25,4 +25,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
   </ItemGroup>
 
+  <!-- The DualSense HID reader is shared with the emulator's pad HLE. It is
+       dependency-free, so it is compiled in directly rather than pulling a
+       reference to all of SharpEmu.Libs into the launcher. -->
+  <ItemGroup>
+    <Compile Include="..\SharpEmu.Libs\Pad\HidNative.cs" Link="Input/HidNative.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\DualSenseReader.cs" Link="Input/DualSenseReader.cs" />
+  </ItemGroup>
+
 </Project>

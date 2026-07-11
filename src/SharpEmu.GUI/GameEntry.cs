@@ -28,13 +28,15 @@ public sealed class GameEntry : INotifyPropertyChanged
     private IBrush? _placeholderBrush;
     private long _sizeBytes;
 
-    public GameEntry(string name, string? titleId, string path, long sizeBytes, string? coverPath)
+    public GameEntry(
+        string name, string? titleId, string path, long sizeBytes, string? coverPath, string? backgroundPath)
     {
         Name = name;
         TitleId = titleId;
         Path = path;
         _sizeBytes = sizeBytes;
         CoverPath = coverPath;
+        BackgroundPath = backgroundPath;
         Initials = ComputeInitials(name);
     }
 
@@ -69,6 +71,15 @@ public sealed class GameEntry : INotifyPropertyChanged
 
     /// <summary>Path to the cover art image shipped with the game, if found.</summary>
     public string? CoverPath { get; }
+
+    /// <summary>Path to the key art (pic0/pic1) shipped with the game, if found.</summary>
+    public string? BackgroundPath { get; }
+
+    /// <summary>
+    /// Decoded key art used as the window backdrop while this game is
+    /// selected. Loaded on demand and cached; not exposed via binding.
+    /// </summary>
+    public Bitmap? Background { get; set; }
 
     public string Initials { get; }
 
