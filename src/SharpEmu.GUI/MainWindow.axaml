@@ -162,7 +162,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto, Auto" Margin="16,12,16,8">
             <TextBlock Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
             <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox" 
-                    Watermark="Search..." MaxWidth="300" />
+                    Watermark="Search..." MaxWidth="5500" />
             <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
                     FontSize="12" Margin="0,0,12,0" />
             <Button Grid.Column="3" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="12"
