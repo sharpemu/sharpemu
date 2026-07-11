@@ -518,6 +518,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private Thread? _stallWatchdogThread;
 
+	private volatile bool _readyDispatchStop;
+
+	private Thread? _readyDispatchThread;
+
 	private GCHandle _selfHandle;
 
 	private nint _selfHandlePtr;
@@ -4268,6 +4272,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			Console.Error.WriteLine("[LOADER][INFO] Calling guest entry...");
 			StartStallWatchdog();
+			StartReadyThreadDispatcher();
 			int num6 = -1;
 			try
 			{
@@ -4318,6 +4323,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			StopReadyThreadDispatcher();
 			StopStallWatchdog();
 			ActiveEntryReturnSentinelRip = 0uL;
 			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
@@ -4442,6 +4448,114 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 		_stallWatchdogThread = null;
+	}
+
+	// A guest thread only gets dispatched to a native thread when some running
+	// guest thread calls Pump (which happens inside blocking HLE primitives:
+	// waits, usleep, pthread_create, entry_return). That leaves a starvation
+	// hole: a guest thread that spins on a non-blocking HLE call (e.g.
+	// sceAudioOutOutput) never pumps, so any thread that was made Ready — for
+	// example a job worker woken by sceKernelSetEventFlag — sits in the ready
+	// queue forever. Import progress keeps advancing (the spin), so the stall
+	// watchdog never fires either, and the whole game deadlocks with 0 draws.
+	//
+	// This background dispatcher closes the hole: it drains the ready queue on
+	// a short interval regardless of whether any guest thread pumps. It is
+	// deliberately self-contained (it does not touch Pump or the pump-depth
+	// guard) so it cannot alter the existing cooperative dispatch path.
+	private void StartReadyThreadDispatcher()
+	{
+		if (_readyDispatchThread != null)
+		{
+			return;
+		}
+		_readyDispatchStop = false;
+		_readyDispatchThread = new Thread(new ThreadStart(delegate
+		{
+			while (!_readyDispatchStop)
+			{
+				Thread.Sleep(1);
+				if (_readyDispatchStop)
+				{
+					break;
+				}
+				if (Volatile.Read(ref _readyGuestThreadCount) > 0)
+				{
+					DispatchReadyGuestThreads();
+				}
+			}
+		}))
+		{
+			IsBackground = true,
+			Name = "SharpEmu-ReadyDispatch",
+		};
+		_readyDispatchThread.Start();
+	}
+
+	private void StopReadyThreadDispatcher()
+	{
+		_readyDispatchStop = true;
+		Thread? readyDispatchThread = _readyDispatchThread;
+		if (readyDispatchThread == null)
+		{
+			return;
+		}
+		if (!ReferenceEquals(Thread.CurrentThread, readyDispatchThread))
+		{
+			try
+			{
+				readyDispatchThread.Join(300);
+			}
+			catch
+			{
+			}
+		}
+		_readyDispatchThread = null;
+	}
+
+	// Dequeue every currently-ready guest thread and start a native thread for
+	// each, mirroring Pump's dispatch step. Dequeue and the Ready->Running
+	// transition happen under _guestThreadGate, so this races safely with a
+	// concurrent Pump: each ready thread is claimed once (the State check skips
+	// any that another dispatcher already took).
+	private void DispatchReadyGuestThreads()
+	{
+		while (true)
+		{
+			GuestThreadState? thread = null;
+			lock (_guestThreadGate)
+			{
+				while (_readyGuestThreads.Count > 0)
+				{
+					var candidate = _readyGuestThreads.Dequeue();
+					Interlocked.Decrement(ref _readyGuestThreadCount);
+					if (candidate.State == GuestThreadRunState.Ready)
+					{
+						candidate.State = GuestThreadRunState.Running;
+						thread = candidate;
+						break;
+					}
+				}
+			}
+
+			if (thread == null)
+			{
+				return;
+			}
+
+			var dispatched = thread;
+			var hostThread = new Thread(() => RunGuestThread(dispatched, "ready-dispatch"))
+			{
+				IsBackground = true,
+				Name = $"SharpEmu-{dispatched.Name}",
+				Priority = MapGuestThreadPriority(dispatched.Priority),
+			};
+			lock (_guestThreadGate)
+			{
+				dispatched.HostThread = hostThread;
+			}
+			hostThread.Start();
+		}
 	}
 
 	private void LogStallWatchdogSnapshot()
