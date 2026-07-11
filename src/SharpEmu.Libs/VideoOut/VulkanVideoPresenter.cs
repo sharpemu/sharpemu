@@ -1034,19 +1034,26 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    // GLFW platform enum (GLFW 3.4): glfwInitHint(GLFW_PLATFORM, ...) selects a
+    // backend, glfwGetPlatform() reports the one in use.
+    private const int GlfwPlatformHint = 0x00050003;
+    private const int GlfwPlatformWin32 = 0x00060001;
+    private const int GlfwPlatformCocoa = 0x00060002;
+    private const int GlfwPlatformWayland = 0x00060003;
+    private const int GlfwPlatformX11 = 0x00060004;
+    private const int GlfwPlatformNull = 0x00060005;
+
     /// <summary>
     /// GLFW's native Wayland backend does not reliably map the Vulkan window
     /// with some drivers (notably NVIDIA): the surface presents frames but the
     /// window never becomes visible, so the game runs with no picture while
     /// audio works. XWayland is dependable, so on a Wayland session that also
-    /// exposes an X server (DISPLAY set) we steer GLFW to its X11 backend by
-    /// clearing WAYLAND_DISPLAY for our own process before GLFW initializes.
-    /// Empty (rather than unset) makes libwayland's wl_display_connect fail
-    /// instead of falling back to the default "wayland-0" socket, which is
-    /// what makes GLFW pick X11. Opt back into native Wayland with
-    /// SHARPEMU_ENABLE_WAYLAND=1.
+    /// exposes an X server (DISPLAY set) we force GLFW's X11 backend through
+    /// its GLFW_PLATFORM init hint before GLFW initializes — the supported way
+    /// to pick a backend, applied by calling into the same libglfw GLFW loads.
+    /// Opt back into native Wayland with SHARPEMU_ENABLE_WAYLAND=1.
     /// </summary>
-    private static void PreferX11OnLinuxWayland()
+    private static unsafe void PreferX11OnLinuxWayland()
     {
         if (!OperatingSystem.IsLinux() ||
             string.Equals(
@@ -1057,18 +1064,82 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        var waylandDisplay = Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
-        var x11Display = Environment.GetEnvironmentVariable("DISPLAY");
-        if (string.IsNullOrEmpty(waylandDisplay) || string.IsNullOrEmpty(x11Display))
+        // Only steer on a Wayland session (WAYLAND_DISPLAY set). Forcing X11
+        // needs an X server to fall back to (XWayland, DISPLAY set); without
+        // one, forcing it would make glfwInit fail outright, so leave GLFW
+        // alone and say why the window may not appear.
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
         {
-            // Not a Wayland session, or no X server to fall back to — leave it.
             return;
         }
 
-        Environment.SetEnvironmentVariable("WAYLAND_DISPLAY", string.Empty);
-        Console.Error.WriteLine(
-            "[LOADER][INFO] Wayland session detected; steering GLFW to X11/XWayland " +
-            "for a reliable window (set SHARPEMU_ENABLE_WAYLAND=1 to force native Wayland).");
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY")))
+        {
+            Console.Error.WriteLine(
+                "[LOADER][WARN] Wayland session without an X server (DISPLAY unset); " +
+                "cannot steer GLFW to XWayland. If the window does not appear, install " +
+                "XWayland, or run natively with SHARPEMU_ENABLE_WAYLAND=1.");
+            return;
+        }
+
+        if (!TryLoadGlfw(out var glfw))
+        {
+            return;
+        }
+
+        try
+        {
+            var initHint = (delegate* unmanaged<int, int, void>)
+                System.Runtime.InteropServices.NativeLibrary.GetExport(glfw, "glfwInitHint");
+            initHint(GlfwPlatformHint, GlfwPlatformX11);
+            Console.Error.WriteLine(
+                "[LOADER][INFO] Wayland session detected; requested GLFW X11/XWayland " +
+                "backend (set SHARPEMU_ENABLE_WAYLAND=1 to force native Wayland).");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Could not set GLFW X11 platform hint: {exception.Message}");
+        }
+    }
+
+    /// <summary>Logs the backend GLFW actually selected, so a "no window"
+    /// report shows Wayland vs X11 at a glance.</summary>
+    private static unsafe void LogGlfwPlatformInUse()
+    {
+        if (OperatingSystem.IsWindows() || !TryLoadGlfw(out var glfw))
+        {
+            return;
+        }
+
+        try
+        {
+            var getPlatform = (delegate* unmanaged<int>)
+                System.Runtime.InteropServices.NativeLibrary.GetExport(glfw, "glfwGetPlatform");
+            var platform = getPlatform();
+            var label = platform switch
+            {
+                GlfwPlatformWin32 => "Win32",
+                GlfwPlatformCocoa => "Cocoa",
+                GlfwPlatformWayland => "Wayland",
+                GlfwPlatformX11 => "X11",
+                GlfwPlatformNull => "Null",
+                _ => $"0x{platform:X}",
+            };
+            Console.Error.WriteLine($"[LOADER][INFO] GLFW windowing platform in use: {label}");
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Could not query GLFW platform: {exception.Message}");
+        }
+    }
+
+    private static bool TryLoadGlfw(out nint handle)
+    {
+        var name = OperatingSystem.IsMacOS() ? "libglfw.3.dylib" : "libglfw.so.3";
+        return System.Runtime.InteropServices.NativeLibrary.TryLoad(
+            Path.Combine(AppContext.BaseDirectory, name), out handle) ||
+            System.Runtime.InteropServices.NativeLibrary.TryLoad(name, out handle);
     }
 
     private static void Run()
@@ -1442,6 +1513,7 @@ internal static unsafe class VulkanVideoPresenter
                 _window.SetWindowIcon(ref icon);
             }
 
+            LogGlfwPlatformInUse();
             if (!OperatingSystem.IsWindows())
             {
                 try
