@@ -14,7 +14,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
         ExtendClientAreaToDecorationsHint="True"
         ExtendClientAreaChromeHints="PreferSystemChrome"
         ExtendClientAreaTitleBarHeightHint="44"
-        Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico">
+        Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
+        KeyDown="OnKeyDown">
 
   <Grid RowDefinitions="44,*,32">
 

@@ -12,6 +12,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -283,6 +284,34 @@ public partial class MainWindow : Window
                 "Browsing the library",
                 $"{_allGames.Count} game(s)",
                 _launcherStartUnixSeconds);
+        }
+    }
+
+    private void OnKeyDown(object sender, KeyEventArgs args)
+    {
+        args.Handled = true;
+        switch (args.Key)
+        {
+            case Key.F11:
+                OnWindowFullScreen(this, new RoutedEventArgs());
+                break;
+            default:
+                args.Handled = false;
+                break;
+        }
+    }
+
+    private void OnWindowFullScreen(object sender, RoutedEventArgs args)
+    {
+        if (WindowState == WindowState.FullScreen)
+        {
+            WindowState = WindowState.Normal;
+            ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.PreferSystemChrome;
+        }
+        else
+        {
+            WindowState = WindowState.FullScreen;
+            ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.NoChrome;
         }
     }
 
