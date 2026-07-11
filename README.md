@@ -25,14 +25,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
-> [!TIP]
-> The Discord server is the best place to:
->
-> - 🚀 Follow development progress
-> - 🛠️ Get help building or running SharpEmu
-> - 🐞 Report bugs and discuss compatibility
-> - 💡 Suggest features and improvements
-
 > [!WARNING]  
 > Currently the primary development target is Windows.
 
