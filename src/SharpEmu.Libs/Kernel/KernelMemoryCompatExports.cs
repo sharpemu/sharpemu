@@ -3846,33 +3846,59 @@ public static class KernelMemoryCompatExports
 
     private struct RegisterPrintfArgumentSource : IPrintfArgumentSource
     {
+        // SysV AMD64: variadic integer/pointer args use the GP registers (rdi..r9, up to
+        // 6) and variadic float/double args use xmm0..xmm7 (8) — INDEPENDENT counters.
+        // Args beyond the registers spill to the stack in source order, so GP-overflow
+        // and FP-overflow share one stack cursor.
         private readonly CpuContext _ctx;
         private int _gpIndex;
+        private int _fpIndex;
+        private int _stackIndex;
 
         public RegisterPrintfArgumentSource(CpuContext ctx, int gpIndex)
         {
             _ctx = ctx;
             _gpIndex = gpIndex;
+            _fpIndex = 0;
+            _stackIndex = 0;
         }
 
         public ulong NextGpArg()
         {
-            var index = _gpIndex++;
-            return index switch
+            var index = _gpIndex;
+            if (index < 6)
             {
-                0 => _ctx[CpuRegister.Rdi],
-                1 => _ctx[CpuRegister.Rsi],
-                2 => _ctx[CpuRegister.Rdx],
-                3 => _ctx[CpuRegister.Rcx],
-                4 => _ctx[CpuRegister.R8],
-                5 => _ctx[CpuRegister.R9],
-                _ => ReadStackArg(_ctx, (ulong)(index - 6) * 8)
-            };
+                _gpIndex++;
+                return index switch
+                {
+                    0 => _ctx[CpuRegister.Rdi],
+                    1 => _ctx[CpuRegister.Rsi],
+                    2 => _ctx[CpuRegister.Rdx],
+                    3 => _ctx[CpuRegister.Rcx],
+                    4 => _ctx[CpuRegister.R8],
+                    _ => _ctx[CpuRegister.R9],
+                };
+            }
+
+            return ReadStackArg(_ctx, (ulong)(_stackIndex++) * 8);
         }
 
         public double NextFloatArg()
         {
-            return BitConverter.Int64BitsToDouble(unchecked((long)NextGpArg()));
+            // Float/double variadic args live in xmm0..xmm7 (low 64 bits), NOT the GP
+            // registers. Reading them from GP prints garbage and desynchronizes every
+            // subsequent argument.
+            ulong bits;
+            if (_fpIndex < 8)
+            {
+                _ctx.GetXmmRegister(_fpIndex++, out bits, out _);
+            }
+            else
+            {
+                bits = ReadStackArg(_ctx, (ulong)(_stackIndex++) * 8);
+            }
+
+            return BitConverter.Int64BitsToDouble(unchecked((long)bits));
         }
     }
 

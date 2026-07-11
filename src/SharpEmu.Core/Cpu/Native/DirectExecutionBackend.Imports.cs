@@ -99,6 +99,12 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
 			_lastReportedRawSentinelRecoveries = num2;
 		}
+		// Leaf imports take a scalar-only fast path that reads its own operands and
+		// intentionally bypasses the SysV variadic XMM marshalling below. This is safe
+		// only while the leaf set contains no float-variadic or float-returning function
+		// (currently graphics/pad/save-data/mutex plus va_list-based vsnprintf). Do not add
+		// a function that consumes xmm0-7 args or returns in xmm0 to the leaf set without
+		// routing it through the full gateway.
 		if (IsLeafImport(importStubEntry.Nid) &&
 			TryDispatchLeafImport(cpuContext, importStubEntry, argPackPtr, num, out var leafResult))
 		{
@@ -118,10 +124,17 @@ public sealed partial class DirectExecutionBackend
 		cpuContext[CpuRegister.R13] = *(ulong*)(argPackPtr + 72);
 		cpuContext[CpuRegister.R14] = *(ulong*)(argPackPtr + 80);
 		cpuContext[CpuRegister.R15] = *(ulong*)(argPackPtr + 88);
-		cpuContext.SetXmmRegister(
-			0,
-			*(ulong*)(argPackPtr - 16),
-			*(ulong*)(argPackPtr - 8));
+		// The trampoline spills the SysV variadic XMM save area (xmm0..xmm7) into the
+		// 0x80 bytes immediately below the GP argpack, so variadic float args (printf
+		// %f, and powf/logf inputs) reach the handler. xmm{i} is at argPackPtr-0x80+i*16.
+		for (var xmmIndex = 0; xmmIndex < 8; xmmIndex++)
+		{
+			var xmmSlot = argPackPtr - 0x80 + (xmmIndex * 16);
+			cpuContext.SetXmmRegister(
+				xmmIndex,
+				*(ulong*)xmmSlot,
+				*(ulong*)(xmmSlot + 8));
+		}
 		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
 		ulong value = cpuContext[CpuRegister.Rdi];
 		ulong value2 = cpuContext[CpuRegister.Rsi];
@@ -491,6 +504,13 @@ public sealed partial class DirectExecutionBackend
 					Console.Error.Flush();
 				}
 			}
+			// Publish the handler's XMM0 back into the argpack's xmm0 save slot; the
+			// trampoline epilogue reloads it into the guest's XMM0, delivering float/double
+			// return values (powf/logf/wcstod). Harmless for int/pointer returns (XMM is
+			// volatile across a SysV call, so the guest never relies on a preserved XMM0).
+			cpuContext.GetXmmRegister(0, out var returnXmm0Low, out var returnXmm0High);
+			*(ulong*)(argPackPtr - 0x80) = returnXmm0Low;
+			*(ulong*)(argPackPtr - 0x80 + 8) = returnXmm0High;
 			return cpuContext[CpuRegister.Rax];
 		}
 		catch (Exception ex)

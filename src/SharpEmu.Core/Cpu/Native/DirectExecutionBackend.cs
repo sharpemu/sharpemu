@@ -1568,7 +1568,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe nint CreateImportHandlerTrampoline(int importIndex)
 	{
-		void* ptr = VirtualAlloc(null, 192u, 12288u, 64u);
+		void* ptr = VirtualAlloc(null, 256u, 12288u, 64u);
 		if (ptr == null)
 		{
 			return 0;
@@ -1596,20 +1596,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 82;
 			ptr2[num++] = 86;
 			ptr2[num++] = 87;
-			ptr2[num++] = 72;
-			ptr2[num++] = 131;
-			ptr2[num++] = 236;
-			ptr2[num++] = 16;
-			ptr2[num++] = 243;
-			ptr2[num++] = 15;
-			ptr2[num++] = 127;
-			ptr2[num++] = 4;
-			ptr2[num++] = 36;
-			ptr2[num++] = 76;
-			ptr2[num++] = 141;
-			ptr2[num++] = 100;
-			ptr2[num++] = 36;
-			ptr2[num++] = 16;
+			// sub rsp, 0x80  — reserve 8*16 bytes for the SysV variadic XMM save area
+			ptr2[num++] = 0x48; ptr2[num++] = 0x81; ptr2[num++] = 0xEC;
+			ptr2[num++] = 0x80; ptr2[num++] = 0x00; ptr2[num++] = 0x00; ptr2[num++] = 0x00;
+			// movdqu [rsp + i*0x10], xmm{i}  for i = 0..7  (F3 0F 7F /r, SIB=0x24 base=rsp, disp8)
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x44; ptr2[num++] = 0x24; ptr2[num++] = 0x00; // xmm0
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x4C; ptr2[num++] = 0x24; ptr2[num++] = 0x10; // xmm1
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x20; // xmm2
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x5C; ptr2[num++] = 0x24; ptr2[num++] = 0x30; // xmm3
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x64; ptr2[num++] = 0x24; ptr2[num++] = 0x40; // xmm4
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x6C; ptr2[num++] = 0x24; ptr2[num++] = 0x50; // xmm5
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x74; ptr2[num++] = 0x24; ptr2[num++] = 0x60; // xmm6
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x7C; ptr2[num++] = 0x24; ptr2[num++] = 0x70; // xmm7
+			// lea r12, [rsp + 0x80]  — r12 = argpack base (the 12 pushed GP regs), past the XMM area
+			ptr2[num++] = 0x4C; ptr2[num++] = 0x8D; ptr2[num++] = 0xA4; ptr2[num++] = 0x24;
+			ptr2[num++] = 0x80; ptr2[num++] = 0x00; ptr2[num++] = 0x00; ptr2[num++] = 0x00;
 			ptr2[num++] = 72;
 			ptr2[num++] = 131;
 			ptr2[num++] = 236;
@@ -1657,6 +1658,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 131;
 			ptr2[num++] = 196;
 			ptr2[num++] = 40;
+			// movdqu xmm0, [r12 - 0x80]  — reload the return XMM0 the gateway wrote into the
+			// argpack's xmm0 save slot (float/double returns: powf/logf/wcstod). SysV/Win64
+			// XMM regs are volatile across calls, so an unconditional reload is ABI-safe.
+			ptr2[num++] = 0xF3; ptr2[num++] = 0x41; ptr2[num++] = 0x0F; ptr2[num++] = 0x6F;
+			ptr2[num++] = 0x84; ptr2[num++] = 0x24; ptr2[num++] = 0x80; ptr2[num++] = 0xFF; ptr2[num++] = 0xFF; ptr2[num++] = 0xFF;
 			ptr2[num++] = 76;
 			ptr2[num++] = 137;
 			ptr2[num++] = 228;
@@ -1680,12 +1686,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 95;
 			ptr2[num++] = 195;
 		uint num2 = default(uint);
-		if (!VirtualProtect(ptr, 192u, 32u, &num2))
+		if (!VirtualProtect(ptr, 256u, 32u, &num2))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for import dispatch stub at 0x{(nint)ptr:X16}");
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, 192u);
+		FlushInstructionCache(GetCurrentProcess(), ptr, 256u);
 		return (nint)ptr;
 		}
 		catch
