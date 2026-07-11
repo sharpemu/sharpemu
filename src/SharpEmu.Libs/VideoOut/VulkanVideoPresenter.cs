@@ -1885,8 +1885,12 @@ internal static unsafe class VulkanVideoPresenter
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
             _maxColorAttachments = selected.Limits.MaxColorAttachments;
             var selectedName = SilkMarshal.PtrToString((nint)selected.DeviceName) ?? "unknown";
+            var apiMajor = (selected.ApiVersion >> 22) & 0x7F;
+            var apiMinor = (selected.ApiVersion >> 12) & 0x3FF;
+            var apiPatch = selected.ApiVersion & 0xFFF;
             Console.Error.WriteLine(
-                $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
+                $"[LOADER][INFO] Vulkan device: {selectedName} " +
+                $"(type={selected.DeviceType}, api={apiMajor}.{apiMinor}.{apiPatch})");
             VideoOutExports.SetSelectedGpuName(selectedName);
             _window.Title = VideoOutExports.GetWindowTitle();
         }
