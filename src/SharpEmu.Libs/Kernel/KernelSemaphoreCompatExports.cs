@@ -19,8 +19,21 @@ public static class KernelSemaphoreCompatExports
         public required int MaxCount { get; init; }
         public int Count { get; set; }
         public int WaitingThreads { get; set; }
+        public int CancelEpoch { get; set; }
+        public bool Deleted { get; set; }
         public object Gate { get; } = new();
     }
+
+    private sealed class SemaphoreWaiter
+    {
+        public required int NeedCount { get; init; }
+        public required int CancelEpochAtBlock { get; init; }
+
+        // Written and read only under the owning semaphore's Gate.
+        public int? Result { get; set; }
+    }
+
+    private static string GetSemaphoreWakeKey(uint handle) => $"kernel_sema:0x{handle:X8}";
 
     [SysAbiExport(
         Nid = "188x57JYp0g",
@@ -58,17 +71,27 @@ public static class KernelSemaphoreCompatExports
             handle = unchecked((uint)Interlocked.Increment(ref _nextSemaphoreHandle));
         }
 
-        _semaphores[handle] = new KernelSemaphoreState
+        var state = new KernelSemaphoreState
         {
             Name = name,
             InitialCount = initialCount,
             MaxCount = maxCount,
             Count = initialCount,
         };
+        _semaphores[handle] = state;
 
         if (!ctx.TryWriteUInt32(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
+            // Handles are sequential and guest-predictable, so a hostile guest can
+            // race a WaitSema onto the handle between publication above and this
+            // rollback. Strand-proof that waiter exactly like DeleteSema does.
+            lock (state.Gate)
+            {
+                state.Deleted = true;
+            }
+
+            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
@@ -118,7 +141,17 @@ public static class KernelSemaphoreCompatExports
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
             }
 
-            if (!GuestThreadExecution.RequestCurrentThreadBlock(ctx, "sceKernelWaitSema"))
+            var waiter = new SemaphoreWaiter
+            {
+                NeedCount = needCount,
+                CancelEpochAtBlock = semaphore.CancelEpoch,
+            };
+            if (!GuestThreadExecution.RequestCurrentThreadBlock(
+                    ctx,
+                    "sceKernelWaitSema",
+                    GetSemaphoreWakeKey(handle),
+                    resumeHandler: () => CompleteBlockedSemaWait(semaphore, waiter),
+                    wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, waiter)))
             {
                 TraceSemaphore($"wait-would-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
@@ -193,8 +226,14 @@ public static class KernelSemaphoreCompatExports
 
             semaphore.Count += signalCount;
             TraceSemaphore($"signal handle=0x{handle:X8} name='{semaphore.Name}' signal={signalCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
+
+        // Wake after releasing the gate (lock order: scheduler gate -> semaphore gate).
+        // Wake everyone; the wake handler consumes the count per waiter, so a waiter
+        // whose needCount exceeds the remaining count stays parked while a smaller
+        // waiter can proceed.
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -226,10 +265,16 @@ public static class KernelSemaphoreCompatExports
             }
 
             semaphore.Count = setCount < 0 ? semaphore.InitialCount : setCount;
-            semaphore.WaitingThreads = 0;
+            semaphore.CancelEpoch++;
+            // WaitingThreads is NOT zeroed here: each canceled waiter decrements it
+            // exactly once in its wake handler. Zeroing here as well would double-count
+            // and silently absorb the increment of a waiter that parks between this
+            // gate release and the wake-all below.
             TraceSemaphore($"cancel handle=0x{handle:X8} name='{semaphore.Name}' set={setCount} count={semaphore.Count}");
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
+
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -245,8 +290,82 @@ public static class KernelSemaphoreCompatExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
+        // Delete succeeds even with blocked waiters; they wake with the deleted
+        // result (the SCE kernel wakes waiters with the EACCES-class code).
+        lock (semaphore.Gate)
+        {
+            semaphore.Deleted = true;
+        }
+
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
         TraceSemaphore($"delete handle=0x{handle:X8} name='{semaphore.Name}'");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // Wake handler: runs under the scheduler's guest-thread gate (lock order:
+    // scheduler gate -> semaphore gate). Returns true iff the waiter has a final
+    // result and should be re-readied; false leaves it parked.
+    private static bool TryConsumeBlockedSemaWait(KernelSemaphoreState semaphore, SemaphoreWaiter waiter)
+    {
+        lock (semaphore.Gate)
+        {
+            return TryConsumeBlockedSemaWaitLocked(semaphore, waiter);
+        }
+    }
+
+    private static bool TryConsumeBlockedSemaWaitLocked(KernelSemaphoreState semaphore, SemaphoreWaiter waiter)
+    {
+        if (waiter.Result is not null)
+        {
+            return true;
+        }
+
+        if (semaphore.Deleted)
+        {
+            waiter.Result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
+            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+            TraceSemaphore($"wake-deleted name='{semaphore.Name}' need={waiter.NeedCount}");
+            return true;
+        }
+
+        if (semaphore.CancelEpoch != waiter.CancelEpochAtBlock)
+        {
+            waiter.Result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED;
+            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+            TraceSemaphore($"wake-canceled name='{semaphore.Name}' need={waiter.NeedCount}");
+            return true;
+        }
+
+        if (semaphore.Count >= waiter.NeedCount)
+        {
+            semaphore.Count -= waiter.NeedCount;
+            waiter.Result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+            TraceSemaphore($"wake-consume name='{semaphore.Name}' need={waiter.NeedCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
+            return true;
+        }
+
+        return false;
+    }
+
+    // Resume handler: runs on the woken guest thread outside the scheduler gate;
+    // its return value becomes the guest's RAX for the resumed sceKernelWaitSema.
+    private static int CompleteBlockedSemaWait(KernelSemaphoreState semaphore, SemaphoreWaiter waiter)
+    {
+        lock (semaphore.Gate)
+        {
+            if (waiter.Result is null && !TryConsumeBlockedSemaWaitLocked(semaphore, waiter))
+            {
+                // Nothing readies a parked semaphore waiter without the wake handler
+                // resolving it, so reaching here means the scheduler contract changed.
+                Console.Error.WriteLine(
+                    $"[LOADER][GAP] sema.resume-no-outcome name='{semaphore.Name}' need={waiter.NeedCount} count={semaphore.Count}");
+                waiter.Result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+            }
+
+            return waiter.Result!.Value;
+        }
     }
 
     private static void TraceSemaphore(string message)
