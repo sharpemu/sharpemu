@@ -3,14 +3,14 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# SharpEmu
+# SharpEmu Android 
 
 <p align="center">
   <img src="./assets/images/logo.png" width=30% height=30% />
 </p>
 
 <p align="center">
-  An experimental PlayStation 5 emulator for Windows, Linux and macOS.  
+  An experimental PlayStation 5 emulator
 </p>
 
 <p align="center">
@@ -33,11 +33,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ## Info
 
-SharpEmu is an emulator project currently in its early stages of development.
+SharpEmu Android is an emulator project currently in its early stages of development.
 
 This project is developed purely for research and educational purposes. There are no commercial goals associated with it. We enjoy learning about system architecture and reverse engineering.
 
-SharpEmu focuses exclusively on the PlayStation 5.  
+SharpEmu Android focuses exclusively on the PlayStation 5  
 Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
 
 ## Status
@@ -57,52 +57,16 @@ Current capabilities include:
 * Shader/resource submits and AGC initial
 * Video outputs in some games
 
-Some games have reached like `sceVideoOut` and AGC stages.
-
-Currently the project primarily targets Windows. Cross-platform support (Linux and macOS) is planned, but development is currently focused on Windows to simplify early-stage debugging and iteration.
-
-## Using
-
-* Build or Publish project or download in release tab.
-* Open Powershell.
-  * Run Emulator GUI.
-  * Or command: `.\SharpEmu "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
-
-## Games Tested
-
-* **Demon's Souls Remake**
-  * [Demon's Souls [PPSA01341]](https://github.com/par274/sharpemu/issues/2)
-  * Demon's Souls is now video loop. Shaders are ready to be converted to SPIR-V/Vulkan. We are continuing our work on this.
-  ![DeS videoOut submit first frame](./.github/images/des-videoout-shaders.jpg)
-
-* **Poppy Playtime Chapter 1**
-  * [Poppy Playtime Chapter 1 [PPSA20591]](https://github.com/par274/sharpemu/issues/3)
-
-* **SILENT HILL: The Short Message**
-  * [SILENT HILL: The Short Message [PPSA10112]](https://github.com/par274/sharpemu/issues/4)
-
-* **Dreaming Sarah**
-  * [Dreaming Sarah [PPSA02929]](https://github.com/par274/sharpemu/issues/9)
-  * Real texture rendering for this game;
-  ![Splash texture](./.github/images/dreaming-sarah.jpg)
-
 
 > [!IMPORTANT]  
 > This project does **not** support or condone piracy.  
 > All games used during development and testing are dumped from consoles that we personally own.  
 > Users are expected to use legally obtained copies of their games.
 
-## Build
-
-1. Install the **.NET SDK**.
-2. Clone the repository: `git clone https://github.com/par274/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
-4. Build the project: `dotnet build` or `dotnet publish`
-5. Build artifacts will be located in the `artifacts` directory.
 
 ## Disclaimer
 
-SharpEmu is an experimental emulator intended for research and educational purposes.
+SharpEmu Android is an experimental emulator intended for research and educational purposes.
 
 This project does not contain any copyrighted system firmware, game data, or proprietary PlayStation assets.
 
@@ -115,9 +79,6 @@ Helped with understanding the basic architecture of the PlayStation 4.
 
 * **[Kyty](https://github.com/InoriRus/Kyty)**  
 One of the few PS5 emulator projects available and very useful for studying native code execution.
-
-* **Ryujinx**  
-Provided valuable references for filesystem handling and low-level C# implementation patterns.
 
 # License
 
