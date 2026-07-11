@@ -13,6 +13,7 @@ namespace SharpEmu.Logging;
 public static class BuildInfo
 {
     private const string ProjectUrl = "https://github.com/par274/sharpemu";
+    private const string CanonicalRepository = "par274/sharpemu";
 
     /// <summary>Short commit hash the build was produced from, or <c>null</c>.</summary>
     public static string? CommitSha { get; }
@@ -26,6 +27,18 @@ public static class BuildInfo
     /// <summary>URL of the GitHub Actions workflow run that produced the build, or <c>null</c>.</summary>
     public static string? WorkflowRunUrl { get; }
 
+    /// <summary>Build configuration (e.g. <c>Debug</c> or <c>Release</c>), or <c>null</c>.</summary>
+    public static string? Configuration { get; }
+
+    /// <summary>
+    /// Whether this build is an official release: a Release-configuration CI build
+    /// from the canonical repository, produced by a push to <c>main</c> or a manual
+    /// workflow dispatch (matching the CI <c>release</c> job). All other builds
+    /// (pull requests, forks, feature branches, and local/Debug builds) are
+    /// considered unofficial.
+    /// </summary>
+    public static bool IsOfficialRelease { get; }
+
     static BuildInfo()
     {
         var metadata = ReadMetadata();
@@ -38,6 +51,7 @@ public static class BuildInfo
 
         Branch = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildBranch"));
         Repository = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildRepository"));
+        Configuration = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildConfiguration"));
 
         var serverUrl = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildServerUrl"));
         var runId = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildRunId"));
@@ -45,6 +59,18 @@ public static class BuildInfo
         {
             WorkflowRunUrl = $"{serverUrl.TrimEnd('/')}/{Repository}/actions/runs/{runId}";
         }
+
+        var eventName = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildEventName"));
+        var gitRef = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildRef"));
+
+        var isReleaseConfig = string.Equals(Configuration, "Release", StringComparison.OrdinalIgnoreCase);
+        var isCanonicalRepo = string.Equals(Repository, CanonicalRepository, StringComparison.OrdinalIgnoreCase);
+        var isReleaseTrigger =
+            string.Equals(eventName, "workflow_dispatch", StringComparison.OrdinalIgnoreCase) ||
+            (string.Equals(eventName, "push", StringComparison.OrdinalIgnoreCase) &&
+             string.Equals(gitRef, "refs/heads/main", StringComparison.OrdinalIgnoreCase));
+
+        IsOfficialRelease = isReleaseConfig && isCanonicalRepo && isReleaseTrigger && CommitSha is not null;
     }
 
     /// <summary>
@@ -54,13 +80,27 @@ public static class BuildInfo
     ///
     /// Built from branch "main" of "par274/sharpemu" by GitHub Actions workflow run https://github.com/par274/sharpemu/actions/runs/123.
     /// </code>
-    /// Falls back to a local-build line when no CI provenance is present.
+    /// Official release builds drop the <c>UNOFFICIAL</c> tag. Falls back to a
+    /// local-build line when no CI provenance is present.
     /// </summary>
     public static string Banner
     {
         get
         {
-            var version = CommitSha is null ? "UNOFFICIAL" : $"UNOFFICIAL {CommitSha}";
+            string version;
+            if (CommitSha is null)
+            {
+                version = "UNOFFICIAL";
+            }
+            else if (IsOfficialRelease)
+            {
+                version = CommitSha;
+            }
+            else
+            {
+                version = $"UNOFFICIAL {CommitSha}";
+            }
+
             var header = $"SharpEmu {version} — {ProjectUrl}";
 
             if (Branch is null || Repository is null || WorkflowRunUrl is null)
