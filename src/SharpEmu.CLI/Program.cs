@@ -37,6 +37,18 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        try
+        {
+            return Run(args);
+        }
+        finally
+        {
+            SharpEmuLog.Shutdown();
+        }
+    }
+
+    private static int Run(string[] args)
+    {
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
         if (args.Length == 0 && !isMitigatedChild)
         {
@@ -66,7 +78,7 @@ internal static partial class Program
 
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
-        
+
         if (!File.Exists(ebootPath))
         {
             Log.Error($"EBOOT file was not found: {ebootPath}");
