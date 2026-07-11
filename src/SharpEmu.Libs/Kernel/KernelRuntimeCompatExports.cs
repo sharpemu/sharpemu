@@ -15,6 +15,7 @@ namespace SharpEmu.Libs.Kernel;
 public static class KernelRuntimeCompatExports
 {
     private const int Efault = 14;
+    private const int Einval = 22;
     private const ulong TlsErrnoOffset = 0x40;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
     private const ulong StackChkGuardFieldOffset = 0x10;
@@ -64,6 +65,77 @@ public static class KernelRuntimeCompatExports
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate ulong RdtscDelegate();
+
+    [SysAbiExport(
+        Nid = "QvsZxomvUHs",
+        ExportName = "sceKernelNanosleep",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelNanosleep(CpuContext ctx)
+    {
+        var requestAddress = ctx[CpuRegister.Rdi];
+        var remainAddress = ctx[CpuRegister.Rsi];
+
+        if (requestAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        Span<byte> timespecBuffer = stackalloc byte[16];
+        if (!ctx.Memory.TryRead(requestAddress, timespecBuffer))
+        {
+            ctx[CpuRegister.Rax] = Efault;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var tvSec = BinaryPrimitives.ReadInt64LittleEndian(timespecBuffer);
+        var tvNsec = BinaryPrimitives.ReadInt64LittleEndian(timespecBuffer[sizeof(long)..]);
+
+        if (tvSec < 0 || tvNsec < 0 || tvNsec >= 1_000_000_000L)
+        {
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (tvSec == 0 && tvNsec == 0)
+        {
+            WriteRemainingTime(ctx, remainAddress, 0, 0);
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelNanosleep");
+
+        // TimeSpan resolution is 100 ns ticks, so sub-100 ns requests round up to
+        // a single tick rather than collapsing to a zero-length (no-op) sleep.
+        var totalTicks = tvSec * TimeSpan.TicksPerSecond + Math.Max(tvNsec / 100L, 1L);
+        try
+        {
+            Thread.Sleep(TimeSpan.FromTicks(totalTicks));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            Thread.Sleep(TimeSpan.FromMilliseconds(int.MaxValue));
+        }
+
+        WriteRemainingTime(ctx, remainAddress, 0, 0);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static void WriteRemainingTime(CpuContext ctx, ulong remainAddress, long seconds, long nanoseconds)
+    {
+        if (remainAddress == 0)
+        {
+            return;
+        }
+
+        Span<byte> remainBuffer = stackalloc byte[16];
+        BinaryPrimitives.WriteInt64LittleEndian(remainBuffer, seconds);
+        BinaryPrimitives.WriteInt64LittleEndian(remainBuffer[sizeof(long)..], nanoseconds);
+        ctx.Memory.TryWrite(remainAddress, remainBuffer);
+    }
 
     [SysAbiExport(
         Nid = "1jfXLRVzisc",
