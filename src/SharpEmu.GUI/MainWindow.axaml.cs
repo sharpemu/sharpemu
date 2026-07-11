@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -33,7 +34,7 @@ public partial class MainWindow : Window
 
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
-    private readonly ObservableCollection<LogLine> _consoleLines = new();
+    private readonly AvaloniaList<LogLine> _consoleLines = new();
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
@@ -1049,6 +1050,10 @@ public partial class MainWindow : Window
                 {
                     string path = _settings.LogFilePath;
                     string id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
+                    foreach (var invalidChar in Path.GetInvalidFileNameChars())
+                    {
+                        id = id.Replace(invalidChar.ToString(), "");
+                    }
                     string identifier = $"{id}-{DateTime.Now:yyyyMMdd-HHmmss}";
 
                     string? dir = Path.GetDirectoryName(path);
@@ -1241,10 +1246,6 @@ public partial class MainWindow : Window
         FlushFileLog();
 
         _allConsoleLines.AddRange(incoming);
-        if (_allConsoleLines.Count > MaxConsoleLines)
-        {
-            _allConsoleLines.RemoveRange(0, _allConsoleLines.Count - MaxConsoleLines);
-        }
 
         string query = ConsoleSearchBox.Text ?? string.Empty;
 
@@ -1255,15 +1256,17 @@ public partial class MainWindow : Window
                 line.Text != null &&
                 line.Text.Contains(query, StringComparison.OrdinalIgnoreCase));
         }
-        foreach (var line in linesToAdd)
-        {
-            _consoleLines.Add(line);
-        }
+        _consoleLines.AddRange(linesToAdd);
 
         var overflow = _consoleLines.Count - MaxConsoleLines;
-        for (var i = 0; i < overflow; i++)
+        while (_allConsoleLines.Count > MaxConsoleLines)
         {
-            _consoleLines.RemoveAt(0);
+            var droppedLine = _allConsoleLines[0];
+            _allConsoleLines.RemoveAt(0);
+            if (_consoleLines.Count > 0 && _consoleLines[0] == droppedLine)
+            {
+                _consoleLines.RemoveAt(0);
+            }
         }
 
         _autoScrollTicks = 3;
@@ -1276,17 +1279,18 @@ public partial class MainWindow : Window
 
         var line = new LogLine(text, brush);
         _allConsoleLines.Add(line);
-        if (_allConsoleLines.Count > MaxConsoleLines)
-        {
-            _allConsoleLines.RemoveRange(0, _allConsoleLines.Count - MaxConsoleLines);
-        }
 
         string query = ConsoleSearchBox.Text ?? string.Empty;
         if (string.IsNullOrWhiteSpace(query) || (text != null && text.Contains(query, StringComparison.OrdinalIgnoreCase)))
         {
             _consoleLines.Add(line);
-            var overflow = _consoleLines.Count - MaxConsoleLines;
-            for (var i = 0; i < overflow; i++)
+        }
+
+        while (_allConsoleLines.Count > MaxConsoleLines)
+        {
+            var droppedLine = _allConsoleLines[0];
+            _allConsoleLines.RemoveAt(0);
+            if (_consoleLines.Count > 0 && _consoleLines[0] == droppedLine)
             {
                 _consoleLines.RemoveAt(0);
             }
@@ -1304,10 +1308,7 @@ public partial class MainWindow : Window
 
         if (string.IsNullOrWhiteSpace(query))
         {
-            foreach (var line in _allConsoleLines)
-            {
-                _consoleLines.Add(line);
-            }
+            _consoleLines.AddRange(_allConsoleLines);
         }
         else
         {
@@ -1315,10 +1316,7 @@ public partial class MainWindow : Window
                 line.Text != null &&
                 line.Text.Contains(query, StringComparison.OrdinalIgnoreCase));
 
-            foreach (var line in filtered)
-            {
-                _consoleLines.Add(line);
-            }
+            _consoleLines.AddRange(filtered);
         }
     }
 
