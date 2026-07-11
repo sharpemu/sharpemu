@@ -38,6 +38,7 @@ jobs:
       artifact-name: ${{ steps.vars.outputs.artifact-name }}
       release-name: ${{ steps.vars.outputs.release-name }}
       release-tag: ${{ steps.vars.outputs.release-tag }}
+      safe-ref: ${{ steps.vars.outputs.safe-ref }}
       short-sha: ${{ steps.vars.outputs.short-sha }}
     steps:
       - name: Compute workflow variables
@@ -53,6 +54,7 @@ jobs:
 
           {
             echo "short-sha=${short_sha}"
+            echo "safe-ref=${safe_ref}"
             echo "archive-name=${archive_name}"
             echo "artifact-name=${artifact_name}"
             echo "release-tag=${release_tag}"
@@ -210,6 +212,49 @@ jobs:
         run: |
           asset_path="release/${ARCHIVE_NAME}"
           notes="Automated Windows build for commit ${GITHUB_SHA}."
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${asset_path}" --clobber
+            gh release edit "${RELEASE_TAG}" --title "${RELEASE_NAME}" --notes "${notes}"
+          else
+            gh release create "${RELEASE_TAG}" "${asset_path}" \
+              --title "${RELEASE_NAME}" \
+              --notes "${notes}" \
+              --target "${GITHUB_SHA}"
+          fi
+
+  release-posix:
+    name: Publish GitHub Release (${{ matrix.rid }})
+    needs:
+      - init
+      - build-posix
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        rid: [linux-x64, osx-x64]
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: sharpemu-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
+          path: release
+
+      - name: Create or update release
+        shell: bash
+        env:
+          ARCHIVE_NAME: sharpemu-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}.tar.gz
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NAME: SharpEmu ${{ matrix.rid }} ${{ needs.init.outputs.short-sha }}
+          RELEASE_TAG: ${{ matrix.rid }}-${{ needs.init.outputs.safe-ref }}-${{ needs.init.outputs.short-sha }}
+          RID: ${{ matrix.rid }}
+        run: |
+          asset_path="release/${ARCHIVE_NAME}"
+          notes="Automated ${RID} build for commit ${GITHUB_SHA}."
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             gh release upload "${RELEASE_TAG}" "${asset_path}" --clobber
