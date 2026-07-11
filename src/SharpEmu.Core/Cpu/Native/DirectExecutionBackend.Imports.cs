@@ -101,10 +101,10 @@ public sealed partial class DirectExecutionBackend
 		}
 		// Leaf imports take a scalar-only fast path that reads its own operands and
 		// intentionally bypasses the SysV variadic XMM marshalling below. This is safe
-		// only while the leaf set contains no float-variadic or float-returning function
-		// (currently graphics/pad/save-data/mutex plus va_list-based vsnprintf). Do not add
-		// a function that consumes xmm0-7 args or returns in xmm0 to the leaf set without
-		// routing it through the full gateway.
+		// only while the leaf set contains no float-variadic or float-returning function.
+		// The constraint and the audited list live on IsLeafImport — do not add a
+		// function that consumes xmm0-7 args or returns in xmm0 to the leaf set;
+		// such functions must stay on the full gateway path below.
 		if (IsLeafImport(importStubEntry.Nid) &&
 			TryDispatchLeafImport(cpuContext, importStubEntry, argPackPtr, num, out var leafResult))
 		{
@@ -642,6 +642,13 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
+	// Subset of the leaf set that additionally skips the import-call-frame
+	// bookkeeping. The same scalar-only (no XMM args, no XMM return) constraint
+	// as IsLeafImport applies — see the note there before adding entries.
+	// NOTE: this filter is only consulted after IsLeafImport accepts the NID;
+	// entries listed here but not in IsLeafImport (scePadRead, scePadOpen,
+	// sceUserServiceGetEvent, sceUserServiceGetPlatformPrivacySetting,
+	// pthread_mutex_trylock) currently take the full gateway path.
 	private static bool IsNoBlockLeafImport(string nid) =>
 		nid is
 			"8aI7R7WaOlc" or // sceAmprCommandBufferConstructor
@@ -668,7 +675,7 @@ public sealed partial class DirectExecutionBackend
 			"xk0AcarP3V4" or // scePadOpen
 			"yH17Q6NWtVg" or // sceUserServiceGetEvent
 			"D-CzAxQL0XI" or // sceUserServiceGetPlatformPrivacySetting
-			"K-jXhbt2gn4";   // scePthreadMutexTrylock
+			"K-jXhbt2gn4";   // pthread_mutex_trylock (scePthreadMutexTrylock is upoVrzMHFeE)
 
 	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
 	{
@@ -735,22 +742,41 @@ public sealed partial class DirectExecutionBackend
 			"1G3lF1Gg1k8" or // sceKernelOpen
 			"gEpBkcwxUjw";   // sceKernelAprResolveFilepathsToIdsAndFileSizes
 
+	// LEAF-IMPORT REGISTRATION — scalar-only constraint.
+	//
+	// TryDispatchLeafImport is a fast path that never copies the trampoline's XMM
+	// save area into CpuContext and never publishes an XMM0 return back to the
+	// guest (see DispatchImport). Every NID listed here must therefore satisfy BOTH:
+	//   1. no float/double parameters (nothing passed in xmm0..xmm7), and
+	//   2. no float/double return value (nothing returned in xmm0).
+	// Integer/pointer arguments and returns only. va_list-based functions
+	// (vsnprintf) are safe: SysV va_list floats are read from the caller-built
+	// reg_save_area in guest memory, not from the callee's incoming XMM registers.
+	//
+	// If a function that consumes XMM arguments or returns in xmm0 (e.g. powf,
+	// logf, wcstod, sceVideoOutColorSettingsSetGamma_) is ever added here, its
+	// float arguments will silently arrive stale and its return value will be
+	// dropped. Such functions must stay on the full gateway path — do not list them.
+	//
+	// Audited 2026-07-11 (PR #59): every NID below maps to a registered
+	// SysAbiExport whose handler neither reads nor writes CpuContext XMM state
+	// and whose known guest signature is integer/pointer only.
 	private bool IsLeafImport(string nid)
 	{
-		if (nid == "1jfXLRVzisc")
+		if (nid == "1jfXLRVzisc") // sceKernelUsleep
 		{
 			return !_logUsleep;
 		}
 
 		return nid is
-			"9UK1vLZQft4" or
-			"tn3VlD0hG60" or
-			"7H0iTOciTLo" or
-			"2Z+PpY6CaJg" or
-			"8aI7R7WaOlc" or
+			"9UK1vLZQft4" or // scePthreadMutexLock
+			"tn3VlD0hG60" or // scePthreadMutexUnlock
+			"7H0iTOciTLo" or // pthread_mutex_lock
+			"2Z+PpY6CaJg" or // pthread_mutex_unlock
+			"8aI7R7WaOlc" or // sceAmprCommandBufferConstructor
 			"zgXifHT9ErY" or // sceVideoOutIsFlipPending
 			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
-			"qj7QZpgr9Uw" or // Gen5 graphics type-2 packet
+			"qj7QZpgr9Uw" or // sceAgcUnknownQj7QZpgr9Uw (unknown NID; observed scalar: command-buffer pointer in, packet address out)
 			"LtTouSCZjHM" or // sceAgcCbNop
 			"k3GhuSNmBLU" or // sceAgcCbDispatch
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
@@ -773,24 +799,24 @@ public sealed partial class DirectExecutionBackend
 			"IxYiarKlXxM" or // sceAgcDmaDataPatchSetDstAddressOrOffset
 			"3KDcnM3lrcU" or // sceAgcWaitRegMemPatchAddress
 			"0fWWK5uG9rQ" or // sceAgcQueueEndOfPipeActionPatchAddress
-			"a8uLzYY--tM" or
-			"Qs1xtplKo0U" or
-			"GuchCTefuZw" or
-			"N-FSPA4S3nI" or
-			"baQO9ez2gL4" or
-			"ULvXMDz56po" or
-			"mQ16-QdKv7k" or
-			"vWU-odnS+fU" or
-			"sSAUCCU1dv4" or
-			"C+IEj+BsAFM" or
-			"tZDDEo2tE5k" or
-			"GnxKOHEawhk" or
-			"H896Pt-yB4I" or
-			"sJXyWHjP-F8" or
-			"ASoW5WE-UPo" or
-			"rqwFKI4PAiM" or
-			"eE4Szl8sil8" or
-			"qvMUCyyaCSI" or
+			"a8uLzYY--tM" or // sceAmprAprCommandBufferConstructor
+			"Qs1xtplKo0U" or // sceAmprAprCommandBufferDestructor
+			"GuchCTefuZw" or // sceAmprCommandBufferDestructor
+			"N-FSPA4S3nI" or // sceAmprCommandBufferSetBuffer
+			"baQO9ez2gL4" or // sceAmprCommandBufferReset
+			"ULvXMDz56po" or // sceAmprCommandBufferClearBuffer
+			"mQ16-QdKv7k" or // sceAmprAprCommandBufferReadFile
+			"vWU-odnS+fU" or // sceAmprMeasureCommandSizeReadFile
+			"sSAUCCU1dv4" or // sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00
+			"C+IEj+BsAFM" or // sceAmprMeasureCommandSizeWriteAddressOnCompletion
+			"tZDDEo2tE5k" or // sceAmprCommandBufferGetSize
+			"GnxKOHEawhk" or // sceAmprCommandBufferGetCurrentOffset
+			"H896Pt-yB4I" or // sceAmprCommandBufferWriteKernelEventQueue_04_00
+			"sJXyWHjP-F8" or // sceAmprCommandBufferWriteAddressOnCompletion
+			"ASoW5WE-UPo" or // sceKernelAprSubmitCommandBufferAndGetResult
+			"rqwFKI4PAiM" or // sceKernelAprWaitCommandBuffer
+			"eE4Szl8sil8" or // sceKernelAprSubmitCommandBuffer
+			"qvMUCyyaCSI" or // sceKernelAprSubmitCommandBufferAndGetId
 			"Vo5V8KAwCmk" or // sceSystemServiceHideSplashScreen
 			"TywrFKCoLGY" or // sceSaveDataInitialize3
 			"dyIhnXq-0SM" or // sceSaveDataDirNameSearch
