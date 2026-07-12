@@ -249,13 +249,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
 
-        // The desired address is only a search hint for these callers. On
-        // POSIX hosts the page-stepped probing below is pathological: the
-        // host owns arbitrary unmapped-looking ranges, and under Rosetta 2
-        // the kernel ignores placement hints for whole windows, so 64K
-        // mmap/munmap probes all fail. Ask the kernel for a placement
-        // directly instead and accept it when it satisfies the alignment.
-        if (!OperatingSystem.IsWindows())
+        // Under Rosetta 2 the kernel can ignore placement hints for whole
+        // windows, so page-stepped exact probes are pathological on macOS.
+        // Linux must keep using the exact-address search below: PS5 resource
+        // descriptors cannot represent ordinary 0x7F... host mappings. Linux
+        // HostMemory uses MAP_FIXED_NOREPLACE, making those low-address probes
+        // safe without clobbering existing host mappings.
+        if (OperatingSystem.IsMacOS())
         {
             // Over-allocate by the alignment so a kernel-chosen placement
             // always contains an aligned start; the unused head/tail stays
