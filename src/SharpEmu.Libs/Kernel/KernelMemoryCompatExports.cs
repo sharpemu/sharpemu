@@ -1689,15 +1689,15 @@ public static class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var entryCount = (int)count;
+        Span<uint> localIds = count <= 256 ? stackalloc uint[entryCount] : new uint[entryCount];
+        Span<ulong> localSizes = count <= 128 ? stackalloc ulong[entryCount] : new ulong[entryCount];
+        var resolvedGuestPaths = new string[entryCount];
+        var resolvedHostPaths = new string[entryCount];
+
         for (ulong i = 0; i < count; i++)
         {
-            if (idsAddress != 0 &&
-                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
-            {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
+            var index = (int)i;
             if (!TryResolveAprFilepath(ctx, pathListAddress, i, out var guestPath))
             {
                 KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
@@ -1712,21 +1712,45 @@ public static class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
-            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
+            var fileId = AmprFileRegistry.ComputeFileId(guestPath);
             LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
 
-            if (idsAddress != 0 &&
-                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
+            localIds[index] = fileId;
+            localSizes[index] = fileSize;
+            resolvedGuestPaths[index] = guestPath;
+            resolvedHostPaths[index] = hostPath;
+        }
+
+        Span<byte> sizePayload = count <= 64 ? stackalloc byte[entryCount * sizeof(ulong)] : new byte[entryCount * sizeof(ulong)];
+        for (ulong i = 0; i < count; i++)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(sizePayload[(int)(i * sizeof(ulong))..], localSizes[(int)i]);
+        }
+
+        if (!TryWriteCompat(ctx, sizesAddress, sizePayload))
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (idsAddress != 0)
+        {
+            Span<byte> idPayload = count <= 128 ? stackalloc byte[entryCount * sizeof(uint)] : new byte[entryCount * sizeof(uint)];
+            for (ulong i = 0; i < count; i++)
             {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                BinaryPrimitives.WriteUInt32LittleEndian(idPayload[(int)(i * sizeof(uint))..], localIds[(int)i]);
             }
 
-            if (!TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), fileSize))
+            if (!TryWriteCompat(ctx, idsAddress, idPayload))
             {
                 KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
+        }
+
+        for (var i = 0; i < entryCount; i++)
+        {
+            AmprFileRegistry.Register(resolvedGuestPaths[i], resolvedHostPaths[i]);
         }
 
         ctx[CpuRegister.Rax] = 0;

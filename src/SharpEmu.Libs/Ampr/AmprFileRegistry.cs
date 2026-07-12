@@ -21,7 +21,7 @@ internal static class AmprFileRegistry
         return _hostPathsById.TryGetValue(id, out hostPath!);
     }
 
-    private static uint ComputeFileId(string guestPath)
+    internal static uint ComputeFileId(string guestPath)
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(guestPath);
 
