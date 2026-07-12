@@ -6687,8 +6687,14 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                var hasPriorContents = texture.GuestImage is { } guestImage &&
-                    (guestImage.Initialized || guestImage.InitialUploadPending);
+                // InitialUploadPending means this upload still has to perform
+                // the image's first layout transition.  Treating it as prior
+                // contents records ShaderReadOnlyOptimal as oldLayout even
+                // though a freshly created image is still Undefined.  Linux
+                // validation reports VUID-vkCmdDraw-None-09600 and NVIDIA
+                // samples the uninitialized (black) image in that case.
+                var hasPriorContents =
+                    texture.GuestImage is { Initialized: true };
                 var toTransfer = new ImageMemoryBarrier
                 {
                     SType = StructureType.ImageMemoryBarrier,
