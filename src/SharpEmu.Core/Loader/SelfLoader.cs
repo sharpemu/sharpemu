@@ -17,7 +17,8 @@ namespace SharpEmu.Core.Loader;
 public sealed class SelfLoader : ISelfLoader
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("Loader");
-    private const uint SelfMagic = 0x4F153D1D;
+    private const uint SelfOrbisMagic = 0x1D3D154F;
+    private const uint SelfProsperoMagic = 0xEEF51454;
     private const ulong SelfSegmentFlag = 0x800;
     private const int PageSize = 0x1000;
     private const ulong ImportStubBaseAddress = 0x0000_7000_0000_0000UL;
@@ -82,8 +83,8 @@ public sealed class SelfLoader : ISelfLoader
     private static readonly IReadOnlyDictionary<string, ulong> EmptyRuntimeSymbols =
         new Dictionary<string, ulong>(StringComparer.Ordinal);
     private static readonly IReadOnlyList<ulong> EmptyInitializerFunctions = Array.Empty<ulong>();
-    private static readonly int SelfHeaderSize = Unsafe.SizeOf<SelfHeader>();
-    private static readonly int SelfSegmentSize = Unsafe.SizeOf<SelfSegment>();
+    private static readonly int SelfHeaderSize = 32; // 0x20 bytes // Unsafe.SizeOf<SelfHeader>();
+    private static readonly int SelfSegmentSize = 32; // 0x20 bytes per segment // Unsafe.SizeOf<SelfSegment>();
     private static readonly int ProgramHeaderSize = Unsafe.SizeOf<ProgramHeader>();
 
     public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory)
@@ -323,12 +324,26 @@ public sealed class SelfLoader : ISelfLoader
             throw new InvalidDataException("Input image is too small to contain an ELF header.");
         }
 
-        if (imageData.Length >= sizeof(uint) && BinaryPrimitives.ReadUInt32BigEndian(imageData[..sizeof(uint)]) == SelfMagic)
+        if (imageData.Length >= sizeof(uint))
         {
-            var selfHeader = ReadUnmanaged<SelfHeader>(imageData, 0);
-            if (!selfHeader.HasKnownLayout || selfHeader.Unknown != 0x22)
+            uint magic = BinaryPrimitives.ReadUInt32LittleEndian(imageData);
+            if (magic != SelfOrbisMagic && magic != SelfProsperoMagic)
             {
-                throw new InvalidDataException("SELF header signature is not recognized.");
+                throw new InvalidDataException($"Not a SELF file. Found magic 0x{magic:X8}");
+            }
+
+            var selfHeader = ReadUnmanaged<SelfHeader>(imageData, 0);
+            if (!selfHeader.IsValidSelf)
+            {
+                throw new InvalidDataException("SELF magic not recognized.");
+            }
+            if (selfHeader.SegmentCount == 0 || selfHeader.SegmentCount > 100)
+            {
+                throw new InvalidDataException($"Invalid segment count: {selfHeader.SegmentCount}");
+            }
+            if (selfHeader.FileSize > (ulong)imageData.Length)
+            {
+                throw new InvalidDataException("SELF FileSize is larger than actual file.");
             }
 
             var segmentCount = selfHeader.SegmentCount;
@@ -2354,44 +2369,22 @@ public sealed class SelfLoader : ISelfLoader
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private readonly struct SelfHeader
     {
-        private readonly byte _ident0;
-        private readonly byte _ident1;
-        private readonly byte _ident2;
-        private readonly byte _ident3;
-        private readonly byte _ident4;
-        private readonly byte _ident5;
-        private readonly byte _ident6;
-        private readonly byte _ident7;
-        private readonly byte _ident8;
-        private readonly byte _ident9;
-        private readonly byte _ident10;
-        private readonly byte _ident11;
-        private readonly ushort _size1;
-        private readonly ushort _size2;
-        private readonly ulong _fileSize;
-        private readonly ushort _segmentCount;
-        private readonly ushort _unknown;
-        private readonly uint _padding;
+        public readonly uint Magic; // 0x4F153D1D (PS4) or 0x5414F5EE (PS5)
+        public readonly byte Version;
+        public readonly byte Mode;
+        public readonly byte Endian;
+        public readonly byte Attrs;
+        public readonly uint KeyType;
+        public readonly ushort HeaderSize;
+        public readonly ushort MetaSize;
+        public readonly ulong FileSize;
+        public readonly ushort SegmentCount;
+        public readonly ushort Flags;
 
-        public ushort SegmentCount => _segmentCount;
+        public bool IsValidSelf => Magic == SelfOrbisMagic || Magic == SelfProsperoMagic;
 
-        public ushort Unknown => _unknown;
-
-        public ulong FileSize => _fileSize;
-
-        public bool HasKnownLayout =>
-            _ident0 == 0x4F &&
-            _ident1 == 0x15 &&
-            _ident2 == 0x3D &&
-            _ident3 == 0x1D &&
-            _ident4 == 0x00 &&
-            _ident5 == 0x01 &&
-            _ident6 == 0x01 &&
-            _ident7 == 0x12 &&
-            _ident8 == 0x01 &&
-            _ident9 == 0x01 &&
-            _ident10 == 0x00 &&
-            _ident11 == 0x00;
+        public bool IsProspero => Magic == SelfProsperoMagic; // PS5
+        public bool IsOrbis => Magic == SelfOrbisMagic;       // PS4
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
