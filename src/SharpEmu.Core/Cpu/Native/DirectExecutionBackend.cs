@@ -234,6 +234,32 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
+	private const ulong LazyImportStubPoolBaseAddress = 0x0000_7000_0000_0000_1000UL;
+
+	private const ulong LazyImportStubPoolAddressStride = 0x0000_0000_0100_0000UL;
+
+	private const ulong LazyImportStubSlotSize = 0x10;
+
+	private const ulong LazyImportStubPoolMapSize = 0x10000UL;
+
+	private const byte LazyImportStubTrapOpcode = 0xCC;
+
+	private const byte LazyImportStubReturnOpcode = 0xC3;
+
+	private const string KernelDynlibDlsymAerolibNid = "LwG8g3niqwA";
+
+	private readonly object _lazyDlsymStubGate = new();
+
+	private readonly Dictionary<string, ulong> _lazyDlsymStubCache = new(StringComparer.Ordinal);
+
+	private ulong _lazyImportStubPoolBase;
+
+	private ulong _lazyImportStubNextSlot;
+
+	private ulong _lazyImportStubPoolLimit;
+
+	private bool _lazyImportStubPoolMapped;
+
 	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
 
 	private int _recentImportTraceCount;
@@ -855,6 +881,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		result = OrbisGen2Result.ORBIS_GEN2_OK;
 		LastError = null;
 		InitializeRuntimeSymbolIndex(runtimeSymbols);
+		ResetLazyDlsymStubState();
 		_recentImportTraceCount = 0;
 		_recentImportTraceWriteIndex = 0;
 		_distinctImportNidHistoryCount = 0;
@@ -4456,13 +4483,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ulong rsp = cpuContext[CpuRegister.Rsp];
 			Console.Error.WriteLine($"[LOADER][ERROR] Stall snapshot: rip=0x{cpuContext.Rip:X16} rsp=0x{rsp:X16} rbp=0x{cpuContext[CpuRegister.Rbp]:X16} rax=0x{cpuContext[CpuRegister.Rax]:X16} rbx=0x{cpuContext[CpuRegister.Rbx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdi=0x{cpuContext[CpuRegister.Rdi]:X16}");
 			ulong num = cpuContext.Rip & 0xFFFFFFFFFFFFFFF0uL;
-			for (int i = 0; i < _importEntries.Length; i++)
+			var importEntries = _importEntries;
+			for (int i = 0; i < importEntries.Length; i++)
 			{
-				if (_importEntries[i].Address != num)
+				if (importEntries[i].Address != num)
 				{
 					continue;
 				}
-				string text = _importEntries[i].Nid;
+				string text = importEntries[i].Nid;
 				if (_moduleManager.TryGetExport(text, out ExportedFunction export))
 				{
 					Console.Error.WriteLine($"[LOADER][ERROR] Stall import-stub: rip=0x{num:X16} nid={text} -> {export.LibraryName}:{export.Name}");
@@ -4653,6 +4681,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ClearImportHandlerTrampolines();
 		_importEntries = Array.Empty<ImportStubEntry>();
 		_runtimeSymbolsByName.Clear();
+		ResetLazyDlsymStubState();
 		_importNidHashCache.Clear();
 		StopStallWatchdog();
 		if (_exceptionHandler != 0)
