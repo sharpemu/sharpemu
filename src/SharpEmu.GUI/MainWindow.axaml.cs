@@ -42,6 +42,7 @@ public partial class MainWindow : Window
 
     private GuiSettings _settings = new();
     private EmulatorProcess? _emulator;
+    private ConsoleWindow? _consoleWindow;
     private StreamWriter? _fileLog;
     private readonly SndPreviewPlayer _sndPreview = new();
     private string? _emulatorExePath;
@@ -98,8 +99,9 @@ public partial class MainWindow : Window
         StopButton.Click += (_, _) => StopEmulator();
         ClearLogButton.Click += (_, _) => _consoleLines.Clear();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
+        DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         OptionsToggle.IsCheckedChanged += (_, _) => OptionsPanel.IsVisible = OptionsToggle.IsChecked == true;
-        ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true;
+        ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         SelectLogFilePathButton.Click += async (_, _) => await SelectFilePathAsync();
         TitleMusicToggle.IsCheckedChanged += (_, _) => OnTitleMusicToggled();
         DiscordToggle.IsCheckedChanged += (_, _) =>
@@ -329,6 +331,7 @@ public partial class MainWindow : Window
         _gamepadTimer.Stop();
         _sndPreview.Stop();
         _discord?.Dispose();
+        _consoleWindow?.Close();
         _emulator?.Dispose();
         DropFileLog();
     }
@@ -1469,5 +1472,29 @@ public partial class MainWindow : Window
 
         var text = string.Join(Environment.NewLine, _consoleLines.Select(line => line.Text));
         await Clipboard.SetTextAsync(text);
+    }
+
+    private void ShowConsoleWindow()
+    {
+        if (_consoleWindow is { } window)
+        {
+            window.Activate();
+            return;
+        }
+
+        ConsoleSearchBox.Text = string.Empty;
+        ConsoleToggle.IsChecked = false;
+        ConsolePanel.IsVisible = false;
+        _consoleWindow = new ConsoleWindow(
+            _consoleLines,
+            () => { _consoleLines.Clear(); _allConsoleLines.Clear(); },
+            AutoScrollCheck.IsChecked == true);
+        _consoleWindow.Closed += (_, _) =>
+        {
+            _consoleWindow = null;
+            ConsoleToggle.IsChecked = true;
+            ConsolePanel.IsVisible = true;
+        };
+        _consoleWindow.Show(this);
     }
 }

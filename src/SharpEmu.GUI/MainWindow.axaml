@@ -160,15 +160,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border Grid.Row="2" x:Name="ConsolePanel" Classes="card" Padding="0" Height="240"
               Margin="0,12,0,0" IsVisible="False">
         <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto, Auto" Margin="16,12,16,8">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
             <TextBlock Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
-            <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox" 
-                    Watermark="Search..." MaxWidth="5500" />
+            <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
+                    Watermark="Search..." Width="320" />
             <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
                     FontSize="12" Margin="0,0,12,0" />
-            <Button Grid.Column="3" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="12"
+            <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost" Content="Split" FontSize="12"
                     Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="4" x:Name="ClearLogButton" Classes="ghost" Content="Clear" FontSize="12"
+            <Button Grid.Column="4" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="12"
+                    Padding="10,4" Margin="0,0,8,0" />
+            <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost" Content="Clear" FontSize="12"
                     Padding="10,4" />
           </Grid>
           <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
