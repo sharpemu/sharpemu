@@ -6350,19 +6350,19 @@ public static class KernelMemoryCompatExports
         }
 
         var currentIndex = directory.NextIndex;
-        if (basePointerAddress != 0 && !TryWriteUInt64Compat(ctx, basePointerAddress, (ulong)currentIndex))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
         if (currentIndex >= directory.Entries.Length)
         {
+            if (basePointerAddress != 0 &&
+                !TryWriteUInt64Compat(ctx, basePointerAddress, (ulong)currentIndex))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         var entryName = directory.Entries[currentIndex];
-        directory.NextIndex = currentIndex + 1;
 
         var entryBytes = Encoding.UTF8.GetBytes(entryName);
         var nameLength = Math.Min(entryBytes.Length, 255);
@@ -6381,6 +6381,13 @@ public static class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (basePointerAddress != 0 &&
+            !TryWriteUInt64Compat(ctx, basePointerAddress, (ulong)currentIndex))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        directory.NextIndex = currentIndex + 1;
         ctx[CpuRegister.Rax] = 512;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
