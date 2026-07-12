@@ -6441,7 +6441,8 @@ internal static unsafe class VulkanVideoPresenter
             var bytesPerPixel = GetReadbackBytesPerPixel(image.Format);
             if (bytesPerPixel == 0)
             {
-                TraceVulkanShader(
+                Console.Error.WriteLine(
+                    "[LOADER][TRACE] " +
                     $"vk.guest_image addr=0x{image.Address:X16} " +
                     $"format={image.Format} readback=unsupported");
                 return;
@@ -6576,7 +6577,8 @@ internal static unsafe class VulkanVideoPresenter
                         (int)bytesPerPixel);
                     var center = Convert.ToHexString(
                         bytes.Slice(centerOffset, (int)bytesPerPixel));
-                    TraceVulkanShader(
+                    Console.Error.WriteLine(
+                        "[LOADER][TRACE] " +
                         $"vk.guest_image addr=0x{image.Address:X16} " +
                         $"size={image.Width}x{image.Height} format={image.Format} " +
                         $"nonzero_bytes={nonzeroBytes}/{byteCount} " +
