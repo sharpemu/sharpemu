@@ -1406,12 +1406,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		return exportName switch
 		{
-			"memmove" or
-			// memset/memcpy excluded: the raw LLE routines have no null/bounds guard and crash
-			// with an access violation on bad pointers (observed hit during Quake's CL_Init,
-			// where a still-unidentified upstream bug calls memcpy/memset with a null
-			// destination). Both are instead served by the guarded native intrinsics in
-			// TryCreateNativeImportIntrinsic, which fail safely without leaving the leaf path.
+			// memset/memcpy excluded: the raw LLE routines have no null/bounds guard and
+			// crash with an access violation on bad pointers (observed hit during Quake's
+			// CL_Init, where a still-unidentified upstream bug calls memcpy/memset with a
+			// null destination). Both are served by the guarded native intrinsics in
+			// TryCreateNativeImportIntrinsic, which fail safely without leaving the leaf
+			// path.
+			// memmove excluded preventively for the same reason — raw LLE has no guards;
+			// it falls back to the HLE handler KernelMemoryCompatExports.Memmove, which
+			// delegates to the guarded Memcpy with a 512 MiB count cap.
 			"memcmp" or
 			// _Getpctype must come from the game's own Dinkumware libc when one is bundled:
 			// it returns a pointer to that CRT's ctype bitmask table, whose bit layout
