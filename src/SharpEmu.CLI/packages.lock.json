@@ -216,7 +216,10 @@
         }
       },
       "sharpemu.hle": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.Logging": "[1.0.0, )"
+        }
       },
       "sharpemu.libs": {
         "type": "Project",

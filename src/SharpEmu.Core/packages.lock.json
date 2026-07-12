@@ -65,7 +65,10 @@
         "contentHash": "Iy22JopynbOJ32vA0lBhFEzGi65GQJBuJHYBYRBpydrDpNoTiHnjIXfA65Gu+8qsOr/ZEoIF8r9aHCgAXuO6DA=="
       },
       "sharpemu.hle": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.Logging": "[1.0.0, )"
+        }
       },
       "sharpemu.libs": {
         "type": "Project",
