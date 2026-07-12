@@ -6178,6 +6178,7 @@ internal static unsafe class VulkanVideoPresenter
 
             TranslatedDrawResources? translatedResources = null;
             GuestImageResource? presentedGuestImage = null;
+            var tracePresentedGuestImage = false;
             if (presentation.GuestImageAddress != 0 &&
                 (!_guestImages.TryGetValue(
                     presentation.GuestImageAddress,
@@ -6193,10 +6194,10 @@ internal static unsafe class VulkanVideoPresenter
                     (_directPresentationCount is 1 or 30 or 120 ||
                      _directPresentationCount % 600 == 0))
                 {
+                    tracePresentedGuestImage = true;
                     Console.Error.WriteLine(
                         $"[LOADER][TRACE] vk.present_sample frame={_directPresentationCount} " +
                         $"addr=0x{presentedGuestImage.Address:X16}");
-                    TraceGuestImageContents(presentedGuestImage);
                 }
             }
 
@@ -6383,6 +6384,15 @@ internal static unsafe class VulkanVideoPresenter
             {
                 CompletePendingPresentation(wait: true);
                 TraceSwapchainReadback();
+            }
+            // Report the actual presented pixels before starting the larger
+            // source-image readback.  If a guest draw wedges the GPU, the
+            // source probe can block in vkQueueWaitIdle; doing it first used
+            // to hide whether the swapchain itself was black and made the
+            // diagnostic run stop immediately after vk.present_sample.
+            if (tracePresentedGuestImage && presentedGuestImage is not null)
+            {
+                TraceGuestImageContents(presentedGuestImage);
             }
             while (_pendingAliasImageDumps.TryDequeue(out var aliasImage))
             {
