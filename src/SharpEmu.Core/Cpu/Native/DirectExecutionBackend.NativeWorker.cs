@@ -79,7 +79,10 @@ public sealed partial class DirectExecutionBackend
 
 	private NativeGuestExecutor? RentNativeGuestExecutor()
 	{
-		if (NativeGuestWorkersDisabled)
+		// NativeGuestExecutor emits a Win32 wait loop and creates it with
+		// kernel32!CreateThread. POSIX hosts use the established inline entry
+		// path until the worker loop has a pthread/eventfd implementation.
+		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
 		{
 			return null;
 		}
