@@ -7294,7 +7294,15 @@ internal static unsafe class VulkanVideoPresenter
             var sourceToTransfer = new ImageMemoryBarrier
             {
                 SType = StructureType.ImageMemoryBarrier,
-                SrcAccessMask = AccessFlags.ShaderReadBit,
+                // An offscreen target is last written as a color attachment,
+                // then put in ShaderReadOnlyOptimal for later sampling.  A
+                // layout-only handoff to ShaderRead does not make that write
+                // visible to this transfer when no shader sample occurs in
+                // between.  NVIDIA's Linux driver exposed the resulting stale
+                // (usually black) image while Windows drivers happened to
+                // tolerate it.  Include all preceding writes before blitting
+                // the image into the swapchain.
+                SrcAccessMask = AccessFlags.MemoryWriteBit | AccessFlags.ShaderReadBit,
                 DstAccessMask = AccessFlags.TransferReadBit,
                 OldLayout = ImageLayout.ShaderReadOnlyOptimal,
                 NewLayout = ImageLayout.TransferSrcOptimal,
