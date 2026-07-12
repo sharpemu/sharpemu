@@ -88,7 +88,7 @@ body:
     attributes:
       label: Last Milestone / First Error
       description: Paste the **last useful milestone line** or the **first `WARNING`, `ERROR`, or `CRITICAL` line connected to the stop** from the log. `DEBUG`/`TRACE` lines do not count unless a real error follows them.
-      placeholder: e.g. CpuEngine: native-only  OR  [ERROR] Native backend FAILED: ...
+      placeholder: "e.g. CpuEngine: native-only  OR  [ERROR] Native backend FAILED: ..."
     validations:
       required: true
 

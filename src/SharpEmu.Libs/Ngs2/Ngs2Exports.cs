@@ -203,13 +203,12 @@ public static class Ngs2Exports
         }
     }
 
-    [SysAbiExport(
-        Nid = "-4GCfYdNF1s",
-        ExportName = "sceNgs2VoiceControl",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2VoiceControlAlt(CpuContext ctx) => Ngs2VoiceControl(ctx);
-
+    // The earlier "alt NID" guesses here were wrong: an NID is the aerolib hash of one
+    // symbol name, and hashing scripts/ps5_names.txt shows the previous alt bindings
+    // actually belonged to sceImeUpdate (-4GCfYdNF1s), sceMouseRead (x8qnXqh-tiM) and
+    // sceSystemGestureUpdateAllTouchRecognizer (wPJGwI2RM2I) — Quake's audio thread was
+    // receiving an NGS2 error from what it thought was sceImeUpdate. Those now live in
+    // their real libraries; the NIDs below are verified against the hash.
     [SysAbiExport(
         Nid = "AbYvTOZ8Pts",
         ExportName = "sceNgs2VoiceRunCommands",
@@ -219,24 +218,24 @@ public static class Ngs2Exports
 
     [SysAbiExport(
         Nid = "-TOuuAQ-buE",
-        ExportName = "sceNgs2VoiceRunCommands",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceNgs2")]
-    public static int Ngs2VoiceRunCommandsAlt(CpuContext ctx) => Ngs2VoiceControl(ctx);
-
-    [SysAbiExport(
-        Nid = "x8qnXqh-tiM",
         ExportName = "sceNgs2VoiceGetState",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
     public static int Ngs2VoiceGetState(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
-        Nid = "wPJGwI2RM2I",
+        Nid = "rEh728kXk3w",
         ExportName = "sceNgs2VoiceGetStateFlags",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
     public static int Ngs2VoiceGetStateFlags(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "xa8oL9dmXkM",
+        ExportName = "sceNgs2PanInit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2PanInit(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "i0VnXM-C9fc",

@@ -19,6 +19,16 @@ public sealed partial class DirectExecutionBackend
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
 	{
+		if (LogThreadMode)
+		{
+			_threadModeGatewayCalls++;
+			_threadModeGatewayDepth++;
+			if (!_threadModeGatewayFirstLogged)
+			{
+				_threadModeGatewayFirstLogged = true;
+				TraceThreadMode($"gateway_first import={importIndex} total={_threadModeGatewayCalls}");
+			}
+		}
 		try
 		{
 			if (!(GCHandle.FromIntPtr(backendHandle).Target is DirectExecutionBackend directExecutionBackend))
@@ -35,6 +45,13 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][ERROR] ImportDispatchGatewayManaged exception: {ex.GetType().Name}: {ex.Message}");
 			return 18446744071562199298uL;
+		}
+		finally
+		{
+			if (LogThreadMode)
+			{
+				_threadModeGatewayDepth--;
+			}
 		}
 	}
 
@@ -69,6 +86,12 @@ public sealed partial class DirectExecutionBackend
 			WriteCtxU64(contextRecord, 152, nextRsp);
 			WriteCtxU64(contextRecord, 248, returnRip);
 			Interlocked.Increment(ref _rawSentinelRecoveries);
+			if (LogThreadMode)
+			{
+				TraceThreadMode(
+					$"sentinel_recover rip=0x{value:X16} -> 0x{returnRip:X16} rsp=0x{rsp:X16} -> 0x{nextRsp:X16} " +
+					$"gateway_depth={_threadModeGatewayDepth}");
+			}
 			return -1;
 		}
 		return 0;
@@ -203,6 +226,17 @@ public sealed partial class DirectExecutionBackend
 		{
 			cpuContext[CpuRegister.Rax] = 1uL;
 			return 1uL;
+		}
+		// Backend teardown in progress: unwind this worker to the host instead of
+		// dispatching. RunGuestThread parks it as Blocked with no wake handler, its
+		// host thread exits, and RequestGuestThreadTeardown can finish before any
+		// executable memory is freed.
+		if (isGuestWorker &&
+			_guestTeardownRequested &&
+			TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, "backend teardown"))
+		{
+			cpuContext[CpuRegister.Rax] = 0uL;
+			return 0uL;
 		}
 		bool flag0 = ShouldSuppressStrlenTrace(importStubEntry.Nid);
 		bool flag = num7 >= 2156221920u && num7 <= 2156225024u;

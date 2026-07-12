@@ -83,4 +83,15 @@ public static class SystemGestureExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "wPJGwI2RM2I",
+        ExportName = "sceSystemGestureUpdateAllTouchRecognizer",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemGesture")]
+    public static int SystemGestureUpdateAllTouchRecognizer(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

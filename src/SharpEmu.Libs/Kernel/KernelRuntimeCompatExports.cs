@@ -19,10 +19,15 @@ public static class KernelRuntimeCompatExports
     internal const int ClockProf = 2;
     internal const int ClockMonotonic = 4;
     internal const int ClockUptime = 5;
+    internal const int ClockUptimePrecise = 7;
+    internal const int ClockUptimeFast = 8;
     internal const int ClockRealtimePrecise = 9;
-    internal const int ClockMonotonicPrecise = 11;
     internal const int ClockRealtimeFast = 10;
+    internal const int ClockMonotonicPrecise = 11;
     internal const int ClockMonotonicFast = 12;
+    internal const int ClockSecond = 13;
+    internal const int ClockThreadCputimeId = 14;
+    internal const int ClockProcTime = 15;
     private const int Efault = 14;
     private const int Einval = 22;
     private const ulong TlsErrnoOffset = 0x40;
@@ -773,10 +778,24 @@ public static class KernelRuntimeCompatExports
                 return true;
             }
 
+            // CLOCK_SECOND is FreeBSD's cached whole-second realtime clock (Quake's
+            // audio_output_thread polls it and treated the previous EINVAL as a fatal
+            // init failure, exiting and getting respawned in a loop).
+            case ClockSecond:
+                seconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                nanoseconds = 0;
+                return true;
+
             case ClockMonotonic:
             case ClockMonotonicPrecise:
             case ClockMonotonicFast:
             case ClockUptime:
+            case ClockUptimePrecise:
+            case ClockUptimeFast:
+            // Per-thread/process CPU time approximated with the monotonic clock; games
+            // use these for profiling deltas where monotonicity matters, not absolutes.
+            case ClockThreadCputimeId:
+            case ClockProcTime:
                 GetProcessMonotonicTime(out seconds, out nanoseconds);
                 return true;
 
