@@ -4385,6 +4385,7 @@ public static class AgcExports
             descriptor.Width > 8192 ||
             descriptor.Height > 8192)
         {
+            TraceTextureFallback(descriptor, "invalid-descriptor");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
@@ -4402,6 +4403,9 @@ public static class AgcExports
             sourceByteCount > MaxPresentedTextureBytes ||
             sourceByteCount > int.MaxValue)
         {
+            TraceTextureFallback(
+                descriptor,
+                $"invalid-byte-count:{sourceByteCount}");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
@@ -4465,6 +4469,9 @@ public static class AgcExports
         var source = new byte[(int)sourceByteCount];
         if (!ctx.Memory.TryRead(descriptor.Address, source))
         {
+            TraceTextureFallback(
+                descriptor,
+                $"guest-read-failed:{sourceByteCount}");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
@@ -4509,6 +4516,29 @@ public static class AgcExports
             DstSelect: descriptor.DstSelect,
             Sampler: ToVulkanSampler(samplerDescriptor));
         return true;
+    }
+
+    private static int _textureFallbackTraceCount;
+
+    private static void TraceTextureFallback(
+        TextureDescriptor descriptor,
+        string reason)
+    {
+        var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
+        if ((!string.Equals(mode, "1", StringComparison.Ordinal) &&
+             !string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase)) ||
+            Interlocked.Increment(ref _textureFallbackTraceCount) > 64)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.texture_fallback reason={reason} " +
+            $"addr=0x{descriptor.Address:X16} type={descriptor.Type} " +
+            $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
+            $"fmt={descriptor.Format} num={descriptor.NumberType} " +
+            $"tile={descriptor.TileMode} mip={descriptor.MipLevels} " +
+            $"dst=0x{descriptor.DstSelect:X3}");
     }
 
 
