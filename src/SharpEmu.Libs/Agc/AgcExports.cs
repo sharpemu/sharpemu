@@ -3296,8 +3296,58 @@ public static class AgcExports
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
-            CreateRenderState(state.CxRegisters, renderTargets.FirstOrDefault()));
+            ApplyTransparentPremultipliedFillClear(
+                CreateRenderState(state.CxRegisters, renderTargets.FirstOrDefault()),
+                textures,
+                vertexInputs,
+                pixelEvaluation.InitialScalarRegisters));
         return true;
+    }
+
+    private static readonly bool _transparentFillClearEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_TRANSPARENT_FILL_CLEAR"),
+        "1",
+        StringComparison.Ordinal);
+
+    /// <summary>
+    /// Chowdren resets its effect layers with an untextured transparent-black
+    /// fill using premultiplied blending. With One/OneMinusSrcAlpha that draw
+    /// is otherwise a no-op, causing fog and vignette layers to accumulate.
+    /// Treat precisely that draw shape as an overwrite.
+    /// </summary>
+    private static VulkanGuestRenderState ApplyTransparentPremultipliedFillClear(
+        VulkanGuestRenderState renderState,
+        IReadOnlyList<TranslatedImageBinding> textures,
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        IReadOnlyList<uint> pixelUserData)
+    {
+        if (!_transparentFillClearEnabled ||
+            textures.Count != 0 ||
+            vertexInputs.Count != 0 ||
+            pixelUserData.Count < 4 ||
+            renderState.Blend is not
+            {
+                Enable: true,
+                ColorSrcFactor: 1,
+                ColorDstFactor: 5,
+                ColorFunc: 0,
+            })
+        {
+            return renderState;
+        }
+
+        for (var index = 0; index < 4; index++)
+        {
+            if ((pixelUserData[index] & 0x7FFF_FFFFu) != 0)
+            {
+                return renderState;
+            }
+        }
+
+        return renderState with
+        {
+            Blend = renderState.Blend with { Enable = false },
+        };
     }
 
     private static VulkanGuestIndexBuffer? CreateVulkanIndexBuffer(
