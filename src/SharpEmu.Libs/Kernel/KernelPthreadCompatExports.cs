@@ -349,7 +349,32 @@ public static class KernelPthreadCompatExports
         ExportName = "pthread_cond_timedwait",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadCondTimedwait(CpuContext ctx) => PthreadCondTimedwait(ctx);
+    public static int PosixPthreadCondTimedwait(CpuContext ctx)
+    {
+        // POSIX passes `const struct timespec *abstime` (absolute deadline), not relative microseconds (#113).
+        var abstimeAddress = ctx[CpuRegister.Rdx];
+        if (abstimeAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!ctx.TryReadUInt64(abstimeAddress, out var deadlineSeconds) ||
+            !ctx.TryReadUInt64(abstimeAddress + 8, out var deadlineNanoseconds))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var nowMicroseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000L;
+        var deadlineMicroseconds =
+            deadlineSeconds >= long.MaxValue / 1_000_000UL
+                ? long.MaxValue
+                : (long)(deadlineSeconds * 1_000_000UL + Math.Min(deadlineNanoseconds, 999_999_999UL) / 1000UL);
+        var remainingMicroseconds = deadlineMicroseconds - nowMicroseconds;
+        var timeoutUsec = remainingMicroseconds <= 0
+            ? 1u
+            : (uint)Math.Min(remainingMicroseconds, uint.MaxValue);
+        return PthreadCondWaitCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], timed: true, timeoutUsec: timeoutUsec);
+    }
 
     [SysAbiExport(
         Nid = "kDh-NfxgMtE",
@@ -1185,10 +1210,19 @@ public static class KernelPthreadCompatExports
 
             if (consumedPendingSignal)
             {
+                // Leave SyncRoot before relocking the mutex to avoid lock-order inversion with cond-signal (#113).
                 state.Waiters = Math.Max(0, state.Waiters - 1);
                 TracePthreadCond("wait-wake-pending", condAddress, mutexAddress, state, timed, waitResult);
-                var pendingLockResult = PthreadMutexRelockForCondWait(ctx, mutexAddress, releasedRecursion);
-                return pendingLockResult != (int)OrbisGen2Result.ORBIS_GEN2_OK ? pendingLockResult : waitResult;
+                Monitor.Exit(state.SyncRoot);
+                try
+                {
+                    var pendingLockResult = PthreadMutexRelockForCondWait(ctx, mutexAddress, releasedRecursion);
+                    return pendingLockResult != (int)OrbisGen2Result.ORBIS_GEN2_OK ? pendingLockResult : waitResult;
+                }
+                finally
+                {
+                    Monitor.Enter(state.SyncRoot);
+                }
             }
 
             var scheduler = GuestThreadExecution.Scheduler;
