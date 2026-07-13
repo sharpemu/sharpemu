@@ -900,6 +900,7 @@ internal static class Gen5ShaderTranslator
             0x169 => "VMulLoU32",
             0x16A => "VMulHiU32",
             0x16B => "VMulLoI32",
+            0x16C => "VMulHiI32",
             0x360 => "VMadU32U16",
             0x361 => "VMulLoU32",
             0x362 => "VLdexpF32",

@@ -337,6 +337,7 @@ internal static partial class Gen5SpirvTranslator
                     result = EmitSubtractWithBorrow(instruction, reverse: true);
                     break;
                 case "VMulLoU32":
+                case "VMulLoI32":
                 case "VMulU32U24":
                     result = EmitIntegerBinary(instruction, SpirvOp.IMul);
                     break;
@@ -369,6 +370,29 @@ internal static partial class Gen5SpirvTranslator
                         _uintType,
                         ShiftRightLogical64(
                             product,
+                            _module.Constant64(_ulongType, 32)));
+                    break;
+                }
+                case "VMulHiI32":
+                {
+                    var wideLeft = _module.AddInstruction(
+                        SpirvOp.SConvert,
+                        _longType,
+                        Bitcast(_intType, GetRawSource(instruction, 0)));
+                    var wideRight = _module.AddInstruction(
+                        SpirvOp.SConvert,
+                        _longType,
+                        Bitcast(_intType, GetRawSource(instruction, 1)));
+                    var product = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _longType,
+                        wideLeft,
+                        wideRight);
+                    result = _module.AddInstruction(
+                        SpirvOp.UConvert,
+                        _uintType,
+                        ShiftRightLogical64(
+                            Bitcast(_ulongType, product),
                             _module.Constant64(_ulongType, 32)));
                     break;
                 }
