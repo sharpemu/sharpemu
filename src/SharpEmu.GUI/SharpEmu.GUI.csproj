@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
     <AvaloniaResource Include="..\..\assets\images\github.png" Link="Assets/github.png" />
     <AvaloniaResource Include="..\..\assets\images\discord.png" Link="Assets/discord.png" />
+    <AvaloniaResource Include="..\..\assets\images\input-controller-vecteezy-7743127-white.png" Link="Assets/input-controller-vecteezy-7743127-white.png" />
   </ItemGroup>
 
   <ItemGroup>
@@ -46,6 +47,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
        SharpEmu.Libs into the launcher. -->
   <ItemGroup>
     <Compile Include="..\SharpEmu.Libs\Pad\PadState.cs" Link="Input/PadState.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\PadInputProfile.cs" Link="Input/PadInputProfile.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\PadInputProfileStore.cs" Link="Input/PadInputProfileStore.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\PadMappedInputReader.cs" Link="Input/PadMappedInputReader.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\PlatformPadInputSource.cs" Link="Input/PlatformPadInputSource.cs" />
     <Compile Include="..\SharpEmu.Libs\Pad\HidNative.cs" Link="Input/HidNative.cs" />
     <Compile Include="..\SharpEmu.Libs\Pad\DualSenseReader.cs" Link="Input/DualSenseReader.cs" />
     <Compile Include="..\SharpEmu.Libs\Pad\XInputReader.cs" Link="Input/XInputReader.cs" />

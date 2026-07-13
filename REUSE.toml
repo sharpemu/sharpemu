@@ -18,6 +18,15 @@ SPDX-FileCopyrightText = "SharpEmu Emulator Project"
 SPDX-License-Identifier = "GPL-2.0-or-later"
 
 [[annotations]]
+path = [
+    "assets/images/input-controller-vecteezy-7743127-cropped.jpg",
+    "assets/images/input-controller-vecteezy-7743127-white.png"
+]
+precedence = "override"
+SPDX-FileCopyrightText = "Faisal Faisal / Vecteezy"
+SPDX-License-Identifier = "LicenseRef-Vecteezy-Free-License"
+
+[[annotations]]
 path = "src/SharpEmu.GUI/Atrac9/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2018 Alex Barney"

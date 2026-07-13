@@ -286,6 +286,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="InputMappingLabel" Text="Input mapping" FontSize="13" />
+                          <TextBlock x:Name="InputMappingDesc"
+                                     Text="Map keyboard, mouse and controller inputs to the virtual pad."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1" x:Name="OpenInputMappingButton" Classes="ghost" Content="Open…"
+                                VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
                           <TextBlock x:Name="LanguageLabel" Text="Emulator language" FontSize="13" />
                           <TextBlock x:Name="LanguageDesc"
                                      Text="Language used throughout the launcher. Applies immediately."

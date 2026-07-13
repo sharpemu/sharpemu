@@ -96,10 +96,8 @@ public partial class MainWindow : Window
         RescanButton.Click += async (_, _) => await RescanLibraryAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
-        StopButton.Click += (_, _) => _emulator?.Stop();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
         StopButton.Click += (_, _) => StopEmulator();
-        ClearLogButton.Click += (_, _) => _consoleLines.Clear();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
@@ -119,6 +117,7 @@ public partial class MainWindow : Window
             _settings.PlayTitleMusic = TitleMusicToggle.IsChecked == true;
             OnTitleMusicSettingChanged();
         };
+        OpenInputMappingButton.Click += async (_, _) => await OpenInputMappingAsync();
         DiscordToggle.IsCheckedChanged += (_, _) =>
         {
             _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
@@ -428,6 +427,10 @@ public partial class MainWindow : Window
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
         LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
 
+        InputMappingLabel.Text = loc.Get("Options.InputMapping.Label");
+        InputMappingDesc.Text = loc.Get("Options.InputMapping.Desc");
+        OpenInputMappingButton.Content = loc.Get("Options.InputMapping.Open");
+
         CpuEngineLabel.Text = loc.Get("Options.CpuEngine.Label");
         CpuEngineDesc.Text = loc.Get("Options.CpuEngine.Desc");
         CpuEngineNativeItem.Content = loc.Get("Options.CpuEngine.Native");
@@ -674,6 +677,12 @@ public partial class MainWindow : Window
             _settings.LogFilePath = result.File.Path.LocalPath;
             UpdateLogFilePathText();
         }
+    }
+
+    private async Task OpenInputMappingAsync()
+    {
+        var window = new InputMappingWindow();
+        await window.ShowDialog(this);
     }
 
     // ---- Emulator discovery ----

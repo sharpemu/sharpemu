@@ -221,6 +221,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="ClipToBounds" Value="True" />
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     </Style>
+
+    <!-- In-editor mapping row (Input Mapping window); matches the visual
+         language of inner elevated panels used elsewhere. -->
+    <Style Selector="Border.mappingRow">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
   </Application.Styles>
 
 </Application>

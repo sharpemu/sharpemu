@@ -4,7 +4,6 @@
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Pad;
 
@@ -85,13 +84,9 @@ public static class PadExports
         XInputReader.EnsureStarted();
         if (Interlocked.Exchange(ref _controlsAnnouncementLogged, 1) == 0)
         {
-            Console.Error.WriteLine(DualSenseReader.TryGetState(out _)
-                ? "[LOADER][INFO] Controls: DualSense connected (keyboard fallback also active)."
-                : XInputReader.TryGetState(out _)
-                    ? "[LOADER][INFO] Controls: Xbox controller connected (keyboard fallback also active)."
-                    : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense or Xbox controller will be used automatically when plugged in.");
+            var profile = PadInputProfileStore.LoadCached();
+            Console.Error.WriteLine($"[LOADER][INFO] Controls: {DescribeControls(profile)}");
         }
-
         return ctx.SetReturn(PrimaryPadHandle);
     }
 
@@ -420,16 +415,17 @@ public static class PadExports
             return _cachedInputState;
         }
 
-        var acceptsKeyboardInput = IsEmulatorWindowFocused();
-        var buttons = acceptsKeyboardInput ? ReadKeyboardButtons() : 0;
-        var leftX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x41), IsKeyDown(0x44)) : (byte)128;
-        var leftY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x57), IsKeyDown(0x53)) : (byte)128;
-        var rightX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x4A), IsKeyDown(0x4C)) : (byte)128;
-        var rightY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x49), IsKeyDown(0x4B)) : (byte)128;
-        var l2 = acceptsKeyboardInput && IsKeyDown(0x52) ? (byte)255 : (byte)0;
-        var r2 = acceptsKeyboardInput && IsKeyDown(0x46) ? (byte)255 : (byte)0;
+        var profile = PadInputProfileStore.LoadCached();
+        var mapped = PadMappedInputReader.Read(profile);
+        var buttons = mapped.Buttons;
+        var leftX = mapped.LeftX;
+        var leftY = mapped.LeftY;
+        var rightX = mapped.RightX;
+        var rightY = mapped.RightY;
+        var l2 = mapped.L2;
+        var r2 = mapped.R2;
 
-        if (DualSenseReader.TryGetState(out var pad))
+        if (profile.EnableExternalController && DualSenseReader.TryGetState(out var pad))
         {
             buttons |= pad.Buttons;
             // The controller stick wins whenever it is deflected past a
@@ -442,7 +438,7 @@ public static class PadExports
             r2 = Math.Max(r2, pad.R2);
         }
 
-        if (XInputReader.TryGetState(out var xpad))
+        if (profile.EnableExternalController && XInputReader.TryGetState(out var xpad))
         {
             buttons |= xpad.Buttons;
             leftX = MergeAxis(xpad.LeftX, leftX);
@@ -466,63 +462,65 @@ public static class PadExports
         return _cachedInputState;
     }
 
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
-
-    private static bool IsKeyDown(int vk) =>
-        (GetAsyncKeyState(vk) & 0x8000) != 0;
-
-    private static bool IsEmulatorWindowFocused()
-    {
-        var foregroundWindow = GetForegroundWindow();
-        if (foregroundWindow == 0)
-        {
-            return false;
-        }
-
-        GetWindowThreadProcessId(foregroundWindow, out var processId);
-        return processId == (uint)Environment.ProcessId;
-    }
-
-    private static uint ReadKeyboardButtons()
-    {
-        uint buttons = 0;
-        // D-pad
-        if (IsKeyDown(0x25)) buttons |= 0x0080; // Left
-        if (IsKeyDown(0x27)) buttons |= 0x0020; // Right
-        if (IsKeyDown(0x26)) buttons |= 0x0010; // Up
-        if (IsKeyDown(0x28)) buttons |= 0x0040; // Down
-        // Face buttons
-        if (IsKeyDown(0x5A) || IsKeyDown(0x0D)) buttons |= 0x4000; // Z / Enter = Cross
-        if (IsKeyDown(0x58) || IsKeyDown(0x1B)) buttons |= 0x2000; // X / Escape = Circle
-        if (IsKeyDown(0x43)) buttons |= 0x8000; // C = Square
-        if (IsKeyDown(0x56)) buttons |= 0x1000; // V = Triangle
-        // Shoulder buttons
-        if (IsKeyDown(0x51)) buttons |= 0x0400; // Q = L1
-        if (IsKeyDown(0x45)) buttons |= 0x0800; // E = R1
-        if (IsKeyDown(0x52)) buttons |= 0x0100; // R = L2 (digital)
-        if (IsKeyDown(0x46)) buttons |= 0x0200; // F = R2 (digital)
-        // Options (Start)
-        if (IsKeyDown(0x09) || IsKeyDown(0x08)) buttons |= 0x0008; // Tab / Backspace = Options
-        return buttons;
-    }
-
-    private static byte ReadAnalogStick(bool negative, bool positive)
-    {
-        if (negative && !positive) return 0;
-        if (positive && !negative) return 255;
-        return 128;
-    }
-
     private static byte MergeAxis(byte controller, byte keyboard)
     {
         const int Deadzone = 10;
         return Math.Abs(controller - 128) > Deadzone ? controller : keyboard;
+    }
+
+    private static string DescribeControls(PadInputProfile profile)
+    {
+        if (profile.EnableExternalController && DualSenseReader.TryGetState(out _))
+        {
+            return "DualSense connected (keyboard fallback also active).";
+        }
+
+        if (profile.EnableExternalController && XInputReader.TryGetState(out _))
+        {
+            return "Xbox controller connected (keyboard fallback also active).";
+        }
+
+        var profileDescription = DescribeProfile(profile);
+        if (!profile.EnableExternalController)
+        {
+            return $"{profileDescription} External controllers disabled.";
+        }
+
+        return $"{profileDescription} A DualSense or Xbox controller will be used automatically when plugged in.";
+    }
+
+    private static string DescribeProfile(PadInputProfile profile)
+    {
+        if (!profile.EnableKeyboardAndMouse)
+        {
+            return "keyboard/mouse mappings disabled.";
+        }
+
+        static string Button(PadInputProfile profile, PadLogicalControl control) =>
+            profile.Buttons.TryGetValue(control, out var mapping) && mapping.Bindings.Count > 0
+                ? string.Join('/', mapping.Bindings.Select(binding => binding.Code))
+                : "unmapped";
+
+        static string Stick(PadInputProfile profile, PadStickSide side)
+        {
+            if (!profile.Sticks.TryGetValue(side, out var mapping))
+            {
+                return "unmapped";
+            }
+
+            return mapping.Source switch
+            {
+                PadStickSource.Keyboard =>
+                    $"{mapping.NegativeXKey}/{mapping.PositiveXKey}/{mapping.NegativeYKey}/{mapping.PositiveYKey}",
+                PadStickSource.Mouse => "mouse movement",
+                PadStickSource.ExternalController => "external controller",
+                _ => "unmapped",
+            };
+        }
+
+        return $"D-pad {Button(profile, PadLogicalControl.DpadLeft)}/{Button(profile, PadLogicalControl.DpadRight)}/{Button(profile, PadLogicalControl.DpadUp)}/{Button(profile, PadLogicalControl.DpadDown)}, " +
+               $"left stick {Stick(profile, PadStickSide.Left)}, right stick {Stick(profile, PadStickSide.Right)}, " +
+               $"Cross {Button(profile, PadLogicalControl.Cross)}, Circle {Button(profile, PadLogicalControl.Circle)}, " +
+               $"Square {Button(profile, PadLogicalControl.Square)}, Triangle {Button(profile, PadLogicalControl.Triangle)}.";
     }
 }

@@ -1,0 +1,151 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="SharpEmu.GUI.InputMappingWindow"
+        Title="Input Mapping"
+        Width="1180" Height="720"
+        MinWidth="1080" MinHeight="620"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource BgBrush}"
+        KeyDown="OnKeyDown">
+
+  <Window.Styles>
+    <!-- Per-window hotspots for the controller layout; they reuse the shared
+         brushes but need tailored padding/corner so the labels fit inside
+         the callouts over the controller art. -->
+    <Style Selector="Button.mapHotspot">
+      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.mapHotspot.callout">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="BorderBrush" Value="#55FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="9" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Width" Value="102" />
+      <Setter Property="Height" Value="26" />
+      <Setter Property="CornerRadius" Value="13" />
+    </Style>
+    <Style Selector="Button.mapHotspot:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="18">
+
+    <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,14">
+      <StackPanel>
+        <TextBlock x:Name="WindowTitleText" Text="Input Mapping" FontSize="22" FontWeight="Bold" />
+        <TextBlock x:Name="ControllerStatusText" FontSize="12" Foreground="{StaticResource MutedBrush}" />
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+        <CheckBox x:Name="KeyboardMouseToggle" Content="Keyboard and mouse" IsChecked="True" />
+        <CheckBox x:Name="ExternalControllerToggle" Content="Controller" IsChecked="True" />
+      </StackPanel>
+    </Grid>
+
+    <Grid Grid.Row="1" ColumnDefinitions="650,*" ColumnSpacing="16">
+      <Border Classes="card" Padding="16">
+        <Grid RowDefinitions="Auto,*,Auto">
+          <TextBlock Classes="sectionTitle" x:Name="LayoutSectionTitle" Text="LAYOUT" />
+          <Canvas Grid.Row="1" Width="610" Height="420" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Border Width="610" Height="420" CornerRadius="12" ClipToBounds="True" Background="{StaticResource ElevatedBrush}">
+              <Image Source="avares://SharpEmu.GUI/Assets/input-controller-vecteezy-7743127-white.png"
+                     Width="410" Height="285" Margin="100,68,100,67"
+                     Stretch="Fill" RenderOptions.BitmapInterpolationMode="HighQuality" />
+            </Border>
+
+            <Polyline Points="119,27 167,31 201,95" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="117,61 158,64 177,93" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="305,62 305,124" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="113,130 159,133 184,144" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="111,164 140,161 164,164" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="111,198 143,177 204,164" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="110,232 150,195 184,184" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="102,311 162,241 243,216" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="298,301 303,271 306,244" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+
+            <Polyline Points="493,30 440,48 413,96" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="493,65 456,71 433,93" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="504,123 459,124 423,135" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="506,194 462,194 397,163" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="505,156 482,155 454,163" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="505,226 468,218 425,191" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+            <Polyline Points="508,327 460,265 363,217" Stroke="White" StrokeThickness="1.5" Opacity="0.72" />
+
+            <Button x:Name="HotL1" Classes="mapHotspot callout" Canvas.Left="17" Canvas.Top="14" Content="L1" />
+            <Button x:Name="HotL2" Classes="mapHotspot callout" Canvas.Left="15" Canvas.Top="48" Content="L2" />
+            <Button x:Name="HotTouchPad" Classes="mapHotspot callout" Canvas.Left="254" Canvas.Top="36" Content="TOUCH" />
+
+            <Button x:Name="HotDpadUp" Classes="mapHotspot callout" Canvas.Left="11" Canvas.Top="117" Content="D-PAD UP" />
+            <Button x:Name="HotDpadLeft" Classes="mapHotspot callout" Canvas.Left="9" Canvas.Top="151" Content="D-PAD LEFT" />
+            <Button x:Name="HotDpadRight" Classes="mapHotspot callout" Canvas.Left="9" Canvas.Top="185" Content="D-PAD RIGHT" />
+            <Button x:Name="HotDpadDown" Classes="mapHotspot callout" Canvas.Left="8" Canvas.Top="219" Content="D-PAD DOWN" />
+
+            <Button x:Name="HotL3" Classes="mapHotspot callout" Canvas.Left="0" Canvas.Top="298" Content="L3" />
+            <Button x:Name="HotOptions" Classes="mapHotspot callout" Canvas.Left="196" Canvas.Top="288" Content="OPTIONS" />
+
+            <Button x:Name="HotR1" Classes="mapHotspot callout" Canvas.Left="493" Canvas.Top="17" Content="R1" />
+            <Button x:Name="HotR2" Classes="mapHotspot callout" Canvas.Left="493" Canvas.Top="52" Content="R2" />
+
+            <Button x:Name="HotTriangle" Classes="mapHotspot callout" Canvas.Left="504" Canvas.Top="110" Content="TRIANGLE" />
+            <Button x:Name="HotSquare" Classes="mapHotspot callout" Canvas.Left="506" Canvas.Top="181" Content="SQUARE" />
+            <Button x:Name="HotCircle" Classes="mapHotspot callout" Canvas.Left="505" Canvas.Top="143" Content="CIRCLE" />
+            <Button x:Name="HotCross" Classes="mapHotspot callout" Canvas.Left="505" Canvas.Top="213" Content="CROSS" />
+
+            <Button x:Name="HotR3" Classes="mapHotspot callout" Canvas.Left="508" Canvas.Top="314" Content="R3" />          </Canvas>
+          <TextBlock x:Name="ArtCreditText" Grid.Row="2" Text="Controller art: Faisal Faisal / Vecteezy"
+                     FontSize="10" Foreground="{StaticResource MutedBrush}"
+                     HorizontalAlignment="Right" Margin="0,8,0,0" />
+        </Grid>
+      </Border>
+
+      <Border Grid.Column="1" Classes="card" Padding="0">
+        <ScrollViewer>
+          <StackPanel Margin="16" Spacing="16">
+            <StackPanel>
+              <TextBlock Classes="sectionTitle" x:Name="SticksSectionTitle" Text="STICKS" />
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="12" Margin="0,8,0,0">
+                <Border Background="{StaticResource ElevatedBrush}" CornerRadius="8" Padding="12">
+                  <StackPanel x:Name="LeftStickPanel" Spacing="8" />
+                </Border>
+                <Border Grid.Column="1" Background="{StaticResource ElevatedBrush}" CornerRadius="8" Padding="12">
+                  <StackPanel x:Name="RightStickPanel" Spacing="8" />
+                </Border>
+              </Grid>
+            </StackPanel>
+
+            <StackPanel>
+              <TextBlock Classes="sectionTitle" x:Name="ButtonsSectionTitle" Text="BUTTONS" />
+              <StackPanel x:Name="ButtonMappingPanel" Spacing="8" Margin="0,8,0,0" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+    </Grid>
+
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto,Auto" Margin="0,14,0,0">
+      <TextBlock x:Name="CaptureStatusText" Foreground="{StaticResource MutedBrush}"
+                 VerticalAlignment="Center" />
+      <Button Grid.Column="1" x:Name="ResetDefaultsButton" Classes="ghost" Content="Reset defaults"
+               Margin="0,0,8,0" />
+      <Button Grid.Column="2" x:Name="SaveButton" Classes="accent" Content="Save"
+              Margin="0,0,8,0" />
+      <Button Grid.Column="3" x:Name="CloseButton" Classes="ghost" Content="Close" />
+    </Grid>
+  </Grid>
+</Window>
