@@ -64,7 +64,7 @@ public static class VideoOutExports
     private static long _vblankSignalCount;
     private static long _flipSubmitCount;
 
-    public static void ConfigureApplicationInfo(string? title, string? titleId, string? version)
+    public static void ConfigureApplicationInfo(string? title, string? titleId, string? version, string? emulatorCommitSha)
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(title))
@@ -79,9 +79,10 @@ public static class VideoOutExports
 
         var application = parts.Count == 0 ? "VideoOut" : string.Join(' ', parts);
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
+        var commitSuffix = string.IsNullOrWhiteSpace(emulatorCommitSha) ? string.Empty : $" \u00b7 {emulatorCommitSha.Trim()}";
         lock (_stateGate)
         {
-            _windowTitle = $"SharpEmu - {application}{versionSuffix}";
+            _windowTitle = $"SharpEmu{commitSuffix} - {application}{versionSuffix}";
         }
     }
 

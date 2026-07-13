@@ -140,7 +140,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         LastMilestoneLog = null;
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath);
-        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
+        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version, BuildInfo.CommitSha);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         LogAppBundleInfo(normalizedEbootPath, image);
         RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
