@@ -6198,6 +6198,55 @@ public static class KernelMemoryCompatExports
         return false;
     }
 
+    internal static bool TryReadTrackedLibcHeapGpuAlias(
+        ulong packedAddress,
+        Span<byte> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return true;
+        }
+
+        // Gen5 texture descriptors retain 46 bits of the byte address.  Host
+        // libc allocations can live at 0x7F... on Linux, so recover the full
+        // tracked allocation address when the descriptor contains its packed
+        // low-bit alias.
+        const ulong textureAddressMask = (1UL << 46) - 1;
+        var length = (ulong)destination.Length;
+        ulong resolvedAddress = 0;
+        lock (_libcAllocGate)
+        {
+            foreach (var (allocationAddress, allocation) in _libcAllocations)
+            {
+                var packedBase = allocationAddress & textureAddressMask;
+                if (packedAddress < packedBase)
+                {
+                    continue;
+                }
+
+                var offset = packedAddress - packedBase;
+                var allocationSize = (ulong)allocation.Size;
+                if (offset > allocationSize || length > allocationSize - offset)
+                {
+                    continue;
+                }
+
+                var candidate = allocationAddress + offset;
+                if (resolvedAddress != 0 && resolvedAddress != candidate)
+                {
+                    // Do not guess if two live host allocations collide after
+                    // descriptor address packing.
+                    return false;
+                }
+
+                resolvedAddress = candidate;
+            }
+
+            return resolvedAddress != 0 &&
+                   TryReadHostMemory(resolvedAddress, destination);
+        }
+    }
+
     private static bool TryAllocateLibcHeap(ulong requestedSize, nuint alignment, bool zeroFill, out ulong address)
     {
         address = 0;

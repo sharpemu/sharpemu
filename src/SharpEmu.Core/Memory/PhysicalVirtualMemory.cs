@@ -257,6 +257,31 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // safe without clobbering existing host mappings.
         if (OperatingSystem.IsMacOS())
         {
+            // Prefer the requested low address.  Besides matching the guest
+            // address model, this keeps the allocation representable by every
+            // PS5 GPU descriptor (the strictest ones carry 40 address bits).
+            try
+            {
+                var exactAddress = AllocateAt(
+                    cursor,
+                    alignedSize,
+                    executable,
+                    allowAlternative: false);
+                if (exactAddress == cursor)
+                {
+                    actualAddress = exactAddress;
+                    UpdateAllocationSearchCursor(
+                        desiredAddress,
+                        effectiveAlignment,
+                        executable,
+                        exactAddress + alignedSize);
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+
             // Over-allocate by the alignment so a kernel-chosen placement
             // always contains an aligned start; the unused head/tail stays
             // part of the tracked region and is simply never handed out.
@@ -269,7 +294,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 if (posixAddress != 0)
                 {
                     var alignedBase = AlignUp(posixAddress, effectiveAlignment);
-                    if (alignedBase + alignedSize <= posixAddress + reserveSize)
+                    const ulong gpuAddressLimit = 1UL << 40;
+                    if (alignedBase < gpuAddressLimit &&
+                        alignedSize <= gpuAddressLimit - alignedBase &&
+                        alignedBase + alignedSize <= posixAddress + reserveSize)
                     {
                         actualAddress = alignedBase;
                         UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, alignedBase + alignedSize);
