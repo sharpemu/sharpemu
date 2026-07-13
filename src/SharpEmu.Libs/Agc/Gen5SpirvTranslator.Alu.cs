@@ -1136,6 +1136,52 @@ internal static partial class Gen5SpirvTranslator
                                 left,
                                 right);
                             break;
+                        case "SMulHiU32":
+                        {
+                            var wideLeft = _module.AddInstruction(
+                                SpirvOp.UConvert,
+                                _ulongType,
+                                left);
+                            var wideRight = _module.AddInstruction(
+                                SpirvOp.UConvert,
+                                _ulongType,
+                                right);
+                            var product = _module.AddInstruction(
+                                SpirvOp.IMul,
+                                _ulongType,
+                                wideLeft,
+                                wideRight);
+                            result = _module.AddInstruction(
+                                SpirvOp.UConvert,
+                                _uintType,
+                                ShiftRightLogical64(
+                                    product,
+                                    _module.Constant64(_ulongType, 32)));
+                            break;
+                        }
+                        case "SMulHiI32":
+                        {
+                            var wideLeft = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, left));
+                            var wideRight = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, right));
+                            var product = _module.AddInstruction(
+                                SpirvOp.IMul,
+                                _longType,
+                                wideLeft,
+                                wideRight);
+                            result = _module.AddInstruction(
+                                SpirvOp.UConvert,
+                                _uintType,
+                                ShiftRightLogical64(
+                                    Bitcast(_ulongType, product),
+                                    _module.Constant64(_ulongType, 32)));
+                            break;
+                        }
                         case "SAndB32":
                             result = BitwiseAnd(left, right);
                             Store(_scc, IsNotZero(result));
