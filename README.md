@@ -25,8 +25,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
-> [!WARNING]  
-> Currently the primary development target is Windows.
+> [!NOTE]  
+> SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
+> can run the macOS x64 build through Rosetta 2.
 
 > [!WARNING]  
 > SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
@@ -59,14 +60,33 @@ Current capabilities include:
 
 Some games have reached like `sceVideoOut` and AGC stages.
 
-Currently the project primarily targets Windows. Cross-platform support (Linux and macOS) is planned, but development is currently focused on Windows to simplify early-stage debugging and iteration.
+SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
+Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
+so compatibility and performance vary by game, operating system, and GPU driver.
 
 ## Using
 
-* Build or Publish project or download in release tab.
-* Open Powershell.
-  * Run Emulator GUI.
-  * Or command: `.\SharpEmu "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
+Download the release archive for your operating system, extract it, and launch
+SharpEmu with the path to a legally obtained game's `eboot.bin`.
+
+Windows PowerShell:
+
+```powershell
+.\SharpEmu.exe "C:\path\to\game\eboot.bin" 2>&1 |
+  Tee-Object -FilePath "SharpEmu.log"
+```
+
+Linux and macOS:
+
+```bash
+chmod +x ./SharpEmu
+
+./SharpEmu "/path/to/game/eboot.bin" 2>&1 |
+  tee SharpEmu.log
+```
+
+A Vulkan-capable GPU and current graphics driver are required. The macOS
+release includes the MoltenVK Vulkan implementation.
 
 ## Games Tested
 
@@ -94,7 +114,7 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 
 ## Build
 
-1. Install the **.NET SDK**.
+1. Install the .NET SDK version specified in [`global.json`](./global.json).
 2. Clone the repository: `git clone https://github.com/par274/sharpemu.git`
 3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
 4. Build the project: `dotnet build` or `dotnet publish`
