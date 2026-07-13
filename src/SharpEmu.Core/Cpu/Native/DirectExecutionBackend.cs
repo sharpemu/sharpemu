@@ -1992,9 +1992,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
-		EmitByte(code, ref offset, 0x48); // sub rsp, 0x20
+		// TlsGetValue returns its TLS pointer in RAX. Preserve the guest return value
+		// above the 32-byte Windows shadow space while keeping the call site aligned.
+		EmitByte(code, ref offset, 0x48); // sub rsp, 0x30
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xEC);
+		EmitByte(code, ref offset, 0x30);
+		EmitByte(code, ref offset, 0x48); // mov [rsp+0x20], rax
+		EmitByte(code, ref offset, 0x89);
+		EmitByte(code, ref offset, 0x44);
+		EmitByte(code, ref offset, 0x24);
 		EmitByte(code, ref offset, 0x20);
 		EmitByte(code, ref offset, 0xB9); // mov ecx, tlsIndex
 		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
@@ -2004,13 +2011,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		offset += sizeof(ulong);
 		EmitByte(code, ref offset, 0xFF); // call rax
 		EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); // add rsp, 0x20
+		EmitByte(code, ref offset, 0x49); // mov r11, rax
+		EmitByte(code, ref offset, 0x89);
+		EmitByte(code, ref offset, 0xC3);
+		EmitByte(code, ref offset, 0x48); // mov rax, [rsp+0x20]
+		EmitByte(code, ref offset, 0x8B);
+		EmitByte(code, ref offset, 0x44);
+		EmitByte(code, ref offset, 0x24);
+		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x48); // add rsp, 0x30
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xC4);
-		EmitByte(code, ref offset, 0x20);
-		EmitByte(code, ref offset, 0x48); // mov rsp, [rax]
+		EmitByte(code, ref offset, 0x30);
+		EmitByte(code, ref offset, 0x49); // mov rsp, [r11]
 		EmitByte(code, ref offset, 0x8B);
-		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x23);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
