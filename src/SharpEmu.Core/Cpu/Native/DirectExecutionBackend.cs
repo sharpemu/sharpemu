@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -47,6 +48,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong Arg0,
 		ulong Arg1,
 		ulong Arg2);
+
+	private readonly record struct DeferredBootstrapTraceEntry(
+		long DispatchIndex,
+		ulong Op,
+		ulong SymbolPointer,
+		ulong OutputPointer,
+		ulong ReturnRip);
 
 #pragma warning disable CS0649
 	private struct EXCEPTION_POINTERS
@@ -232,19 +240,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private KeyValuePair<string, ulong>[] _runtimeSymbolsByAddress = Array.Empty<KeyValuePair<string, ulong>>();
 
-	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
+	private readonly ConcurrentDictionary<string, ulong> _runtimeSymbolsByName =
+		new(StringComparer.Ordinal);
 
-	private const ulong LazyImportStubPoolBaseAddress = 0x0000_7000_0000_0000_1000UL;
+	// Keep in sync with SelfLoader import-stub mapping constants.
+	private const ulong ImportStubRegionCanonicalBase = 0x0000_7000_0000_0000UL;
 
-	private const ulong LazyImportStubPoolAddressStride = 0x0000_0000_0100_0000UL;
+	private const ulong ImportStubRegionAddressStride = 0x0000_0000_0100_0000UL;
 
 	private const ulong LazyImportStubSlotSize = 0x10;
 
-	private const ulong LazyImportStubPoolMapSize = 0x10000UL;
-
-	private const byte LazyImportStubTrapOpcode = 0xCC;
-
-	private const byte LazyImportStubReturnOpcode = 0xC3;
+	private const ulong ImportStubRegionPageSize = 0x1000UL;
 
 	private const string KernelDynlibDlsymAerolibNid = "LwG8g3niqwA";
 
@@ -265,6 +271,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private int _recentImportTraceCount;
 
 	private int _recentImportTraceWriteIndex;
+
+	private readonly DeferredBootstrapTraceEntry[] _deferredBootstrapTrace = new DeferredBootstrapTraceEntry[32];
+
+	private int _deferredBootstrapTraceCount;
+
+	private int _deferredBootstrapTraceWriteIndex;
+
+	private readonly object _deferredBootstrapTraceGate = new();
 
 	private readonly string[] _distinctImportNidHistory = new string[128];
 
@@ -884,6 +898,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ResetLazyDlsymStubState();
 		_recentImportTraceCount = 0;
 		_recentImportTraceWriteIndex = 0;
+		lock (_deferredBootstrapTraceGate)
+		{
+			_deferredBootstrapTraceCount = 0;
+			_deferredBootstrapTraceWriteIndex = 0;
+		}
 		_distinctImportNidHistoryCount = 0;
 		_distinctImportNidHistoryWriteIndex = 0;
 		_lastDistinctImportNid = string.Empty;
@@ -957,6 +976,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			DrainDeferredBootstrapTraces();
 			GuestThreadExecution.Scheduler = previousGuestThreadScheduler;
 			Console.Error.WriteLine("[LOADER][INFO] === Execute END (LastError: " + (LastError ?? "null") + ") ===");
 		}

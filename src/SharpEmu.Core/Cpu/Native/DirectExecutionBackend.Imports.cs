@@ -161,6 +161,14 @@ public sealed partial class DirectExecutionBackend
 				*(ulong*)(xmmSlot + 8));
 		}
 		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
+		if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		{
+			NormalizeKernelDynlibDlsymArguments(cpuContext, out _, out _);
+			*(ulong*)argPackPtr = cpuContext[CpuRegister.Rdi];
+			*(ulong*)(argPackPtr + 8) = cpuContext[CpuRegister.Rsi];
+			*(ulong*)(argPackPtr + 16) = cpuContext[CpuRegister.Rdx];
+		}
+
 		ulong value = cpuContext[CpuRegister.Rdi];
 		ulong value2 = cpuContext[CpuRegister.Rsi];
 		ulong num3 = cpuContext[CpuRegister.Rdx];
@@ -210,16 +218,6 @@ public sealed partial class DirectExecutionBackend
 		{
 			TraceGuestContext(
 				$"import dispatch={num} nid={importStubEntry.Nid} ret=0x{num7:X16} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} active={HasActiveExecutionThread}");
-		}
-		if (_logBootstrap && string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
-		{
-			string symbolText = "<unreadable>";
-			if (TryReadAsciiZ(value2, 256, out var sym))
-			{
-				symbolText = sym;
-			}
-			Console.Error.WriteLine(
-				$"[LOADER][TRACE] bootstrap_call#{num}: op=0x{value:X16} sym_ptr=0x{value2:X16} sym='{symbolText}' out_ptr=0x{num3:X16} ret=0x{num7:X16}");
 		}
 		if (!isGuestWorker &&
 			!ActiveForcedGuestExit &&
@@ -385,6 +383,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 				{
+					if (_logBootstrap)
+					{
+						RecordDeferredBootstrapTrace(num, value, value2, num3, num7);
+					}
+
 					orbisGen2Result = DispatchBootstrapBridge();
 				}
 				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
@@ -547,6 +550,7 @@ public sealed partial class DirectExecutionBackend
 			cpuContext.GetXmmRegister(0, out var returnXmm0Low, out var returnXmm0High);
 			*(ulong*)(argPackPtr - 0x80) = returnXmm0Low;
 			*(ulong*)(argPackPtr - 0x80 + 8) = returnXmm0High;
+			DrainDeferredBootstrapTraces();
 			return cpuContext[CpuRegister.Rax];
 		}
 		catch (Exception ex)
@@ -555,6 +559,7 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][ERROR] {LastError}");
 			Console.Error.WriteLine($"[LOADER][ERROR] {ex.StackTrace}");
 			cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
+			DrainDeferredBootstrapTraces();
 			return 18446744071562199298uL;
 		}
 	}
@@ -1343,6 +1348,7 @@ public sealed partial class DirectExecutionBackend
 
 		// Standalone bootstrap loaders sometimes call through the bridge with
 		// (symbol_ptr, handle, out) while sceKernelDlsym is (handle, symbol_ptr, out).
+		// Heuristic only: valid when RSI looks like a small handle and RDI is a guest pointer.
 		if (symbolNameAddress < 0x10000 &&
 			IsPlausibleDynlibSymbolPointer(handle))
 		{
@@ -1554,9 +1560,21 @@ public sealed partial class DirectExecutionBackend
 				return true;
 			}
 
-			if (!EnsureLazyImportStubPoolMapped() ||
-				!TryAllocateLazyImportStubSlot(out guestAddress))
+			if (!EnsureLazyImportStubPoolMapped())
 			{
+				LogLazyImportStubMaterializationFailure(
+					"import stub region unresolved",
+					dispatchNid,
+					symbolName);
+				return false;
+			}
+
+			if (!TryAllocateLazyImportStubSlot(out guestAddress))
+			{
+				LogLazyImportStubMaterializationFailure(
+					"lazy import stub pool exhausted",
+					dispatchNid,
+					symbolName);
 				return false;
 			}
 
@@ -1575,6 +1593,10 @@ public sealed partial class DirectExecutionBackend
 				!PatchImportStub((nint)(long)guestAddress, hostTrampoline))
 			{
 				guestAddress = 0;
+				LogLazyImportStubMaterializationFailure(
+					"failed to patch lazy import stub trampoline",
+					dispatchNid,
+					symbolName);
 				return false;
 			}
 
@@ -1630,6 +1652,93 @@ public sealed partial class DirectExecutionBackend
 		_lazyDlsymStubCache[key] = guestAddress;
 	}
 
+	private void LogLazyImportStubMaterializationFailure(string reason, string dispatchNid, string symbolName)
+	{
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] Lazy import stub materialization failed ({reason}): " +
+			$"nid={dispatchNid} symbol='{symbolName}'");
+	}
+
+	private unsafe bool TryResolveImportStubRegionBounds(
+		ImportStubEntry[] importEntries,
+		out ulong regionBase,
+		out ulong regionLimit)
+	{
+		regionBase = 0;
+		regionLimit = 0;
+
+		for (var candidateIndex = 0; candidateIndex < 64; candidateIndex++)
+		{
+			var candidateBase = ImportStubRegionCanonicalBase -
+				(ulong)candidateIndex * ImportStubRegionAddressStride;
+			if (VirtualQuery((void*)candidateBase, out var memoryInfo, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				memoryInfo.RegionSize == 0 ||
+				memoryInfo.State != 4096)
+			{
+				continue;
+			}
+
+			var candidateLimit = candidateBase + memoryInfo.RegionSize;
+			var hasStub = false;
+			for (var i = 0; i < importEntries.Length; i++)
+			{
+				var entryAddress = importEntries[i].Address;
+				if (entryAddress < candidateBase || entryAddress >= candidateLimit)
+				{
+					continue;
+				}
+
+				if ((entryAddress - candidateBase) % LazyImportStubSlotSize != 0)
+				{
+					continue;
+				}
+
+				hasStub = true;
+				break;
+			}
+
+			if (!hasStub)
+			{
+				continue;
+			}
+
+			regionBase = candidateBase;
+			regionLimit = candidateLimit;
+			return true;
+		}
+
+		ulong maxStubEnd = 0;
+		for (var i = 0; i < importEntries.Length; i++)
+		{
+			var entryAddress = importEntries[i].Address;
+			if (entryAddress < ImportStubRegionCanonicalBase)
+			{
+				continue;
+			}
+
+			if ((entryAddress - ImportStubRegionCanonicalBase) % LazyImportStubSlotSize != 0)
+			{
+				continue;
+			}
+
+			var entryEnd = entryAddress + LazyImportStubSlotSize;
+			if (entryEnd > maxStubEnd)
+			{
+				maxStubEnd = entryEnd;
+				regionBase = ImportStubRegionCanonicalBase;
+			}
+		}
+
+		if (regionBase == 0 || maxStubEnd <= regionBase)
+		{
+			return false;
+		}
+
+		var spanBytes = maxStubEnd - regionBase;
+		regionLimit = regionBase + AlignUp(spanBytes, ImportStubRegionPageSize);
+		return regionLimit > regionBase;
+	}
+
 	private bool EnsureLazyImportStubPoolMapped()
 	{
 		if (_lazyImportStubPoolMapped && _lazyImportStubPoolBase != 0)
@@ -1637,10 +1746,13 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		const ulong importStubRegionBase = 0x0000_7000_0000_0000UL;
-		const ulong importStubRegionLimit = importStubRegionBase + 0x1000UL;
-		ulong nextSlot = importStubRegionBase;
 		var importEntries = _importEntries;
+		if (!TryResolveImportStubRegionBounds(importEntries, out var importStubRegionBase, out var importStubRegionLimit))
+		{
+			return false;
+		}
+
+		ulong nextSlot = importStubRegionBase;
 		for (var i = 0; i < importEntries.Length; i++)
 		{
 			var entryAddress = importEntries[i].Address;
