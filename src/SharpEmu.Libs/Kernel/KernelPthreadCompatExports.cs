@@ -37,6 +37,8 @@ public static class KernelPthreadCompatExports
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_CONDS"), "1", StringComparison.Ordinal);
     private static readonly HashSet<ulong>? _tracePthreadMutexFilter = ParseTraceAddressFilter(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
+    private static readonly bool _enableMutexLockBlocking =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_LOCK_BLOCKING"), "1", StringComparison.Ordinal);
 
     // On the outer class deliberately: a static on the nested state classes gives them a
     // type initializer that first runs on a guest thread and fail-fasts the CLR.
@@ -628,7 +630,11 @@ public static class KernelPthreadCompatExports
         if (!acquired)
         {
             var waiter = new PthreadMutexWaiter { ThreadId = currentThreadId };
-            if (!tryOnly &&
+            // Cooperative deschedule on a contended lock corrupts fiber state
+            // (Demon's Souls sceFiberSwitch -> ESRCH). Off by default: fall through to the
+            // synchronous host-thread wait below.
+            if (_enableMutexLockBlocking &&
+                !tryOnly &&
                 GuestThreadExecution.IsGuestThread &&
                 GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
                 GuestThreadExecution.RequestCurrentThreadBlock(
