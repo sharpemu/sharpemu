@@ -166,7 +166,10 @@ internal static unsafe class VulkanVideoPresenter
     private const uint DefaultWindowWidth = 1280;
     private const uint DefaultWindowHeight = 720;
     private const int MaxPendingGuestWork = 16;
-    private const int MaxGuestWorkPerRender = 16;
+    // A single guest frame commonly contains 30-50 translated draws.  Limiting
+    // this to 16 split one frame across several 60 Hz window callbacks and
+    // unnecessarily throttled the producer behind the bounded work queue.
+    private const int MaxGuestWorkPerRender = 128;
     private const uint GuestPrimitiveRectList = 0x11;
     private const uint GuestFormatR32Uint = 0x10004;
     private const uint GuestFormatR32Sint = 0x20004;
@@ -205,6 +208,29 @@ internal static unsafe class VulkanVideoPresenter
         var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
         return string.Equals(mode, "1", StringComparison.Ordinal) ||
                string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldTraceGuestImageSubmissionsForDiagnostics()
+    {
+        return string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES"),
+            "1",
+            StringComparison.Ordinal);
+    }
+
+    private static bool ShouldSamplePresentedGuestImageForDiagnostics(long frame)
+    {
+        var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
+        if (string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase))
+        {
+            // A 4K Vulkan readback is deliberately synchronous and can take
+            // several seconds on Linux.  The lightweight "present" mode only
+            // needs one proof that the final image is non-black.
+            return frame == 1;
+        }
+
+        return string.Equals(mode, "1", StringComparison.Ordinal) &&
+               (frame is 1 or 30 or 120 || frame % 600 == 0);
     }
 
     public static void EnsureStarted(uint width, uint height)
@@ -300,7 +326,7 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        if (ShouldTraceGuestImageSubmissionsForDiagnostics())
         {
             Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=Submit {width}x{height}");
         }
@@ -341,7 +367,7 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        if (ShouldTraceGuestImageSubmissionsForDiagnostics())
         {
             Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=SubmitGuestDraw({drawKind}) {width}x{height}");
         }
@@ -399,7 +425,7 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        if (ShouldTraceGuestImageSubmissionsForDiagnostics())
         {
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] vk.submit_call kind=SubmitTranslatedDraw {width}x{height} textures={textures.Count}");
@@ -507,7 +533,7 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        if (ShouldTraceGuestImageSubmissionsForDiagnostics())
         {
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] vk.submit_call kind=SubmitOffscreenTranslatedDraw " +
@@ -656,7 +682,7 @@ internal static unsafe class VulkanVideoPresenter
         {
             // VideoOut registration does not imply a rendered Vulkan image.
             var known = _gpuGuestImages.ContainsKey(address);
-            if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+            if (ShouldTraceGuestImageSubmissionsForDiagnostics())
             {
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] vk.submit_call kind=TrySubmitGuestImage addr=0x{address:X16} " +
@@ -693,7 +719,9 @@ internal static unsafe class VulkanVideoPresenter
                 sequence,
                 GuestDrawKind.None,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: 0,
+                // A flip targets the image produced by all work already queued
+                // for this frame.  Do not expose it until those draws finish.
+                RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
                 IsSplash: false,
                 GuestImageAddress: address);
             System.Threading.Monitor.PulseAll(_gate);
@@ -6190,9 +6218,8 @@ internal static unsafe class VulkanVideoPresenter
             if (presentedGuestImage is not null)
             {
                 _directPresentationCount++;
-                if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                    (_directPresentationCount is 1 or 30 or 120 ||
-                     _directPresentationCount % 600 == 0))
+                if (ShouldSamplePresentedGuestImageForDiagnostics(
+                        _directPresentationCount))
                 {
                     tracePresentedGuestImage = true;
                     Console.Error.WriteLine(
