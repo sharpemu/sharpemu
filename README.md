@@ -94,10 +94,10 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 
 ## Build
 
-1. Install the **.NET SDK**.
+1. Install the **.NET SDK `10.0.103`**. The repository pins this exact version in `global.json` with `rollForward: disable`, so any other SDK version will be rejected.
 2. Clone the repository: `git clone https://github.com/par274/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
-4. Build the project: `dotnet build` or `dotnet publish`
+3. Restore dependencies: `dotnet restore SharpEmu.slnx --locked-mode`
+4. Build the project: `dotnet build SharpEmu.slnx -c Release --no-restore`
 5. Build artifacts will be located in the `artifacts` directory.
 
 ## Disclaimer
