@@ -88,6 +88,7 @@ public sealed partial class DirectExecutionBackend
 			_deferredBootstrapTraceCount = 0;
 		}
 
+		Span<byte> symBytes = stackalloc byte[32];
 		foreach (var entry in pending)
 		{
 			var symbolText = "<unreadable>";
@@ -96,10 +97,25 @@ public sealed partial class DirectExecutionBackend
 				symbolText = sym;
 			}
 
+			var outValueText = "<unreadable>";
+			if (entry.OutputPointer != 0 && TryReadUInt64Compat(entry.OutputPointer, out var outValue))
+			{
+				outValueText = $"0x{outValue:X16}";
+			}
+
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] bootstrap_call#{entry.DispatchIndex}: op=0x{entry.Op:X16} " +
 				$"sym_ptr=0x{entry.SymbolPointer:X16} sym='{symbolText}' " +
-				$"out_ptr=0x{entry.OutputPointer:X16} ret=0x{entry.ReturnRip:X16}");
+				$"out_ptr=0x{entry.OutputPointer:X16} *out_ptr={outValueText} ret=0x{entry.ReturnRip:X16}");
+
+			if (entry.Op == 2 && entry.SymbolPointer != 0)
+			{
+				if (ActiveCpuContext?.Memory.TryRead(entry.SymbolPointer, symBytes) == true)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][TRACE] bootstrap_call#{entry.DispatchIndex}: sym_bytes={Convert.ToHexString(symBytes)}");
+				}
+			}
 		}
 	}
 

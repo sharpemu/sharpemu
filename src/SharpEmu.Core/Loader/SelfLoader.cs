@@ -31,7 +31,10 @@ public sealed class SelfLoader : ISelfLoader
     private const int ElfRelocationSize = 24;
     private const int ElfSectionHeaderSize = 64;
     private const uint SectionTypeSymbolTable = 2;
+    private const uint SectionTypeProgbits = 1;
     private const uint SectionTypeRela = 4;
+    private const ushort ElfTypeExec = 2;
+    private const ulong SectionFlagWrite = 0x1;
 
     private const long DtNull = 0;
     private const long DtPltRelSize = 0x02;
@@ -196,6 +199,14 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         MapLoadSegments(imageData, loadContext, programHeaders, virtualMemory, imageBase);
+        ApplyDataRelocations(
+            imageData,
+            loadContext,
+            elfHeader,
+            programHeaders,
+            virtualMemory,
+            imageBase,
+            tlsModuleId);
         var importStubs = ResolveAndPatchImportStubs(
             imageData,
             loadContext,
@@ -456,6 +467,375 @@ public sealed class SelfLoader : ISelfLoader
         return 0;
     }
 
+    private static int ApplyDataRelocations(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        ElfHeader elfHeader,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        uint tlsModuleId)
+    {
+        var descriptors = new List<RelocationDescriptor>(512);
+        var orderedImportNids = new List<string>(8);
+        var seenImportNids = new HashSet<string>(StringComparer.Ordinal);
+        var relocationEntries = 0;
+
+        relocationEntries += AppendSectionRelocationDescriptors(
+            imageData,
+            loadContext,
+            elfHeader,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+
+        relocationEntries += TryAppendDynamicRelocationDescriptors(
+            imageData,
+            loadContext,
+            programHeaders,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+
+        relocationEntries += TryAppendSceRelaProgramRelocationDescriptors(
+            imageData,
+            loadContext,
+            programHeaders,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+
+        var patched = PatchDataRelocationDescriptors(virtualMemory, descriptors);
+        if (patched > 0)
+        {
+            Console.WriteLine($"[LOADER] Applied {patched} data relocation patches");
+        }
+
+        if (relocationEntries == 0 && patched == 0 && elfHeader.Type == ElfTypeExec && imageBase != 0)
+        {
+            patched = ApplyExecWritableProgbitsLoadBaseRelocations(
+                elfHeader,
+                imageData,
+                loadContext,
+                programHeaders,
+                virtualMemory,
+                imageBase);
+            if (patched > 0)
+            {
+                Console.WriteLine(
+                    $"[LOADER] Applied {patched} ET_EXEC load-base pointer relocations in writable PROGBITS");
+            }
+            else
+            {
+                Console.WriteLine(
+                    "[LOADER] ET_EXEC: no formal relocs and no writable pointers rebased");
+            }
+        }
+
+        return patched;
+    }
+
+    private static int ApplyExecWritableProgbitsLoadBaseRelocations(
+        ElfHeader elfHeader,
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        IVirtualMemory virtualMemory,
+        ulong imageBase)
+    {
+        var minVaddr = ulong.MaxValue;
+        var maxVaddr = 0UL;
+        foreach (var header in programHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+            {
+                continue;
+            }
+
+            minVaddr = Math.Min(minVaddr, header.VirtualAddress);
+            var end = header.VirtualAddress + header.MemorySize;
+            if (end > maxVaddr)
+            {
+                maxVaddr = end;
+            }
+        }
+
+        if (maxVaddr <= minVaddr)
+        {
+            return 0;
+        }
+
+        var patched = 0;
+        Span<byte> valueBuffer = stackalloc byte[sizeof(ulong)];
+        for (var sectionIndex = 0; sectionIndex < elfHeader.SectionHeaderCount; sectionIndex++)
+        {
+            if (!TryReadSectionHeader(imageData, loadContext, elfHeader, sectionIndex, out var sectionHeader) ||
+                sectionHeader.Type != SectionTypeProgbits ||
+                sectionHeader.Size == 0 ||
+                (sectionHeader.Flags & SectionFlagWrite) == 0)
+            {
+                continue;
+            }
+
+            var guestStart = sectionHeader.Address + imageBase;
+            var sectionSize = sectionHeader.Size;
+            for (var offset = 0UL; offset + sizeof(ulong) <= sectionSize; offset += sizeof(ulong))
+            {
+                if (!virtualMemory.TryRead(guestStart + offset, valueBuffer))
+                {
+                    continue;
+                }
+
+                var value = BinaryPrimitives.ReadUInt64LittleEndian(valueBuffer);
+                if (value == 0 ||
+                    value >= imageBase ||
+                    value < minVaddr ||
+                    value >= maxVaddr ||
+                    !IsLinkTimeVaInLoadSegment(value, programHeaders))
+                {
+                    continue;
+                }
+
+                if (!TryWriteUInt64(virtualMemory, guestStart + offset, unchecked(value + imageBase)))
+                {
+                    throw new InvalidDataException(
+                        $"Failed to patch ET_EXEC load-base pointer at 0x{(guestStart + offset):X16}.");
+                }
+
+                patched++;
+            }
+        }
+
+        return patched;
+    }
+
+    private static bool IsLinkTimeVaInLoadSegment(ulong value, IReadOnlyList<ProgramHeader> programHeaders)
+    {
+        foreach (var header in programHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+            {
+                continue;
+            }
+
+            var start = header.VirtualAddress;
+            var end = header.VirtualAddress + header.MemorySize;
+            if (value >= start && value < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int TryAppendDynamicRelocationDescriptors(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        uint tlsModuleId,
+        ICollection<RelocationDescriptor> descriptors,
+        IList<string> orderedImportNids,
+        ISet<string> seenImportNids)
+    {
+        if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex) ||
+            dynamicHeader.FileSize == 0 ||
+            dynamicHeader.FileSize > int.MaxValue ||
+            !TryLoadDynamicTableBytes(
+                imageData,
+                loadContext,
+                virtualMemory,
+                imageBase,
+                dynamicHeader,
+                dynamicHeaderIndex,
+                out var dynamicTable))
+        {
+            return 0;
+        }
+
+        var dynamicInfo = ParseDynamicInfo(dynamicTable);
+        var relocations = new List<ElfRelocation>(512);
+        if (dynamicInfo.RelaSize != 0 &&
+            TryLoadTableBytes(imageData, virtualMemory, imageBase, dynamicInfo.RelaOffset, dynamicInfo.RelaSize, out var relaBytes))
+        {
+            CollectRelocations(relaBytes, relocations);
+        }
+
+        if (dynamicInfo.JmpRelSize != 0 &&
+            TryLoadTableBytes(imageData, virtualMemory, imageBase, dynamicInfo.JmpRelOffset, dynamicInfo.JmpRelSize, out var jmpRelBytes))
+        {
+            CollectRelocations(jmpRelBytes, relocations);
+        }
+
+        if (relocations.Count == 0)
+        {
+            return 0;
+        }
+
+        uint maxSymbolIndex = 0;
+        foreach (var relocation in relocations)
+        {
+            if (!IsSupportedRelocationType(relocation.Type))
+            {
+                continue;
+            }
+
+            if (relocation.Type is RelocationTypeRelative or RelocationTypeTlsModuleId)
+            {
+                continue;
+            }
+
+            if (relocation.SymbolIndex > maxSymbolIndex)
+            {
+                maxSymbolIndex = relocation.SymbolIndex;
+            }
+        }
+
+        ReadOnlySpan<byte> stringTable = ReadOnlySpan<byte>.Empty;
+        ReadOnlySpan<byte> symbolTable = ReadOnlySpan<byte>.Empty;
+        if (maxSymbolIndex != 0)
+        {
+            if (!TryLoadTableBytes(
+                    imageData,
+                    virtualMemory,
+                    imageBase,
+                    dynamicInfo.StrTabOffset,
+                    dynamicInfo.StrTabSize,
+                    out var loadedStringTable) ||
+                !TryLoadTableBytes(
+                    imageData,
+                    virtualMemory,
+                    imageBase,
+                    dynamicInfo.SymTabOffset,
+                    dynamicInfo.SymTabSize != 0
+                        ? dynamicInfo.SymTabSize
+                        : checked(((ulong)maxSymbolIndex + 1) * ElfSymbolSize),
+                    out var loadedSymbolTable))
+            {
+                return 0;
+            }
+
+            stringTable = loadedStringTable;
+            symbolTable = loadedSymbolTable;
+        }
+
+        AppendRelocationDescriptors(
+            relocations,
+            symbolTable,
+            stringTable,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+        return relocations.Count;
+    }
+
+    private static int TryAppendSceRelaProgramRelocationDescriptors(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        uint tlsModuleId,
+        ICollection<RelocationDescriptor> descriptors,
+        IList<string> orderedImportNids,
+        ISet<string> seenImportNids)
+    {
+        if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.SceRela, out var relocHeader, out var relocHeaderIndex) ||
+            relocHeader.FileSize == 0 ||
+            relocHeader.FileSize > int.MaxValue)
+        {
+            return 0;
+        }
+
+        ReadOnlySpan<byte> relaBytes = ReadOnlySpan<byte>.Empty;
+        if (!TryLoadTableBytes(
+                imageData,
+                virtualMemory,
+                imageBase,
+                relocHeader.VirtualAddress,
+                relocHeader.FileSize,
+                out var relaBytesArray))
+        {
+            var relocOffset = ResolvePhysicalSegmentOffset(imageData.Length, loadContext, relocHeader, relocHeaderIndex);
+            if (!TrySlice(imageData, relocOffset, relocHeader.FileSize, out relaBytes))
+            {
+                return 0;
+            }
+        }
+        else
+        {
+            relaBytes = relaBytesArray;
+        }
+
+        var relocations = new List<ElfRelocation>(checked((int)(relocHeader.FileSize / ElfRelocationSize)));
+        CollectRelocations(relaBytes, relocations);
+        if (relocations.Count == 0)
+        {
+            return 0;
+        }
+
+        AppendRelocationDescriptors(
+            relocations,
+            ReadOnlySpan<byte>.Empty,
+            ReadOnlySpan<byte>.Empty,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+        return relocations.Count;
+    }
+
+    private static int PatchDataRelocationDescriptors(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<RelocationDescriptor> descriptors)
+    {
+        var patched = 0;
+        foreach (var descriptor in descriptors)
+        {
+            if (descriptor.ImportNid is not null)
+            {
+                continue;
+            }
+
+            var targetValue = descriptor.ValueKind == RelocationValueKind.TlsModuleId
+                ? descriptor.SymbolValue
+                : AddSigned(descriptor.SymbolValue, descriptor.Addend);
+
+            if (targetValue < 0x1000 && descriptor.ValueKind != RelocationValueKind.TlsModuleId)
+            {
+                Log.Warning(
+                    $"!!! CRITICAL !!! Patching address 0x{descriptor.TargetAddress:X} with INVALID value 0x{targetValue:X} for data relocation");
+                Log.Warning(
+                    $"  SymbolValue=0x{descriptor.SymbolValue:X}, Addend=0x{descriptor.Addend:X}");
+            }
+
+            if (!TryWriteUInt64(virtualMemory, descriptor.TargetAddress, targetValue))
+            {
+                throw new InvalidDataException($"Failed to patch data relocation at 0x{descriptor.TargetAddress:X16}.");
+            }
+
+            patched++;
+        }
+
+        return patched;
+    }
+
     private static IReadOnlyDictionary<ulong, string> ResolveAndPatchImportStubs(
         ReadOnlySpan<byte> imageData,
         LoadContext loadContext,
@@ -622,6 +1002,12 @@ public sealed class SelfLoader : ISelfLoader
             return EmptyImportStubs;
         }
 
+        if (!descriptors.Any(static descriptor => descriptor.ImportNid is not null))
+        {
+            Console.WriteLine($"[LOADER] No import relocation descriptors!");
+            return EmptyImportStubs;
+        }
+
         importedRelocations = BuildImportedRelocations(descriptors);
 
         var stubsByAddress = CreateImportStubMapping(virtualMemory, orderedImportNids);
@@ -654,20 +1040,18 @@ public sealed class SelfLoader : ISelfLoader
 
         foreach (var descriptor in descriptors)
         {
-            ulong targetValue;
             if (descriptor.ImportNid is null)
             {
-                targetValue = AddSigned(descriptor.SymbolValue, descriptor.Addend);
+                continue;
             }
-            else
-            {
-                if (!addressesByNid.TryGetValue(descriptor.ImportNid, out var stubAddress))
-                {
-                    throw new InvalidOperationException($"Import stub not found for NID '{descriptor.ImportNid}'.");
-                }
 
-                targetValue = AddSigned(stubAddress, descriptor.Addend);
+            ulong targetValue;
+            if (!addressesByNid.TryGetValue(descriptor.ImportNid, out var stubAddress))
+            {
+                throw new InvalidOperationException($"Import stub not found for NID '{descriptor.ImportNid}'.");
             }
+
+            targetValue = AddSigned(stubAddress, descriptor.Addend);
 
             if (targetValue < 0x1000)
             {

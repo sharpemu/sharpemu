@@ -9,6 +9,8 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -94,6 +96,14 @@ public static class KernelMemoryCompatExports
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
+    private sealed class EmulatedSocketState
+    {
+        public TcpClient? Client;
+        public NetworkStream? Stream;
+        public bool Connected;
+    }
+
+    private static readonly Dictionary<int, EmulatedSocketState> _emulatedSockets = new();
     private static readonly object _libcAllocGate = new();
     private static readonly object _memoryGate = new();
     private static readonly object _tlsGate = new();
@@ -110,6 +120,116 @@ public static class KernelMemoryCompatExports
     private static readonly HashSet<string> _negativeStatCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(StringComparer.OrdinalIgnoreCase);
     private static long _nextFileDescriptor = 2;
+
+    private static int AllocateGuestFd()
+    {
+        return (int)Interlocked.Increment(ref _nextFileDescriptor);
+    }
+
+
+    private static bool TryGetEmulatedSocketState(int fd, out EmulatedSocketState? state)
+    {
+        lock (_fdGate)
+        {
+            return _emulatedSockets.TryGetValue(fd, out state);
+        }
+    }
+
+    private static bool TryParseGuestSockaddrIn(
+        ulong address,
+        int addrlen,
+        CpuContext ctx,
+        out IPAddress ipAddress,
+        out int port)
+    {
+        ipAddress = IPAddress.None;
+        port = 0;
+        if (address == 0 || addrlen < 8)
+        {
+            return false;
+        }
+
+        Span<byte> buffer = stackalloc byte[16];
+        var readLength = Math.Min(addrlen, buffer.Length);
+        if (!ctx.Memory.TryRead(address, buffer.Slice(0, readLength)))
+        {
+            return false;
+        }
+
+        if (buffer[1] != 2)
+        {
+            return false;
+        }
+
+        port = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2, 2));
+        ipAddress = new IPAddress(buffer.Slice(4, 4).ToArray());
+        return true;
+    }
+
+    private static void DisposeEmulatedSocket(EmulatedSocketState state)
+    {
+        try { state.Stream?.Dispose(); } catch (IOException) { }
+        try { state.Client?.Dispose(); } catch (IOException) { }
+        state.Stream = null;
+        state.Client = null;
+        state.Connected = false;
+    }
+
+    private static void RemoveEmulatedSocketFd(int fd)
+    {
+        lock (_fdGate)
+        {
+            if (_emulatedSockets.Remove(fd, out var socketState))
+            {
+                DisposeEmulatedSocket(socketState);
+            }
+        }
+    }
+
+    private static void LogNet(string message)
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_NET"), "1", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"[LOADER][DEBUG] {message}");
+        }
+    }
+
+    private static bool TryApplyNetRedirect(ref IPAddress ipAddress)
+    {
+        var redirect = Environment.GetEnvironmentVariable("SHARPEMU_NET_REDIRECT");
+        if (string.IsNullOrWhiteSpace(redirect))
+        {
+            return false;
+        }
+
+        if (!IPAddress.TryParse(redirect.Trim(), out var redirectAddress))
+        {
+            return false;
+        }
+
+        ipAddress = redirectAddress;
+        return true;
+    }
+
+    private static bool IsNetRedirectConfigured()
+    {
+        var redirect = Environment.GetEnvironmentVariable("SHARPEMU_NET_REDIRECT");
+        return !string.IsNullOrWhiteSpace(redirect);
+    }
+
+    // Default deny: guest TCP connect is allowed only to loopback or when SHARPEMU_NET_REDIRECT is set.
+    private static bool IsGuestTcpOutboundAllowed(IPAddress ipAddress, bool redirectApplied)
+    {
+        return redirectApplied || IsNetRedirectConfigured() || IPAddress.IsLoopback(ipAddress);
+    }
+
+    private static bool IsEmulatedSocketFd(int fd)
+    {
+        lock (_fdGate)
+        {
+            return _emulatedSockets.ContainsKey(fd);
+        }
+    }
     private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
     private static ulong _mainDirectMemoryPoolBase = UnsetMainDirectMemoryPoolBase;
@@ -1555,9 +1675,10 @@ public static class KernelMemoryCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                var directoryFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+                int directoryFd;
                 lock (_fdGate)
                 {
+                    directoryFd = AllocateGuestFd();
                     _openDirectories[directoryFd] = new OpenDirectory
                     {
                         Path = hostPath,
@@ -1578,9 +1699,10 @@ public static class KernelMemoryCompatExports
                 stream.Seek(0, SeekOrigin.End);
             }
 
-            var fd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            int fd;
             lock (_fdGate)
             {
+                fd = AllocateGuestFd();
                 _openFiles[fd] = stream;
             }
 
@@ -1956,6 +2078,13 @@ public static class KernelMemoryCompatExports
         FileStream? stream;
         lock (_fdGate)
         {
+            if (_emulatedSockets.Remove(fd, out var socketState))
+            {
+                DisposeEmulatedSocket(socketState);
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
             if (_openFiles.Remove(fd, out stream))
             {
             }
@@ -1993,6 +2122,36 @@ public static class KernelMemoryCompatExports
         if (requested == 0 || fd == 0)
         {
             ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (IsEmulatedSocketFd(fd))
+        {
+            if (!TryGetEmulatedSocketState(fd, out var socketState) ||
+                socketState is null ||
+                !socketState.Connected ||
+                socketState.Stream is null)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            var socketBuffer = GC.AllocateUninitializedArray<byte>(requested);
+            int socketRead;
+            try
+            {
+                socketRead = socketState.Stream.Read(socketBuffer, 0, requested);
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            if (socketRead > 0 && !ctx.Memory.TryWrite(bufferAddress, socketBuffer.AsSpan(0, socketRead)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)socketRead);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2185,6 +2344,262 @@ public static class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "GstScktEm0",
+        ExportName = "GuestSocket",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GuestSocket(CpuContext ctx)
+    {
+        int fd;
+        lock (_fdGate)
+        {
+            fd = AllocateGuestFd();
+            _emulatedSockets[fd] = new EmulatedSocketState();
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)fd);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "GstScktC0n",
+        ExportName = "GuestConnect",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GuestConnect(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var sockaddrAddress = ctx[CpuRegister.Rsi];
+        var addrlen = unchecked((int)ctx[CpuRegister.Rdx]);
+        lock (_fdGate)
+        {
+            if (!_emulatedSockets.ContainsKey(fd))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+        }
+
+        if (!TryParseGuestSockaddrIn(sockaddrAddress, addrlen, ctx, out var ipAddress, out var port))
+        {
+            LogNet(
+                $"GuestConnect sockaddr parse failed: fd={fd} addr=0x{sockaddrAddress:X} len={addrlen}");
+
+            RemoveEmulatedSocketFd(fd);
+            ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var redirectApplied = TryApplyNetRedirect(ref ipAddress);
+        if (redirectApplied)
+        {
+            LogNet($"GuestConnect redirect: fd={fd} ip={ipAddress} port={port}");
+        }
+
+        if (!IsGuestTcpOutboundAllowed(ipAddress, redirectApplied))
+        {
+            LogNet(
+                $"GuestConnect denied by outbound policy: fd={fd} ip={ipAddress} port={port} redirect={IsNetRedirectConfigured()}");
+
+            RemoveEmulatedSocketFd(fd);
+            ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!TryEstablishHostTcpConnection(ipAddress, port, out var client, out var stream))
+        {
+            LogNet($"GuestConnect failed: fd={fd} ip={ipAddress} port={port}");
+
+            RemoveEmulatedSocketFd(fd);
+            ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        LogNet($"GuestConnect ok: fd={fd} ip={ipAddress} port={port}");
+
+        lock (_fdGate)
+        {
+            if (!_emulatedSockets.TryGetValue(fd, out var state) || state is null)
+            {
+                try { stream.Dispose(); } catch (IOException) { }
+                try { client.Dispose(); } catch (IOException) { }
+                ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            DisposeEmulatedSocket(state);
+            state.Client = client;
+            state.Stream = stream;
+            state.Connected = true;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "GstBzero0",
+        ExportName = "bzero",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GuestBzero(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var length = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (length > 0 && address != 0)
+        {
+            var zeros = new byte[length];
+            if (!ctx.Memory.TryWrite(address, zeros))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool TryEstablishHostTcpConnection(
+        IPAddress ipAddress,
+        int port,
+        out TcpClient client,
+        out NetworkStream stream)
+    {
+        client = null!;
+        stream = null!;
+        if (!TryConnectTcpClient(ipAddress, port, out client))
+        {
+            return false;
+        }
+
+        stream = client.GetStream();
+        return true;
+    }
+
+    private static bool TryConnectTcpClient(IPAddress ipAddress, int port, out TcpClient client)
+    {
+        client = new TcpClient();
+        try
+        {
+            var connectTask = client.ConnectAsync(ipAddress, port);
+            if (!connectTask.Wait(TimeSpan.FromMilliseconds(500)))
+            {
+                client.Dispose();
+                client = null!;
+                return false;
+            }
+
+            return true;
+        }
+        catch (SocketException)
+        {
+            client.Dispose();
+            client = null!;
+            return false;
+        }
+        catch (IOException)
+        {
+            client.Dispose();
+            client = null!;
+            return false;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "GstInetP0",
+        ExportName = "GuestInetPton",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GuestInetPton(CpuContext ctx)
+    {
+        var af = unchecked((int)ctx[CpuRegister.Rdi]);
+        var srcAddress = ctx[CpuRegister.Rsi];
+        var dstAddress = ctx[CpuRegister.Rdx];
+        if (af != 2 || srcAddress == 0 || dstAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadCString(srcAddress, out var text, ctx) ||
+            !TryParseIpv4Address(text, out var octets))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        Span<byte> packed = stackalloc byte[4];
+        packed[0] = octets[0];
+        packed[1] = octets[1];
+        packed[2] = octets[2];
+        packed[3] = octets[3];
+        if (!ctx.Memory.TryWrite(dstAddress, packed))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 1;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "GstHtons0",
+        ExportName = "GuestHtons",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GuestHtons(CpuContext ctx)
+    {
+        var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
+        var swapped = (ushort)(((value & 0x00FF) << 8) | ((value >> 8) & 0x00FF));
+        ctx[CpuRegister.Rax] = swapped;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool TryReadCString(ulong address, out string text, CpuContext ctx)
+    {
+        const int maxLength = 64;
+        var buffer = new byte[maxLength];
+        var length = 0;
+        for (; length < maxLength; length++)
+        {
+            if (!ctx.Memory.TryRead(address + (ulong)length, buffer.AsSpan(length, 1)))
+            {
+                text = string.Empty;
+                return false;
+            }
+
+            if (buffer[length] == 0)
+            {
+                break;
+            }
+        }
+
+        text = Encoding.ASCII.GetString(buffer, 0, length);
+        return true;
+    }
+
+    private static bool TryParseIpv4Address(string text, out byte[] octets)
+    {
+        octets = Array.Empty<byte>();
+        var parts = text.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        var parsed = new byte[4];
+        for (var i = 0; i < 4; i++)
+        {
+            if (!byte.TryParse(parts[i], out parsed[i]))
+            {
+                return false;
+            }
+        }
+
+        octets = parsed;
+        return true;
+    }
+
+    [SysAbiExport(
         Nid = "FxVZqBAA7ks",
         ExportName = "_write",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -2223,6 +2638,40 @@ public static class KernelMemoryCompatExports
 
             ctx[CpuRegister.Rax] = unchecked((ulong)requested);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (IsEmulatedSocketFd(fd))
+        {
+            if (!TryGetEmulatedSocketState(fd, out var socketState) ||
+                socketState is null ||
+                !socketState.Connected)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            if (socketState.Stream is not null)
+            {
+                try
+                {
+                    socketState.Stream.Write(payload, 0, requested);
+                    socketState.Stream.Flush();
+                }
+                catch (IOException)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                }
+
+                if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_NET"), "1", StringComparison.Ordinal))
+                {
+                    Console.Out.Write(Encoding.UTF8.GetString(payload));
+                    Console.Out.Flush();
+                }
+
+                ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         FileStream? stream;
@@ -4131,7 +4580,7 @@ public static class KernelMemoryCompatExports
     private struct RegisterPrintfArgumentSource : IPrintfArgumentSource
     {
         // SysV AMD64: variadic integer/pointer args use the GP registers (rdi..r9, up to
-        // 6) and variadic float/double args use xmm0..xmm7 (8) — INDEPENDENT counters.
+        // 6) and variadic float/double args use xmm0..xmm7 (8) -- INDEPENDENT counters.
         // Args beyond the registers spill to the stack in source order, so GP-overflow
         // and FP-overflow share one stack cursor.
         private readonly CpuContext _ctx;

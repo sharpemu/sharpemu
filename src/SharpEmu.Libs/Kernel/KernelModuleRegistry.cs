@@ -97,14 +97,23 @@ public static class KernelModuleRegistry
         }
     }
 
-    public static int RegisterSyntheticModule(string moduleName, bool isSystemModule)
+    public static int RegisterSyntheticModule(
+        string moduleName,
+        bool isSystemModule,
+        ulong baseAddress = 0,
+        ulong size = 0)
     {
         lock (_gate)
         {
             if (TryResolveHandleByNameLocked(moduleName, out var existingHandle))
             {
                 var existing = _modulesByHandle[existingHandle];
-                _modulesByHandle[existingHandle] = existing with { IsSystemModule = existing.IsSystemModule || isSystemModule };
+                _modulesByHandle[existingHandle] = existing with
+                {
+                    BaseAddress = baseAddress != 0 ? baseAddress : existing.BaseAddress,
+                    EndAddress = baseAddress != 0 ? ComputeEnd(baseAddress, size) : existing.EndAddress,
+                    IsSystemModule = existing.IsSystemModule || isSystemModule,
+                };
                 return existingHandle;
             }
 
@@ -116,8 +125,8 @@ public static class KernelModuleRegistry
                 Handle: handle,
                 Name: fallbackName,
                 Path: string.Empty,
-                BaseAddress: 0,
-                EndAddress: 0,
+                BaseAddress: baseAddress,
+                EndAddress: ComputeEnd(baseAddress, size),
                 EntryPoint: 0,
                 IsMain: false,
                 IsSystemModule: isSystemModule);

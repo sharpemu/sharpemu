@@ -29,8 +29,17 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private const ulong BootstrapStubBaseAddress = 0x7FFD_F000_0000UL;
     private const ulong BootstrapPayloadBaseAddress = 0x7FFD_E000_0000UL;
     private const ulong DynlibFallbackStubBaseAddress = 0x7FFD_D000_0000UL;
+    private const ulong GuestCrtDlsymStubBaseAddress = 0x7FFD_B000_0000UL;
+    private const ulong CrtLazyImportPoolBaseAddress = 0x7FFD_A000_0000UL;
+    private const ulong CrtLazyImportPoolSize = 0x0020_0000UL;
     private const ulong ReturnToHostStubBaseAddress = 0x7FFD_C000_0000UL;
     private const ulong BootstrapRegionSize = 0x0000_1000UL;
+    private const ulong GuestCrtPayloadArgsSize = 0x30UL;
+    private const ulong GuestCrtPayloadArgsDlsymOffset = 0x00UL;
+    private const ulong GuestCrtPayloadArgsRwpipeOffset = 0x08UL;
+    private const ulong GuestCrtPayloadArgsRwpairOffset = 0x10UL;
+    private const ulong GuestCrtPayloadArgsPayloadOutOffset = 0x28UL;
+    private const byte GuestCrt0JumpOpcode = 0xE9;
     private const ulong ReturnToHostStubStride = 0x0100_0000UL;
     private const ulong BootstrapPayloadResultOffset = 0x28UL;
     private const ulong BootstrapStatusOffset = 0x100UL;
@@ -217,19 +226,35 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+            if (ShouldInjectBootstrapPayload(entryPoint, runtimeSymbols))
             {
-                return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
+                if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+                {
+                    return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
 
-            entryParamsConfigured = true;
-
-            if (ShouldInjectBootstrapPayload(entryPoint))
-            {
+                entryParamsConfigured = true;
                 if (!TryInstallBootstrapPayload(context, effectiveImportStubs))
                 {
                     return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
+            }
+            else if (TryDetectGuestCrtEntry(entryPoint, runtimeSymbols))
+            {
+                if (!InitializeGuestCrtEntryFrame(context, effectiveImportStubs))
+                {
+                    return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                entryParamsConfigured = true;
+            }
+            else if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+            {
+                return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+            else
+            {
+                entryParamsConfigured = true;
             }
         }
         else if (!InitializeModuleInitializerFrame(context))
@@ -441,6 +466,131 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         return true;
     }
 
+    private bool TryDetectGuestCrtEntry(
+        ulong entryPoint,
+        IReadOnlyDictionary<string, ulong>? runtimeSymbols)
+    {
+        if (runtimeSymbols is not null &&
+            // Guest CRT entry symbol (ELF export name literal).
+            runtimeSymbols.TryGetValue("__ps5sdk_crt_start", out var crtStart))
+        {
+            if (crtStart == entryPoint)
+            {
+                return true;
+            }
+
+            if (runtimeSymbols.TryGetValue("_start", out var startAddress) &&
+                startAddress == entryPoint)
+            {
+                return true;
+            }
+
+            if (runtimeSymbols.TryGetValue("_start", out startAddress) &&
+                entryPoint != crtStart &&
+                IsAddressInMainExecutableRange(entryPoint, startAddress, runtimeSymbols))
+            {
+                return true;
+            }
+
+            Span<byte> probe = stackalloc byte[5];
+            if (_virtualMemory.TryRead(entryPoint, probe) && probe[0] == GuestCrt0JumpOpcode)
+            {
+                var rel32 = BitConverter.ToInt32(probe.Slice(1, 4));
+                var jumpTarget = unchecked((ulong)((long)entryPoint + 5 + rel32));
+                if (jumpTarget == crtStart)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    private static bool IsAddressInMainExecutableRange(
+        ulong address,
+        ulong moduleAnchor,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols)
+    {
+        ulong imageBase = moduleAnchor;
+        ulong imageEnd = moduleAnchor;
+        foreach (var value in runtimeSymbols.Values)
+        {
+            if (value < 0x10000 || value >= 0x80000000)
+            {
+                continue;
+            }
+
+            imageBase = Math.Min(imageBase, value);
+            imageEnd = Math.Max(imageEnd, value);
+        }
+
+        const ulong imageSlack = 0x200000;
+        return address >= imageBase && address <= imageEnd + imageSlack;
+    }
+
+    private bool InitializeGuestCrtEntryFrame(
+        CpuContext context,
+        IDictionary<ulong, string> importStubs)
+    {
+        var dlsymStubAddress = TryMapGuestCrtDlsymStubRegion();
+        if (dlsymStubAddress == 0)
+        {
+            return false;
+        }
+
+        importStubs[dlsymStubAddress] = RuntimeStubNids.KernelDynlibDlsym;
+
+        var cursor = context[CpuRegister.Rsp];
+        var rwpairArrayAddress = AlignDown(cursor - (2 * sizeof(uint)), sizeof(ulong));
+        if (!context.TryWriteUInt32(rwpairArrayAddress, 0) ||
+            !context.TryWriteUInt32(rwpairArrayAddress + sizeof(uint), 0))
+        {
+            return false;
+        }
+
+        var rwpipeArrayAddress = AlignDown(rwpairArrayAddress - (2 * sizeof(uint)), sizeof(ulong));
+        if (!context.TryWriteUInt32(rwpipeArrayAddress, 0) ||
+            !context.TryWriteUInt32(rwpipeArrayAddress + sizeof(uint), 0))
+        {
+            return false;
+        }
+
+        var payloadOutAddress = AlignDown(rwpipeArrayAddress - sizeof(uint), sizeof(ulong));
+        if (!context.TryWriteUInt32(payloadOutAddress, 0))
+        {
+            return false;
+        }
+
+        var payloadArgsAddress = AlignDown(payloadOutAddress - GuestCrtPayloadArgsSize, 16);
+        if (!context.TryWriteUInt64(payloadArgsAddress + GuestCrtPayloadArgsDlsymOffset, dlsymStubAddress) ||
+            !context.TryWriteUInt64(payloadArgsAddress + GuestCrtPayloadArgsRwpipeOffset, rwpipeArrayAddress) ||
+            !context.TryWriteUInt64(payloadArgsAddress + GuestCrtPayloadArgsRwpairOffset, rwpairArrayAddress) ||
+            !context.TryWriteUInt64(payloadArgsAddress + 0x18, 0) ||
+            !context.TryWriteUInt64(payloadArgsAddress + 0x20, 0) ||
+            !context.TryWriteUInt64(payloadArgsAddress + GuestCrtPayloadArgsPayloadOutOffset, payloadOutAddress))
+        {
+            return false;
+        }
+
+        var entryStackPointer = payloadArgsAddress - sizeof(ulong);
+        if (!context.TryWriteUInt64(entryStackPointer, 0))
+        {
+            return false;
+        }
+
+        context[CpuRegister.Rsp] = entryStackPointer;
+        context[CpuRegister.Rdi] = payloadArgsAddress;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0;
+        context[CpuRegister.Rcx] = 0;
+        context[CpuRegister.R8] = 0;
+        context[CpuRegister.R9] = 0;
+        return true;
+    }
+
     private static bool InitializeModuleInitializerFrame(CpuContext context)
     {
         context[CpuRegister.Rdi] = 0;
@@ -475,8 +625,16 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             $"EntryFrame: entry_rip=0x{entryPoint:X16} initial_rsp=0x{initialRsp:X16} [rsp]={stackTopText} sentinel_enabled={sentinelText} sentinel_value={sentinelValueText} entry_params_configured={entryParamsText}";
     }
 
-    private bool ShouldInjectBootstrapPayload(ulong entryPoint)
+    private bool ShouldInjectBootstrapPayload(
+        ulong entryPoint,
+        IReadOnlyDictionary<string, ulong>? runtimeSymbols)
     {
+        if (runtimeSymbols is not null &&
+            runtimeSymbols.ContainsKey("__ps5sdk_crt_start")) // guest CRT entry symbol
+        {
+            return false;
+        }
+
         Span<byte> probe = stackalloc byte[16];
         if (!_virtualMemory.TryRead(entryPoint, probe))
         {
@@ -492,6 +650,13 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         }
 
         return true;
+    }
+
+    private static bool OverlapsCrtLazyImportPool(ulong candidateBase, ulong regionSize)
+    {
+        var candidateEnd = candidateBase + regionSize;
+        var poolEnd = CrtLazyImportPoolBaseAddress + CrtLazyImportPoolSize;
+        return candidateBase < poolEnd && candidateEnd > CrtLazyImportPoolBaseAddress;
     }
 
     private bool TryInstallBootstrapPayload(CpuContext context, IDictionary<ulong, string> importStubs)
@@ -592,6 +757,40 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         for (var i = 0; i < 16; i++)
         {
             var candidateBase = DynlibFallbackStubBaseAddress - ((ulong)i * stride);
+            try
+            {
+                _virtualMemory.Map(
+                    candidateBase,
+                    BootstrapRegionSize,
+                    fileOffset: 0,
+                    stubData,
+                    ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute);
+                return candidateBase;
+            }
+            catch (InvalidOperationException)
+            {
+                continue;
+            }
+        }
+
+        return 0;
+    }
+
+    private ulong TryMapGuestCrtDlsymStubRegion()
+    {
+        var stubData = new byte[(int)BootstrapRegionSize];
+        stubData[0] = 0xCC;
+        stubData[1] = 0xC3;
+
+        const ulong stride = 0x0100_0000UL;
+        for (var i = 0; i < 16; i++)
+        {
+            var candidateBase = GuestCrtDlsymStubBaseAddress - ((ulong)i * stride);
+            if (OverlapsCrtLazyImportPool(candidateBase, BootstrapRegionSize))
+            {
+                continue;
+            }
+
             try
             {
                 _virtualMemory.Map(

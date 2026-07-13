@@ -9,7 +9,9 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Loader;
+using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -127,7 +129,7 @@ public sealed partial class DirectExecutionBackend
 		// Leaf imports take a scalar-only fast path that reads its own operands and
 		// intentionally bypasses the SysV variadic XMM marshalling below. This is safe
 		// only while the leaf set contains no float-variadic or float-returning function.
-		// The constraint and the audited list live on IsLeafImport — do not add a
+		// The constraint and the audited list live on IsLeafImport -- do not add a
 		// function that consumes xmm0-7 args or returns in xmm0 to the leaf set;
 		// such functions must stay on the full gateway path below.
 		if (IsLeafImport(importStubEntry.Nid) &&
@@ -163,7 +165,7 @@ public sealed partial class DirectExecutionBackend
 		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
 		if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 		{
-			NormalizeKernelDynlibDlsymArguments(cpuContext, out _, out _);
+			NormalizeBootstrapBridgeArguments(cpuContext, out _, out _);
 			*(ulong*)argPackPtr = cpuContext[CpuRegister.Rdi];
 			*(ulong*)(argPackPtr + 8) = cpuContext[CpuRegister.Rsi];
 			*(ulong*)(argPackPtr + 16) = cpuContext[CpuRegister.Rdx];
@@ -685,7 +687,7 @@ public sealed partial class DirectExecutionBackend
 
 	// Subset of the leaf set that additionally skips the import-call-frame
 	// bookkeeping. The same scalar-only (no XMM args, no XMM return) constraint
-	// as IsLeafImport applies — see the note there before adding entries.
+	// as IsLeafImport applies -- see the note there before adding entries.
 	// NOTE: this filter is only consulted after IsLeafImport accepts the NID;
 	// entries listed here but not in IsLeafImport (scePadRead, scePadOpen,
 	// sceUserServiceGetEvent, sceUserServiceGetPlatformPrivacySetting,
@@ -784,13 +786,13 @@ public sealed partial class DirectExecutionBackend
 			"1G3lF1Gg1k8" or // sceKernelOpen
 			"gEpBkcwxUjw";   // sceKernelAprResolveFilepathsToIdsAndFileSizes
 
-	// LEAF-IMPORT REGISTRATION — scalar-only constraint.
+	// LEAF-IMPORT REGISTRATION -- scalar-only constraint.
 	//
 	// TryDispatchLeafImport is a fast path that never copies the trampoline's XMM
 	// save area into CpuContext and never publishes an XMM0 return back to the
 	// guest (see DispatchImport). Every NID listed here must therefore satisfy BOTH:
-	//   1. no float/double parameters (nothing passed in xmm0..xmm7), and
-	//   2. no float/double return value (nothing returned in xmm0).
+	// 1. no float/double parameters (nothing passed in xmm0..xmm7), and
+	// 2. no float/double return value (nothing returned in xmm0).
 	// Integer/pointer arguments and returns only. va_list-based functions
 	// (vsnprintf) are safe: SysV va_list floats are read from the caller-built
 	// reg_save_area in guest memory, not from the callee's incoming XMM registers.
@@ -798,7 +800,7 @@ public sealed partial class DirectExecutionBackend
 	// If a function that consumes XMM arguments or returns in xmm0 (e.g. powf,
 	// logf, wcstod, sceVideoOutColorSettingsSetGamma_) is ever added here, its
 	// float arguments will silently arrive stale and its return value will be
-	// dropped. Such functions must stay on the full gateway path — do not list them.
+	// dropped. Such functions must stay on the full gateway path -- do not list them.
 	//
 	// Audited 2026-07-11 (PR #59): every NID below maps to a registered
 	// SysAbiExport whose handler neither reads nor writes CpuContext XMM state
@@ -811,7 +813,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		// Only mutex/rwlock *lock* is excluded: it may block a contended acquire, which the
-		// leaf path can't. unlock never blocks and stays here — routing it off the fast path
+		// leaf path can't. unlock never blocks and stays here -- routing it off the fast path
 		// slows guest spinlocks enough to livelock (Demon's Souls).
 		return nid is
 			"tn3VlD0hG60" or // scePthreadMutexUnlock
@@ -1318,10 +1320,33 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		NormalizeKernelDynlibDlsymArguments(cpuContext, out var symbolNameAddress, out var outputAddress);
+		var moduleHandle = cpuContext[CpuRegister.Rdi];
 		try
 		{
-			if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
-				!TryResolveDlsymGuestAddress(symbolName, out var resolvedAddress) ||
+			if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
+			{
+				return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
+			}
+
+			var resolved = false;
+			ulong resolvedAddress = 0;
+			if (moduleHandle == GuestLibkernelModuleId)
+			{
+				resolved = TryResolveGuestLibkernelGuestAddress(symbolName, out resolvedAddress);
+			}
+			else if ((int)moduleHandle > 0 &&
+				KernelModuleRegistry.TryGetModuleByHandle((int)moduleHandle, out var moduleEntry) &&
+				IsGuestLibcModule(in moduleEntry))
+			{
+				resolved = TryResolveGuestLibcGuestAddress(symbolName, in moduleEntry, out resolvedAddress);
+			}
+			else
+			{
+				resolved = TryResolveDlsymGuestAddress(symbolName, out resolvedAddress);
+			}
+
+			if (!resolved ||
+				resolvedAddress == 0 ||
 				outputAddress == 0 ||
 				!TryWriteUInt64Compat(outputAddress, resolvedAddress))
 			{
@@ -1337,6 +1362,57 @@ public sealed partial class DirectExecutionBackend
 		return OrbisGen2Result.ORBIS_GEN2_OK;
 	}
 
+	private static bool IsKnownKernelModuleHandle(ulong value)
+	{
+		if (value == 0 || value >= 0x10000)
+		{
+			return false;
+		}
+
+		return KernelModuleRegistry.TryGetModuleByHandle((int)value, out _);
+	}
+
+	private static void NormalizeBootstrapBridgeArguments(
+		CpuContext cpuContext,
+		out ulong argumentAddress,
+		out ulong outputAddress)
+	{
+		var op = cpuContext[CpuRegister.Rdi];
+		argumentAddress = cpuContext[CpuRegister.Rsi];
+		outputAddress = cpuContext[CpuRegister.Rdx];
+
+		if (IsBootstrapBridgeOp(op))
+		{
+			if (op == BootstrapBridgeOpModuleDescriptor &&
+				IsKnownKernelModuleHandle(op) &&
+				IsPlausibleDynlibSymbolPointer(argumentAddress))
+			{
+				NormalizeKernelDynlibDlsymArguments(cpuContext, out argumentAddress, out outputAddress);
+				return;
+			}
+
+			return;
+		}
+
+		if (IsBootstrapBridgeOp(argumentAddress) &&
+			IsPlausibleDynlibSymbolPointer(op) &&
+			!IsKnownKernelModuleHandle(op))
+		{
+			cpuContext[CpuRegister.Rdi] = argumentAddress;
+			cpuContext[CpuRegister.Rsi] = op;
+			argumentAddress = op;
+			return;
+		}
+
+		NormalizeKernelDynlibDlsymArguments(cpuContext, out argumentAddress, out outputAddress);
+	}
+
+	private static bool IsBootstrapBridgeOp(ulong value)
+	{
+		return value == BootstrapBridgeOpResolveSymbol ||
+			value == BootstrapBridgeOpModuleDescriptor;
+	}
+
 	private static void NormalizeKernelDynlibDlsymArguments(
 		CpuContext cpuContext,
 		out ulong symbolNameAddress,
@@ -1350,6 +1426,7 @@ public sealed partial class DirectExecutionBackend
 		// (symbol_ptr, handle, out) while sceKernelDlsym is (handle, symbol_ptr, out).
 		// Heuristic only: valid when RSI looks like a small handle and RDI is a guest pointer.
 		if (symbolNameAddress < 0x10000 &&
+			!IsKnownKernelModuleHandle(symbolNameAddress) &&
 			IsPlausibleDynlibSymbolPointer(handle))
 		{
 			symbolNameAddress = handle;
@@ -1384,10 +1461,43 @@ public sealed partial class DirectExecutionBackend
 			_lazyImportStubPoolBase = 0;
 			_lazyImportStubNextSlot = 0;
 			_lazyImportStubPoolLimit = 0;
+			_crtLazyImportStubPoolMapped = false;
+			_crtLazyImportStubPoolBase = 0;
+			_crtLazyImportStubNextSlot = 0;
+			_crtLazyImportStubPoolLimit = 0;
+			_crtLazyImportStubPoolBandIndex = 0;
 		}
 	}
 
+	private static bool IsGuestLibcModule(in KernelModuleRegistry.ModuleEntry module)
+	{
+		return ModuleNameLooksLikeGuestLibc(module.Name) ||
+			ModuleNameLooksLikeGuestLibc(module.Path);
+	}
+
+	private static bool ModuleNameLooksLikeGuestLibc(string? moduleName)
+	{
+		if (string.IsNullOrWhiteSpace(moduleName))
+		{
+			return false;
+		}
+
+		return moduleName.Contains("Libc", StringComparison.OrdinalIgnoreCase) ||
+			moduleName.Contains("libSceLibcInternal", StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static bool IsLibcLibraryExport(ExportedFunction export)
+	{
+		return string.Equals(export.LibraryName, "libc", StringComparison.OrdinalIgnoreCase) ||
+			export.LibraryName.Contains("Libc", StringComparison.OrdinalIgnoreCase);
+	}
+
 	private bool TryResolveDlsymGuestAddress(string symbolName, out ulong guestAddress)
+	{
+		return TryResolveDlsymGuestAddressCore(symbolName, includeRuntimeSymbols: true, out guestAddress);
+	}
+
+	private bool TryResolveGuestLibkernelGuestAddress(string symbolName, out ulong guestAddress)
 	{
 		guestAddress = 0;
 		if (string.IsNullOrWhiteSpace(symbolName))
@@ -1395,17 +1505,252 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		// Tier 0: ELF runtime symbols and aliases.
-		if (TryResolveRuntimeSymbolAddress(symbolName, out guestAddress) ||
-			TryResolveRuntimeSymbolAlias(symbolName, out guestAddress))
+		if (TryResolveModuleManagerExportStub(symbolName, out guestAddress))
 		{
 			return true;
+		}
+
+		if (TryResolveGuestNamedCompatLazyStub(symbolName, out guestAddress))
+		{
+			return true;
+		}
+
+		if (TryResolveDlsymGuestAddressCore(
+				symbolName,
+				includeRuntimeSymbols: false,
+				out guestAddress,
+				exportFilter: null,
+				useCrtLazyImportStubPool: true))
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	private bool TryResolveGuestNamedCompatLazyStub(string symbolName, out ulong guestAddress)
+	{
+		guestAddress = 0;
+		if (!TryGetGuestLibkernelNamedCompatExport(symbolName, out var export))
+		{
+			return false;
+		}
+
+		if (ActiveCpuContext is { } cpuContext &&
+			(export.Target & cpuContext.TargetGeneration) == 0)
+		{
+			return false;
+		}
+
+		return TryGetOrCreateLazyImportStub(
+			symbolName,
+			symbolName,
+			null,
+			export,
+			out guestAddress,
+			useCrtLazyImportStubPool: true) &&
+			guestAddress != 0;
+	}
+
+	private bool TryGetGuestLibkernelNamedCompatExport(string symbolName, out ExportedFunction export)
+	{
+		export = null!;
+		if (string.Equals(symbolName, "socket", StringComparison.Ordinal))
+		{
+			return _moduleManager.TryGetExport(GuestSocketExportNid, out export) ||
+				_moduleManager.TryGetExportByName("GuestSocket", out export);
+		}
+
+		if (string.Equals(symbolName, "bzero", StringComparison.Ordinal))
+		{
+			return _moduleManager.TryGetExport(GuestBzeroExportNid, out export) ||
+				_moduleManager.TryGetExportByName("bzero", out export);
+		}
+
+		if (string.Equals(symbolName, "connect", StringComparison.Ordinal) ||
+			string.Equals(symbolName, "_connect", StringComparison.Ordinal))
+		{
+			return _moduleManager.TryGetExport(GuestConnectExportNid, out export) ||
+				_moduleManager.TryGetExportByName("GuestConnect", out export);
+		}
+
+		if (string.Equals(symbolName, "inet_pton", StringComparison.Ordinal))
+		{
+			return _moduleManager.TryGetExport(GuestInetPtonExportNid, out export) ||
+				_moduleManager.TryGetExportByName("GuestInetPton", out export);
+		}
+
+		if (string.Equals(symbolName, "htons", StringComparison.Ordinal))
+		{
+			return _moduleManager.TryGetExport(GuestHtonsExportNid, out export) ||
+				_moduleManager.TryGetExportByName("GuestHtons", out export);
+		}
+
+		return false;
+	}
+
+	private bool TryResolveGuestLibcGuestAddress(
+		string symbolName,
+		in KernelModuleRegistry.ModuleEntry module,
+		out ulong guestAddress)
+	{
+		guestAddress = 0;
+		if (string.IsNullOrWhiteSpace(symbolName))
+		{
+			return false;
+		}
+
+		_ = module;
+
+		if (TryResolveModuleManagerLibcExportStub(symbolName, out guestAddress))
+		{
+			return true;
+		}
+
+		if (TryResolveGuestNamedCompatLazyStub(symbolName, out guestAddress))
+		{
+			return true;
+		}
+
+		return TryResolveDlsymGuestAddressCore(
+			symbolName,
+			includeRuntimeSymbols: false,
+			out guestAddress,
+			IsLibcLibraryExport,
+			useCrtLazyImportStubPool: true);
+	}
+
+	private bool TryResolveModuleManagerLibcExportStub(string symbolName, out ulong guestAddress)
+	{
+		guestAddress = 0;
+		foreach (var candidate in EnumerateGuestLibcExportNameCandidates(symbolName))
+		{
+			if (!_moduleManager.TryGetExportByName(candidate, out var export) ||
+				!IsLibcLibraryExport(export))
+			{
+				continue;
+			}
+
+			if (HleDataSymbols.TryGetAddress(export.Nid, out _))
+			{
+				continue;
+			}
+
+			if (ActiveCpuContext is { } cpuContext &&
+				(export.Target & cpuContext.TargetGeneration) == 0)
+			{
+				continue;
+			}
+
+			if (TryGetOrCreateLazyImportStub(
+					export.Nid,
+					symbolName,
+					null,
+					export,
+					out guestAddress,
+					useCrtLazyImportStubPool: true) &&
+				guestAddress != 0)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static IEnumerable<string> EnumerateGuestLibcExportNameCandidates(string symbolName)
+	{
+		yield return symbolName;
+
+		if (symbolName.StartsWith('_') &&
+			!symbolName.StartsWith("__", StringComparison.Ordinal) &&
+			symbolName.Length > 1)
+		{
+			yield return symbolName[1..];
+		}
+	}
+
+	private bool TryResolveModuleManagerExportStub(string symbolName, out ulong guestAddress)
+	{
+		guestAddress = 0;
+		foreach (var candidate in EnumerateGuestLibkernelExportNameCandidates(symbolName))
+		{
+			if (!_moduleManager.TryGetExportByName(candidate, out var export))
+			{
+				continue;
+			}
+
+			if (HleDataSymbols.TryGetAddress(export.Nid, out _))
+			{
+				continue;
+			}
+
+			if (ActiveCpuContext is { } cpuContext &&
+				(export.Target & cpuContext.TargetGeneration) == 0)
+			{
+				continue;
+			}
+
+			if (TryGetOrCreateLazyImportStub(
+					export.Nid,
+					symbolName,
+					null,
+					export,
+					out guestAddress,
+					useCrtLazyImportStubPool: true) &&
+				guestAddress != 0)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static IEnumerable<string> EnumerateGuestLibkernelExportNameCandidates(string symbolName)
+	{
+		yield return symbolName;
+
+		if (symbolName.StartsWith('_') &&
+			!symbolName.StartsWith("__", StringComparison.Ordinal) &&
+			symbolName.Length > 1)
+		{
+			yield return symbolName[1..];
+		}
+
+		if (symbolName.StartsWith("_sce", StringComparison.Ordinal) && symbolName.Length > 4)
+		{
+			yield return symbolName[1..];
+		}
+	}
+
+	private bool TryResolveDlsymGuestAddressCore(
+		string symbolName,
+		bool includeRuntimeSymbols,
+		out ulong guestAddress,
+		Func<ExportedFunction, bool>? exportFilter = null,
+		bool useCrtLazyImportStubPool = false)
+	{
+		guestAddress = 0;
+		if (string.IsNullOrWhiteSpace(symbolName))
+		{
+			return false;
+		}
+
+		if (includeRuntimeSymbols)
+		{
+			// Tier 0: ELF runtime symbols and aliases.
+			if (TryResolveRuntimeSymbolAddress(symbolName, out guestAddress) ||
+				TryResolveRuntimeSymbolAlias(symbolName, out guestAddress))
+			{
+				return guestAddress != 0;
+			}
 		}
 
 		// Tier 1: existing import stub entries (duplicate prevention).
 		if (TryFindImportStubGuestAddress(symbolName, out guestAddress))
 		{
-			return true;
+			return guestAddress != 0;
 		}
 
 		var hasAerolibSymbol = Aerolib.Instance.TryGetByExportName(symbolName, out var hleSymbol);
@@ -1416,12 +1761,13 @@ public sealed partial class DirectExecutionBackend
 				return false;
 			}
 
-			if (TryResolveRuntimeSymbolAddress(hleSymbol.Nid, out guestAddress) ||
-				TryResolveRuntimeSymbolAddress(hleSymbol.ExportName, out guestAddress) ||
+			if ((includeRuntimeSymbols &&
+					(TryResolveRuntimeSymbolAddress(hleSymbol.Nid, out guestAddress) ||
+						TryResolveRuntimeSymbolAddress(hleSymbol.ExportName, out guestAddress))) ||
 				TryFindImportStubGuestAddress(hleSymbol.Nid, out guestAddress) ||
 				TryFindImportStubGuestAddress(hleSymbol.ExportName, out guestAddress))
 			{
-				return true;
+				return guestAddress != 0;
 			}
 		}
 		else if (Aerolib.Instance.TryGetByNid(symbolName, out hleSymbol))
@@ -1434,14 +1780,20 @@ public sealed partial class DirectExecutionBackend
 			if (TryFindImportStubGuestAddress(hleSymbol.Nid, out guestAddress) ||
 				TryFindImportStubGuestAddress(hleSymbol.ExportName, out guestAddress))
 			{
-				return true;
+				return guestAddress != 0;
 			}
 
 			hasAerolibSymbol = true;
 		}
 
 		// Tier 3: lazy materialization for callable HLE symbols missing from ELF imports.
-		if (!TryResolveLazyDispatchTarget(symbolName, hasAerolibSymbol, in hleSymbol, out var dispatchNid, out var export))
+		if (!TryResolveLazyDispatchTarget(
+				symbolName,
+				hasAerolibSymbol,
+				in hleSymbol,
+				out var dispatchNid,
+				out var export,
+				exportFilter))
 		{
 			return false;
 		}
@@ -1451,7 +1803,9 @@ public sealed partial class DirectExecutionBackend
 			symbolName,
 			hasAerolibSymbol ? hleSymbol : null,
 			export,
-			out guestAddress);
+			out guestAddress,
+			useCrtLazyImportStubPool) &&
+			guestAddress != 0;
 	}
 
 	private bool TryFindImportStubGuestAddress(string identifier, out ulong guestAddress)
@@ -1509,7 +1863,8 @@ public sealed partial class DirectExecutionBackend
 		bool hasAerolibSymbol,
 		in SysAbiSymbol hleSymbol,
 		out string dispatchNid,
-		out ExportedFunction? export)
+		out ExportedFunction? export,
+		Func<ExportedFunction, bool>? exportFilter = null)
 	{
 		export = null;
 		dispatchNid = string.Empty;
@@ -1531,13 +1886,55 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		if (_moduleManager.TryGetExport(hleSymbol.Nid, out export))
+		if (TryGetFilteredExport(hleSymbol.Nid, exportFilter, out export) ||
+			TryGetFilteredExportByName(hleSymbol.ExportName, exportFilter, out export) ||
+			TryGetFilteredExportByName(symbolName, exportFilter, out export))
 		{
-			dispatchNid = hleSymbol.Nid;
+			dispatchNid = export.Nid;
 			return true;
 		}
 
 		return false;
+	}
+
+	private bool TryGetFilteredExport(
+		string nid,
+		Func<ExportedFunction, bool>? exportFilter,
+		out ExportedFunction export)
+	{
+		export = null!;
+		if (!_moduleManager.TryGetExport(nid, out var candidate))
+		{
+			return false;
+		}
+
+		if (exportFilter is not null && !exportFilter(candidate))
+		{
+			return false;
+		}
+
+		export = candidate;
+		return true;
+	}
+
+	private bool TryGetFilteredExportByName(
+		string exportName,
+		Func<ExportedFunction, bool>? exportFilter,
+		out ExportedFunction export)
+	{
+		export = null!;
+		if (!_moduleManager.TryGetExportByName(exportName, out var candidate))
+		{
+			return false;
+		}
+
+		if (exportFilter is not null && !exportFilter(candidate))
+		{
+			return false;
+		}
+
+		export = candidate;
+		return true;
 	}
 
 	private bool TryGetOrCreateLazyImportStub(
@@ -1545,7 +1942,8 @@ public sealed partial class DirectExecutionBackend
 		string symbolName,
 		SysAbiSymbol? hleSymbol,
 		ExportedFunction? export,
-		out ulong guestAddress)
+		out ulong guestAddress,
+		bool useCrtLazyImportStubPool = false)
 	{
 		guestAddress = 0;
 		if (string.IsNullOrWhiteSpace(dispatchNid))
@@ -1560,22 +1958,47 @@ public sealed partial class DirectExecutionBackend
 				return true;
 			}
 
-			if (!EnsureLazyImportStubPoolMapped())
+			if (useCrtLazyImportStubPool)
 			{
-				LogLazyImportStubMaterializationFailure(
-					"import stub region unresolved",
-					dispatchNid,
-					symbolName);
-				return false;
-			}
+				if (!EnsureCrtLazyImportStubPoolMapped())
+				{
+					LogLazyImportStubMaterializationFailure(
+						"CRT lazy import stub pool unresolved",
+						dispatchNid,
+						symbolName,
+						useCrtLazyImportStubPool: true);
+					return false;
+				}
 
-			if (!TryAllocateLazyImportStubSlot(out guestAddress))
+				if (!TryAllocateCrtLazyImportStubSlot(out guestAddress))
+				{
+					LogLazyImportStubMaterializationFailure(
+						"CRT lazy import stub pool exhausted",
+						dispatchNid,
+						symbolName,
+						useCrtLazyImportStubPool: true);
+					return false;
+				}
+			}
+			else
 			{
-				LogLazyImportStubMaterializationFailure(
-					"lazy import stub pool exhausted",
-					dispatchNid,
-					symbolName);
-				return false;
+				if (!EnsureLazyImportStubPoolMapped())
+				{
+					LogLazyImportStubMaterializationFailure(
+						"import stub region unresolved",
+						dispatchNid,
+						symbolName);
+					return false;
+				}
+
+				if (!TryAllocateLazyImportStubSlot(out guestAddress))
+				{
+					LogLazyImportStubMaterializationFailure(
+						"lazy import stub pool exhausted",
+						dispatchNid,
+						symbolName);
+					return false;
+				}
 			}
 
 			var previousEntries = _importEntries;
@@ -1652,11 +2075,161 @@ public sealed partial class DirectExecutionBackend
 		_lazyDlsymStubCache[key] = guestAddress;
 	}
 
-	private void LogLazyImportStubMaterializationFailure(string reason, string dispatchNid, string symbolName)
+	private void LogLazyImportStubMaterializationFailure(
+		string reason,
+		string dispatchNid,
+		string symbolName,
+		bool useCrtLazyImportStubPool = false)
 	{
+		if (useCrtLazyImportStubPool && _crtLazyImportStubPoolMapped)
+		{
+			var usedSlots = (_crtLazyImportStubNextSlot - _crtLazyImportStubPoolBase) /
+				LazyImportStubSlotSize;
+			var maxSlots = (_crtLazyImportStubPoolLimit - _crtLazyImportStubPoolBase) /
+				LazyImportStubSlotSize;
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Lazy import stub materialization failed ({reason}): " +
+				$"nid={dispatchNid} symbol='{symbolName}' " +
+				$"crt_pool_used_slots={usedSlots} crt_pool_max_slots={maxSlots}");
+			return;
+		}
+
 		Console.Error.WriteLine(
 			$"[LOADER][WARN] Lazy import stub materialization failed ({reason}): " +
 			$"nid={dispatchNid} symbol='{symbolName}'");
+	}
+
+	private static bool IsExcludedFromGenericLazyImportStubPoolAddress(ulong address)
+	{
+		return address >= CrtSyntheticRegionFloor;
+	}
+
+	private bool EnsureCrtLazyImportStubPoolMapped()
+	{
+		if (_crtLazyImportStubPoolMapped && _crtLazyImportStubPoolBase != 0)
+		{
+			return true;
+		}
+
+		if (ActiveCpuContext is not { } cpuContext ||
+			!TryGetVirtualMemory(cpuContext, out var virtualMemory))
+		{
+			return false;
+		}
+
+		var stubData = new byte[256];
+		stubData[0] = 0xCC;
+		stubData[1] = 0xC3;
+
+		for (var i = 0; i < 16; i++)
+		{
+			var candidateBase = CrtLazyImportStubPoolBaseAddress - ((ulong)i * CrtSyntheticRegionStride);
+			try
+			{
+				virtualMemory.Map(
+					candidateBase,
+					CrtLazyImportStubPoolSize,
+					fileOffset: 0,
+					stubData,
+					ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute);
+
+				var candidateLimit = candidateBase + CrtLazyImportStubPoolSize;
+				ulong nextSlot = candidateBase;
+				var importEntries = _importEntries;
+				for (var entryIndex = 0; entryIndex < importEntries.Length; entryIndex++)
+				{
+					var entryAddress = importEntries[entryIndex].Address;
+					if (entryAddress < candidateBase || entryAddress >= candidateLimit)
+					{
+						continue;
+					}
+
+					if ((entryAddress - candidateBase) % LazyImportStubSlotSize != 0)
+					{
+						continue;
+					}
+
+					var entryEnd = entryAddress + LazyImportStubSlotSize;
+					if (entryEnd > nextSlot)
+					{
+						nextSlot = entryEnd;
+					}
+				}
+
+				_crtLazyImportStubPoolBase = candidateBase;
+				_crtLazyImportStubNextSlot = nextSlot;
+				_crtLazyImportStubPoolLimit = candidateLimit;
+				_crtLazyImportStubPoolMapped = true;
+				return true;
+			}
+			catch (InvalidOperationException)
+			{
+				continue;
+			}
+		}
+
+		return false;
+	}
+
+	private bool TryAllocateCrtLazyImportStubSlot(out ulong guestAddress)
+	{
+		guestAddress = 0;
+		if (!_crtLazyImportStubPoolMapped)
+		{
+			return false;
+		}
+
+		while (true)
+		{
+			if (_crtLazyImportStubNextSlot >= _crtLazyImportStubPoolBase &&
+				_crtLazyImportStubNextSlot + LazyImportStubSlotSize <= _crtLazyImportStubPoolLimit)
+			{
+				guestAddress = _crtLazyImportStubNextSlot;
+				_crtLazyImportStubNextSlot += LazyImportStubSlotSize;
+				return true;
+			}
+
+			if (!TryMapSpillCrtLazyImportStubPool())
+			{
+				return false;
+			}
+		}
+	}
+
+	private bool TryMapSpillCrtLazyImportStubPool()
+	{
+		if (ActiveCpuContext is not { } cpuContext ||
+			!TryGetVirtualMemory(cpuContext, out var virtualMemory))
+		{
+			return false;
+		}
+
+		_crtLazyImportStubPoolBandIndex++;
+		var spillBase = CrtLazyImportStubPoolBaseAddress -
+			((ulong)_crtLazyImportStubPoolBandIndex * CrtLazyImportStubPoolSize);
+		var stubData = new byte[256];
+		stubData[0] = 0xCC;
+		stubData[1] = 0xC3;
+
+		try
+		{
+			virtualMemory.Map(
+				spillBase,
+				CrtLazyImportStubPoolSize,
+				fileOffset: 0,
+				stubData,
+				ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute);
+
+			_crtLazyImportStubPoolBase = spillBase;
+			_crtLazyImportStubNextSlot = spillBase;
+			_crtLazyImportStubPoolLimit = spillBase + CrtLazyImportStubPoolSize;
+			_crtLazyImportStubPoolMapped = true;
+			return true;
+		}
+		catch (InvalidOperationException)
+		{
+			return false;
+		}
 	}
 
 	private unsafe bool TryResolveImportStubRegionBounds(
@@ -1683,7 +2256,9 @@ public sealed partial class DirectExecutionBackend
 			for (var i = 0; i < importEntries.Length; i++)
 			{
 				var entryAddress = importEntries[i].Address;
-				if (entryAddress < candidateBase || entryAddress >= candidateLimit)
+				if (IsExcludedFromGenericLazyImportStubPoolAddress(entryAddress) ||
+					entryAddress < candidateBase ||
+					entryAddress >= candidateLimit)
 				{
 					continue;
 				}
@@ -1711,7 +2286,8 @@ public sealed partial class DirectExecutionBackend
 		for (var i = 0; i < importEntries.Length; i++)
 		{
 			var entryAddress = importEntries[i].Address;
-			if (entryAddress < ImportStubRegionCanonicalBase)
+			if (IsExcludedFromGenericLazyImportStubPoolAddress(entryAddress) ||
+				entryAddress < ImportStubRegionCanonicalBase)
 			{
 				continue;
 			}
@@ -1851,6 +2427,25 @@ public sealed partial class DirectExecutionBackend
 			TryResolveRuntimeSymbolAddress(symbol.Nid, out address);
 	}
 
+	private const ulong BootstrapBridgeOpResolveSymbol = 1UL;
+	private const ulong BootstrapBridgeOpModuleDescriptor = 2UL;
+	private const ulong GuestLibkernelModuleId = 0x2001UL;
+
+	private const string GuestSocketExportNid = "GstScktEm0";
+
+	private const string GuestBzeroExportNid = "GstBzero0";
+
+	private const string GuestConnectExportNid = "GstScktC0n";
+
+	private const string GuestInetPtonExportNid = "GstInetP0";
+
+	private const string GuestHtonsExportNid = "GstHtons0";
+
+	private const ulong StandaloneGuestModuleBase = 0x7FFD_0000_0000UL;
+	private const ulong StandaloneGuestModuleObjectSize = 0x0000_1000UL;
+	private const ulong StandaloneGuestModuleStatusOffset = 0x0100UL;
+	private const ulong StandaloneGuestModuleResultPointerOffset = 0x0028UL;
+
 	private OrbisGen2Result DispatchBootstrapBridge()
 	{
 		var cpuContext = ActiveCpuContext;
@@ -1859,7 +2454,18 @@ public sealed partial class DirectExecutionBackend
 			return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
 		}
 
+		var op = cpuContext[CpuRegister.Rdi];
 		ulong outputAddress = cpuContext[CpuRegister.Rdx];
+		if (op == BootstrapBridgeOpModuleDescriptor)
+		{
+			return DispatchBootstrapBridgeModuleDescriptor(cpuContext, cpuContext[CpuRegister.Rsi], outputAddress);
+		}
+
+		if (op != BootstrapBridgeOpResolveSymbol)
+		{
+			return CompleteBootstrapBridgeFailure(cpuContext, outputAddress);
+		}
+
 		try
 		{
 			OrbisGen2Result result = DispatchKernelDynlibDlsym();
@@ -1874,6 +2480,198 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	private OrbisGen2Result DispatchBootstrapBridgeModuleDescriptor(
+		CpuContext cpuContext,
+		ulong descriptorAddress,
+		ulong outputAddress)
+	{
+		if (!TryParseStandaloneModuleDescriptor(cpuContext, descriptorAddress, out var moduleBase))
+		{
+			return CompleteBootstrapBridgeFailure(cpuContext, outputAddress);
+		}
+
+		if (!TryEnsureStandaloneGuestModuleObject(cpuContext, moduleBase))
+		{
+			return CompleteBootstrapBridgeFailure(cpuContext, outputAddress);
+		}
+
+		cpuContext[CpuRegister.Rax] = moduleBase;
+		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	private bool TryParseStandaloneModuleDescriptor(
+		CpuContext cpuContext,
+		ulong descriptorAddress,
+		out ulong moduleBase)
+	{
+		moduleBase = 0;
+		if (descriptorAddress == 0 || cpuContext == null)
+		{
+			return false;
+		}
+
+		if (!cpuContext.TryReadUInt32(descriptorAddress + 0x00, out var header0) ||
+			header0 != 1 ||
+			!cpuContext.TryReadUInt32(descriptorAddress + 0x04, out var header1) ||
+			header1 != 0x2E)
+		{
+			return false;
+		}
+
+		if (!cpuContext.TryReadUInt64(descriptorAddress + 0x10, out var descriptorBase) ||
+			descriptorBase == 0)
+		{
+			return false;
+		}
+
+		moduleBase = NormalizeStandaloneModuleBase(descriptorBase);
+		return moduleBase >= 0x0000_1000_0000_0000UL;
+	}
+
+	private static ulong NormalizeStandaloneModuleBase(ulong descriptorBase)
+	{
+		// Standalone bootstrap descriptors name a module object in the 0x7FFD canonical range.
+		if ((descriptorBase & 0xFFFF_0000_0000_0000UL) == (StandaloneGuestModuleBase & 0xFFFF_0000_0000_0000UL))
+		{
+			return StandaloneGuestModuleBase;
+		}
+
+		return descriptorBase;
+	}
+
+	private bool TryEnsureStandaloneGuestModuleObject(CpuContext cpuContext, ulong moduleBase)
+	{
+		if (moduleBase == 0 || cpuContext == null)
+		{
+			return false;
+		}
+
+		var statusAddress = moduleBase + StandaloneGuestModuleStatusOffset;
+		var objectEnd = moduleBase + StandaloneGuestModuleObjectSize;
+		if (!TryCommitGuestMapping(cpuContext, moduleBase, StandaloneGuestModuleObjectSize))
+		{
+			return false;
+		}
+
+		// Bootstrap op=2 only; full-title paths without bootstrap injection never reach here.
+		RegisterPrtLazyCommitRange(moduleBase, StandaloneGuestModuleObjectSize);
+
+		if (!TryWriteUInt64Compat(moduleBase + StandaloneGuestModuleResultPointerOffset, statusAddress) ||
+			!TryWriteUInt32Compat(statusAddress, 0))
+		{
+			return false;
+		}
+
+		_ = KernelModuleRegistry.RegisterSyntheticModule(
+			"standalone.elf",
+			isSystemModule: false,
+			baseAddress: moduleBase,
+			size: objectEnd - moduleBase);
+		return VerifyGuestMappingReadable(moduleBase + StandaloneGuestModuleResultPointerOffset);
+	}
+
+	private unsafe bool TryCommitGuestMapping(CpuContext cpuContext, ulong address, ulong size)
+	{
+		if (address == 0 || size == 0)
+		{
+			return false;
+		}
+
+		var mapBase = address & ~0xFFFUL;
+		var mapSize = ((address + size - mapBase) + 0xFFF) & ~0xFFFUL;
+		if (TryGetVirtualMemory(cpuContext, out var virtualMemory))
+		{
+			try
+			{
+				virtualMemory.Map(
+					mapBase,
+					mapSize,
+					fileOffset: 0,
+					ReadOnlySpan<byte>.Empty,
+					ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+				if (VerifyGuestMappingReadable(address))
+				{
+					return true;
+				}
+			}
+			catch (InvalidOperationException)
+			{
+			}
+		}
+
+		const uint pageReadWrite = 4u;
+		if (VirtualAlloc((void*)mapBase, (nuint)mapSize, MEM_COMMIT, pageReadWrite) != null &&
+			VerifyGuestMappingReadable(address))
+		{
+			return true;
+		}
+
+		foreach (var trySize in new ulong[] { 0x200000UL, 0x10000UL, 0x1000UL })
+		{
+			var tryBase = address & ~(trySize - 1);
+			if (VirtualAlloc((void*)tryBase, (nuint)trySize, MEM_COMMIT, pageReadWrite) != null &&
+				VerifyGuestMappingReadable(address))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static unsafe bool VerifyGuestMappingReadable(ulong address)
+	{
+		if (address == 0)
+		{
+			return false;
+		}
+
+		try
+		{
+			_ = Marshal.ReadByte((nint)address);
+			return true;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	private OrbisGen2Result CompleteBootstrapBridgeFailure(CpuContext cpuContext, ulong outputAddress)
+	{
+		if (outputAddress != 0)
+		{
+			_ = TryWriteUInt64Compat(outputAddress, 0);
+		}
+
+		cpuContext[CpuRegister.Rax] = ulong.MaxValue;
+		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	private bool TryWriteUInt32Compat(ulong address, uint value)
+	{
+		var cpuContext = ActiveCpuContext;
+		if (cpuContext == null || address == 0L)
+		{
+			return false;
+		}
+
+		if (cpuContext.TryWriteUInt32(address, value))
+		{
+			return true;
+		}
+
+		try
+		{
+			Marshal.WriteInt32((nint)address, unchecked((int)value));
+			return true;
+		}
+		catch
+		{
+			return false;
+		}
 	}
 
 	private bool TryResolveRuntimeSymbolAddress(string symbolName, out ulong address)

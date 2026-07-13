@@ -266,6 +266,25 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _lazyImportStubPoolMapped;
 
+	// Guest CRT dlsym lazy stubs - separate from C3 callback stub @ 0x7FFD_B000_0000.
+	private const ulong CrtLazyImportStubPoolBaseAddress = 0x7FFD_A000_0000UL;
+
+	private const ulong CrtLazyImportStubPoolSize = 0x0020_0000UL;
+
+	private const ulong CrtSyntheticRegionFloor = 0x7FFD_0000_0000UL;
+
+	private const ulong CrtSyntheticRegionStride = 0x0100_0000UL;
+
+	private ulong _crtLazyImportStubPoolBase;
+
+	private ulong _crtLazyImportStubNextSlot;
+
+	private ulong _crtLazyImportStubPoolLimit;
+
+	private bool _crtLazyImportStubPoolMapped;
+
+	private int _crtLazyImportStubPoolBandIndex;
+
 	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
 
 	private int _recentImportTraceCount;
@@ -628,7 +647,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static int _nestedVehTraceCount;
 
-	// SHARPEMU_LOG_THREAD_MODE=1 — GC thread-mode corruption investigation. Traces
+	// SHARPEMU_LOG_THREAD_MODE=1 -- GC thread-mode corruption investigation. Traces
 	// every managed<->guest transition per guest-thread run cycle so the last event
 	// before a ReversePInvokeBadTransition FailFast identifies the corrupting path.
 	private static readonly bool LogThreadMode =
@@ -1770,10 +1789,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 82;
 			ptr2[num++] = 86;
 			ptr2[num++] = 87;
-			// sub rsp, 0x80  — reserve 8*16 bytes for the SysV variadic XMM save area
+			// sub rsp, 0x80 -- reserve 8*16 bytes for the SysV variadic XMM save area
 			ptr2[num++] = 0x48; ptr2[num++] = 0x81; ptr2[num++] = 0xEC;
 			ptr2[num++] = 0x80; ptr2[num++] = 0x00; ptr2[num++] = 0x00; ptr2[num++] = 0x00;
-			// movdqu [rsp + i*0x10], xmm{i}  for i = 0..7  (F3 0F 7F /r, SIB=0x24 base=rsp, disp8)
+			// movdqu [rsp + i*0x10], xmm{i} for i = 0..7 (F3 0F 7F /r, SIB=0x24 base=rsp, disp8)
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x44; ptr2[num++] = 0x24; ptr2[num++] = 0x00; // xmm0
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x4C; ptr2[num++] = 0x24; ptr2[num++] = 0x10; // xmm1
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x20; // xmm2
@@ -1782,7 +1801,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x6C; ptr2[num++] = 0x24; ptr2[num++] = 0x50; // xmm5
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x74; ptr2[num++] = 0x24; ptr2[num++] = 0x60; // xmm6
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x0F; ptr2[num++] = 0x7F; ptr2[num++] = 0x7C; ptr2[num++] = 0x24; ptr2[num++] = 0x70; // xmm7
-			// lea r12, [rsp + 0x80]  — r12 = argpack base (the 12 pushed GP regs), past the XMM area
+			// lea r12, [rsp + 0x80] -- r12 = argpack base (the 12 pushed GP regs), past the XMM area
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8D; ptr2[num++] = 0xA4; ptr2[num++] = 0x24;
 			ptr2[num++] = 0x80; ptr2[num++] = 0x00; ptr2[num++] = 0x00; ptr2[num++] = 0x00;
 			ptr2[num++] = 72;
@@ -1832,7 +1851,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 131;
 			ptr2[num++] = 196;
 			ptr2[num++] = 40;
-			// movdqu xmm0, [r12 - 0x80]  — reload the return XMM0 the gateway wrote into the
+			// movdqu xmm0, [r12 - 0x80] -- reload the return XMM0 the gateway wrote into the
 			// argpack's xmm0 save slot (float/double returns: powf/logf/wcstod). SysV/Win64
 			// XMM regs are volatile across calls, so an unconditional reload is ABI-safe.
 			ptr2[num++] = 0xF3; ptr2[num++] = 0x41; ptr2[num++] = 0x0F; ptr2[num++] = 0x6F;
@@ -1992,16 +2011,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
-		// TlsGetValue returns its TLS pointer in RAX. Preserve the guest return value
-		// above the 32-byte Windows shadow space while keeping the call site aligned.
-		EmitByte(code, ref offset, 0x48); // sub rsp, 0x30
+		EmitByte(code, ref offset, 0x48); // sub rsp, 0x20
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xEC);
-		EmitByte(code, ref offset, 0x30);
-		EmitByte(code, ref offset, 0x48); // mov [rsp+0x20], rax
-		EmitByte(code, ref offset, 0x89);
-		EmitByte(code, ref offset, 0x44);
-		EmitByte(code, ref offset, 0x24);
 		EmitByte(code, ref offset, 0x20);
 		EmitByte(code, ref offset, 0xB9); // mov ecx, tlsIndex
 		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
@@ -2011,21 +2023,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		offset += sizeof(ulong);
 		EmitByte(code, ref offset, 0xFF); // call rax
 		EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x49); // mov r11, rax
-		EmitByte(code, ref offset, 0x89);
-		EmitByte(code, ref offset, 0xC3);
-		EmitByte(code, ref offset, 0x48); // mov rax, [rsp+0x20]
-		EmitByte(code, ref offset, 0x8B);
-		EmitByte(code, ref offset, 0x44);
-		EmitByte(code, ref offset, 0x24);
-		EmitByte(code, ref offset, 0x20);
-		EmitByte(code, ref offset, 0x48); // add rsp, 0x30
+		EmitByte(code, ref offset, 0x48); // add rsp, 0x20
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xC4);
-		EmitByte(code, ref offset, 0x30);
-		EmitByte(code, ref offset, 0x49); // mov rsp, [r11]
+		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x48); // mov rsp, [rax]
 		EmitByte(code, ref offset, 0x8B);
-		EmitByte(code, ref offset, 0x23);
+		EmitByte(code, ref offset, 0x20);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
@@ -2063,7 +2067,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// thread; FailFast/stack-overflow arrive mid-runtime-failure). Entering the managed
 		// handler then trips the CLR's reverse-P/Invoke check and kills the process with
 		// "Invalid Program: attempted to call a UnmanagedCallersOnly method from managed
-		// code" — this is why no managed throw (even one with a catch handler) ever
+		// code" -- this is why no managed throw (even one with a catch handler) ever
 		// survived inside the emulator. Continue the handler search without touching
 		// managed code; the CLR's own VEH handles its exceptions. MSVC C++ exceptions
 		// (Vulkan drivers, host CRT) are excluded too: the managed handler only ever
@@ -3313,7 +3317,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	/// memory. Workers unwind to the host at their next import dispatch (see the
 	/// teardown check in DispatchImport); this waits for their host threads to
 	/// finish within <paramref name="timeoutMs"/>. Returns false when at least one
-	/// worker is still running — the caller must then leak its executable stubs
+	/// worker is still running -- the caller must then leak its executable stubs
 	/// rather than free memory a live thread may still execute.
 	/// </summary>
 	private bool RequestGuestThreadTeardown(int timeoutMs)
@@ -4774,7 +4778,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			// A guest worker is still executing native code; freeing the trampolines,
 			// exception-handler stubs, or GC handles under it turns process exit into
-			// an execute-AV / CLR fatal. Leak them — the process is going away anyway.
+			// an execute-AV / CLR fatal. Leak them -- the process is going away anyway.
 			Console.Error.WriteLine(
 				"[LOADER][WARN] Skipping executable stub teardown: guest worker threads are still running.");
 			return;
