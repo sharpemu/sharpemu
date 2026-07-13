@@ -178,6 +178,7 @@ internal static unsafe class VulkanVideoPresenter
     private static uint _windowHeight;
     private static bool _closed;
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
+    private const uint NvidiaVendorId = 0x10DE;
     private static bool _splashHidden;
     private static long _enqueuedGuestWorkSequence;
     private static long _completedGuestWorkSequence;
@@ -1502,6 +1503,13 @@ internal static unsafe class VulkanVideoPresenter
                 Check(_vk.EnumeratePhysicalDevices(_instance, &deviceCount, devicePointer), "vkEnumeratePhysicalDevices");
             }
 
+            // Hybrid laptops enumerate the iGPU first, and AMD's integrated driver
+            // segfaults compiling some translated shaders, so rank rather than take
+            // the first hit. SHARPEMU_VK_DEVICE=<substring> pins an adapter by name.
+            var deviceOverride = Environment.GetEnvironmentVariable("SHARPEMU_VK_DEVICE");
+            var bestScore = int.MinValue;
+            var found = false;
+
             foreach (var device in devices)
             {
                 uint queueCount = 0;
@@ -1521,13 +1529,60 @@ internal static unsafe class VulkanVideoPresenter
                         continue;
                     }
 
-                    _physicalDevice = device;
-                    _queueFamilyIndex = index;
-                    return;
+                    _vk.GetPhysicalDeviceProperties(device, out var properties);
+                    var name = SilkMarshal.PtrToString((nint)properties.DeviceName) ?? string.Empty;
+                    var score = ScorePhysicalDevice(properties, name, deviceOverride);
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] Vulkan candidate: {name} ({properties.DeviceType}) score={score}");
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        _physicalDevice = device;
+                        _queueFamilyIndex = index;
+                        found = true;
+                    }
+
+                    break;
                 }
             }
 
-            throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            if (!found)
+            {
+                throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            }
+
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan device: {SilkMarshal.PtrToString((nint)selected.DeviceName)} ({selected.DeviceType})");
+        }
+
+        private static int ScorePhysicalDevice(
+            PhysicalDeviceProperties properties,
+            string name,
+            string? deviceOverride)
+        {
+            if (!string.IsNullOrWhiteSpace(deviceOverride))
+            {
+                return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
+            }
+
+            var score = properties.DeviceType switch
+            {
+                PhysicalDeviceType.DiscreteGpu => 300,
+                PhysicalDeviceType.VirtualGpu => 100,
+                PhysicalDeviceType.Cpu => 50,
+                // Last resort: only picked when nothing else can present.
+                PhysicalDeviceType.IntegratedGpu => -100,
+                _ => 10,
+            };
+
+            if (properties.VendorID == NvidiaVendorId)
+            {
+                score += 500;
+            }
+
+            return score;
         }
 
         private void CreateDevice()
