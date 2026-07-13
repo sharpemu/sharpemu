@@ -45,6 +45,59 @@ public static class VideoOutExports
     private static readonly object _stateGate = new();
     private static readonly object _frameDumpGate = new();
     private static readonly Dictionary<int, VideoOutPortState> _ports = new();
+
+    // Hardware raises vblank autonomously; UE blocks its frame loop on it.
+    private static Timer? _vblankPumpTimer;
+    private static int _vblankPumpActive;
+    private const int VblankPumpIntervalMs = 16;
+
+    private static void EnsureVblankPumpStarted()
+    {
+        if (_vblankPumpTimer is not null)
+        {
+            return;
+        }
+
+        _vblankPumpTimer = new Timer(
+            static _ => PumpVblanks(),
+            null,
+            VblankPumpIntervalMs,
+            VblankPumpIntervalMs);
+    }
+
+    private static void PumpVblanks()
+    {
+        if (Interlocked.Exchange(ref _vblankPumpActive, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            VideoOutPortState[] ports;
+            lock (_stateGate)
+            {
+                if (_ports.Count == 0)
+                {
+                    return;
+                }
+
+                // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one global
+                // flag. Waking an unwatched queue would hold it 60x/sec and starve guest threads.
+                ports = _ports.Values.Where(static port => port.VblankEvents.Count != 0).ToArray();
+            }
+
+            foreach (var port in ports)
+            {
+                SignalVblank(port);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _vblankPumpActive, 0);
+        }
+    }
+
     private static readonly Dictionary<(int Handle, int BufferIndex, ulong Address), ulong> _lastFrameFingerprints = new();
     private static int _nextHandle = 1;
     private static int _frameDumpCount;
@@ -177,6 +230,7 @@ public static class VideoOutExports
             {
                 Handle = handle,
             };
+            EnsureVblankPumpStarted();
             return handle;
         }
     }
