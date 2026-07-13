@@ -255,6 +255,8 @@ internal static partial class Gen5SpirvTranslator
                 case "VFmaF32":
                 case "VMadMkF32":
                 case "VMadAkF32":
+                case "VFmamkF32":
+                case "VFmaakF32":
                     result = EmitFloatResult(
                         instruction,
                         Ext(
@@ -265,6 +267,7 @@ internal static partial class Gen5SpirvTranslator
                             GetFloatSource(instruction, 2)));
                     break;
                 case "VMacF32":
+                case "VFmacF32":
                 {
                     var addend = Bitcast(_floatType, LoadV(destination));
                     result = EmitFloatResult(
