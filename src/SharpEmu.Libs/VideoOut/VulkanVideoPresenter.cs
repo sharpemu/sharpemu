@@ -178,9 +178,17 @@ internal static unsafe class VulkanVideoPresenter
     private static uint _windowHeight;
     private static bool _closed;
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
+    private const uint NvidiaVendorId = 0x10DE;
     private static bool _splashHidden;
     private static long _enqueuedGuestWorkSequence;
     private static long _completedGuestWorkSequence;
+
+    private static bool ShouldTracePresentedGuestImageContentsForDiagnostics()
+    {
+        var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
+        return string.Equals(mode, "1", StringComparison.Ordinal) ||
+               string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase);
+    }
 
     public static void EnsureStarted(uint width, uint height)
     {
@@ -279,6 +287,11 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=Submit {width}x{height}");
+        }
+
         lock (_gate)
         {
             if (_closed)
@@ -317,6 +330,11 @@ internal static unsafe class VulkanVideoPresenter
         if (drawKind == GuestDrawKind.None || width == 0 || height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] vk.submit_call kind=SubmitGuestDraw({drawKind}) {width}x{height}");
         }
 
         lock (_gate)
@@ -374,6 +392,12 @@ internal static unsafe class VulkanVideoPresenter
         if (pixelSpirv.Length == 0 || width == 0 || height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] vk.submit_call kind=SubmitTranslatedDraw {width}x{height} textures={textures.Count}");
         }
 
         lock (_gate)
@@ -440,6 +464,13 @@ internal static unsafe class VulkanVideoPresenter
             target.Height == 0)
         {
             return;
+        }
+
+        if (ShouldTracePresentedGuestImageContentsForDiagnostics())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] vk.submit_call kind=SubmitOffscreenTranslatedDraw " +
+                $"target=0x{target.Address:X16} {target.Width}x{target.Height} textures={textures.Count}");
         }
 
         lock (_gate)
@@ -569,9 +600,31 @@ internal static unsafe class VulkanVideoPresenter
         var traceSubmission = false;
         lock (_gate)
         {
-            if (_closed ||
-                !_availableGuestImages.ContainsKey(address))
+            var known = _availableGuestImages.ContainsKey(address);
+            if (ShouldTracePresentedGuestImageContentsForDiagnostics())
             {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] vk.submit_call kind=TrySubmitGuestImage addr=0x{address:X16} " +
+                    $"{width}x{height} known={known}");
+            }
+
+            if (_closed)
+            {
+                return false;
+            }
+
+            // The caller (VideoOutExports.SubmitFlip) reports the flip as successful either
+            // way, so an unregistered address means the frame is dropped silently; warn once
+            // per address so that shows up in the log.
+            if (!known)
+            {
+                if (_tracedGuestImageSubmissions.Add((address, width, height)))
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.submit_guest_image_unknown addr=0x{address:X16} " +
+                        $"{width}x{height} - flip target was never registered as a render output");
+                }
+
                 return false;
             }
 
@@ -588,6 +641,19 @@ internal static unsafe class VulkanVideoPresenter
                 RequiredGuestWorkSequence: 0,
                 IsSplash: false,
                 GuestImageAddress: address);
+            if (_thread is not null)
+            {
+                return true;
+            }
+
+            _windowWidth = width;
+            _windowHeight = height;
+            _thread = new Thread(Run)
+            {
+                IsBackground = true,
+                Name = "SharpEmu Vulkan VideoOut",
+            };
+            _thread.Start();
         }
 
         if (traceSubmission)
@@ -599,6 +665,21 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         return true;
+    }
+
+    // Display buffers registered through sceVideoOutRegisterBuffers are valid flip targets
+    // even when no AGC render-target write to them was ever observed.
+    internal static void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
+    {
+        if (address == 0 || guestFormat == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            _availableGuestImages[address] = guestFormat;
+        }
     }
 
     internal static bool IsGpuGuestImageAvailable(
@@ -1422,6 +1503,13 @@ internal static unsafe class VulkanVideoPresenter
                 Check(_vk.EnumeratePhysicalDevices(_instance, &deviceCount, devicePointer), "vkEnumeratePhysicalDevices");
             }
 
+            // Hybrid laptops enumerate the iGPU first, and AMD's integrated driver
+            // segfaults compiling some translated shaders, so rank rather than take
+            // the first hit. SHARPEMU_VK_DEVICE=<substring> pins an adapter by name.
+            var deviceOverride = Environment.GetEnvironmentVariable("SHARPEMU_VK_DEVICE");
+            var bestScore = int.MinValue;
+            var found = false;
+
             foreach (var device in devices)
             {
                 uint queueCount = 0;
@@ -1441,13 +1529,60 @@ internal static unsafe class VulkanVideoPresenter
                         continue;
                     }
 
-                    _physicalDevice = device;
-                    _queueFamilyIndex = index;
-                    return;
+                    _vk.GetPhysicalDeviceProperties(device, out var properties);
+                    var name = SilkMarshal.PtrToString((nint)properties.DeviceName) ?? string.Empty;
+                    var score = ScorePhysicalDevice(properties, name, deviceOverride);
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] Vulkan candidate: {name} ({properties.DeviceType}) score={score}");
+
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        _physicalDevice = device;
+                        _queueFamilyIndex = index;
+                        found = true;
+                    }
+
+                    break;
                 }
             }
 
-            throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            if (!found)
+            {
+                throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            }
+
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan device: {SilkMarshal.PtrToString((nint)selected.DeviceName)} ({selected.DeviceType})");
+        }
+
+        private static int ScorePhysicalDevice(
+            PhysicalDeviceProperties properties,
+            string name,
+            string? deviceOverride)
+        {
+            if (!string.IsNullOrWhiteSpace(deviceOverride))
+            {
+                return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
+            }
+
+            var score = properties.DeviceType switch
+            {
+                PhysicalDeviceType.DiscreteGpu => 300,
+                PhysicalDeviceType.VirtualGpu => 100,
+                PhysicalDeviceType.Cpu => 50,
+                // Last resort: only picked when nothing else can present.
+                PhysicalDeviceType.IntegratedGpu => -100,
+                _ => 10,
+            };
+
+            if (properties.VendorID == NvidiaVendorId)
+            {
+                score += 500;
+            }
+
+            return score;
         }
 
         private void CreateDevice()
@@ -5033,14 +5168,19 @@ internal static unsafe class VulkanVideoPresenter
                         _renderPass,
                         _extent);
                     if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                        !_firstGuestDrawPresented &&
-                        translatedResources.Textures is
-                        [
-                        { GuestImage: { } guestImage },
-                        ] &&
-                        _tracedGuestImageContents.Add(guestImage.Address))
+                        !_firstGuestDrawPresented)
                     {
-                        TraceGuestImageContents(guestImage);
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] vk.translated_draw kind={presentation.DrawKind} " +
+                            $"textures={translatedResources.Textures.Length}");
+                        foreach (var boundTexture in translatedResources.Textures)
+                        {
+                            if (boundTexture.GuestImage is { } guestImage &&
+                                _tracedGuestImageContents.Add(guestImage.Address))
+                            {
+                                TraceGuestImageContents(guestImage);
+                            }
+                        }
                     }
                 }
                 catch (Exception exception)
@@ -5808,13 +5948,6 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             return false;
-        }
-
-        private static bool ShouldTracePresentedGuestImageContentsForDiagnostics()
-        {
-            var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
-            return string.Equals(mode, "1", StringComparison.Ordinal) ||
-                   string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool ShouldTraceVulkanResources() =>

@@ -13,7 +13,7 @@ public static class Ngs2Exports
     private const int OrbisNgs2ErrorInvalidSystemHandle = unchecked((int)0x804A0230);
     private const int OrbisNgs2ErrorInvalidRackHandle = unchecked((int)0x804A0261);
     private const int OrbisNgs2ErrorInvalidVoiceHandle = unchecked((int)0x804A0300);
-    private const ulong HandleStorageSize = 0x20;
+    private const ulong HandleStorageSize = 0x1000;
     private const int RenderBufferInfoSize = 0x18;
     private const ulong MaximumRenderBufferSize = 16 * 1024 * 1024;
 
@@ -197,18 +197,45 @@ public static class Ngs2Exports
         lock (StateGate)
         {
             return ctx.SetReturn(
-                Voices.ContainsKey(ctx[CpuRegister.Rdi]) 
-                    ? 0 
+                Voices.ContainsKey(ctx[CpuRegister.Rdi])
+                    ? 0
                     : OrbisNgs2ErrorInvalidVoiceHandle);
         }
     }
 
+    // The earlier "alt NID" guesses here were wrong: an NID is the aerolib hash of one
+    // symbol name, and hashing scripts/ps5_names.txt shows the previous alt bindings
+    // actually belonged to sceImeUpdate (-4GCfYdNF1s), sceMouseRead (x8qnXqh-tiM) and
+    // sceSystemGestureUpdateAllTouchRecognizer (wPJGwI2RM2I) — Quake's audio thread was
+    // receiving an NGS2 error from what it thought was sceImeUpdate. Those now live in
+    // their real libraries; the NIDs below are verified against the hash.
     [SysAbiExport(
         Nid = "AbYvTOZ8Pts",
         ExportName = "sceNgs2VoiceRunCommands",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
     public static int Ngs2VoiceRunCommands(CpuContext ctx) => Ngs2VoiceControl(ctx);
+
+    [SysAbiExport(
+        Nid = "-TOuuAQ-buE",
+        ExportName = "sceNgs2VoiceGetState",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2VoiceGetState(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "rEh728kXk3w",
+        ExportName = "sceNgs2VoiceGetStateFlags",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2VoiceGetStateFlags(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "xa8oL9dmXkM",
+        ExportName = "sceNgs2PanInit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2PanInit(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "i0VnXM-C9fc",
@@ -263,7 +290,6 @@ public static class Ngs2Exports
 
     private static bool TryCreateHandle(CpuContext ctx, uint type, ulong ownerHandle, out ulong handle)
     {
-        handle = 0;
         if (!KernelMemoryCompatExports.TryAllocateHleData(ctx, HandleStorageSize, 16, out handle))
         {
             return false;
@@ -271,11 +297,18 @@ public static class Ngs2Exports
 
         Span<byte> data = stackalloc byte[(int)HandleStorageSize];
         data.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(data[0..8], handle);
         BinaryPrimitives.WriteUInt64LittleEndian(data[8..16], ownerHandle);
         BinaryPrimitives.WriteUInt32LittleEndian(data[16..20], 1);
         BinaryPrimitives.WriteUInt32LittleEndian(data[24..28], type);
-        return ctx.Memory.TryWrite(handle, data);
+        if (!ctx.Memory.TryWrite(handle, data))
+        {
+            return false;
+        }
+
+        // Offset 0 doubles as a vtable slot for guest code that treats this handle as a C++
+        // object; stamp it with the shared dummy vtable instead of a self-referential value.
+        KernelMemoryCompatExports.TryWriteDummyVtable(ctx, handle);
+        return true;
     }
 
     private static bool TryClearGuestBuffer(CpuContext ctx, ulong address, ulong length)

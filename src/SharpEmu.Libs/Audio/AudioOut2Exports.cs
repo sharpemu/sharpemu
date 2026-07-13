@@ -8,9 +8,14 @@ namespace SharpEmu.Libs.Audio;
 
 public static class AudioOut2Exports
 {
-    private const int AudioOut2ContextParamSize = 0x80;
+    // Sized from guest evidence, not SDK headers: Quake keeps its
+    // SceAudioOut2ContextParam on the stack with the frame canary at param+0x60,
+    // and an earlier 0x80-byte ResetParam write zeroed that canary
+    // (__stack_chk_fail right after sceAudioOut2UserCreate, which silently killed
+    // the whole audio init). Stay well below 0x60 and only write the prefix we
+    // populate.
+    private const int AudioOut2ContextParamSize = 0x30;
     private const int AudioOut2ContextMemorySize = 0x10000;
-    private const int AudioOut2ContextMemoryAlignment = 0x10000;
     private static long _nextContextHandle = 1;
     private static long _nextUserHandle = 1;
     private static int _nextPortId;
@@ -59,20 +64,13 @@ public static class AudioOut2Exports
     public static int AudioOut2ContextQueryMemory(CpuContext ctx)
     {
         var paramAddress = ctx[CpuRegister.Rdi];
-        var memoryInfoAddress = ctx[CpuRegister.Rsi];
-        if (paramAddress == 0 || memoryInfoAddress == 0)
+        var outMemorySizeAddress = ctx[CpuRegister.Rsi];
+        if (paramAddress == 0 || outMemorySizeAddress == 0)
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
-
-        Span<byte> memoryInfo = stackalloc byte[0x20];
-        memoryInfo.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x00..], AudioOut2ContextMemorySize);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x08..], AudioOut2ContextMemoryAlignment);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x10..], AudioOut2ContextMemorySize);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x18..], AudioOut2ContextMemoryAlignment);
-
-        return ctx.Memory.TryWrite(memoryInfoAddress, memoryInfo)
+        
+        return ctx.TryWriteUInt64(outMemorySizeAddress, AudioOut2ContextMemorySize)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }

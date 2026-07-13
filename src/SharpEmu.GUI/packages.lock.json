@@ -180,6 +180,9 @@
         "type": "Transitive",
         "resolved": "2.88.9",
         "contentHash": "wb2kYgU7iy84nQLYZwMeJXixvK++GoIuECjU4ECaUKNuflyRlJKyiRhN1MAHswvlvzuvkrjRWlK0Za6+kYQK7w=="
+      },
+      "sharpemu.logging": {
+        "type": "Project"
       }
     }
   }

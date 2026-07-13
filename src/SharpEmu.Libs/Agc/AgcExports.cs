@@ -179,7 +179,6 @@ public static class AgcExports
     private static long _createShaderTraceCount;
     private static long _packetPayloadTraceCount;
     private static bool _tracedMissingPixelShaderBindings;
-    private static long _unsatisfiedWaitTraceCount;
     private static long _shaderTranslationMissTraceCount;
     private static long _translatedDrawTraceCount;
     private static long _standardDmaTraceCount;
@@ -2001,6 +2000,57 @@ public static class AgcExports
         lock (gpuState.Gate)
         {
             ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
+            DrainResumableDcbs(ctx, gpuState, tracePackets);
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // ABI (reversed from Quake): rdi = array of DCB base addresses (u64 each),
+    // rsi = array of DCB sizes in dwords (u32 each), rdx = buffer count.
+    [SysAbiExport(
+        Nid = "6UzEidRZwkg",
+        ExportName = "sceAgcDriverSubmitMultiDcbs",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSubmitMultiDcbs(CpuContext ctx)
+    {
+        var addressArray = ctx[CpuRegister.Rdi];
+        var sizeArray = ctx[CpuRegister.Rsi];
+        var bufferCount = (uint)ctx[CpuRegister.Rdx];
+        if (addressArray == 0 || sizeArray == 0 || bufferCount == 0 || bufferCount > 4096)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var tracePackets = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal);
+
+        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        lock (gpuState.Gate)
+        {
+            for (uint i = 0; i < bufferCount; i++)
+            {
+                if (!ctx.TryReadUInt64(addressArray + i * 8, out var commandAddress) ||
+                    commandAddress == 0 ||
+                    !ctx.TryReadUInt32(sizeArray + i * 4, out var dwordCount) ||
+                    dwordCount == 0)
+                {
+                    continue;
+                }
+
+                if (tracePackets)
+                {
+                    TraceAgc(
+                        $"agc.driver_submit_multi_dcbs index={i}/{bufferCount} " +
+                        $"addr=0x{commandAddress:X16} dwords={dwordCount}");
+                }
+
+                ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
+            }
+
+            DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -2049,6 +2099,7 @@ public static class AgcExports
             }
 
             ParseSubmittedDcb(ctx, gpuState, queueState, commandAddress, dwordCount, tracePackets);
+            DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -2170,6 +2221,63 @@ public static class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
+    // WAIT_REG_MEM packets whose condition is not met suspend their DCB into
+    // GpuWaitRegistry. Each submit re-checks every suspended DCB against current guest
+    // memory (labels are advanced by ReleaseMem/WriteData/DmaData packets or by direct
+    // CPU writes) and resumes the ones whose condition is now satisfied. A resumed DCB
+    // can itself write labels that unblock others, so loop until a fixed point.
+    private static void DrainResumableDcbs(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        bool tracePackets)
+    {
+        for (var pass = 0; pass < 256; pass++)
+        {
+            var woken = GpuWaitRegistry.CollectSatisfied((address, is64Bit) =>
+            {
+                if (is64Bit)
+                {
+                    return ctx.TryReadUInt64(address, out var value64)
+                        ? value64
+                        : (ulong?)null;
+                }
+
+                return ctx.TryReadUInt32(address, out var value32)
+                    ? value32
+                    : (ulong?)null;
+            });
+            if (woken is null)
+            {
+                return;
+            }
+
+            foreach (var waiter in woken)
+            {
+                var remainingDwords = waiter.TotalDwords - waiter.ResumeOffset;
+                if (remainingDwords == 0)
+                {
+                    continue;
+                }
+
+                if (tracePackets)
+                {
+                    TraceAgc(
+                        $"agc.dcb.resumed addr=0x{waiter.WaitAddress:X16} " +
+                        $"resume=0x{waiter.ResumeAddress:X16} dwords={remainingDwords}");
+                }
+
+                var state = waiter.State as SubmittedDcbState ?? gpuState.Graphics;
+                ParseSubmittedDcb(
+                    ctx,
+                    gpuState,
+                    state,
+                    waiter.ResumeAddress,
+                    remainingDwords,
+                    tracePackets);
+            }
+        }
+    }
+
     private static void ParseSubmittedDcb(
         CpuContext ctx,
         SubmittedGpuState gpuState,
@@ -2201,7 +2309,6 @@ public static class AgcExports
                         $"agc.dcb.packet dw={offset} addr=0x{currentAddress:X16} " +
                         $"header=0x{header:X8} len=1 type=2");
                 }
-
                 offset++;
                 continue;
             }
@@ -2311,16 +2418,91 @@ public static class AgcExports
                 state.InstanceCount = Math.Max(instanceCount, 1);
             }
 
-            if (op == ItNop &&
-                register is RWaitMem32 or RWaitMem64 &&
+            // WAIT_REG_MEM (AGC NOP-encapsulated 32/64-bit variants): when the condition is
+            // not yet satisfied, suspend this DCB; DrainResumableDcbs resumes it once the
+            // watched memory advances.
+            if (op == ItNop && register is RWaitMem32 or RWaitMem64 &&
                 length >= (register == RWaitMem32 ? 6u : 9u))
             {
-                ObserveSubmittedWaitRegMem(ctx, currentAddress, register == RWaitMem64, tracePackets);
+                if (TryParseWaitRegMem(ctx, currentAddress, register == RWaitMem64,
+                        out var waitAddr, out var refVal, out var waitMask, out var cmpFunc))
+                {
+                    ulong curVal = 0;
+                    bool hasCurVal;
+                    if (register == RWaitMem64)
+                    {
+                        hasCurVal = ctx.TryReadUInt64(waitAddr, out curVal);
+                    }
+                    else if (ctx.TryReadUInt32(waitAddr, out var curVal32))
+                    {
+                        curVal = curVal32;
+                        hasCurVal = true;
+                    }
+                    else
+                    {
+                        hasCurVal = false;
+                    }
+
+                    var waiter = new GpuWaitRegistry.WaitingDcb
+                    {
+                        CommandBufferAddress = commandAddress,
+                        ResumeAddress = currentAddress + ((ulong)length * sizeof(uint)),
+                        TotalDwords = dwordCount,
+                        ResumeOffset = offset + length,
+                        ReferenceValue = refVal,
+                        Mask = waitMask,
+                        CompareFunction = cmpFunc,
+                        Is64Bit = register == RWaitMem64,
+                        State = state,
+                    };
+                    if (hasCurVal && !GpuWaitRegistry.Compare(waiter, curVal))
+                    {
+                        GpuWaitRegistry.Register(waitAddr, waiter);
+
+                        if (tracePackets)
+                        {
+                            TraceAgc(
+                                $"agc.dcb.suspended addr=0x{waitAddr:X16} ref=0x{refVal:X16} " +
+                                $"mask=0x{waitMask:X16} cur=0x{curVal:X16} cmp={cmpFunc}");
+                        }
+
+                        return; // suspend parsing of this DCB
+                    }
+                }
             }
 
             if (op == ItWaitRegMem && length >= 7)
             {
-                ObserveSubmittedStandardWaitRegMem(ctx, currentAddress, tracePackets);
+                if (TryParseStandardWaitRegMem(ctx, currentAddress,
+                        out var waitAddr, out var refVal, out var waitMask, out var cmpFunc) &&
+                    ctx.TryReadUInt32(waitAddr, out var curVal))
+                {
+                    var waiter = new GpuWaitRegistry.WaitingDcb
+                    {
+                        CommandBufferAddress = commandAddress,
+                        ResumeAddress = currentAddress + ((ulong)length * sizeof(uint)),
+                        TotalDwords = dwordCount,
+                        ResumeOffset = offset + length,
+                        ReferenceValue = refVal,
+                        Mask = waitMask,
+                        CompareFunction = cmpFunc,
+                        Is64Bit = false,
+                        State = state,
+                    };
+                    if (!GpuWaitRegistry.Compare(waiter, curVal))
+                    {
+                        GpuWaitRegistry.Register(waitAddr, waiter);
+
+                        if (tracePackets)
+                        {
+                            TraceAgc(
+                                $"agc.dcb.suspended_std addr=0x{waitAddr:X16} ref=0x{refVal:X16} " +
+                                $"mask=0x{waitMask:X16} cur=0x{curVal:X16} cmp={cmpFunc}");
+                        }
+
+                        return;
+                    }
+                }
             }
 
             if (TryReadSubmittedDrawCount(
@@ -2641,104 +2823,6 @@ public static class AgcExports
         }
     }
 
-    private static void ObserveSubmittedWaitRegMem(
-        CpuContext ctx,
-        ulong packetAddress,
-        bool is64Bit,
-        bool tracePacket)
-    {
-        if (!ctx.TryReadUInt64(packetAddress + 4, out var address) ||
-            !ctx.TryReadUInt32(packetAddress + (is64Bit ? 28u : 16u), out var control))
-        {
-            return;
-        }
-
-        ulong mask;
-        ulong reference;
-        ulong value;
-        if (is64Bit)
-        {
-            if (!ctx.TryReadUInt64(packetAddress + 12, out mask) ||
-                !ctx.TryReadUInt64(packetAddress + 20, out reference) ||
-                !ctx.TryReadUInt64(address, out value))
-            {
-                return;
-            }
-        }
-        else
-        {
-            if (!ctx.TryReadUInt32(packetAddress + 12, out var mask32) ||
-                !ctx.TryReadUInt32(packetAddress + 20, out var reference32) ||
-                !ctx.TryReadUInt32(address, out var value32))
-            {
-                return;
-            }
-
-            mask = mask32;
-            reference = reference32;
-            value = value32;
-        }
-
-        var compareFunction = control & 0xFFu;
-        TraceSubmittedWait(
-            address,
-            value,
-            mask,
-            reference,
-            compareFunction,
-            is64Bit ? 64 : 32,
-            tracePacket);
-    }
-
-    private static void ObserveSubmittedStandardWaitRegMem(
-        CpuContext ctx,
-        ulong packetAddress,
-        bool tracePacket)
-    {
-        if (!ctx.TryReadUInt32(packetAddress + 4, out var control) ||
-            !ctx.TryReadUInt64(packetAddress + 8, out var address) ||
-            !ctx.TryReadUInt32(packetAddress + 16, out var reference) ||
-            !ctx.TryReadUInt32(packetAddress + 20, out var mask) ||
-            !ctx.TryReadUInt32(address, out var value))
-        {
-            return;
-        }
-
-        TraceSubmittedWait(address, value, mask, reference, control & 0x7u, 32, tracePacket);
-    }
-
-    private static void TraceSubmittedWait(
-        ulong address,
-        ulong value,
-        ulong mask,
-        ulong reference,
-        uint compareFunction,
-        int bits,
-        bool tracePacket)
-    {
-        var maskedValue = value & mask;
-        var satisfied = compareFunction switch
-        {
-            0 => false,
-            1 => maskedValue < reference,
-            2 => maskedValue <= reference,
-            3 => maskedValue == reference,
-            4 => maskedValue != reference,
-            5 => maskedValue >= reference,
-            6 => maskedValue > reference,
-            _ => true,
-        };
-        if (!tracePacket && (satisfied || !ShouldTraceHotPath(ref _unsatisfiedWaitTraceCount)))
-        {
-            return;
-        }
-
-        TraceAgc(
-            $"agc.dcb.wait_reg_mem bits={bits} addr=0x{address:X16} " +
-            $"value=0x{value:X16} mask=0x{mask:X16} ref=0x{reference:X16} " +
-            $"compare={compareFunction} satisfied={satisfied}");
-    }
-
     private static void ApplySubmittedReleaseMem(
         CpuContext ctx,
         ulong packetAddress,
@@ -2756,10 +2840,11 @@ public static class AgcExports
         var dataSelection = (control >> 16) & 0xFFu;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
+
         var wroteData = dataSelection switch
         {
-            1 or 2 => ctx.TryWriteUInt32(destinationAddress, dataLo),
-            3 => ctx.TryWriteUInt64(destinationAddress, data),
+            1 => ctx.TryWriteUInt32(destinationAddress, dataLo),
+            2 or 3 => ctx.TryWriteUInt64(destinationAddress, data),
             _ => false,
         };
 
@@ -2855,6 +2940,11 @@ public static class AgcExports
             case ItDrawIndex2 when packetLength >= 6:
                 state.DrawIndexOffset = 0;
                 return ctx.TryReadUInt32(packetAddress + 16, out drawCount);
+            // 5-dword form emitted by DcbDrawIndex (count at +4, ItIndexBase/
+            // ItIndexBufferSize carried by separate preceding packets).
+            case ItDrawIndex2 when packetLength >= 5:
+                state.DrawIndexOffset = 0;
+                return ctx.TryReadUInt32(packetAddress + 4, out drawCount);
             case ItDrawIndexOffset2 when packetLength >= 5:
                 if (!ctx.TryReadUInt32(packetAddress + 8, out var indexOffset))
                 {
@@ -3206,8 +3296,58 @@ public static class AgcExports
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
-            CreateRenderState(state.CxRegisters, renderTargets.FirstOrDefault()));
+            ApplyTransparentPremultipliedFillClear(
+                CreateRenderState(state.CxRegisters, renderTargets.FirstOrDefault()),
+                textures,
+                vertexInputs,
+                pixelEvaluation.InitialScalarRegisters));
         return true;
+    }
+
+    private static readonly bool _transparentFillClearEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_TRANSPARENT_FILL_CLEAR"),
+        "1",
+        StringComparison.Ordinal);
+
+    /// <summary>
+    /// Chowdren resets its effect layers with an untextured transparent-black
+    /// fill using premultiplied blending. With One/OneMinusSrcAlpha that draw
+    /// is otherwise a no-op, causing fog and vignette layers to accumulate.
+    /// Treat precisely that draw shape as an overwrite.
+    /// </summary>
+    private static VulkanGuestRenderState ApplyTransparentPremultipliedFillClear(
+        VulkanGuestRenderState renderState,
+        IReadOnlyList<TranslatedImageBinding> textures,
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        IReadOnlyList<uint> pixelUserData)
+    {
+        if (!_transparentFillClearEnabled ||
+            textures.Count != 0 ||
+            vertexInputs.Count != 0 ||
+            pixelUserData.Count < 4 ||
+            renderState.Blend is not
+            {
+                Enable: true,
+                ColorSrcFactor: 1,
+                ColorDstFactor: 5,
+                ColorFunc: 0,
+            })
+        {
+            return renderState;
+        }
+
+        for (var index = 0; index < 4; index++)
+        {
+            if ((pixelUserData[index] & 0x7FFF_FFFFu) != 0)
+            {
+                return renderState;
+            }
+        }
+
+        return renderState with
+        {
+            Blend = renderState.Blend with { Enable = false },
+        };
     }
 
     private static VulkanGuestIndexBuffer? CreateVulkanIndexBuffer(
@@ -5634,5 +5774,87 @@ public static class AgcExports
 
         Console.Error.WriteLine(
             $"[LOADER][TRACE] agc.create_shader dst=0x{destinationAddress:X16} header=0x{headerAddress:X16} code=0x{codeAddress:X16} {detail}");
+    }
+
+    // Packet layouts mirror what DcbWaitRegMem emits.
+    // 32-bit (ItNop/RWaitMem32): +4 addrLo, +8 addrHi, +12 mask, +16 cmp|op<<8, +20 ref.
+    // 64-bit (ItNop/RWaitMem64): +4 addrLo, +8 addrHi, +12 maskLo, +16 maskHi,
+    //                            +20 refLo, +24 refHi, +28 cmp|op<<8, +32 poll.
+    private static bool TryParseWaitRegMem(
+        CpuContext ctx,
+        ulong addr,
+        bool is64,
+        out ulong waitAddr,
+        out ulong refVal,
+        out ulong mask,
+        out uint cmpFunc)
+    {
+        waitAddr = refVal = mask = 0;
+        cmpFunc = 0;
+
+        if (!ctx.TryReadUInt32(addr + 4, out var lo) ||
+            !ctx.TryReadUInt32(addr + 8, out var hi))
+        {
+            return false;
+        }
+
+        waitAddr = ((ulong)hi << 32) | lo;
+        if (!is64)
+        {
+            if (!ctx.TryReadUInt32(addr + 12, out var mask32) ||
+                !ctx.TryReadUInt32(addr + 16, out var cmpRaw) ||
+                !ctx.TryReadUInt32(addr + 20, out var refVal32))
+            {
+                return false;
+            }
+
+            mask = mask32;
+            refVal = refVal32;
+            cmpFunc = cmpRaw & 0x7;
+            return true;
+        }
+
+        if (!ctx.TryReadUInt32(addr + 12, out var maskLo) ||
+            !ctx.TryReadUInt32(addr + 16, out var maskHi) ||
+            !ctx.TryReadUInt32(addr + 20, out var refLo) ||
+            !ctx.TryReadUInt32(addr + 24, out var refHi) ||
+            !ctx.TryReadUInt32(addr + 28, out var cmpRaw64))
+        {
+            return false;
+        }
+
+        mask = ((ulong)maskHi << 32) | maskLo;
+        refVal = ((ulong)refHi << 32) | refLo;
+        cmpFunc = cmpRaw64 & 0x7;
+        return true;
+    }
+
+    // Standard ItWaitRegMem (7 dwords, 32-bit compare):
+    // +4 cmp|(op&1)<<8, +8 addrLo, +12 addrHi, +16 ref, +20 mask, +24 poll.
+    private static bool TryParseStandardWaitRegMem(
+        CpuContext ctx,
+        ulong addr,
+        out ulong waitAddr,
+        out ulong refVal,
+        out ulong mask,
+        out uint cmpFunc)
+    {
+        waitAddr = refVal = mask = 0;
+        cmpFunc = 0;
+
+        if (!ctx.TryReadUInt32(addr + 4, out var cmpRaw) ||
+            !ctx.TryReadUInt32(addr + 8, out var lo) ||
+            !ctx.TryReadUInt32(addr + 12, out var hi) ||
+            !ctx.TryReadUInt32(addr + 16, out var reference) ||
+            !ctx.TryReadUInt32(addr + 20, out var mask32))
+        {
+            return false;
+        }
+
+        cmpFunc = cmpRaw & 0x7;
+        waitAddr = ((ulong)hi << 32) | lo;
+        refVal = reference;
+        mask = mask32;
+        return true;
     }
 }

@@ -85,6 +85,14 @@ internal sealed class EmulatorProcess : IDisposable
                 return;
             }
 
+            // Prefer terminating the job: it kills the whole tree, including
+            // any children the emulator spawned, even when the main process
+            // is wedged in a GPU driver call.
+            if (_jobHandle != 0)
+            {
+                _ = TerminateJobObject(_jobHandle, 1);
+            }
+
             if (_processHandle != 0)
             {
                 _ = TerminateProcess(_processHandle, 1);
@@ -160,8 +168,7 @@ internal sealed class EmulatorProcess : IDisposable
             var policy1 = PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF;
             var policy2 =
                 PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF |
-                PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF |
-                PROCESS_CREATION_MITIGATION_POLICY2_XTENDED_CONTROL_FLOW_GUARD_ALWAYS_OFF;
+                PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF;
 
             mitigationPolicies = Marshal.AllocHGlobal(sizeof(ulong) * 2);
             Marshal.WriteInt64(mitigationPolicies, unchecked((long)policy1));
@@ -194,27 +201,8 @@ internal sealed class EmulatorProcess : IDisposable
 
             if (!created)
             {
-                // Some mitigation policy bits (e.g. XFG) are not supported on
-                // older Windows builds. Mirror the CLI's behavior and fall back
-                // to launching without the mitigation attribute list.
-                startupInfoEx.lpAttributeList = 0;
-                created = CreateProcessW(
-                    exePath,
-                    new StringBuilder(BuildCommandLine(exePath, arguments)),
-                    0,
-                    0,
-                    true,
-                    CREATE_NO_WINDOW,
-                    0,
-                    currentDirectory,
-                    ref startupInfoEx,
-                    out processInfo);
-            }
-
-            if (!created)
-            {
                 var error = Marshal.GetLastWin32Error();
-                throw new Win32Exception(error, $"Failed to start '{exePath}' (Win32 error {error}: {new Win32Exception(error).Message}).");
+                throw new Win32Exception(error, $"Failed to start '{exePath}' with CET/CFG mitigation disabled (Win32 error {error}: {new Win32Exception(error).Message}).");
             }
 
             CloseHandle(processInfo.hThread);
@@ -638,6 +626,10 @@ internal sealed class EmulatorProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(nint process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(nint job, uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

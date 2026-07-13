@@ -8,7 +8,6 @@ namespace SharpEmu.Libs.CommonDialog;
 
 public static class CommonDialogExports
 {
-    private const int AlreadySystemInitialized = unchecked((int)0x80B80002);
     private static int _initialized;
 
     [SysAbiExport(
@@ -18,11 +17,12 @@ public static class CommonDialogExports
         LibraryName = "libSceCommonDialog")]
     public static int CommonDialogInitialize(CpuContext ctx)
     {
-        var result = Interlocked.Exchange(ref _initialized, 1) == 0
-            ? 0
-            : AlreadySystemInitialized;
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        // Games can initialize the common-dialog service defensively from more than one
+        // subsystem. Keeping this HLE initialization idempotent avoids turning an error
+        // reporting path into a second, unrelated failure.
+        Interlocked.Exchange(ref _initialized, 1);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(

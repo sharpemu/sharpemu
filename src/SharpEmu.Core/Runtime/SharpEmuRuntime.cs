@@ -11,15 +11,19 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.AppContent;
 using SharpEmu.Libs.SaveData;
+using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.IO;
 
 namespace SharpEmu.Core.Runtime;
 
 public sealed class SharpEmuRuntime : ISharpEmuRuntime
 {
+    private static readonly SharpEmuLogger Log = SharpEmuLog.For("Runtime");
+
     private readonly record struct LoadedModuleImage(string Path, SelfImage Image);
 
     private static readonly HashSet<string> PreloadSkipModules = new(StringComparer.OrdinalIgnoreCase)
@@ -79,7 +83,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
         };
         var moduleManager = new ModuleManager();
-        moduleManager.RegisterFromAssembly(typeof(VideoOutExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
         moduleManager.RegisterFromAssembly(typeof(KernelExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
         moduleManager.Freeze();
 
@@ -128,7 +131,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     {
         var normalizedEbootPath = Path.GetFullPath(ebootPath);
         using var app0Binding = BindApp0Root(normalizedEbootPath);
-        Console.Error.WriteLine($"[RUNTIME] Loading: {ebootPath}");
+        Log.Info($"Loading: {ebootPath}");
         LastExecutionDiagnostics = null;
         LastExecutionTrace = null;
         LastSessionSummary = null;
@@ -136,11 +139,12 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         LastMilestoneLog = null;
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath);
-        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
+        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version, BuildInfo.CommitSha);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
+        LogAppBundleInfo(normalizedEbootPath, image);
         RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
-        Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
+        Log.Info($"Entry: 0x{image.EntryPoint:X16}");
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
         var activeImportStubs = new Dictionary<ulong, string>(image.ImportStubs);
         var activeRuntimeSymbols = new Dictionary<string, ulong>(image.RuntimeSymbols, StringComparer.Ordinal);
@@ -163,7 +167,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             processImageName);
         if (initializerResult is { } failedInitializerResult)
         {
-            Console.Error.WriteLine($"[RUNTIME] Initializer dispatch failed: {failedInitializerResult}");
+            Log.Error($"Initializer dispatch failed: {failedInitializerResult}");
             LastExecutionTrace = _cpuDispatcher.LastImportResolutionTrace;
             LastMilestoneLog = _cpuDispatcher.LastMilestoneLog;
             LastSessionSummary = BuildSessionSummary(_cpuDispatcher.LastSessionSummary);
@@ -171,8 +175,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return failedInitializerResult;
         }
 
-        Console.Error.WriteLine($"[RUNTIME] Dispatching, gen: {generation}");
-        Console.Error.WriteLine($"[RUNTIME] About to call DispatchEntry with entryPoint=0x{image.EntryPoint:X16}");
+        Log.Info($"Dispatching, gen: {generation}");
+        Log.Debug($"About to call DispatchEntry with entryPoint=0x{image.EntryPoint:X16}");
 
         var result = _cpuDispatcher.DispatchEntry(
             image.EntryPoint,
@@ -182,8 +186,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             processImageName,
             _cpuExecutionOptions);
 
-        Console.Error.WriteLine($"[RUNTIME] DispatchEntry returned: {result}");
-        Console.Error.WriteLine($"[RUNTIME] Dispatch result: {result}");
+        Log.Info($"DispatchEntry returned: {result}");
+        Log.Info($"Dispatch result: {result}");
         LastExecutionTrace = _cpuDispatcher.LastImportResolutionTrace;
         LastMilestoneLog = _cpuDispatcher.LastMilestoneLog;
         LastSessionSummary = BuildSessionSummary(_cpuDispatcher.LastSessionSummary);
@@ -354,6 +358,66 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
+    private static void LogAppBundleInfo(string ebootPath, SelfImage image)
+    {
+        var executableName = Path.GetFileName(ebootPath);
+        if (string.IsNullOrWhiteSpace(executableName))
+        {
+            executableName = "eboot.bin";
+        }
+
+        var displayName = string.IsNullOrWhiteSpace(image.Title) ? "(unknown)" : image.Title!.Trim();
+        var titleId = string.IsNullOrWhiteSpace(image.TitleId) ? "(unknown)" : image.TitleId!.Trim();
+        var version = string.IsNullOrWhiteSpace(image.Version) ? "(unknown)" : image.Version!.Trim();
+        var contentId = ResolveContentId(Path.GetDirectoryName(ebootPath)) ?? "(unknown)";
+
+        var builder = new StringBuilder();
+        builder.AppendLine("App bundle info:");
+        builder.AppendLine($"- Display name: {displayName}");
+        builder.AppendLine($"- Version: {version}");
+        builder.AppendLine($"- Title ID: {titleId}");
+        builder.AppendLine($"- Content ID: {contentId}");
+        builder.AppendLine($"- Executable: {executableName}");
+        builder.Append("- Platform: PlayStation 5");
+        Log.Info(builder.ToString());
+    }
+
+    private static string? ResolveContentId(string? bundleRoot)
+    {
+        if (string.IsNullOrEmpty(bundleRoot))
+        {
+            return null;
+        }
+
+        foreach (var candidate in new[]
+        {
+            Path.Combine(bundleRoot, "sce_sys", "param.json"),
+            Path.Combine(bundleRoot, "param.json"),
+        })
+        {
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(candidate));
+                if (doc.RootElement.TryGetProperty("contentId", out var contentId))
+                {
+                    return contentId.GetString();
+                }
+            }
+            catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException)
+            {
+            }
+
+            break;
+        }
+
+        return null;
+    }
+
     private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
     {
         const string app0VariableName = "SHARPEMU_APP0_DIR";
@@ -434,8 +498,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 moduleName = $"module#{i}";
             }
 
-            Console.Error.WriteLine(
-                $"[RUNTIME] Starting module {moduleName}: dt_init=0x{initEntryPoint:X16}");
+            Log.Info(
+                $"Starting module {moduleName}: dt_init=0x{initEntryPoint:X16}");
 
             var result = _cpuDispatcher.DispatchModuleInitializer(
                 initEntryPoint,
@@ -446,8 +510,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 _cpuExecutionOptions);
             if (result != OrbisGen2Result.ORBIS_GEN2_OK)
             {
-                Console.Error.WriteLine(
-                    $"[RUNTIME] Module start failed: {moduleName} -> {result}");
+                Log.Error(
+                    $"Module start failed: {moduleName} -> {result}");
                 return result;
             }
         }
@@ -468,8 +532,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return null;
         }
 
-        Console.Error.WriteLine(
-            $"[RUNTIME] Running initializers for {label}: preinit={image.PreInitializerFunctions.Count}, init={image.InitializerFunctions.Count}");
+        Log.Info(
+            $"Running initializers for {label}: preinit={image.PreInitializerFunctions.Count}, init={image.InitializerFunctions.Count}");
 
         var result = RunInitializerList(
             $"{label}:preinit",
@@ -508,8 +572,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 continue;
             }
 
-            Console.Error.WriteLine(
-                $"[RUNTIME]   Initializer {label}[{i}] -> 0x{initializerAddress:X16}");
+            Log.Debug(
+                $"  Initializer {label}[{i}] -> 0x{initializerAddress:X16}");
 
             var result = _cpuDispatcher.DispatchEntry(
                 initializerAddress,
@@ -577,7 +641,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             .ToArray();
         if (skippedModules.Length > 0)
         {
-            Console.Error.WriteLine($"[RUNTIME] Skipping {skippedModules.Length} core module(s): {string.Join(", ", skippedModules)}");
+            Log.Info($"Skipping {skippedModules.Length} core module(s): {string.Join(", ", skippedModules)}");
         }
 
         if (modulePaths.Length == 0)
@@ -585,8 +649,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return loadedImages;
         }
 
-        Console.Error.WriteLine($"[RUNTIME] Module search directories: {string.Join(", ", moduleDirectories)}");
-        Console.Error.WriteLine($"[RUNTIME] Loading {modulePaths.Length} module(s)...");
+        Log.Debug($"Module search directories: {string.Join(", ", moduleDirectories)}");
+        Log.Info($"Loading {modulePaths.Length} module(s)...");
         var loadedModules = 0;
         var failedModules = 0;
         var mergedImportCount = 0;
@@ -621,18 +685,18 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 loadedImages.Add(new LoadedModuleImage(modulePath, moduleImage));
                 loadedModules++;
 
-                Console.Error.WriteLine(
-                    $"[RUNTIME] Loaded module {Path.GetFileName(modulePath)}: entry=0x{moduleImage.EntryPoint:X16}, imports={moduleImage.ImportStubs.Count}, symbols={moduleImage.RuntimeSymbols.Count}");
+                Log.Info(
+                    $"Loaded module {Path.GetFileName(modulePath)}: entry=0x{moduleImage.EntryPoint:X16}, imports={moduleImage.ImportStubs.Count}, symbols={moduleImage.RuntimeSymbols.Count}");
             }
             catch (Exception ex)
             {
                 failedModules++;
-                Console.Error.WriteLine($"[RUNTIME] Module load failed: {modulePath} ({ex.GetType().Name}: {ex.Message})");
+                Log.Error($"Module load failed: {modulePath} ({ex.GetType().Name}: {ex.Message})", ex);
             }
         }
 
-        Console.Error.WriteLine(
-            $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
+        Log.Info(
+            $"Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
         return loadedImages;
     }
 
@@ -652,8 +716,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         if (rebound != 0 || unresolved != 0)
         {
-            Console.Error.WriteLine(
-                $"[RUNTIME] Imported data rebind: rebound={rebound}, unresolved={unresolved}");
+            Log.Info(
+                $"Imported data rebind: rebound={rebound}, unresolved={unresolved}");
         }
     }
 
@@ -685,8 +749,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             {
                 if (logRebind)
                 {
-                    Console.Error.WriteLine(
-                        $"[RUNTIME] Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16}");
+                    Log.Warning(
+                        $"Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16}");
                 }
 
                 unresolved++;
@@ -698,8 +762,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             {
                 if (logRebind)
                 {
-                    Console.Error.WriteLine(
-                        $"[RUNTIME] Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+                    Log.Error(
+                        $"Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
                 }
 
                 unresolved++;
@@ -708,8 +772,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
             if (logRebind)
             {
-                Console.Error.WriteLine(
-                    $"[RUNTIME] Imported data rebound: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+                Log.Debug(
+                    $"Imported data rebound: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
             }
 
             rebound++;
@@ -745,8 +809,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             {
                 if (!string.Equals(existingNid, nid, StringComparison.Ordinal))
                 {
-                    Console.Error.WriteLine(
-                        $"[RUNTIME] Import stub conflict at 0x{address:X16}: keep={existingNid}, skip={nid} ({Path.GetFileName(modulePath)})");
+                    Log.Warning(
+                        $"Import stub conflict at 0x{address:X16}: keep={existingNid}, skip={nid} ({Path.GetFileName(modulePath)})");
                 }
 
                 continue;
@@ -855,8 +919,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             image.EntryPoint,
             isMain,
             isSystemModule);
-        Console.Error.WriteLine(
-            $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
+        Log.Info(
+            $"Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
     }
 
     private static bool TryComputeImageRange(SelfImage image, out ulong baseAddress, out ulong size)

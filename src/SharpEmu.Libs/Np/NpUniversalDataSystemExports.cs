@@ -76,4 +76,14 @@ public static class NpUniversalDataSystemExports
     {
         return ctx.SetReturn(0, typeof(long));
     }
+
+    [SysAbiExport(
+        Nid = "AUIHb7jUX3I",
+        ExportName = "sceNpUniversalDataSystemDestroyHandle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemDestroyHandle(CpuContext ctx)
+    {
+        return ctx.SetReturn(0, typeof(long));
+    }
 }

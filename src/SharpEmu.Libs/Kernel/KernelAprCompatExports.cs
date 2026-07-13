@@ -149,6 +149,19 @@ public static class KernelAprCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Success stub: the argument layout is unknown and callers tolerate the
+    // empty answer (Quake streams fine), so no output payload is written until
+    // the real signature is reversed.
+    [SysAbiExport(
+        Nid = "WvEu7yl3Ivg",
+        ExportName = "sceKernelAprGetFileSize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAprGetFileSize(CpuContext ctx)
+    {
+        return ctx.SetReturn(0);
+    }
+
     private static bool TryWriteAprResult(CpuContext ctx, ulong resultAddress)
     {
         Span<byte> result = stackalloc byte[sizeof(ulong)];

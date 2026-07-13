@@ -267,18 +267,52 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
+        ulong bytesRead = 0;
+
+        // Unregistered/missing files are zero-filled instead of failing: games queue
+        // speculative reads and only consume the bytes on success paths.
+        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath) || !File.Exists(hostPath))
         {
-            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            if (destination != 0 && size > 0)
+            {
+                int chunkSize = (int)Math.Min(size, 4096);
+                Span<byte> zeros = stackalloc byte[chunkSize];
+                zeros.Clear();
+                while (bytesRead < size)
+                {
+                    int currentChunk = (int)Math.Min((ulong)chunkSize, size - bytesRead);
+                    if (!ctx.Memory.TryWrite(destination + bytesRead, zeros[..currentChunk]))
+                    {
+                        break;
+                    }
+
+                    bytesRead += (ulong)currentChunk;
+                }
+            }
+
+            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, "(missing)", (int)OrbisGen2Result.ORBIS_GEN2_OK);
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
+        // Offset -1 means "continue after the previous read of this file id".
+        if (fileOffset == unchecked((ulong)(long)-1))
+        {
+            fileOffset = PakDirectoryTracker.ResolveSequentialOffset(fileId, size);
+        }
+        else if (fileOffset > long.MaxValue)
+        {
+            fileOffset = 0;
+        }
+
+        var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out bytesRead);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
             return result;
         }
+
+        PakDirectoryTracker.OnReadCompleted(ctx, fileId, destination, fileOffset, bytesRead);
 
         if (!AppendReadFileRecord(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead))
         {

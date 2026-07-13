@@ -18,6 +18,9 @@ public static class UserServiceExports
     private const string PrimaryUserName = "SharpEmu";
     private static int _loginEventDelivered;
 
+    private static readonly bool _traceUserService =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USER_SERVICE"), "1", StringComparison.Ordinal);
+
     [SysAbiExport(
         Nid = "j3YMu1MVNNo",
         ExportName = "sceUserServiceInitialize",
@@ -42,9 +45,11 @@ public static class UserServiceExports
             return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
         }
 
-        return ctx.TryWriteInt32(userIdAddress, PrimaryUserId)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        var result = ctx.TryWriteInt32(userIdAddress, PrimaryUserId)
+            ? 0
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        TraceUserService($"get_initial_user out=0x{userIdAddress:X16} value={PrimaryUserId} result=0x{result:X8}");
+        return ctx.SetReturn(result);
     }
 
     [SysAbiExport(
@@ -124,9 +129,12 @@ public static class UserServiceExports
 
         Span<byte> output = stackalloc byte[nameBytes.Length + 1];
         nameBytes.CopyTo(output);
-        return ctx.Memory.TryWrite(nameAddress, output)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        var result = ctx.Memory.TryWrite(nameAddress, output)
+            ? 0
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        TraceUserService(
+            $"get_user_name user={userId} out=0x{nameAddress:X16} capacity=0x{capacity:X} value='{PrimaryUserName}' result=0x{result:X8}");
+        return ctx.SetReturn(result);
     }
 
     [SysAbiExport(
@@ -151,5 +159,13 @@ public static class UserServiceExports
         return ctx.TryWriteInt32(valueAddress, 0)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    private static void TraceUserService(string message)
+    {
+        if (_traceUserService)
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] user_service.{message}");
+        }
     }
 }

@@ -12,6 +12,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Version>0.0.1</Version>
   </PropertyGroup>
 
+  <!-- Dependency-free; provides the BuildInfo provenance shown in the
+       title bar. -->
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Avalonia" />
     <PackageReference Include="Avalonia.Desktop" />
@@ -21,8 +27,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
-    <AvaloniaResource Include="..\..\assets\images\logo.png" Link="Assets/logo.png" />
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
+  </ItemGroup>
+
+  <!-- The controller readers (DualSense raw HID + Xbox XInput) are shared
+       with the emulator's pad HLE. They are dependency-free, so they are
+       compiled in directly rather than pulling a reference to all of
+       SharpEmu.Libs into the launcher. -->
+  <ItemGroup>
+    <Compile Include="..\SharpEmu.Libs\Pad\PadState.cs" Link="Input/PadState.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\HidNative.cs" Link="Input/HidNative.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\DualSenseReader.cs" Link="Input/DualSenseReader.cs" />
+    <Compile Include="..\SharpEmu.Libs\Pad\XInputReader.cs" Link="Input/XInputReader.cs" />
   </ItemGroup>
 
 </Project>

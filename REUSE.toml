@@ -15,3 +15,9 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "SharpEmu Emulator Project"
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = "src/SharpEmu.GUI/Atrac9/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2018 Alex Barney"
+SPDX-License-Identifier = "MIT"

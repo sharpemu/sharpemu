@@ -12,10 +12,14 @@ public static class SharpEmuLog
         new(StringComparer.Ordinal);
     private static readonly object ConfigurationSync = new();
     private static volatile LogLevel _minimumLevel = ResolveMinimumLevelFromEnvironment();
-    private static ISharpEmuLogSink _sink = new ConsoleLogSink(
-        useColors: ResolveColorEnabledFromEnvironment(),
-        includeTimestamp: false);
+    private static bool _fileCapturesAllLevels;
+    private static ISharpEmuLogSink _sink = ResolveSinkFromEnvironment();
 
+    /// <summary>
+    /// Entries below this level are dropped. When a SHARPEMU_LOG_FILE sink is
+    /// active it only limits the console — the file receives every level.
+    /// <see cref="LogLevel.None"/> disables logging entirely, file included.
+    /// </summary>
     public static LogLevel MinimumLevel
     {
         get => _minimumLevel;
@@ -37,11 +41,31 @@ public static class SharpEmuLog
             ArgumentNullException.ThrowIfNull(value);
             lock (ConfigurationSync)
             {
+                if (ReferenceEquals(_sink, value))
+                {
+                    return;
+                }
+
+                // A replacement sink is not the environment-configured
+                // console+file pair, so the minimum level applies globally
+                // again.
+                _fileCapturesAllLevels = false;
+
+                if (_sink is IDisposable disposable)
+                {
+                    try
+                    {
+                        disposable.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 _sink = value;
             }
         }
     }
-
     public static void Configure(LogLevel? minimumLevel = null, ISharpEmuLogSink? sink = null)
     {
         if (minimumLevel.HasValue)
@@ -52,6 +76,22 @@ public static class SharpEmuLog
         if (sink is not null)
         {
             Sink = sink;
+        }
+    }
+
+    /// <summary>
+    /// Disposes the active sink if it implements <see cref="IDisposable"/>.
+    /// Call at shutdown to flush file buffers. Logging after this call
+    /// continues to work for non-disposable sinks (e.g. <see cref="ConsoleLogSink"/>).
+    /// </summary>
+    public static void Shutdown()
+    {
+        lock (ConfigurationSync)
+        {
+            if (_sink is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
         }
     }
 
@@ -93,7 +133,14 @@ public static class SharpEmuLog
     internal static bool IsEnabled(LogLevel level)
     {
         var minimum = _minimumLevel;
-        return minimum != LogLevel.None && level >= minimum;
+        if (minimum == LogLevel.None)
+        {
+            return false;
+        }
+
+        // With a file sink capturing all levels, the console filter is
+        // applied per-sink instead of here.
+        return _fileCapturesAllLevels || level >= minimum;
     }
 
     internal static void Write(
@@ -144,6 +191,52 @@ public static class SharpEmuLog
 
         var raw = Environment.GetEnvironmentVariable("SHARPEMU_LOG_NO_COLOR");
         return !IsTrueLike(raw);
+    }
+
+    private static ISharpEmuLogSink ResolveSinkFromEnvironment()
+    {
+        var consoleSink = new ConsoleLogSink(
+            useColors: ResolveColorEnabledFromEnvironment(),
+            includeTimestamp: false);
+
+        var logFilePath = Environment.GetEnvironmentVariable("SHARPEMU_LOG_FILE");
+        if (!string.IsNullOrWhiteSpace(logFilePath))
+        {
+            try
+            {
+                var fileSink = new FileLogSink(logFilePath, append: true, includeTimestamp: true);
+                // The file gets every level; the configured minimum only
+                // limits what reaches the console.
+                _fileCapturesAllLevels = true;
+                return new CompositeLogSink(new MinimumLevelFilterSink(consoleSink), fileSink);
+            }
+            catch (Exception ex)
+            {
+                // Bootstrapping — the logging system is not yet active, so stderr is the only channel.
+                Console.Error.WriteLine($"[SHARPEMU_LOG] Failed to open log file '{logFilePath}': {ex.Message}");
+            }
+        }
+
+        return consoleSink;
+    }
+
+    /// <summary>
+    /// Forwards only entries at or above <see cref="MinimumLevel"/>. Wraps
+    /// the console sink when a file sink captures all levels.
+    /// </summary>
+    private sealed class MinimumLevelFilterSink : ISharpEmuLogSink
+    {
+        private readonly ISharpEmuLogSink _inner;
+
+        internal MinimumLevelFilterSink(ISharpEmuLogSink inner) => _inner = inner;
+
+        public void Write(in LogEntry entry)
+        {
+            if (entry.Level >= _minimumLevel)
+            {
+                _inner.Write(in entry);
+            }
+        }
     }
 
     private static bool IsTrueLike(string? text)
