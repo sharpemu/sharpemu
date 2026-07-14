@@ -9,6 +9,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Cpu.Native.Windows;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
@@ -126,27 +127,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 #pragma warning restore CS0649
 
 	private delegate int ExceptionHandlerDelegate(void* exceptionInfo);
-
-	private struct MEMORY_BASIC_INFORMATION64
-	{
-		public ulong BaseAddress;
-
-		public ulong AllocationBase;
-
-		public uint AllocationProtect;
-
-		public uint __alignment1;
-
-		public ulong RegionSize;
-
-		public uint State;
-
-		public uint Protect;
-
-		public uint Type;
-
-		public uint __alignment2;
-	}
 
 	private const ulong SYSTEM_RESERVED = 34359738368uL;
 
@@ -615,6 +595,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly IHostSymbolResolver _hostSymbols;
 
+	private readonly IHostMemory _hostMemory;
+
+	private readonly IHostFaultHandling _faultHandling;
+
 	private const int MinTlsPatchInstructionBytes = 9;
 
 	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
@@ -632,41 +616,41 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly nint RawUnhandledFilterPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawUnhandledFilterDelegateInstance);
 
-	private const int CTX_MXCSR = 52;
+	private const int CTX_MXCSR = Win64ContextOffsets.Mxcsr;
 
-	private const int CTX_RAX = 120;
+	private const int CTX_RAX = Win64ContextOffsets.Rax;
 
-	private const int CTX_RCX = 128;
+	private const int CTX_RCX = Win64ContextOffsets.Rcx;
 
-	private const int CTX_RDX = 136;
+	private const int CTX_RDX = Win64ContextOffsets.Rdx;
 
-	private const int CTX_RBX = 144;
+	private const int CTX_RBX = Win64ContextOffsets.Rbx;
 
-	private const int CTX_RSP = 152;
+	private const int CTX_RSP = Win64ContextOffsets.Rsp;
 
-	private const int CTX_RBP = 160;
+	private const int CTX_RBP = Win64ContextOffsets.Rbp;
 
-	private const int CTX_RSI = 168;
+	private const int CTX_RSI = Win64ContextOffsets.Rsi;
 
-	private const int CTX_RDI = 176;
+	private const int CTX_RDI = Win64ContextOffsets.Rdi;
 
-	private const int CTX_R8 = 184;
+	private const int CTX_R8 = Win64ContextOffsets.R8;
 
-	private const int CTX_R9 = 192;
+	private const int CTX_R9 = Win64ContextOffsets.R9;
 
-	private const int CTX_R10 = 200;
+	private const int CTX_R10 = Win64ContextOffsets.R10;
 
-	private const int CTX_R11 = 208;
+	private const int CTX_R11 = Win64ContextOffsets.R11;
 
-	private const int CTX_R12 = 216;
+	private const int CTX_R12 = Win64ContextOffsets.R12;
 
-	private const int CTX_R13 = 224;
+	private const int CTX_R13 = Win64ContextOffsets.R13;
 
-	private const int CTX_R14 = 232;
+	private const int CTX_R14 = Win64ContextOffsets.R14;
 
-	private const int CTX_R15 = 240;
+	private const int CTX_R15 = Win64ContextOffsets.R15;
 
-	private const int CTX_RIP = 248;
+	private const int CTX_RIP = Win64ContextOffsets.Rip;
 
 	private ExceptionHandlerDelegate? _handlerDelegate;
 
@@ -707,14 +691,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"[THREADMODE] {message} cycle={_threadModeCycleId} tid={HostPlatform.Current.Threading.CurrentThreadId} managed={Environment.CurrentManagedThreadId}");
 		Console.Error.Flush();
 	}
-
-	private const uint MEM_COMMIT = 4096u;
-
-	private const uint MEM_RESERVE = 8192u;
-
-	private const uint MEM_FREE = 65536u;
-
-	private const uint MEM_RELEASE = 32768u;
 
 	private const uint PAGE_EXECUTE = 16u;
 
@@ -873,12 +849,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_activeGuestThreadYieldReason = previousYieldReason;
 	}
 
-	public unsafe DirectExecutionBackend(IModuleManager moduleManager, IHostPlatform? hostPlatform = null)
+	public unsafe DirectExecutionBackend(IModuleManager moduleManager, IHostPlatform? hostPlatform = null, IHostFaultHandling? faultHandling = null)
 	{
 		_moduleManager = moduleManager ?? throw new ArgumentNullException("moduleManager");
 		_hostPlatform = hostPlatform ?? HostPlatform.Current;
 		_hostThreading = _hostPlatform.Threading;
 		_hostSymbols = _hostPlatform.Symbols;
+		_hostMemory = _hostPlatform.Memory;
+		_faultHandling = faultHandling ?? new WindowsFaultHandling(_hostMemory);
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = _hostThreading.AllocateTlsSlot();
@@ -903,7 +881,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			throw new InvalidOperationException("Failed to resolve kernel32 thread timing functions");
 		}
-		_tlsBaseAddress = (nint)VirtualAlloc(null, 4096u, 12288u, 4u);
+		_tlsBaseAddress = (nint)_hostMemory.Allocate(0, 4096u, HostPageProtection.ReadWrite);
 		if (_tlsBaseAddress == 0)
 		{
 			throw new OutOfMemoryException("Failed to allocate TLS base");
@@ -911,7 +889,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_ownedTlsBaseAddress = _tlsBaseAddress;
 		_ownsTlsBaseAddress = true;
 		SeedTlsLayout(_tlsBaseAddress);
-		_hostRspSlotStorage = (nint)VirtualAlloc(null, 4096u, 12288u, 4u);
+		_hostRspSlotStorage = (nint)_hostMemory.Allocate(0, 4096u, HostPageProtection.ReadWrite);
 		if (_hostRspSlotStorage == 0)
 		{
 			throw new OutOfMemoryException("Failed to allocate host stack slot storage");
@@ -1349,7 +1327,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		const uint intrinsicAllocationSize = 128u;
-		void* memory = VirtualAlloc(null, intrinsicAllocationSize, 12288u, 64u);
+		void* memory = (void*)_hostMemory.Allocate(0, intrinsicAllocationSize, HostPageProtection.ReadWriteExecute);
 		if (memory == null)
 		{
 			address = 0;
@@ -1367,14 +1345,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			*(nint*)((byte*)memory + 64) = _sleepAddress;
 		}
 		uint oldProtect = 0;
-		if (!VirtualProtect(memory, intrinsicAllocationSize, 32u, &oldProtect))
+		if (!_hostMemory.Protect((ulong)memory, intrinsicAllocationSize, HostPageProtection.ReadExecute, out oldProtect))
 		{
-			VirtualFree(memory, 0u, 32768u);
+			_hostMemory.Free((ulong)memory);
 			address = 0;
 			return false;
 		}
 
-		FlushInstructionCache(GetCurrentProcess(), memory, (nuint)code.Length);
+		_hostMemory.FlushInstructionCache((ulong)memory, (nuint)code.Length);
 		address = (nint)memory;
 		_importHandlerTrampolines.Add(address);
 		return true;
@@ -1659,7 +1637,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		uint oldProtect = default;
-		if (!VirtualProtect((void*)_tlsHandlerAddress, 16u, 64u, &oldProtect))
+		if (!_hostMemory.Protect((ulong)(void*)_tlsHandlerAddress, 16u, HostPageProtection.ReadWriteExecute, out oldProtect))
 		{
 			return;
 		}
@@ -1670,8 +1648,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			VirtualProtect((void*)_tlsHandlerAddress, 16u, oldProtect, &oldProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, 16u);
+			_hostMemory.ProtectRaw((ulong)(void*)_tlsHandlerAddress, 16u, oldProtect, out oldProtect);
+			_hostMemory.FlushInstructionCache((ulong)(void*)_tlsHandlerAddress, 16u);
 		}
 	}
 
@@ -1738,7 +1716,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 
 			const uint stubSize = 128;
-			var code = (byte*)VirtualAlloc(null, stubSize, 12288u, 64u);
+			var code = (byte*)_hostMemory.Allocate(0, stubSize, HostPageProtection.ReadWriteExecute);
 			if (code == null)
 			{
 				return 0;
@@ -1773,13 +1751,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Emit(0x41); Emit(0xFF); Emit(0xE2); // jmp r10
 
 			uint oldProtect = 0;
-			if (!VirtualProtect(code, stubSize, 32u, &oldProtect))
+			if (!_hostMemory.Protect((ulong)code, stubSize, HostPageProtection.ReadExecute, out oldProtect))
 			{
-				VirtualFree(code, 0u, 32768u);
+				_hostMemory.Free((ulong)code);
 				return 0;
 			}
 
-			FlushInstructionCache(GetCurrentProcess(), code, stubSize);
+			_hostMemory.FlushInstructionCache((ulong)code, stubSize);
 			Volatile.Write(ref _guestContextTransferStub, (nint)code);
 			return (nint)code;
 		}
@@ -1787,7 +1765,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe nint CreateImportHandlerTrampoline(int importIndex)
 	{
-		void* ptr = VirtualAlloc(null, 256u, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, 256u, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			return 0;
@@ -1905,12 +1883,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 95;
 			ptr2[num++] = 195;
 		uint num2 = default(uint);
-		if (!VirtualProtect(ptr, 256u, 32u, &num2))
+		if (!_hostMemory.Protect((ulong)ptr, 256u, HostPageProtection.ReadExecute, out num2))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for import dispatch stub at 0x{(nint)ptr:X16}");
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, 256u);
+		_hostMemory.FlushInstructionCache((ulong)ptr, 256u);
 		return (nint)ptr;
 		}
 		catch
@@ -1922,7 +1900,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private unsafe bool PatchImportStub(nint address, nint trampoline)
 	{
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, 16u, 64u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)address, 16u, HostPageProtection.ReadWriteExecute, out flNewProtect))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for import stub at 0x{address:X16}");
 			return false;
@@ -1942,8 +1920,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			VirtualProtect((void*)address, 16u, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, 16u);
+			_hostMemory.ProtectRaw((ulong)(void*)address, 16u, flNewProtect, out flNewProtect);
+			_hostMemory.FlushInstructionCache((ulong)(void*)address, 16u);
 		}
 	}
 
@@ -1953,7 +1931,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			if (importHandlerTrampoline != 0)
 			{
-				VirtualFree((void*)importHandlerTrampoline, 0u, 32768u);
+				_hostMemory.Free((ulong)importHandlerTrampoline);
 			}
 		}
 		_importHandlerTrampolines.Clear();
@@ -1964,7 +1942,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_tlsHandlerAddress = (nint)TryAllocateNearEntry(TlsHandlerRegionSize);
 		if (_tlsHandlerAddress == 0)
 		{
-			_tlsHandlerAddress = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
+			_tlsHandlerAddress = (nint)_hostMemory.Allocate(0, TlsHandlerRegionSize, HostPageProtection.ReadWriteExecute);
 		}
 		if (_tlsHandlerAddress == 0)
 		{
@@ -1992,18 +1970,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		tlsHandlerAddress[num++] = 195;
 		_tlsPatchStubOffset = (num + 15) & ~15;
 		uint num2 = default(uint);
-		if (!VirtualProtect((void*)_tlsHandlerAddress, TlsHandlerRegionSize, 32u, &num2))
+		if (!_hostMemory.Protect((ulong)(void*)_tlsHandlerAddress, TlsHandlerRegionSize, HostPageProtection.ReadExecute, out num2))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for TLS handler at 0x{_tlsHandlerAddress:X16}");
 			return;
 		}
-		FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, TlsHandlerRegionSize);
+		_hostMemory.FlushInstructionCache((ulong)(void*)_tlsHandlerAddress, TlsHandlerRegionSize);
 		Console.Error.WriteLine($"[LOADER][INFO] TLS handler at 0x{_tlsHandlerAddress:X16}");
 	}
 
-	private unsafe static nint CreateUnresolvedReturnStub()
+	private unsafe nint CreateUnresolvedReturnStub()
 	{
-		void* ptr = VirtualAlloc(null, 4096u, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, 4096u, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			return 0;
@@ -2017,19 +1995,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[i] = 144;
 		}
 		uint num = default(uint);
-		if (!VirtualProtect(ptr, 4096u, 32u, &num))
+		if (!_hostMemory.Protect((ulong)ptr, 4096u, HostPageProtection.ReadExecute, out num))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for unresolved return stub at 0x{(nint)ptr:X16}");
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, 16u);
+		_hostMemory.FlushInstructionCache((ulong)ptr, 16u);
 		return (nint)ptr;
 	}
 
 	private unsafe nint CreateGuestReturnStub()
 	{
 		const uint stubSize = 256u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, stubSize, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			return 0;
@@ -2083,138 +2061,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0xC3);
 
 		uint oldProtect = default;
-		if (!VirtualProtect(ptr, stubSize, 32u, &oldProtect))
+		if (!_hostMemory.Protect((ulong)ptr, stubSize, HostPageProtection.ReadExecute, out oldProtect))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for guest return stub at 0x{(nint)ptr:X16}");
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
-		return (nint)ptr;
-	}
-
-	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
-	{
-		const uint stubSize = 256u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
-		if (ptr == null)
-		{
-			return 0;
-		}
-
-		byte* code = (byte*)ptr;
-		int offset = 0;
-		// Native pre-filter: these exception codes are raised while the thread can be in
-		// cooperative GC mode (a C# throw is RaiseException(0xE0434352) on the throwing
-		// thread; FailFast/stack-overflow arrive mid-runtime-failure). Entering the managed
-		// handler then trips the CLR's reverse-P/Invoke check and kills the process with
-		// "Invalid Program: attempted to call a UnmanagedCallersOnly method from managed
-		// code" — this is why no managed throw (even one with a catch handler) ever
-		// survived inside the emulator. Continue the handler search without touching
-		// managed code; the CLR's own VEH handles its exceptions. MSVC C++ exceptions
-		// (Vulkan drivers, host CRT) are excluded too: the managed handler only ever
-		// returned CONTINUE_SEARCH for them.
-		ReadOnlySpan<uint> nonManagedExceptionCodes = [0xE0434352u, MSVC_CPP_EXCEPTION, 0xC0000409u, 0xC00000FDu];
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx] (ExceptionRecord*)
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00);                                   // mov eax, [rax] (ExceptionCode)
-		var passJumpOffsets = stackalloc int[nonManagedExceptionCodes.Length];
-		for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
-		{
-			EmitByte(code, ref offset, 0x3D);                                                                 // cmp eax, imm32
-			EmitUInt32(code, ref offset, nonManagedExceptionCodes[i]);
-			EmitByte(code, ref offset, 0x74);                                                                 // je pass
-			passJumpOffsets[i] = offset;
-			EmitByte(code, ref offset, 0x00);
-		}
-		EmitByte(code, ref offset, 0xEB); EmitByte(code, ref offset, 0x03);                                   // jmp over pass block
-		int passOffset = offset;
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);                                   // pass: xor eax, eax (EXCEPTION_CONTINUE_SEARCH)
-		EmitByte(code, ref offset, 0xC3);                                                                     // ret
-		for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
-		{
-			code[passJumpOffsets[i]] = checked((byte)(passOffset - (passJumpOffsets[i] + 1)));
-		}
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x54); // push r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xCD); // mov r13, rcx
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[8]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 8u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x83); // jae guestStack
-		int aboveStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[0x10]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 0x10u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x82); // jb guestStack
-		int belowStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xE9);
-		int hostRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int guestStackOffset = offset;
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xB9);
-		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = _tlsGetValueAddress;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingTlsJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x18); // mov r11, [rax]
-		EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xDB); // test r11, r11
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingHostStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xDC); // mov rsp, r11
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xE9);
-		int guestRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int passThroughOffset = offset;
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
-		int restoreOffset = offset;
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-		EmitByte(code, ref offset, 0xC3);
-
-		*(int*)(code + aboveStackJump) = guestStackOffset - (aboveStackJump + sizeof(int));
-		*(int*)(code + belowStackJump) = guestStackOffset - (belowStackJump + sizeof(int));
-		*(int*)(code + hostRestoreJump) = restoreOffset - (hostRestoreJump + sizeof(int));
-		*(int*)(code + missingTlsJump) = passThroughOffset - (missingTlsJump + sizeof(int));
-		*(int*)(code + missingHostStackJump) = passThroughOffset - (missingHostStackJump + sizeof(int));
-		*(int*)(code + guestRestoreJump) = restoreOffset - (guestRestoreJump + sizeof(int));
-
-		uint oldProtect = default;
-		if (!VirtualProtect(ptr, stubSize, 32u, &oldProtect))
-		{
-			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for exception handler trampoline at 0x{(nint)ptr:X16}");
-			return 0;
-		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
+		_hostMemory.FlushInstructionCache((ulong)ptr, (nuint)offset);
 		return (nint)ptr;
 	}
 
@@ -2236,7 +2088,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return null;
 	}
 
-	private unsafe static bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
+	private unsafe bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
 	{
 		memory = null;
 		ulong num;
@@ -2257,7 +2109,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = baseAddress - num2;
 		}
-		void* ptr = VirtualAlloc((void*)num, size, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(num, size, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			return false;
@@ -2276,7 +2128,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int num9 = 0;
 		while (num < num2)
 		{
-			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
+			if (!_hostMemory.Query(num, out var lpBuffer) || lpBuffer.RegionSize == 0)
 			{
 				num += 4096uL;
 				continue;
@@ -2287,8 +2139,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				num6 = num2;
 			}
-			uint num7 = lpBuffer.Protect & 0xFF;
-			bool flag = lpBuffer.State == 4096 && (lpBuffer.Protect & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
+			uint num7 = lpBuffer.RawProtection & 0xFF;
+			bool flag = lpBuffer.State == HostRegionState.Committed && (lpBuffer.RawProtection & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
 			bool flag2 = num7 == PAGE_EXECUTE || num7 == 32 || num7 == 64 || num7 == PAGE_EXECUTE_WRITECOPY;
 			if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
 			{
@@ -2373,7 +2225,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		byte b5 = (byte)(0xC0 | ((num4 & 7) << 3) | (num4 & 7));
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, (nuint)num2, 64u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)address, (nuint)num2, HostPageProtection.ReadWriteExecute, out flNewProtect))
 		{
 			return false;
 		}
@@ -2389,8 +2241,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			VirtualProtect((void*)address, (nuint)num2, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)num2);
+			_hostMemory.ProtectRaw((ulong)(void*)address, (nuint)num2, flNewProtect, out flNewProtect);
+			_hostMemory.FlushInstructionCache((ulong)(void*)address, (nuint)num2);
 		}
 		return true;
 	}
@@ -2457,7 +2309,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private unsafe bool PatchTlsLoadInstruction(nint address, int instructionLength, int destinationRegister)
 	{
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)address, (nuint)instructionLength, HostPageProtection.ReadWriteExecute, out flNewProtect))
 		{
 			return false;
 		}
@@ -2491,8 +2343,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			VirtualProtect((void*)address, (nuint)instructionLength, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)instructionLength);
+			_hostMemory.ProtectRaw((ulong)(void*)address, (nuint)instructionLength, flNewProtect, out flNewProtect);
+			_hostMemory.FlushInstructionCache((ulong)(void*)address, (nuint)instructionLength);
 		}
 	}
 
@@ -2544,12 +2396,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr[num2++] = 144;
 		}
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)num, 32u, 32u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)num, 32u, HostPageProtection.ReadExecute, out flNewProtect))
 		{
 			Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for TLS store helper at 0x{num:X16}");
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), (void*)num, 32u);
+		_hostMemory.FlushInstructionCache((ulong)(void*)num, 32u);
 		return num;
 	}
 
@@ -2568,7 +2420,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		nint result = _tlsHandlerAddress + _tlsPatchStubOffset;
 		_tlsPatchStubOffset += num;
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)result, (nuint)num, 64u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)result, (nuint)num, HostPageProtection.ReadWriteExecute, out flNewProtect))
 		{
 			return 0;
 		}
@@ -2582,7 +2434,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &flNewProtect))
+		if (!_hostMemory.Protect((ulong)(void*)address, (nuint)instructionLength, HostPageProtection.ReadWriteExecute, out flNewProtect))
 		{
 			return false;
 		}
@@ -2603,17 +2455,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			VirtualProtect((void*)address, (nuint)instructionLength, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)instructionLength);
+			_hostMemory.ProtectRaw((ulong)(void*)address, (nuint)instructionLength, flNewProtect, out flNewProtect);
+			_hostMemory.FlushInstructionCache((ulong)(void*)address, (nuint)instructionLength);
 		}
 		return true;
 	}
 
 	private unsafe void TryPreReservePrtAperture(ulong baseAddress, ulong size)
 	{
-		if (VirtualQuery((void*)baseAddress, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 && lpBuffer.State != 65536)
+		if (_hostMemory.Query(baseAddress, out var lpBuffer) && lpBuffer.State != HostRegionState.Free)
 		{
-			Console.Error.WriteLine($"[LOADER][INFO] PRT aperture at 0x{baseAddress:X16} already in use (state=0x{lpBuffer.State:X}), will use lazy-commit");
+			Console.Error.WriteLine($"[LOADER][INFO] PRT aperture at 0x{baseAddress:X16} already in use (state=0x{lpBuffer.RawState:X}), will use lazy-commit");
 			return;
 		}
 		ulong num = baseAddress;
@@ -2625,8 +2477,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			ulong val = num2 - num;
 			num5 = (nuint)Math.Min(2097152uL, val);
-			void* ptr = VirtualAlloc((void*)num, num5, 8192u, 4u);
-			if (ptr != null)
+			if (_hostMemory.Reserve(num, num5, HostPageProtection.ReadWrite) != 0)
 			{
 				num3++;
 			}
@@ -2648,8 +2499,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int num8 = 0;
 		for (; num6 < num7; num6 += 2097152)
 		{
-			void* ptr2 = VirtualAlloc((void*)num6, 2097152u, 4096u, 4u);
-			if (ptr2 != null)
+			if (_hostMemory.Commit(num6, 2097152u, HostPageProtection.ReadWrite))
 			{
 				num8++;
 			}
@@ -3833,7 +3683,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return GuestNativeCallExitReason.Exception;
 		}
 		const uint stubSize = 512u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, stubSize, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			reason = "failed to allocate executable memory for guest thread stub";
@@ -3970,12 +3820,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
             return GuestNativeCallExitReason.Exception;
         }
         uint oldProtect = default(uint);
-        if (!VirtualProtect(ptr, stubSize, 64u, &oldProtect))
+        if (!_hostMemory.Protect((ulong)ptr, stubSize, HostPageProtection.ReadWriteExecute, out oldProtect))
         {
             reason = $"VirtualProtect failed for guest thread entry stub at 0x{(nint)ptr:X16}";
             return GuestNativeCallExitReason.Exception;
         }
-        FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
+        _hostMemory.FlushInstructionCache((ulong)ptr, stubSize);
         ActiveGuestThreadYieldRequested = false;
         ActiveGuestThreadYieldReason = null;
         var nativeReturn = RunGuestEntryStub(ptr, hostRspSlot);
@@ -4013,7 +3863,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
             previousForcedExit,
             previousYieldRequested,
             previousYieldReason);
-        VirtualFree(ptr, 0u, 32768u);
+        _hostMemory.Free((ulong)ptr);
     }
 }
 
@@ -4031,7 +3881,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return GuestNativeCallExitReason.Exception;
 		}
 		const uint stubSize = 512u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, stubSize, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			reason = "failed to allocate executable memory for guest thread stub";
@@ -4113,12 +3963,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return GuestNativeCallExitReason.Exception;
 			}
 			uint oldProtect = default(uint);
-			if (!VirtualProtect(ptr, stubSize, 64u, &oldProtect))
+			if (!_hostMemory.Protect((ulong)ptr, stubSize, HostPageProtection.ReadWriteExecute, out oldProtect))
 			{
 				reason = $"VirtualProtect failed for guest continuation stub at 0x{(nint)ptr:X16}";
 				return GuestNativeCallExitReason.Exception;
 			}
-			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
+			_hostMemory.FlushInstructionCache((ulong)ptr, stubSize);
 			ActiveGuestThreadYieldRequested = false;
 			ActiveGuestThreadYieldReason = null;
 
@@ -4160,7 +4010,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				previousForcedExit,
 				previousYieldRequested,
 				previousYieldReason);
-			VirtualFree(ptr, 0u, 32768u);
+			_hostMemory.Free((ulong)ptr);
 		}
 	}
 
@@ -4244,7 +4094,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] StackTop: 0x{num:X16}");
 		const uint stubSize = 512u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
+		void* ptr = (void*)_hostMemory.Allocate(0, stubSize, HostPageProtection.ReadWriteExecute);
 		if (ptr == null)
 		{
 			LastError = "Failed to allocate executable memory for stub";
@@ -4377,13 +4227,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return false;
 			}
 			uint num5 = default(uint);
-			if (!VirtualProtect(ptr, stubSize, 64u, &num5))
+			if (!_hostMemory.Protect((ulong)ptr, stubSize, HostPageProtection.ReadWriteExecute, out num5))
 			{
 				LastError = $"VirtualProtect failed for guest entry stub at 0x{(nint)ptr:X16}";
 				result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
 				return false;
 			}
-			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
+			_hostMemory.FlushInstructionCache((ulong)ptr, stubSize);
 			if (_hostRspSlotStorage != 0)
 			{
 				*(ulong*)_hostRspSlotStorage = num2;
@@ -4462,7 +4312,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				previousForcedExit,
 				previousYieldRequested,
 				previousYieldReason);
-			VirtualFree(ptr, 0u, 32768u);
+			_hostMemory.Free((ulong)ptr);
 		}
 	}
 
@@ -4742,15 +4592,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
-	[DllImport("kernel32.dll")]
-	private unsafe static extern void* AddVectoredExceptionHandler(uint first, IntPtr handler);
-
-	[DllImport("kernel32.dll")]
-	private unsafe static extern uint RemoveVectoredExceptionHandler(void* handle);
-
-	[DllImport("kernel32.dll")]
-	private static extern IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
-
 	public unsafe void Dispose()
 	{
 		if (!RequestGuestThreadTeardown(2000))
@@ -4773,28 +4614,28 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		StopStallWatchdog();
 		if (_exceptionHandler != 0)
 		{
-			RemoveVectoredExceptionHandler((void*)_exceptionHandler);
+			_faultHandling.RemoveHandler(_exceptionHandler);
 			_exceptionHandler = 0;
 		}
 		if (_rawExceptionHandler != 0)
 		{
-			RemoveVectoredExceptionHandler((void*)_rawExceptionHandler);
+			_faultHandling.RemoveHandler(_rawExceptionHandler);
 			_rawExceptionHandler = 0;
 		}
 		if (_rawExceptionHandlerStub != 0)
 		{
-			VirtualFree((void*)_rawExceptionHandlerStub, 0u, 32768u);
+			_faultHandling.FreeThunk(_rawExceptionHandlerStub);
 			_rawExceptionHandlerStub = 0;
 		}
 		if (_exceptionHandlerStub != 0)
 		{
-			VirtualFree((void*)_exceptionHandlerStub, 0u, 32768u);
+			_faultHandling.FreeThunk(_exceptionHandlerStub);
 			_exceptionHandlerStub = 0;
 		}
 		if (_unhandledFilterStub != 0)
 		{
-			SetUnhandledExceptionFilter(0);
-			VirtualFree((void*)_unhandledFilterStub, 0u, 32768u);
+			_faultHandling.SetUnhandledFilter(0);
+			_faultHandling.FreeThunk(_unhandledFilterStub);
 			_unhandledFilterStub = 0;
 		}
 		if (_handlerHandle.IsAllocated)
@@ -4812,7 +4653,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		if (_ownedTlsBaseAddress != 0)
 		{
-			VirtualFree((void*)_ownedTlsBaseAddress, 0u, 32768u);
+			_hostMemory.Free((ulong)_ownedTlsBaseAddress);
 			_ownedTlsBaseAddress = 0;
 		}
 		_tlsBaseAddress = 0;
@@ -4823,19 +4664,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				if (num3 != 0)
 				{
-					VirtualFree((void*)num3, 0u, 32768u);
+					_hostMemory.Free((ulong)num3);
 				}
 			}
 			_tlsModuleBases.Clear();
 		}
 		if (_tlsHandlerAddress != 0)
 		{
-			VirtualFree((void*)_tlsHandlerAddress, 0u, 32768u);
+			_hostMemory.Free((ulong)_tlsHandlerAddress);
 			_tlsHandlerAddress = 0;
 		}
 		if (_hostRspSlotStorage != 0)
 		{
-			VirtualFree((void*)_hostRspSlotStorage, 0u, 32768u);
+			_hostMemory.Free((ulong)_hostRspSlotStorage);
 			_hostRspSlotStorage = 0;
 		}
 		if (_guestTlsBaseTlsIndex != uint.MaxValue)
@@ -4850,17 +4691,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		if (_unresolvedReturnStub != 0)
 		{
-			VirtualFree((void*)_unresolvedReturnStub, 0u, 32768u);
+			_hostMemory.Free((ulong)_unresolvedReturnStub);
 			_unresolvedReturnStub = 0;
 		}
 		if (_guestReturnStub != 0)
 		{
-			VirtualFree((void*)_guestReturnStub, 0u, 32768u);
+			_hostMemory.Free((ulong)_guestReturnStub);
 			_guestReturnStub = 0;
 		}
 		if (_guestContextTransferStub != 0)
 		{
-			VirtualFree((void*)_guestContextTransferStub, 0u, 32768u);
+			_hostMemory.Free((ulong)_guestContextTransferStub);
 			_guestContextTransferStub = 0;
 		}
 		foreach (var frame in _guestContextTransferFrames.Values)
@@ -4873,40 +4714,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_guestContextTransferFrames.Dispose();
 		if (_lowIndexedTableScratch != 0)
 		{
-			VirtualFree((void*)_lowIndexedTableScratch, 0u, 32768u);
+			_hostMemory.Free((ulong)_lowIndexedTableScratch);
 			_lowIndexedTableScratch = 0;
 		}
 		if (_stackGuardCompareScratch != 0)
 		{
-			VirtualFree((void*)_stackGuardCompareScratch, 0u, 32768u);
+			_hostMemory.Free((ulong)_stackGuardCompareScratch);
 			_stackGuardCompareScratch = 0;
 		}
 		if (_nullObjectStoreScratch != 0)
 		{
-			VirtualFree((void*)_nullObjectStoreScratch, 0u, 32768u);
+			_hostMemory.Free((ulong)_nullObjectStoreScratch);
 			_nullObjectStoreScratch = 0;
 		}
 		Volatile.Write(ref _globalUnresolvedReturnStub, 0uL);
 	}
-
-	[DllImport("kernel32.dll")]
-	private unsafe static extern void* VirtualAlloc(void* lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
-
-	[DllImport("kernel32.dll")]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private unsafe static extern bool VirtualFree(void* lpAddress, nuint dwSize, uint dwFreeType);
-
-	[DllImport("kernel32.dll")]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private unsafe static extern bool VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, uint* lpflOldProtect);
-
-	[DllImport("kernel32.dll")]
-	private unsafe static extern void* GetCurrentProcess();
-
-	[DllImport("kernel32.dll")]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private unsafe static extern bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
-
-	[DllImport("kernel32.dll")]
-	private unsafe static extern nuint VirtualQuery(void* lpAddress, out MEMORY_BASIC_INFORMATION64 lpBuffer, nuint dwLength);
 }

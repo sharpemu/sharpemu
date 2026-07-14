@@ -8,8 +8,10 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Cpu.Native.Windows;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -69,23 +71,23 @@ public sealed partial class DirectExecutionBackend
 	private unsafe static int TryRecoverUnresolvedSentinel(void* exceptionInfo)
 	{
 		EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-		if (exceptionRecord->ExceptionCode != 3221225477u)
+		if (exceptionRecord->ExceptionCode != WindowsFaultCodes.AccessViolation)
 		{
 			return 0;
 		}
 		void* contextRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ContextRecord;
-		ulong value = ReadCtxU64(contextRecord, 248);
+		ulong value = ReadCtxU64(contextRecord, CTX_RIP);
 		ulong value2 = (ulong)exceptionRecord->ExceptionAddress;
 		if (!IsUnresolvedSentinel(value) && !IsUnresolvedSentinel(value2))
 		{
 			return 0;
 		}
-		ulong rsp = ReadCtxU64(contextRecord, 152);
-		WriteCtxU64(contextRecord, 120, 0uL);
+		ulong rsp = ReadCtxU64(contextRecord, CTX_RSP);
+		WriteCtxU64(contextRecord, CTX_RAX, 0uL);
 		if (TryGetPlausibleReturnFromStack(rsp, out var returnRip, out var nextRsp))
 		{
-			WriteCtxU64(contextRecord, 152, nextRsp);
-			WriteCtxU64(contextRecord, 248, returnRip);
+			WriteCtxU64(contextRecord, CTX_RSP, nextRsp);
+			WriteCtxU64(contextRecord, CTX_RIP, returnRip);
 			Interlocked.Increment(ref _rawSentinelRecoveries);
 			if (LogThreadMode)
 			{
@@ -1684,9 +1686,9 @@ public sealed partial class DirectExecutionBackend
 		{
 			var candidateBase = ImportStubRegionCanonicalBase -
 				(ulong)candidateIndex * ImportStubRegionAddressStride;
-			if (VirtualQuery((void*)candidateBase, out var memoryInfo, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+			if (!_hostMemory.Query(candidateBase, out var memoryInfo) ||
 				memoryInfo.RegionSize == 0 ||
-				memoryInfo.State != 4096)
+				memoryInfo.State != HostRegionState.Committed)
 			{
 				continue;
 			}
@@ -2025,7 +2027,7 @@ public sealed partial class DirectExecutionBackend
 		uint flNewProtect = default(uint);
 		try
 		{
-			if (Marshal.ReadByte(num2) != 232 || !VirtualProtect((void*)num, 5u, 64u, &flNewProtect))
+			if (Marshal.ReadByte(num2) != 232 || !_hostMemory.Protect((ulong)(void*)num, 5u, HostPageProtection.ReadWriteExecute, out flNewProtect))
 			{
 				return;
 			}
@@ -2033,7 +2035,7 @@ public sealed partial class DirectExecutionBackend
 			{
 				Marshal.WriteByte(num2 + i, 144);
 			}
-			FlushInstructionCache(GetCurrentProcess(), (void*)num, 5u);
+			_hostMemory.FlushInstructionCache((ulong)(void*)num, 5u);
 			_patchedEa020eLookupCall = true;
 			Console.Error.WriteLine($"[LOADER][WARNING] Import#{dispatchIndex}: patched hash-lookup call at 0x{num:X16} -> NOP*5");
 		}
@@ -2044,7 +2046,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			if (flNewProtect != 0)
 			{
-				VirtualProtect((void*)num, 5u, flNewProtect, &flNewProtect);
+				_hostMemory.ProtectRaw((ulong)(void*)num, 5u, flNewProtect, out flNewProtect);
 			}
 		}
 	}

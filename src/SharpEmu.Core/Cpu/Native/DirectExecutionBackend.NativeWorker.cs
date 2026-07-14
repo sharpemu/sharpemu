@@ -244,12 +244,12 @@ public sealed partial class DirectExecutionBackend
 		private bool Initialize()
 		{
 			_selfHandle = GCHandle.Alloc(this);
-			_controlBlock = VirtualAlloc(null, 4096u, 12288u, 4u);
+			_controlBlock = (void*)_backend._hostMemory.Allocate(0, 4096u, HostPageProtection.ReadWrite);
 			if (_controlBlock == null)
 			{
 				return false;
 			}
-			_loopStub = VirtualAlloc(null, LoopStubSize, 12288u, 64u);
+			_loopStub = (void*)_backend._hostMemory.Allocate(0, LoopStubSize, HostPageProtection.ReadWriteExecute);
 			if (_loopStub == null)
 			{
 				return false;
@@ -331,11 +331,11 @@ public sealed partial class DirectExecutionBackend
 			*(int*)(code + skipJump) = skipEntryOffset - (skipJump + sizeof(int));
 
 			uint oldProtect = 0;
-			if (!VirtualProtect(_loopStub, LoopStubSize, 32u, &oldProtect))
+			if (!_backend._hostMemory.Protect((ulong)_loopStub, LoopStubSize, HostPageProtection.ReadExecute, out oldProtect))
 			{
 				return false;
 			}
-			FlushInstructionCache(GetCurrentProcess(), _loopStub, LoopStubSize);
+			_backend._hostMemory.FlushInstructionCache((ulong)_loopStub, LoopStubSize);
 			_threadHandle = _backend._hostThreading.CreateNativeThread(
 				(nint)_loopStub,
 				0,
@@ -543,12 +543,12 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (_loopStub != null)
 			{
-				VirtualFree(_loopStub, 0u, 32768u);
+				_backend._hostMemory.Free((ulong)_loopStub);
 				_loopStub = null;
 			}
 			if (_controlBlock != null)
 			{
-				VirtualFree(_controlBlock, 0u, 32768u);
+				_backend._hostMemory.Free((ulong)_controlBlock);
 				_controlBlock = null;
 			}
 			if (_selfHandle.IsAllocated)

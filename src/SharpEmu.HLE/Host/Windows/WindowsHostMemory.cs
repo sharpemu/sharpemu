@@ -68,8 +68,10 @@ internal sealed unsafe class WindowsHostMemory : IHostMemory
             mbi.AllocationBase,
             mbi.RegionSize,
             ToRegionState(mbi.State),
+            mbi.State,
             ToHostProtection(mbi.Protect),
-            mbi.Protect);
+            mbi.Protect,
+            mbi.AllocationProtect);
         return true;
     }
 

@@ -4,15 +4,17 @@
 namespace SharpEmu.HLE.Host;
 
 /// <summary>
-/// Result of <see cref="IHostMemory.Query"/>. <see cref="RawProtection"/> carries
-/// the untranslated OS protection value so call sites migrated from direct
-/// VirtualQuery use can keep comparing the exact native constants they compared
-/// before; <see cref="Protection"/> is a best-effort neutral view.
+/// Result of <see cref="IHostMemory.Query"/>. The Raw* fields carry the
+/// untranslated OS values so call sites migrated from direct VirtualQuery use
+/// keep comparing (and logging) the exact native words they did before;
+/// <see cref="State"/> and <see cref="Protection"/> are neutral views.
 /// </summary>
 public readonly record struct HostRegionInfo(
     ulong BaseAddress,
     ulong AllocationBase,
     ulong RegionSize,
     HostRegionState State,
+    uint RawState,
     HostPageProtection Protection,
-    uint RawProtection);
+    uint RawProtection,
+    uint RawAllocationProtection);
