@@ -7,6 +7,9 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Json;
 
+// JsonObjectHeap is shared static state; both Json test classes join one collection so xUnit
+// does not run them in parallel against it.
+[Collection("JsonObjectHeap")]
 public sealed class JsonValueExportsTests
 {
     private const ulong ThisAddress = 0x1_0000_0000;

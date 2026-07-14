@@ -78,6 +78,30 @@ public static class JsonExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // sce::Json::Initializer::setGlobalNullAccessCallback(const Value& (*)(ValueType, const Value*, void*), void*)
+    // Registers the guest hook invoked when a Value is accessed as the wrong type. Quake calls it
+    // during kexPSNWebAPI::Initialize and treats a non-zero return as a fatal init failure.
+    [SysAbiExport(
+        Nid = "+drDFyAS6u4",
+        ExportName = "_ZN3sce4Json11Initializer27setGlobalNullAccessCallbackEPFRKNS0_5ValueENS0_9ValueTypeEPS3_PvES7_",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitializerSetGlobalNullAccessCallback(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        if (thisAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        JsonObjectHeap.GlobalNullAccessCallback = ctx[CpuRegister.Rsi];
+        JsonObjectHeap.GlobalNullAccessCallbackContext = ctx[CpuRegister.Rdx];
+        TraceJson("Initializer.setGlobalNullAccessCallback", thisAddress, ctx[CpuRegister.Rsi]);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "WSOuge5IsCg",
         ExportName = "_ZN3sce4Json14InitParameter2C1Ev",

@@ -80,6 +80,13 @@ internal static class JsonObjectHeap
 
     public static ConcurrentDictionary<ulong, string> Strings { get; } = new();
 
+    // Guest function the library should call when a Value is read as the wrong type. This HLE
+    // never dereferences missing members (shadows degrade to defaults), so the hook is stored for
+    // fidelity but not invoked.
+    public static ulong GlobalNullAccessCallback;
+
+    public static ulong GlobalNullAccessCallbackContext;
+
     public static void SetValue(ulong address, JsonValueState state) => Values[address] = state;
 
     public static void RemoveValue(ulong address) => Values.TryRemove(address, out _);
@@ -97,5 +104,7 @@ internal static class JsonObjectHeap
     {
         Values.Clear();
         Strings.Clear();
+        GlobalNullAccessCallback = 0;
+        GlobalNullAccessCallbackContext = 0;
     }
 }
