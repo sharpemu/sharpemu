@@ -1499,6 +1499,7 @@ public partial class MainWindow : Window
             2 => "Exit.EbootNotFound",
             3 => "Exit.RuntimeException",
             4 => "Exit.EmulationError",
+            -1073741819 => "Exit.EmulationError",
             _ => "Exit.Unknown",
         };
         var meaning = Localization.Instance.Get(meaningKey);
