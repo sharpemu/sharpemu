@@ -5,6 +5,9 @@
 
 """Offline check: SysAbiExport ExportName must hash to its Nid (name2nid).
 
+NIDs absent from aerolib.bin are skipped (unknown/unresolved symbols).
+Known historic mislabels may be allowlisted with a one-line reason.
+
 Run from the repository root:
   python scripts/check_sysabi_aerolib.py
   python scripts/check_sysabi_aerolib.py --strict
@@ -22,9 +25,16 @@ from binascii import unhexlify as uhx
 from pathlib import Path
 
 SRC_ROOT = Path("src")
+AEROLIB_BIN = Path("src/SharpEmu.HLE/Aerolib/aerolib.bin")
 SYSABI_EXPORT_RE = re.compile(r"\[SysAbiExport\((.*?)\)\]", re.DOTALL)
 NID_RE = re.compile(r'Nid\s*=\s*"([^"]+)"')
 EXPORT_NAME_RE = re.compile(r'ExportName\s*=\s*"([^"]+)"')
+
+# NID -> reason. Keep minimal; fix ExportName when safe instead of growing this list.
+ALLOWLISTED_NIDS: dict[str, str] = {
+    "KMcEa+rHsIo": "Historic kernel MapMemory stub bound to sceAvPlayerAddSource NID; API rewrite deferred.",
+    "WV1GwM32NgY": "Historic WebApi2 init alias for PushEventCreateHandle NID; ABI rewrite deferred.",
+}
 
 
 def name2nid(name: str) -> str:
@@ -44,6 +54,29 @@ def find_repo_root() -> Path:
     raise SystemExit("Run from the repository root (src/ and scripts/ expected).")
 
 
+def load_aerolib_nids(aerolib_path: Path) -> set[str]:
+    data = aerolib_path.read_bytes()
+    if len(data) < 4:
+        raise SystemExit(f"Aerolib binary too small: {aerolib_path}")
+
+    count = struct.unpack_from("<I", data, 0)[0]
+    offset = 4
+    nids: set[str] = set()
+    for _ in range(count):
+        if offset >= len(data):
+            raise SystemExit(f"Truncated aerolib.bin while reading NIDs: {aerolib_path}")
+        nid_len = data[offset]
+        offset += 1
+        nid = data[offset : offset + nid_len].decode("utf-8")
+        offset += nid_len
+        if offset + 2 > len(data):
+            raise SystemExit(f"Truncated aerolib.bin name length: {aerolib_path}")
+        name_len = struct.unpack_from("<H", data, offset)[0]
+        offset += 2 + name_len
+        nids.add(nid)
+    return nids
+
+
 def iter_sysabi_exports(cs_path: Path, text: str):
     for match in SYSABI_EXPORT_RE.finditer(text):
         block = match.group(1)
@@ -54,7 +87,6 @@ def iter_sysabi_exports(cs_path: Path, text: str):
 
         nid = nid_match.group(1)
         export_name = export_match.group(1)
-        # Prefer the Nid= attribute line for reporter location.
         nid_attr = f'Nid = "{nid}"'
         abs_pos = text.find(nid_attr, match.start(), match.end())
         if abs_pos < 0:
@@ -63,17 +95,31 @@ def iter_sysabi_exports(cs_path: Path, text: str):
         yield cs_path, line, nid, export_name
 
 
-def scan(src_root: Path):
+def scan(src_root: Path, catalog_nids: set[str]):
     checked = 0
     mismatches = []
+    skipped_no_catalog = 0
+    allowlisted = 0
+
     for cs_path in sorted(src_root.rglob("*.cs")):
         text = cs_path.read_text(encoding="utf-8")
         for path, line, nid, export_name in iter_sysabi_exports(cs_path, text):
             checked += 1
             computed = name2nid(export_name)
-            if computed != nid:
-                mismatches.append((path, line, nid, export_name, computed))
-    return checked, mismatches
+            if computed == nid:
+                continue
+
+            if nid not in catalog_nids:
+                skipped_no_catalog += 1
+                continue
+
+            if nid in ALLOWLISTED_NIDS:
+                allowlisted += 1
+                continue
+
+            mismatches.append((path, line, nid, export_name, computed))
+
+    return checked, mismatches, skipped_no_catalog, allowlisted
 
 
 def main() -> int:
@@ -83,7 +129,7 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit 1 when any ExportName does not hash to its Nid.",
+        help="Exit 1 when any non-skipped/non-allowlisted ExportName does not hash to its Nid.",
     )
     parser.add_argument(
         "--quiet",
@@ -93,9 +139,15 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = find_repo_root()
-    src_root = repo_root / SRC_ROOT
-    checked, mismatches = scan(src_root)
-    ok = checked - len(mismatches)
+    aerolib_path = repo_root / AEROLIB_BIN
+    if not aerolib_path.is_file():
+        raise SystemExit(f"Missing Aerolib catalog: {aerolib_path.as_posix()}")
+
+    catalog_nids = load_aerolib_nids(aerolib_path)
+    checked, mismatches, skipped_no_catalog, allowlisted = scan(
+        repo_root / SRC_ROOT, catalog_nids
+    )
+    ok = checked - len(mismatches) - skipped_no_catalog - allowlisted
 
     if not args.quiet:
         for path, line, nid, export_name, computed in mismatches:
@@ -105,7 +157,11 @@ def main() -> int:
                 f"computed={computed}"
             )
 
-    print(f"checked={checked} ok={ok} fail={len(mismatches)}")
+    print(
+        f"checked={checked} ok={ok} fail={len(mismatches)} "
+        f"skipped_no_catalog={skipped_no_catalog} allowlisted={allowlisted} "
+        f"allowlist_size={len(ALLOWLISTED_NIDS)}"
+    )
 
     if args.strict and mismatches:
         return 1

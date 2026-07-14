@@ -59,7 +59,7 @@ public static class NpManagerExports
 
     [SysAbiExport(
         Nid = "rbknaUjpqWo",
-        ExportName = "sceNpGetOnlineIdA",
+        ExportName = "sceNpGetAccountIdA",
         Target = Generation.Gen5,
         LibraryName = "libSceNpManager")]
     public static int NpGetOnlineIdA(CpuContext ctx)
