@@ -948,6 +948,18 @@ public static partial class Gen5SpirvTranslator
                         vector);
                     break;
                 }
+
+                case "VPkAddF16":
+                case "VPkMulF16":
+                case "VPkMinF16":
+                case "VPkMaxF16":
+                case "VPkFmaF16":
+                    if (!TryEmitPackedF16(instruction, out result, out error))
+                    {
+                        return false;
+                    }
+
+                    break;
                 default:
                     error = $"unsupported vector opcode {instruction.Opcode}";
                     return false;
@@ -973,6 +985,101 @@ public static partial class Gen5SpirvTranslator
             }
 
             StoreV(destination, result);
+            return true;
+        }
+
+        // Packed f16 (VOP3P) arithmetic. Each source register holds two f16 values.
+        // We unpack every operand to an f32 vec2 (UnpackHalf2x16), apply the op_sel
+        // half-selection and neg modifiers, run the operation component-wise in f32,
+        // and pack the result back with PackHalf2x16. The maths therefore happens in
+        // f32 with a single rounding at the pack, not with an exact intermediate f16
+        // rounding, which is accurate enough for the values shaders actually use.
+        private bool TryEmitPackedF16(
+            Gen5ShaderInstruction instruction,
+            out uint result,
+            out string error)
+        {
+            result = 0;
+            error = string.Empty;
+            if (instruction.Control is not Gen5Vop3pControl control)
+            {
+                error = $"missing vop3p control for {instruction.Opcode}";
+                return false;
+            }
+
+            if (control.Clamp)
+            {
+                error = $"unsupported vop3p modifiers (clamp) for {instruction.Opcode}";
+                return false;
+            }
+
+            var sourceCount = instruction.Opcode == "VPkFmaF16" ? 3 : 2;
+            var operands = new uint[sourceCount];
+            for (var index = 0; index < sourceCount; index++)
+            {
+                if (!TryGetPackedF16Operand(instruction, control, index, out operands[index], out error))
+                {
+                    return false;
+                }
+            }
+
+            var packed = instruction.Opcode switch
+            {
+                "VPkAddF16" => _module.AddInstruction(
+                    SpirvOp.FAdd, _vec2Type, operands[0], operands[1]),
+                "VPkMulF16" => _module.AddInstruction(
+                    SpirvOp.FMul, _vec2Type, operands[0], operands[1]),
+                // GLSL.std.450 FMin/FMax, matching the scalar v_min_f32/v_max_f32 path.
+                "VPkMinF16" => Ext(37, _vec2Type, operands[0], operands[1]),
+                "VPkMaxF16" => Ext(40, _vec2Type, operands[0], operands[1]),
+                "VPkFmaF16" => Ext(50, _vec2Type, operands[0], operands[1], operands[2]),
+                _ => 0u,
+            };
+            if (packed == 0)
+            {
+                error = $"unsupported packed opcode {instruction.Opcode}";
+                return false;
+            }
+
+            result = Ext(58, _uintType, packed);
+            return true;
+        }
+
+        private bool TryGetPackedF16Operand(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            int sourceIndex,
+            out uint operand,
+            out string error)
+        {
+            operand = 0;
+            error = string.Empty;
+            var source = instruction.Sources[sourceIndex];
+            if (source.Kind is not (Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister))
+            {
+                error =
+                    $"unsupported vop3p operand {source} for {instruction.Opcode} (first slice: registers only)";
+                return false;
+            }
+
+            var unpacked = Ext(62, _vec2Type, GetRawSource(instruction, sourceIndex));
+            var low = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 0);
+            var high = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 1);
+
+            var laneLow = ((control.OpSelMask >> sourceIndex) & 1) != 0 ? high : low;
+            var laneHigh = ((control.OpSelHiMask >> sourceIndex) & 1) != 0 ? high : low;
+            if (((control.NegLoMask >> sourceIndex) & 1) != 0)
+            {
+                laneLow = _module.AddInstruction(SpirvOp.FNegate, _floatType, laneLow);
+            }
+
+            if (((control.NegHiMask >> sourceIndex) & 1) != 0)
+            {
+                laneHigh = _module.AddInstruction(SpirvOp.FNegate, _floatType, laneHigh);
+            }
+
+            operand = _module.AddInstruction(
+                SpirvOp.CompositeConstruct, _vec2Type, laneLow, laneHigh);
             return true;
         }
 

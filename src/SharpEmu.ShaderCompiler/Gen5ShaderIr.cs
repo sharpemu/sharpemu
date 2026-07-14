@@ -237,6 +237,17 @@ public sealed record Gen5SdwaControl(
     bool Clamp,
     uint? ScalarDestination) : Gen5InstructionControl;
 
+// Packed (VOP3P) source and destination modifiers. Each mask holds one bit per
+// source operand. OpSel/OpSelHi pick which 16-bit half of a source feeds the low
+// and high result lanes respectively; NegLo/NegHi negate the value routed to each
+// lane. Clamp saturates each output half to [0, 1].
+public sealed record Gen5Vop3pControl(
+    uint OpSelMask,
+    uint OpSelHiMask,
+    uint NegLoMask,
+    uint NegHiMask,
+    bool Clamp) : Gen5InstructionControl;
+
 public sealed record Gen5DppControl(
     uint Control,
     bool FetchInactive,

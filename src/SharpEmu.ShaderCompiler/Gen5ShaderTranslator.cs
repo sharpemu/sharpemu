@@ -562,6 +562,22 @@ public static class Gen5ShaderTranslator
             return DecodeSop(word, out name, out sizeDwords, out error);
         }
 
+        // gfx10 moved VOP3P (packed 16-bit math) to its own 0b110011000 prefix
+        // (word0 top byte 0xCC), separate from the VOP3 block. Match the full
+        // 9-bit prefix here, before the coarse major-opcode switch, so packed
+        // instructions are not misread as one of the neighbouring encodings.
+        if ((word & 0xFF800000u) == 0xCC000000u)
+        {
+            encoding = Gen5ShaderEncoding.Vop3p;
+            if (!ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var vop3pExtra))
+            {
+                error = $"vop3p-extra-read-failed pc=0x{pc:X}";
+                return false;
+            }
+
+            return DecodeVop3p(word, vop3pExtra, out name, out sizeDwords, out error);
+        }
+
         switch (word >> 26)
         {
             case 0x33:
@@ -1157,6 +1173,37 @@ public static class Gen5ShaderTranslator
         name = $"{prefix}Raw{word >> 24:X2}";
         sizeDwords = 2;
         error = string.Empty;
+        return true;
+    }
+
+    private static bool DecodeVop3p(
+        uint word,
+        uint extra,
+        out string name,
+        out uint sizeDwords,
+        out string error)
+    {
+        var opcode = (word >> 16) & 0x7F;
+        var src0 = extra & 0x1FF;
+        var src1 = (extra >> 9) & 0x1FF;
+        var src2 = (extra >> 18) & 0x1FF;
+        sizeDwords = src0 == 0xFF || src1 == 0xFF || src2 == 0xFF ? 3u : 2u;
+        error = string.Empty;
+
+        // Opcode numbers taken from LLVM's AMDGPU VOP3PInstructions.td and the
+        // gfx9/gfx10 MC test encodings; they are unchanged across gfx9 and gfx10.
+        // Unhandled packed opcodes (integer, fma_mix, ...) stay opaque here and
+        // fail loudly at emission rather than being silently mis-emitted.
+        name = opcode switch
+        {
+            0x0E => "VPkFmaF16",
+            0x0F => "VPkAddF16",
+            0x10 => "VPkMulF16",
+            0x11 => "VPkMinF16",
+            0x12 => "VPkMaxF16",
+            _ => $"Vop3pRaw{opcode:X2}",
+        };
+
         return true;
     }
 
@@ -1837,6 +1884,28 @@ public static class Gen5ShaderTranslator
                     ((word >> 15) & 1) != 0,
                     isVop3B ? 0 : (word >> 11) & 0xF,
                     isVop3B ? (word >> 8) & 0x7F : null);
+                break;
+            }
+            case Gen5ShaderEncoding.Vop3p:
+            {
+                var extra = words[1];
+                sources =
+                [
+                    Gen5Operand.Source(extra & 0x1FF, literal),
+                    Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
+                    Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
+                ];
+                destinations = [Gen5Operand.Vector(word & 0xFF)];
+
+                // op_sel_hi is split across both dwords: bits [1:0] live in word1
+                // [28:27], bit [2] in word0 [14].
+                var opSelHi = ((extra >> 27) & 0x3) | (((word >> 14) & 0x1) << 2);
+                control = new Gen5Vop3pControl(
+                    (word >> 11) & 0x7,
+                    opSelHi,
+                    (extra >> 29) & 0x7,
+                    (word >> 8) & 0x7,
+                    ((word >> 15) & 1) != 0);
                 break;
             }
             case Gen5ShaderEncoding.Ds:
