@@ -881,7 +881,7 @@ public sealed partial class DirectExecutionBackend
 			"Q2V+iqvjgC0" or // vsnprintf
 			"j4ViWNHEgww" or // strlen
 			"5jNubw4vlAA" or // strnlen
-			"LHMrG7e8G78" or // wcslen
+			"LHMrG7e8G78" or // wcsmisc
 			"WkkeywLJcgU" or // wcslen
 			"Ovb2dSJOAuE" or // strcmp
 			"aesyjrHVWy4" or // strncmp

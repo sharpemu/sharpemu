@@ -1,0 +1,129 @@
+{
+  "_languageName": "Dansk",
+
+  "Page.Library": "Bibliotek",
+  "Page.Options": "Indstillinger",
+  "Page.GameCount.One": "1 spil",
+  "Page.GameCount.Other": "{0} spil",
+
+  "Library.SearchWatermark": "Søg i biblioteket…",
+  "Library.AddFolder": "＋ Tilføj mappe",
+  "Library.Rescan": "⟳ Genindlæs",
+  "Library.OpenFile": "Åbn fil…",
+
+  "Library.Context.Launch": "Start",
+  "Library.Context.OpenFolder": "Åbn spilmappe",
+  "Library.Context.CopyPath": "Kopiér sti",
+  "Library.Context.CopyTitleId": "Kopiér titel-ID",
+  "Library.Context.Remove": "Fjern fra bibliotek",
+
+  "Library.Empty.Title": "Dit bibliotek er tomt",
+  "Library.Empty.Hint": "Tilføj en mappe med dine spil for at komme i gang.",
+  "Library.Empty.SearchTitle": "Ingen spil matcher din søgning",
+  "Library.Empty.SearchHint": "Intet i biblioteket matcher “{0}”.",
+  "Library.Empty.AddFolder": "＋ Tilføj spilmappe",
+
+  "Library.Loading": "Indlæser bibliotek…",
+
+  "Options.General": "Generelt",
+  "Options.Section.Emulation": "EMULERING",
+  "Options.Section.Logging": "LOGGING",
+  "Options.Section.Launcher": "LAUNCHER",
+
+  "Options.CpuEngine.Label": "CPU-engine",
+  "Options.CpuEngine.Desc": "Den eksekveringsengine der bruges til at køre spilkode.",
+  "Options.CpuEngine.Native": "Native",
+
+  "Options.Strict.Label": "Streng dynlib-opløsning",
+  "Options.Strict.Desc": "Afbryd opstarten, når et importeret symbol ikke kan findes.",
+
+  "Options.LogLevel.Label": "Logniveau",
+  "Options.LogLevel.Desc": "Detaljeringsgrad for emulatorens konsoloutput.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Advarsel",
+  "Options.LogLevel.Error": "Fejl",
+  "Options.LogLevel.Critical": "Kritisk",
+
+  "Options.TraceImports.Label": "Grænse for import-trace",
+  "Options.TraceImports.Desc": "Spor de første N imports pr. modul (0 = fra).",
+
+  "Options.LogToFile.Label": "Log til fil",
+  "Options.LogToFile.Desc": "Spejl emulatorens output til en logfil.",
+
+  "Options.LogFilePath.Label": "Sti til logfil",
+  "Options.LogFilePath.Default": "Ingen brugerdefineret sti — logs gemmes i user/logs ved siden af emulatoren.",
+  "Options.LogFilePath.Select": "Vælg…",
+
+  "Options.OverrideLogFile.Label": "Tilsidesæt logfil",
+  "Options.OverrideLogFile.Desc": "Brug den præcise filsti i stedet for at tilføje titel-ID og tidsstempel.",
+
+  "Options.TitleMusic.Label": "Titelmusik",
+  "Options.TitleMusic.Desc": "Gentag det valgte spils forhåndsvisningsmusik i biblioteket.",
+
+  "Options.Discord.Label": "Discord-tilstedeværelse",
+  "Options.Discord.Desc": "Vis det kørende spil på din Discord-profil.",
+
+  "Options.Language.Label": "Emulatorsprog",
+  "Options.Language.Desc": "Sprog der bruges i hele launcheren. Anvendes med det samme.",
+
+  "Common.On": "Til",
+  "Common.Off": "Fra",
+
+  "Console.Title": "KONSOL",
+  "Console.SearchWatermark": "Søg...",
+  "Console.AutoScroll": "Auto-scroll",
+  "Console.Split": "Opdel",
+  "Console.Copy": "Kopiér",
+  "Console.Clear": "Ryd",
+  "Console.WindowTitle": "SharpEmu-konsol",
+
+  "Launch.NoGameSelected": "Intet spil valgt",
+  "Launch.NoGameHint": "Vælg et spil fra biblioteket, eller åbn en eboot.bin direkte.",
+  "Launch.Idle": "Inaktiv",
+  "Launch.Console": "≡ Konsol",
+  "Launch.Launch": "▶  Start",
+  "Launch.Stop": "■  Stop",
+  "Launch.Running": "Kører — {0}",
+  "Launch.Stopping": "Stopper…",
+  "Launch.Exited": "Afsluttet med kode {0} ({1})",
+  "Launch.ExeNotFound": "SharpEmu-programmet blev ikke fundet. Byg SharpEmu.CLI-projektet først (dotnet build).",
+  "Launch.LogFile": "Logfil: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Kunne ikke starte emulatoren: {0}",
+  "Launch.ProcessExited": "Processen afsluttede med kode {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "ugyldige argumenter",
+  "Exit.EbootNotFound": "eboot ikke fundet",
+  "Exit.RuntimeException": "runtime-fejl",
+  "Exit.EmulationError": "emuleringsfejl",
+  "Exit.Unknown": "ukendt",
+
+  "Status.EmulatorLocating": "Emulator: lokaliserer…",
+  "Status.EmulatorPath": "Emulator: {0}",
+  "Status.EmulatorNotFound": "Emulator: SharpEmu-programmet blev ikke fundet — byg SharpEmu.CLI først.",
+  "Status.ScanningLibrary": "Skanner bibliotek…",
+  "Status.AddFolderPrompt": "Tilføj en spilmappe for at udfylde biblioteket.",
+  "Status.LibraryScanned": "Bibliotek skannet: {0} spil i {1} mappe(r).",
+  "Status.CouldNotOpenFolder": "Kunne ikke åbne mappe: {0}",
+  "Status.CopiedToClipboard": "{0} kopieret til udklipsholderen.",
+  "Status.RemovedFromLibrary": "“{0}” fjernet fra biblioteket. Tilføj mappen igen for at gendanne det.",
+  "Status.Running": "Kører {0}",
+  "Status.Stopping": "Stopper…",
+  "Status.Idle": "Inaktiv",
+
+  "Clipboard.Path": "Sti",
+  "Clipboard.TitleId": "Titel-ID",
+
+  "Discord.Playing": "Spiller {0}",
+  "Discord.Browsing": "Gennemser biblioteket",
+
+  "Dialog.ChooseGameFolder": "Vælg en mappe der indeholder spil",
+  "Dialog.OpenExecutable": "Åbn et program der skal startes",
+  "Dialog.PsExecutables": "PS-programmer",
+  "Dialog.SaveLogFile": "Vælg hvor logfilen skal gemmes",
+  "Dialog.PlainTextFiles": "Almindelige tekstfiler",
+  "Dialog.LogFiles": "Logfiler"
+}

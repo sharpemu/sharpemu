@@ -1,0 +1,129 @@
+{
+  "_languageName": "العربية",
+
+  "Page.Library": "المكتبة",
+  "Page.Options": "الخيارات",
+  "Page.GameCount.One": "لعبة واحدة",
+  "Page.GameCount.Other": "{0} لعبة",
+
+  "Library.SearchWatermark": "ابحث في المكتبة...",
+  "Library.AddFolder": "＋ إضافة مجلد",
+  "Library.Rescan": "⟳ إعادة الفحص",
+  "Library.OpenFile": "فتح ملف...",
+
+  "Library.Context.Launch": "تشغيل",
+  "Library.Context.OpenFolder": "فتح مجلد اللعبة",
+  "Library.Context.CopyPath": "نسخ المسار",
+  "Library.Context.CopyTitleId": "نسخ معرف العنوان",
+  "Library.Context.Remove": "إزالة من المكتبة",
+
+  "Library.Empty.Title": "مكتبتك فارغة",
+  "Library.Empty.Hint": "أضف مجلداً يحتوي على ألعابك للبدء.",
+  "Library.Empty.SearchTitle": "لا توجد ألعاب تطابق بحثك",
+  "Library.Empty.SearchHint": "لا شيء في المكتبة يطابق “{0}”.",
+  "Library.Empty.AddFolder": "＋ إضافة مجلد ألعاب",
+
+  "Library.Loading": "جارٍ تحميل المكتبة...",
+
+  "Options.General": "عام",
+  "Options.Section.Emulation": "المحاكاة",
+  "Options.Section.Logging": "التسجيل",
+  "Options.Section.Launcher": "المُشغِّل",
+
+  "Options.CpuEngine.Label": "محرك المعالج",
+  "Options.CpuEngine.Desc": "محرك التنفيذ المستخدم لتشغيل كود اللعبة.", 
+  "Options.CpuEngine.Native": "أصلي",
+
+  "Options.Strict.Label": "ربط صارم للمكتبات الديناميكية (dynlib)",
+  "Options.Strict.Desc": "إفشال التشغيل عندما يتعذر التعرف على رمز مستورد.",
+
+  "Options.LogLevel.Label": "مستوى التسجيل",
+  "Options.LogLevel.Desc": "مدى تفصيل مخرجات نافذة سجلات المحاكي.",
+  "Options.LogLevel.Trace": "تتبع",
+  "Options.LogLevel.Debug": "تصحيح الأخطاء",
+  "Options.LogLevel.Info": "معلومات",
+  "Options.LogLevel.Warning": "تحذير",
+  "Options.LogLevel.Error": "خطأ",
+  "Options.LogLevel.Critical": "حرج",
+
+  "Options.TraceImports.Label": "حد تتبع الاستيراد",
+  "Options.TraceImports.Desc": "تتبع أول N استيراد لكل وحدة (0 = إيقاف).",
+
+  "Options.LogToFile.Label": "التسجيل في ملف",
+  "Options.LogToFile.Desc": "نسخ مخرجات المحاكي إلى ملف سجل.",
+
+  "Options.LogFilePath.Label": "مسار ملف السجل",
+  "Options.LogFilePath.Default": "لا يوجد مسار مخصص — تُحفظ السجلات في user/logs بجوار المحاكي.",
+  "Options.LogFilePath.Select": "تحديد...",
+
+  "Options.OverrideLogFile.Label": "الكتابة فوق ملف السجل",
+  "Options.OverrideLogFile.Desc": "استخدام مسار الملف الدقيق بدلاً من إلحاق معرف العنوان والطابع الزمني.",
+
+  "Options.TitleMusic.Label": "موسيقى اللعبة",
+  "Options.TitleMusic.Desc": "تكرار موسيقى المعاينة للعبة المحددة في المكتبة.",
+
+  "Options.Discord.Label": "حالة دسكورد",
+  "Options.Discord.Desc": "إظهار اللعبة قيد التشغيل في ملفك الشخصي على دسكورد.",
+
+  "Options.Language.Label": "لغة المحاكي",
+  "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
+
+  "Common.On": "تشغيل",
+  "Common.Off": "إيقاف",
+
+  "Console.Title": "نافذة السجلات",
+  "Console.SearchWatermark": "بحث...",
+  "Console.AutoScroll": "تمرير تلقائي",
+  "Console.Split": "تقسيم",
+  "Console.Copy": "نسخ",
+  "Console.Clear": "مسح",
+  "Console.WindowTitle": "نافذة سجلات SharpEmu",
+
+  "Launch.NoGameSelected": "لم تُحدد أي لعبة",
+  "Launch.NoGameHint": "اختر لعبة من المكتبة، أو افتح ملف eboot.bin مباشرة.",
+  "Launch.Idle": "خامل",
+  "Launch.Console": "≡ نافذة السجلات",
+  "Launch.Launch": "▶  تشغيل",
+  "Launch.Stop": "■  إيقاف",
+  "Launch.Running": "قيد التشغيل — {0}",
+  "Launch.Stopping": "جارٍ الإيقاف...",
+  "Launch.Exited": "انتهى برمز {0} ({1})",
+  "Launch.ExeNotFound": "لم يُعثر على الملف التنفيذي SharpEmu. ابنِ مشروع SharpEmu.CLI أولاً (dotnet build).",
+  "Launch.LogFile": "ملف السجل: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "فشل بدء تشغيل المحاكي: {0}",
+  "Launch.ProcessExited": "انتهت العملية برمز {0} ({1}).",
+
+  "Exit.Ok": "موافق",
+  "Exit.InvalidArguments": "معطيات غير صالحة",
+  "Exit.EbootNotFound": "لم يُعثر على eboot",
+  "Exit.RuntimeException": "استثناء وقت التشغيل",
+  "Exit.EmulationError": "خطأ في المحاكاة",
+  "Exit.Unknown": "غير معروف",
+
+  "Status.EmulatorLocating": "المحاكي: جارٍ تحديد الموقع...",
+  "Status.EmulatorPath": "المحاكي: {0}",
+  "Status.EmulatorNotFound": "المحاكي: لم يُعثر على الملف التنفيذي SharpEmu — ابنِ SharpEmu.CLI أولاً.",
+  "Status.ScanningLibrary": "جارٍ فحص المكتبة...",
+  "Status.AddFolderPrompt": "أضف مجلد ألعاب لملء المكتبة.",
+  "Status.LibraryScanned": "فُحصت المكتبة: {0} لعبة في {1} مجلد.",
+  "Status.CouldNotOpenFolder": "تعذر فتح المجلد: {0}",
+  "Status.CopiedToClipboard": "نُسخ {0} إلى الحافظة.",
+  "Status.RemovedFromLibrary": "أُزيل “{0}” من المكتبة. أعد إضافة مجلده لاستعادته.",
+  "Status.Running": "جارٍ تشغيل {0}",
+  "Status.Stopping": "جارٍ الإيقاف...",
+  "Status.Idle": "خامل",
+
+  "Clipboard.Path": "المسار",
+  "Clipboard.TitleId": "معرف العنوان",
+
+  "Discord.Playing": "يلعب {0}",
+  "Discord.Browsing": "يتصفح المكتبة",
+
+  "Dialog.ChooseGameFolder": "اختر مجلداً يحتوي على ألعاب",
+  "Dialog.OpenExecutable": "افتح ملفاً تنفيذياً لتشغيله",
+  "Dialog.PsExecutables": "ملفات PS التنفيذية",
+  "Dialog.SaveLogFile": "حدد مكان حفظ ملف السجل",
+  "Dialog.PlainTextFiles": "ملفات نصية عادية",
+  "Dialog.LogFiles": "ملفات السجل"
+}

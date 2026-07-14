@@ -19,7 +19,7 @@ public static class LibcInternalExports
 
     [SysAbiExport(
         Nid = "NWtTN10cJzE",
-        ExportName = "LibcHeapGetTraceInfo",
+        ExportName = "sceLibcHeapGetTraceInfo",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "LibcInternalExt")]
     public static int LibcHeapGetTraceInfo(CpuContext ctx)

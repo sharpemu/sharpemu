@@ -396,6 +396,14 @@ internal static partial class Gen5SpirvTranslator
                             _module.Constant64(_ulongType, 32)));
                     break;
                 }
+                case "VBcntU32B32":
+                    result = IAdd(
+                        _module.AddInstruction(
+                            SpirvOp.BitCount,
+                            _uintType,
+                            GetRawSource(instruction, 0)),
+                        GetRawSource(instruction, 1));
+                    break;
                 case "VMadU32U24":
                 {
                     var left = BitwiseAnd(
@@ -593,6 +601,18 @@ internal static partial class Gen5SpirvTranslator
                         Ext(38, _uintType, high, right));
                     break;
                 }
+                case "VSadU32":
+                {
+                    var left = GetRawSource(instruction, 0);
+                    var right = GetRawSource(instruction, 1);
+                    var difference = _module.AddInstruction(
+                        SpirvOp.ISub,
+                        _uintType,
+                        Ext(41, _uintType, left, right),
+                        Ext(38, _uintType, left, right));
+                    result = IAdd(difference, GetRawSource(instruction, 2));
+                    break;
+                }
                 case "VMed3I32":
                 {
                     var left = Bitcast(_intType, GetRawSource(instruction, 0));
@@ -702,6 +722,14 @@ internal static partial class Gen5SpirvTranslator
                     result = Ext(58, _uintType, vector);
                     break;
                 }
+                case "VCvtPkU16U32":
+                case "VCvtPkI16I32":
+                    result = BitwiseOr(
+                        BitwiseAnd(GetRawSource(instruction, 0), UInt(0xFFFF)),
+                        ShiftLeftLogical(
+                            BitwiseAnd(GetRawSource(instruction, 1), UInt(0xFFFF)),
+                            UInt(16)));
+                    break;
                 default:
                     error = $"unsupported vector opcode {instruction.Opcode}";
                     return false;
@@ -1303,6 +1331,43 @@ internal static partial class Gen5SpirvTranslator
                             Store(_scc, IsNotZero(result));
                             break;
                         }
+                        case "SAbsdiffI32":
+                        {
+                            var wideLeft = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, left));
+                            var wideRight = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, right));
+                            var difference = _module.AddInstruction(
+                                SpirvOp.ISub,
+                                _longType,
+                                wideLeft,
+                                wideRight);
+                            result = _module.AddInstruction(
+                                SpirvOp.UConvert,
+                                _uintType,
+                                Ext(5, _longType, difference));
+                            Store(_scc, IsNotZero(result));
+                            break;
+                        }
+                        case "SPackLlB32B16":
+                            result = BitwiseOr(
+                                BitwiseAnd(left, UInt(0xFFFF)),
+                                ShiftLeftLogical(right, UInt(16)));
+                            break;
+                        case "SPackLhB32B16":
+                            result = BitwiseOr(
+                                BitwiseAnd(left, UInt(0xFFFF)),
+                                BitwiseAnd(right, UInt(0xFFFF0000)));
+                            break;
+                        case "SPackHhB32B16":
+                            result = BitwiseOr(
+                                ShiftRightLogical(left, UInt(16)),
+                                BitwiseAnd(right, UInt(0xFFFF0000)));
+                            break;
                         case "SCselectB32":
                             result = _module.AddInstruction(
                                 SpirvOp.Select,

@@ -478,7 +478,7 @@ public static class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "LHMrG7e8G78",
-        ExportName = "wcslen",
+        ExportName = "wcsmisc",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Wcslen(CpuContext ctx)
@@ -1485,6 +1485,214 @@ public static class KernelMemoryCompatExports
         }
 
         ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "ob5xAW4ln-0",
+        ExportName = "strchr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strchr(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
+        if (address == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // The terminator counts as part of the scanned range, so strchr(s, '\0')
+        // returns a pointer to the string's null byte just like a native libc.
+        Span<byte> current = stackalloc byte[1];
+        for (ulong index = 0; index < 1_048_576; index++)
+        {
+            if (!TryReadCompat(ctx, address + index, current))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (current[0] == needle)
+            {
+                ctx[CpuRegister.Rax] = address + index;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            if (current[0] == 0)
+            {
+                break;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "9yDWMxEFdJU",
+        ExportName = "strrchr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strrchr(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
+        if (address == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ulong match = 0;
+        var found = false;
+        Span<byte> current = stackalloc byte[1];
+        for (ulong index = 0; index < 1_048_576; index++)
+        {
+            if (!TryReadCompat(ctx, address + index, current))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (current[0] == needle)
+            {
+                match = address + index;
+                found = true;
+            }
+
+            if (current[0] == 0)
+            {
+                break;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = found ? match : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "8u8lPzUEq+U",
+        ExportName = "memchr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Memchr(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
+        var count = ctx[CpuRegister.Rdx];
+
+        Span<byte> current = stackalloc byte[1];
+        for (ulong index = 0; index < count; index++)
+        {
+            if (!TryReadCompat(ctx, address + index, current))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (current[0] == needle)
+            {
+                ctx[CpuRegister.Rax] = address + index;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "Ls4tzzhimqQ",
+        ExportName = "strcat",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strcat(CpuContext ctx)
+    {
+        var destination = ctx[CpuRegister.Rdi];
+        var source = ctx[CpuRegister.Rsi];
+        if (!TryReadCString(ctx, source, 1_048_576, out var sourceBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!TryReadCString(ctx, destination, 1_048_576, out var destinationBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // Overwrite the destination terminator and re-terminate after the copied bytes.
+        var appendAddress = destination + (ulong)destinationBytes.Length;
+        var payload = new byte[sourceBytes.Length + 1];
+        sourceBytes.CopyTo(payload.AsSpan());
+        if (!TryWriteCompat(ctx, appendAddress, payload))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = destination;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "kHg45qPC6f0",
+        ExportName = "strncat",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strncat(CpuContext ctx)
+    {
+        var destination = ctx[CpuRegister.Rdi];
+        var source = ctx[CpuRegister.Rsi];
+        var limit = ctx[CpuRegister.Rdx];
+
+        // Bounding the source read by the count yields strncat's "at most n bytes"
+        // semantics while still stopping early at the source terminator.
+        if (!TryReadCString(ctx, source, limit, out var sourceBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!TryReadCString(ctx, destination, 1_048_576, out var destinationBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var appendAddress = destination + (ulong)destinationBytes.Length;
+        var payload = new byte[sourceBytes.Length + 1];
+        sourceBytes.CopyTo(payload.AsSpan());
+        if (!TryWriteCompat(ctx, appendAddress, payload))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = destination;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "viiwFMaNamA",
+        ExportName = "strstr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Strstr(CpuContext ctx)
+    {
+        var haystack = ctx[CpuRegister.Rdi];
+        var needle = ctx[CpuRegister.Rsi];
+        if (!TryReadCString(ctx, haystack, 1_048_576, out var haystackBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!TryReadCString(ctx, needle, 1_048_576, out var needleBytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // An empty needle matches at the start of the haystack.
+        if (needleBytes.Length == 0)
+        {
+            ctx[CpuRegister.Rax] = haystack;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var matchIndex = haystackBytes.AsSpan().IndexOf(needleBytes.AsSpan());
+        ctx[CpuRegister.Rax] = matchIndex >= 0 ? haystack + (ulong)matchIndex : 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -3037,7 +3245,7 @@ public static class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "4h6F1LLbTiw",
-        ExportName = "sceKernelMapFlexibleMemoryInternal",
+        ExportName = "sceKernelMapNamedFlexibleMemoryInternal",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapFlexibleMemoryInternal(CpuContext ctx)
@@ -3989,7 +4197,7 @@ public static class KernelMemoryCompatExports
                             _ => unchecked((int)argumentSource.NextGpArg())
                         };
 
-                        var formatted = value.ToString();
+                        var formatted = value.ToString(CultureInfo.InvariantCulture);
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;
                         else if (spaceForSign && value >= 0)
@@ -4013,7 +4221,7 @@ public static class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = value.ToString();
+                        var formatted = value.ToString(CultureInfo.InvariantCulture);
                         sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
                     }
                     break;
@@ -4034,8 +4242,8 @@ public static class KernelMemoryCompatExports
                         };
 
                         var formatted = specifier == 'x'
-                            ? value.ToString("x")
-                            : value.ToString("X");
+                            ? value.ToString("x", CultureInfo.InvariantCulture)
+                            : value.ToString("X", CultureInfo.InvariantCulture);
 
                         if (alternateForm && value != 0)
                             formatted = specifier == 'x' ? "0x" + formatted : "0X" + formatted;
@@ -4143,7 +4351,10 @@ public static class KernelMemoryCompatExports
                         var formatStr = precision >= 0
                             ? $"{{0:{specifier}{precision}}}"
                             : $"{{0:{specifier}}}";
-                        var formatted = string.Format(formatStr, value);
+                        var formatted = string.Format(
+                            CultureInfo.InvariantCulture,
+                            formatStr,
+                            value);
 
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;

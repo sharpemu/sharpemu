@@ -1,0 +1,19 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Standalone dev tool: opt out of the repo-wide lock-file requirement
+         so no packages.lock.json is generated or committed for it. -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+  </ItemGroup>
+
+</Project>

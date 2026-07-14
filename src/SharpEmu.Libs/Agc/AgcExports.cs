@@ -120,6 +120,9 @@ public static class AgcExports
     private const uint RegisterDefaultsVersion13 = 13;
     private const int RegisterDefaultsSize = 0x40;
     private const int RegisterDefaultBlockSize = 16 * 8;
+    private const ulong ResourceRegistrationBytesPerResource = 0x118;
+    private const ulong ResourceRegistrationBytesPerOwner = 0x1E0;
+    private const int ResourceRegistrationMaxNameLength = 256;
 
     private const ulong ShaderUserDataOffset = 0x08;
     private const ulong ShaderCodeOffset = 0x10;
@@ -388,8 +391,25 @@ public static class AgcExports
         public SubmittedDcbState Graphics { get; } = new();
         public Dictionary<uint, SubmittedDcbState> ComputeQueues { get; } = new();
         public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
+        public Dictionary<uint, string> ResourceOwners { get; } = new();
+        public Dictionary<uint, RegisteredAgcResource> RegisteredResources { get; } = new();
+        public bool ResourceRegistrationInitialized { get; set; }
+        public ulong ResourceRegistrationMemory { get; set; }
+        public ulong ResourceRegistrationMemorySize { get; set; }
+        public uint ResourceRegistrationMaxOwners { get; set; }
+        public uint DefaultOwner { get; set; } = DefaultAgcOwner;
+        public uint NextOwner { get; set; } = 1;
+        public uint NextResource { get; set; } = 1;
         public ulong WorkSequence { get; set; }
     }
+
+    private readonly record struct RegisteredAgcResource(
+        uint Owner,
+        ulong Address,
+        ulong Size,
+        string Name,
+        uint Type,
+        uint Flags);
 
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
 
@@ -2120,12 +2140,87 @@ public static class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!ctx.TryWriteUInt32(outAddress, 256))
+        if (!ctx.TryWriteUInt32(outAddress, ResourceRegistrationMaxNameLength))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.driver_get_resource_registration_max_name_length out=0x{outAddress:X16} value=256");
+        TraceAgc(
+            $"agc.driver_get_resource_registration_max_name_length " +
+            $"out=0x{outAddress:X16} value={ResourceRegistrationMaxNameLength}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "AOLcoIkQDgM",
+        ExportName = "sceAgcDriverQueryResourceRegistrationUserMemoryRequirements",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverQueryResourceRegistrationUserMemoryRequirements(CpuContext ctx)
+    {
+        var sizeAddress = ctx[CpuRegister.Rdi];
+        var resourceCount = ctx[CpuRegister.Rsi];
+        var ownerCount = ctx[CpuRegister.Rdx];
+        if (sizeAddress == 0 || resourceCount == 0 || ownerCount == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        ulong requiredSize;
+        try
+        {
+            requiredSize = checked(
+                resourceCount * ResourceRegistrationBytesPerResource +
+                ownerCount * ResourceRegistrationBytesPerOwner);
+        }
+        catch (OverflowException)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!ctx.TryWriteUInt64(sizeAddress, requiredSize))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc(
+            $"agc.driver_query_resource_registration_memory resources={resourceCount} " +
+            $"owners={ownerCount} bytes=0x{requiredSize:X}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "F0Y42t-3e18",
+        ExportName = "sceAgcDriverInitResourceRegistration",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverInitResourceRegistration(CpuContext ctx)
+    {
+        var memoryAddress = ctx[CpuRegister.Rdi];
+        var memorySize = ctx[CpuRegister.Rsi];
+        var ownerCount = ctx[CpuRegister.Rdx];
+        if (memoryAddress == 0 || memorySize == 0 || ownerCount == 0 || ownerCount > uint.MaxValue)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        lock (state.Gate)
+        {
+            state.ResourceRegistrationInitialized = true;
+            state.ResourceRegistrationMemory = memoryAddress;
+            state.ResourceRegistrationMemorySize = memorySize;
+            state.ResourceRegistrationMaxOwners = (uint)ownerCount;
+            state.ResourceOwners.Clear();
+            state.RegisteredResources.Clear();
+            state.DefaultOwner = DefaultAgcOwner;
+            state.NextOwner = 1;
+            state.NextResource = 1;
+        }
+
+        TraceAgc(
+            $"agc.driver_init_resource_registration memory=0x{memoryAddress:X16} " +
+            $"bytes=0x{memorySize:X} owners={ownerCount}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -2144,12 +2239,97 @@ public static class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!ctx.TryWriteUInt32(ownerAddress, DefaultAgcOwner))
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        uint owner;
+        lock (state.Gate)
+        {
+            owner = state.DefaultOwner;
+        }
+
+        if (!ctx.TryWriteUInt32(ownerAddress, owner))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.driver_get_default_owner out=0x{ownerAddress:X16} owner={DefaultAgcOwner}");
+        TraceAgc($"agc.driver_get_default_owner out=0x{ownerAddress:X16} owner={owner}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "U9ueyEhSkF4",
+        ExportName = "sceAgcDriverRegisterDefaultOwner",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverRegisterDefaultOwner(CpuContext ctx)
+    {
+        var owner = (uint)ctx[CpuRegister.Rdi];
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        lock (state.Gate)
+        {
+            state.DefaultOwner = owner;
+        }
+
+        TraceAgc($"agc.driver_register_default_owner owner={owner}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "X-Nm5KLREeg",
+        ExportName = "sceAgcDriverRegisterOwner",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverRegisterOwner(CpuContext ctx)
+    {
+        var ownerAddress = ctx[CpuRegister.Rdi];
+        var nameAddress = ctx[CpuRegister.Rsi];
+        if (ownerAddress == 0 || nameAddress == 0 ||
+            !TryReadGuestCString(
+                ctx,
+                nameAddress,
+                ResourceRegistrationMaxNameLength,
+                out var nameBytes))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        uint owner;
+        lock (state.Gate)
+        {
+            if (!state.ResourceRegistrationInitialized ||
+                state.ResourceRegistrationMaxOwners != 0 &&
+                state.ResourceOwners.Count >= state.ResourceRegistrationMaxOwners)
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            owner = state.NextOwner;
+            while (owner == state.DefaultOwner || state.ResourceOwners.ContainsKey(owner))
+            {
+                owner++;
+                if (owner == 0)
+                {
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                }
+            }
+
+            state.NextOwner = owner + 1;
+            state.ResourceOwners.Add(owner, System.Text.Encoding.UTF8.GetString(nameBytes));
+        }
+
+        if (!ctx.TryWriteUInt32(ownerAddress, owner))
+        {
+            lock (state.Gate)
+            {
+                state.ResourceOwners.Remove(owner);
+            }
+
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc(
+            $"agc.driver_register_owner out=0x{ownerAddress:X16} owner={owner} " +
+            $"name={System.Text.Encoding.UTF8.GetString(nameBytes)}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -2160,16 +2340,87 @@ public static class AgcExports
     LibraryName = "libSceAgc")]
     public static int DriverRegisterResource(CpuContext ctx)
     {
-        var resourceAddress = ctx[CpuRegister.Rdi];
+        var resourceHandleAddress = ctx[CpuRegister.Rdi];
         var owner = (uint)ctx[CpuRegister.Rsi];
-        var nameAddress = ctx[CpuRegister.Rdx];
-        var type = (uint)ctx[CpuRegister.R8];
-        var flags = (uint)ctx[CpuRegister.R9];
+        var resourceAddress = ctx[CpuRegister.Rdx];
+        var resourceSize = ctx[CpuRegister.Rcx];
+        var nameAddress = ctx[CpuRegister.R8];
+        var type = (uint)ctx[CpuRegister.R9];
+        if (resourceHandleAddress == 0 || resourceAddress == 0 || resourceSize == 0 ||
+            !ctx.TryReadUInt32(ctx[CpuRegister.Rsp] + sizeof(ulong), out var flags) ||
+            !TryReadGuestCString(
+                ctx,
+                nameAddress,
+                ResourceRegistrationMaxNameLength,
+                out var nameBytes))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        uint resourceHandle;
+        lock (state.Gate)
+        {
+            if (!state.ResourceRegistrationInitialized ||
+                owner != state.DefaultOwner &&
+                !state.ResourceOwners.ContainsKey(owner))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            resourceHandle = state.NextResource++;
+            if (resourceHandle == 0)
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            state.RegisteredResources.Add(
+                resourceHandle,
+                new RegisteredAgcResource(
+                    owner,
+                    resourceAddress,
+                    resourceSize,
+                    System.Text.Encoding.UTF8.GetString(nameBytes),
+                    type,
+                    flags));
+        }
+
+        if (!ctx.TryWriteUInt32(resourceHandleAddress, resourceHandle))
+        {
+            lock (state.Gate)
+            {
+                state.RegisteredResources.Remove(resourceHandle);
+            }
+
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
 
         TraceAgc(
-            $"agc.driver_register_resource resource=0x{resourceAddress:X16} owner={owner} " +
-            $"name=0x{nameAddress:X16} type={type} flags={flags}");
+            $"agc.driver_register_resource handle={resourceHandle} owner={owner} " +
+            $"resource=0x{resourceAddress:X16} bytes=0x{resourceSize:X} " +
+            $"name={System.Text.Encoding.UTF8.GetString(nameBytes)} type={type} flags={flags}");
 
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "pWLG7WOpVcw",
+        ExportName = "sceAgcDriverUnregisterResource",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverUnregisterResource(CpuContext ctx)
+    {
+        var resourceHandle = (uint)ctx[CpuRegister.Rdi];
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        lock (state.Gate)
+        {
+            if (!state.RegisteredResources.Remove(resourceHandle))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+        }
+
+        TraceAgc($"agc.driver_unregister_resource handle={resourceHandle}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -4250,7 +4501,7 @@ public static class AgcExports
         var localSizeZ = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadZ);
         var gpuDispatch = false;
         var computeError = string.Empty;
-        if (hasStorageBinding &&
+        if ((hasStorageBinding || evaluation.GlobalMemoryBindings.Count != 0) &&
             (ulong)localSizeX * localSizeY * localSizeZ <= 1024)
         {
             var shaderKey = (
@@ -4320,7 +4571,8 @@ public static class AgcExports
                     $"groups={dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ} " +
                     $"local={localSizeX}x{localSizeY}x{localSizeZ} " +
                     $"sys={DescribeComputeSystemRegisters(computeSystemRegisters)} " +
-                    $"gpu={gpuDispatch} blits={blitCount}" +
+                    $"gpu={gpuDispatch} blits={blitCount} " +
+                    $"globals={evaluation.GlobalMemoryBindings.Count}" +
                     (computeError.Length == 0 ? string.Empty : $" error={computeError}") +
                     $" bindings=[{string.Join(',', descriptions)}]");
             }

@@ -80,7 +80,7 @@ public static class JsonExports
 
     [SysAbiExport(
         Nid = "WSOuge5IsCg",
-        ExportName = "_ZN3sce4Json15InitParameter2C2Ev",
+        ExportName = "_ZN3sce4Json14InitParameter2C1Ev",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson2")]
     public static int InitParameter2Constructor(CpuContext ctx)
@@ -93,7 +93,7 @@ public static class JsonExports
 
     [SysAbiExport(
         Nid = "I2QC8PYhJWY",
-        ExportName = "_ZN3sce4Json15InitParameter212setAllocatorERNS0_12MemAllocatorE",
+        ExportName = "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson2")]
     public static int InitParameter2SetAllocator(CpuContext ctx)
@@ -106,7 +106,7 @@ public static class JsonExports
 
     [SysAbiExport(
         Nid = "Eu95jmqn5Rw",
-        ExportName = "_ZN3sce4Json15InitParameter217setFileBufferSizeEm",
+        ExportName = "_ZN3sce4Json14InitParameter217setFileBufferSizeEm",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson2")]
     public static int InitParameter2SetFileBufferSize(CpuContext ctx)
@@ -119,7 +119,7 @@ public static class JsonExports
 
     [SysAbiExport(
         Nid = "IXW-z8pggfg",
-        ExportName = "_ZN3sce4Json12Initializer2C1Ev",
+        ExportName = "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson2")]
     public static int Initializer2Constructor(CpuContext ctx)
