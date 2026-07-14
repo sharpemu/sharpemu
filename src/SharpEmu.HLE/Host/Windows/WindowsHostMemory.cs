@@ -9,7 +9,7 @@ namespace SharpEmu.HLE.Host.Windows;
 /// Windows implementation over VirtualAlloc/VirtualFree/VirtualProtect/VirtualQuery.
 /// Sealed so the JIT can devirtualize interface calls on fault-handling hot paths.
 /// </summary>
-internal sealed unsafe class WindowsHostMemory : IHostMemory
+internal sealed unsafe partial class WindowsHostMemory : IHostMemory
 {
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
@@ -117,26 +117,26 @@ internal sealed unsafe class WindowsHostMemory : IHostMemory
         };
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern void* VirtualAlloc(void* lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial void* VirtualAlloc(void* lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool VirtualFree(void* lpAddress, nuint dwSize, uint dwFreeType);
+    private static partial bool VirtualFree(void* lpAddress, nuint dwSize, uint dwFreeType);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
+    private static partial bool VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
 
-    [DllImport("kernel32.dll")]
-    private static extern nuint VirtualQuery(void* lpAddress, out MemoryBasicInformation64 lpBuffer, nuint dwLength);
+    [LibraryImport("kernel32.dll")]
+    private static partial nuint VirtualQuery(void* lpAddress, out MemoryBasicInformation64 lpBuffer, nuint dwLength);
 
-    [DllImport("kernel32.dll")]
-    private static extern void* GetCurrentProcess();
+    [LibraryImport("kernel32.dll")]
+    private static partial void* GetCurrentProcess();
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
+    private static partial bool FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
 
     private struct MemoryBasicInformation64
     {

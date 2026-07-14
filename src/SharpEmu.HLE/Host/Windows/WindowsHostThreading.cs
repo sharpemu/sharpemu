@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpEmu.HLE.Host.Windows;
 
-internal sealed unsafe class WindowsHostThreading : IHostThreading
+internal sealed unsafe partial class WindowsHostThreading : IHostThreading
 {
     private const uint StackSizeParamIsAReservation = 0x00010000u;
     private const uint ThreadGetContext = 0x0008u;
@@ -72,6 +72,9 @@ internal sealed unsafe class WindowsHostThreading : IHostThreading
             }
 
             suspended = true;
+            // CONTEXT requires 16-byte alignment (it embeds M128A fields);
+            // NativeMemory.AllocZeroed guarantees max_align_t, stackalloc only
+            // pointer-size — so this stays a native allocation.
             contextRecord = NativeMemory.AllocZeroed((nuint)Win64ContextSize);
             *(uint*)((byte*)contextRecord + Win64ContextFlagsOffset) = ContextAmd64ControlInteger;
             if (!GetThreadContext(threadHandle, contextRecord))
@@ -108,29 +111,31 @@ internal sealed unsafe class WindowsHostThreading : IHostThreading
         return *(ulong*)((byte*)contextRecord + offset);
     }
 
-    [DllImport("kernel32.dll")]
-    private static extern uint TlsAlloc();
+    [LibraryImport("kernel32.dll")]
+    private static partial uint TlsAlloc();
 
-    [DllImport("kernel32.dll")]
-    private static extern bool TlsFree(uint dwTlsIndex);
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool TlsFree(uint dwTlsIndex);
 
-    [DllImport("kernel32.dll")]
-    private static extern bool TlsSetValue(uint dwTlsIndex, nint lpTlsValue);
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool TlsSetValue(uint dwTlsIndex, nint lpTlsValue);
 
-    [DllImport("kernel32.dll")]
-    private static extern nint TlsGetValue(uint dwTlsIndex);
+    [LibraryImport("kernel32.dll")]
+    private static partial nint TlsGetValue(uint dwTlsIndex);
 
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentThreadId();
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetCurrentThreadId();
 
-    [DllImport("kernel32.dll")]
-    private static extern nint GetCurrentThread();
+    [LibraryImport("kernel32.dll")]
+    private static partial nint GetCurrentThread();
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint CreateThread(
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial nint CreateThread(
         nint lpThreadAttributes,
         nuint dwStackSize,
         nint lpStartAddress,
@@ -138,23 +143,23 @@ internal sealed unsafe class WindowsHostThreading : IHostThreading
         uint dwCreationFlags,
         out uint lpThreadId);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial nint OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint SuspendThread(nint hThread);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint SuspendThread(nint hThread);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint ResumeThread(nint hThread);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint ResumeThread(nint hThread);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetThreadContext(nint hThread, void* lpContext);
+    private static partial bool GetThreadContext(nint hThread, void* lpContext);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(nint hObject);
+    private static partial bool CloseHandle(nint hObject);
 }

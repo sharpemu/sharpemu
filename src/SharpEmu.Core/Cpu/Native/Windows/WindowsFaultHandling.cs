@@ -13,7 +13,7 @@ namespace SharpEmu.Core.Cpu.Native.Windows;
 /// DirectExecutionBackend; a POSIX backend supplies a sibling built around
 /// sigaction/sigaltstack instead.
 /// </summary>
-internal sealed unsafe class WindowsFaultHandling : IHostFaultHandling
+internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
 {
     private readonly IHostMemory _memory;
 
@@ -179,12 +179,12 @@ internal sealed unsafe class WindowsFaultHandling : IHostFaultHandling
         offset += sizeof(uint);
     }
 
-    [DllImport("kernel32.dll")]
-    private static extern void* AddVectoredExceptionHandler(uint first, IntPtr handler);
+    [LibraryImport("kernel32.dll")]
+    private static partial void* AddVectoredExceptionHandler(uint first, IntPtr handler);
 
-    [DllImport("kernel32.dll")]
-    private static extern uint RemoveVectoredExceptionHandler(void* handle);
+    [LibraryImport("kernel32.dll")]
+    private static partial uint RemoveVectoredExceptionHandler(void* handle);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
 }

@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpEmu.HLE.Host.Windows;
 
-internal sealed class WindowsHostSymbolResolver : IHostSymbolResolver
+internal sealed partial class WindowsHostSymbolResolver : IHostSymbolResolver
 {
     public nint GetAddress(HostRuntimeFunction function)
     {
@@ -28,9 +28,12 @@ internal sealed class WindowsHostSymbolResolver : IHostSymbolResolver
         });
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    private static extern nint GetModuleHandle(string lpModuleName);
+    // Utf16 marshalling pins the managed string and passes its address directly
+    // (no copy); Utf8 stack-allocates the transient buffer for these short
+    // ASCII export names. LibraryImport is exact-spelling, hence the W entry point.
+    [LibraryImport("kernel32.dll", EntryPoint = "GetModuleHandleW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint GetModuleHandle(string lpModuleName);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
-    private static extern nint GetProcAddress(nint hModule, string procName);
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf8)]
+    private static partial nint GetProcAddress(nint hModule, string procName);
 }
