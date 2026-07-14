@@ -1,0 +1,129 @@
+{
+  "_languageName": "Español",
+
+  "Page.Library": "Biblioteca",
+  "Page.Options": "Opciones",
+  "Page.GameCount.One": "1 juego",
+  "Page.GameCount.Other": "{0} juegos",
+
+  "Library.SearchWatermark": "Buscar en la biblioteca…",
+  "Library.AddFolder": "＋ Añadir carpeta",
+  "Library.Rescan": "⟳ Volver a escanear",
+  "Library.OpenFile": "Abrir archivo…",
+
+  "Library.Context.Launch": "Iniciar",
+  "Library.Context.OpenFolder": "Abrir carpeta de juegos",
+  "Library.Context.CopyPath": "Copiar ruta",
+  "Library.Context.CopyTitleId": "Copiar ID del título",
+  "Library.Context.Remove": "Eliminar de la biblioteca",
+
+  "Library.Empty.Title": "Tu biblioteca está vacía",
+  "Library.Empty.Hint": "Añade una carpeta que contenga tus juegos para empezar.",
+  "Library.Empty.SearchTitle": "Ningún juego coincide con la búsqueda",
+  "Library.Empty.SearchHint": "No se ha encontrado nada en la biblioteca que coincida con “{0}”.",
+  "Library.Empty.AddFolder": "＋ Añadir carpeta de juegos",
+
+  "Library.Loading": "Cargando biblioteca…",
+
+  "Options.General": "General",
+  "Options.Section.Emulation": "EMULACIÓN",
+  "Options.Section.Logging": "LOGS",
+  "Options.Section.Launcher": "LAUNCHER",
+
+  "Options.CpuEngine.Label": "Motor de CPU",
+  "Options.CpuEngine.Desc": "Motor utilizado para ejecutar el código del juego.",
+  "Options.CpuEngine.Native": "Nativo",
+
+  "Options.Strict.Label": "Resolución estricta de dynlib (Bibliotecas dinámicas)",
+  "Options.Strict.Desc": "Fallar la ejecución cuando un símbolo importado no se pueda resolver.",
+
+  "Options.LogLevel.Label": "Nivel de Log",
+  "Options.LogLevel.Desc": "Verbosidad de la salida en consola del emulador.",
+  "Options.LogLevel.Trace": "Trazas",
+  "Options.LogLevel.Debug": "Depuración",
+  "Options.LogLevel.Info": "Información",
+  "Options.LogLevel.Warning": "Advertencia",
+  "Options.LogLevel.Error": "Error",
+  "Options.LogLevel.Critical": "Crítico",
+
+  "Options.TraceImports.Label": "Límite de trazado de importaciones",
+  "Options.TraceImports.Desc": "Trazar las primeras N importaciones por módulo (0 = off).",
+
+  "Options.LogToFile.Label": "Registrar log en archivo",
+  "Options.LogToFile.Desc": "Duplicar la salida del emulador en un archivo de logs.",
+
+  "Options.LogFilePath.Label": "Ruta del archivo de Log",
+  "Options.LogFilePath.Default": "Sin ruta personalizada — los logs van a user/logs al lado del emulador.",
+  "Options.LogFilePath.Select": "Seleccionar…",
+
+  "Options.OverrideLogFile.Label": "Sobreescribir archivo de logs",
+  "Options.OverrideLogFile.Desc": "Utilizar la misma ruta para el archivo de logs en vez de añadir la ID del título y marca de tiempo.",
+
+  "Options.TitleMusic.Label": "Música del título",
+  "Options.TitleMusic.Desc": "Repetir en bucle la preview de la música del juego seleccionado en la biblioteca.",
+
+  "Options.Discord.Label": "Actividad de Discord",
+  "Options.Discord.Desc": "Mostrar juego en ejecución en tu perfil de Discord.",
+
+  "Options.Language.Label": "Idioma del emulador",
+  "Options.Language.Desc": "Idioma utilizado en todo el launcher. Se aplica inmediatamente.",
+
+  "Common.On": "Encendido",
+  "Common.Off": "Apagado",
+
+  "Console.Title": "CONSOLA",
+  "Console.SearchWatermark": "Buscar...",
+  "Console.AutoScroll": "Desplazamiento automático",
+  "Console.Split": "Desacoplar",
+  "Console.Copy": "Copiar",
+  "Console.Clear": "Limpiar",
+  "Console.WindowTitle": "Consola SharpEmu",
+
+  "Launch.NoGameSelected": "No hay ningún juego seleccionado",
+  "Launch.NoGameHint": "Selecciona un juego de la biblioteca o abre un eboot.bin directamente.",
+  "Launch.Idle": "Inactivo",
+  "Launch.Console": "≡ Consola",
+  "Launch.Launch": "▶  Iniciar",
+  "Launch.Stop": "■  Detener",
+  "Launch.Running": "En ejecución — {0}",
+  "Launch.Stopping": "Deteniendo…",
+  "Launch.Exited": "Finalizó con el código {0} ({1})",
+  "Launch.ExeNotFound": "No se ha encontrado el ejecutable de SharpEmu. Compila previamente el proyecto SharpEmu.CLI (dotnet build).",
+  "Launch.LogFile": "Archivo de Log: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Error al iniciar el emulador: {0}",
+  "Launch.ProcessExited": "El proceso finalizó con el código {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "argumentos no válidos",
+  "Exit.EbootNotFound": "no se encontró eboot",
+  "Exit.RuntimeException": "excepción en tiempo de ejecución",
+  "Exit.EmulationError": "error de emulación",
+  "Exit.Unknown": "desconocido",
+
+  "Status.EmulatorLocating": "Emulador: localizando…",
+  "Status.EmulatorPath": "Emulador: {0}",
+  "Status.EmulatorNotFound": "Emulador: No se encontró el ejecutable de SharpEmu — compila previamente SharpEmu.CLI.",
+  "Status.ScanningLibrary": "Escaneando biblioteca…",
+  "Status.AddFolderPrompt": "Añade una carpeta de juegos para poblar la biblioteca.",
+  "Status.LibraryScanned": "Biblioteca escaneada: Se encontraron {0} juego(s) en {1} carpeta(s).",
+  "Status.CouldNotOpenFolder": "No se ha podido abrir la carpeta: {0}",
+  "Status.CopiedToClipboard": "{0} copiado al portapapeles.",
+  "Status.RemovedFromLibrary": "Se eliminó “{0}” de la biblioteca. Vuelve a añadir su carpeta para restaurarlo.",
+  "Status.Running": "Ejecutando {0}",
+  "Status.Stopping": "Deteniendo…",
+  "Status.Idle": "Inactivo",
+
+  "Clipboard.Path": "Ruta",
+  "Clipboard.TitleId": "ID del título",
+
+  "Discord.Playing": "Jugando a {0}",
+  "Discord.Browsing": "Navegando en la biblioteca, buscando un juego para divertirse.",
+
+  "Dialog.ChooseGameFolder": "Selecciona una carpeta que contenga juegos",
+  "Dialog.OpenExecutable": "Abrir un ejecutable para iniciar",
+  "Dialog.PsExecutables": "Ejecutables de PS",
+  "Dialog.SaveLogFile": "Selecciona dónde guardar el archivo de Logs",
+  "Dialog.PlainTextFiles": "Archivos en texto plano",
+  "Dialog.LogFiles": "Archivos de Log"
+}
