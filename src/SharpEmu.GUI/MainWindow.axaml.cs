@@ -465,8 +465,8 @@ public partial class MainWindow : Window
         AboutSectionTitle.Text = loc.Get("Options.About");
         GithubLabel.Text = loc.Get("About.Github.Label");
         GithubDesc.Text = loc.Get("About.Github.Desc");
-        CommunityLabel.Text = loc.Get("About.Discord.Label");
-        CommunityDesc.Text = loc.Get("About.Discord.Desc");
+        DiscordServerLabel.Text = loc.Get("About.Discord.Label");
+        DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
         GithubButton.Content = loc.Get("About.GithubButton");
         DiscordButton.Content = loc.Get("About.DiscordButton");
 

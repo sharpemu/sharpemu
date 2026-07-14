@@ -23,14 +23,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Fonts.Inter" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
-    <PackageReference Include="Avalonia.Svg.Skia" />
     <PackageReference Include="Tmds.DBus.Protocol" />
   </ItemGroup>
 
   <ItemGroup>
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
-    <AvaloniaResource Include="..\..\assets\images\github.svg" Link="Assets/github.svg" />
-    <AvaloniaResource Include="..\..\assets\images\discord.svg" Link="Assets/discord.svg" />
+    <AvaloniaResource Include="..\..\assets\images\github.png" Link="Assets/github.png" />
+    <AvaloniaResource Include="..\..\assets\images\discord.png" Link="Assets/discord.png" />
   </ItemGroup>
 
   <ItemGroup>

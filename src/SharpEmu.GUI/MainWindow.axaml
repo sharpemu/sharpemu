@@ -329,7 +329,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       Orientation="Horizontal"
                                       Spacing="8"
                                       VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/github.svg"
+                          <Image Source="avares://SharpEmu.GUI/Assets/github.png"
                                     Width="20"
                                     Height="20"
                                     VerticalAlignment="Center" />
@@ -355,17 +355,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <!--Discord-->
                       <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center"
-                                    Spacing="2"
-                                    Margin="0,0,16,0">
-                          <TextBlock x:Name="CommunityLabel"
-                                    Text="Discord"
-                                    FontSize="13" />
-                          <TextBlock x:Name="CommunityDesc"
-                                    Text="Join the community, get support and follow development."
-                                    FontSize="11"
-                                    Foreground="{StaticResource MutedBrush}"
-                                    TextWrapping="Wrap" />
+                        <StackPanel Grid.Column="0"
+                                        Orientation="Horizontal"
+                                        Spacing="8"
+                                        VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/discord.png"
+                                  Width="20"
+                                  Height="20"
+                                  VerticalAlignment="Center" />
+                          <StackPanel VerticalAlignment="Center"
+                                      Spacing="2">
+                            <TextBlock x:Name="DiscordServerLabel"
+                                      Text="Discord"
+                                      FontSize="13" />
+                            <TextBlock x:Name="DiscordServerDesc"
+                                      Text="Join the community, get support and follow development."
+                                      FontSize="11"
+                                      Foreground="{StaticResource MutedBrush}"
+                                      TextWrapping="Wrap" />
+                          </StackPanel>
                         </StackPanel>
 
                         <Button Grid.Column="1"
