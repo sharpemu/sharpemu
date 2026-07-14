@@ -1,0 +1,129 @@
+{
+  "_languageName": "English",
+
+  "Page.Library": "Library",
+  "Page.Options": "Options",
+  "Page.GameCount.One": "1 game",
+  "Page.GameCount.Other": "{0} games",
+
+  "Library.SearchWatermark": "Search library…",
+  "Library.AddFolder": "＋ Add folder",
+  "Library.Rescan": "⟳ Rescan",
+  "Library.OpenFile": "Open file…",
+
+  "Library.Context.Launch": "Launch",
+  "Library.Context.OpenFolder": "Open game folder",
+  "Library.Context.CopyPath": "Copy path",
+  "Library.Context.CopyTitleId": "Copy title ID",
+  "Library.Context.Remove": "Remove from library",
+
+  "Library.Empty.Title": "Your library is empty",
+  "Library.Empty.Hint": "Add a folder containing your games to get started.",
+  "Library.Empty.SearchTitle": "No games match your search",
+  "Library.Empty.SearchHint": "Nothing in the library matches “{0}”.",
+  "Library.Empty.AddFolder": "＋ Add game folder",
+
+  "Library.Loading": "Loading library…",
+
+  "Options.General": "General",
+  "Options.Section.Emulation": "EMULATION",
+  "Options.Section.Logging": "LOGGING",
+  "Options.Section.Launcher": "LAUNCHER",
+
+  "Options.CpuEngine.Label": "CPU engine",
+  "Options.CpuEngine.Desc": "Execution engine used to run game code.",
+  "Options.CpuEngine.Native": "Native",
+
+  "Options.Strict.Label": "Strict dynlib resolution",
+  "Options.Strict.Desc": "Fail the launch when an imported symbol cannot be resolved.",
+
+  "Options.LogLevel.Label": "Log level",
+  "Options.LogLevel.Desc": "Verbosity of the emulator console output.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Warning",
+  "Options.LogLevel.Error": "Error",
+  "Options.LogLevel.Critical": "Critical",
+
+  "Options.TraceImports.Label": "Import trace limit",
+  "Options.TraceImports.Desc": "Trace the first N imports per module (0 = off).",
+
+  "Options.LogToFile.Label": "Log to file",
+  "Options.LogToFile.Desc": "Mirror emulator output to a log file.",
+
+  "Options.LogFilePath.Label": "Log file path",
+  "Options.LogFilePath.Default": "No custom path — logs go to user/logs next to the emulator.",
+  "Options.LogFilePath.Select": "Select…",
+
+  "Options.OverrideLogFile.Label": "Override log file",
+  "Options.OverrideLogFile.Desc": "Use the exact file path instead of appending title ID and timestamp.",
+
+  "Options.TitleMusic.Label": "Title music",
+  "Options.TitleMusic.Desc": "Loop the selected game's preview music in the library.",
+
+  "Options.Discord.Label": "Discord presence",
+  "Options.Discord.Desc": "Show the running game on your Discord profile.",
+
+  "Options.Language.Label": "Emulator language",
+  "Options.Language.Desc": "Language used throughout the launcher. Applies immediately.",
+
+  "Common.On": "On",
+  "Common.Off": "Off",
+
+  "Console.Title": "CONSOLE",
+  "Console.SearchWatermark": "Search...",
+  "Console.AutoScroll": "Auto-scroll",
+  "Console.Split": "Split",
+  "Console.Copy": "Copy",
+  "Console.Clear": "Clear",
+  "Console.WindowTitle": "SharpEmu Console",
+
+  "Launch.NoGameSelected": "No game selected",
+  "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
+  "Launch.Idle": "Idle",
+  "Launch.Console": "≡ Console",
+  "Launch.Launch": "▶  Launch",
+  "Launch.Stop": "■  Stop",
+  "Launch.Running": "Running — {0}",
+  "Launch.Stopping": "Stopping…",
+  "Launch.Exited": "Exited with code {0} ({1})",
+  "Launch.ExeNotFound": "SharpEmu executable not found. Build the SharpEmu.CLI project first (dotnet build).",
+  "Launch.LogFile": "Log file: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Failed to start the emulator: {0}",
+  "Launch.ProcessExited": "Process exited with code {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "invalid arguments",
+  "Exit.EbootNotFound": "eboot not found",
+  "Exit.RuntimeException": "runtime exception",
+  "Exit.EmulationError": "emulation error",
+  "Exit.Unknown": "unknown",
+
+  "Status.EmulatorLocating": "Emulator: locating…",
+  "Status.EmulatorPath": "Emulator: {0}",
+  "Status.EmulatorNotFound": "Emulator: SharpEmu executable not found — build SharpEmu.CLI first.",
+  "Status.ScanningLibrary": "Scanning library…",
+  "Status.AddFolderPrompt": "Add a game folder to populate the library.",
+  "Status.LibraryScanned": "Library scanned: {0} game(s) in {1} folder(s).",
+  "Status.CouldNotOpenFolder": "Could not open folder: {0}",
+  "Status.CopiedToClipboard": "{0} copied to clipboard.",
+  "Status.RemovedFromLibrary": "Removed “{0}” from the library. Re-add its folder to restore it.",
+  "Status.Running": "Running {0}",
+  "Status.Stopping": "Stopping…",
+  "Status.Idle": "Idle",
+
+  "Clipboard.Path": "Path",
+  "Clipboard.TitleId": "Title ID",
+
+  "Discord.Playing": "Playing {0}",
+  "Discord.Browsing": "Browsing the library",
+
+  "Dialog.ChooseGameFolder": "Choose a folder containing games",
+  "Dialog.OpenExecutable": "Open an executable to launch",
+  "Dialog.PsExecutables": "PS executables",
+  "Dialog.SaveLogFile": "Select where to save the Log file",
+  "Dialog.PlainTextFiles": "Plain Text Files",
+  "Dialog.LogFiles": "Log Files"
+}

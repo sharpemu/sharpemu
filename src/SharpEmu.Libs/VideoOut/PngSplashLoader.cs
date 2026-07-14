@@ -14,6 +14,17 @@ internal static class PngSplashLoader
     ];
 
     public static bool TryLoad(out byte[] pixels, out uint width, out uint height)
+        => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height);
+
+    public static bool TryLoadIcon(out byte[] pixels, out uint width, out uint height)
+        => TryLoad("icon0.png", requestRgba: true, out pixels, out width, out height);
+
+    private static bool TryLoad(
+        string fileName,
+        bool requestRgba,
+        out byte[] pixels,
+        out uint width,
+        out uint height)
     {
         pixels = [];
         width = 0;
@@ -27,13 +38,18 @@ internal static class PngSplashLoader
                 return false;
             }
 
-            var path = Path.Combine(app0Root, "sce_sys", "pic0.png");
+            var path = Path.Combine(app0Root, "sce_sys", fileName);
             if (!File.Exists(path))
             {
                 return false;
             }
 
-            return TryDecode(File.ReadAllBytes(path), out pixels, out width, out height);
+            return TryDecode(
+                File.ReadAllBytes(path),
+                out pixels,
+                out width,
+                out height,
+                requestRgba);
         }
         catch
         {
@@ -48,7 +64,8 @@ internal static class PngSplashLoader
         ReadOnlySpan<byte> png,
         out byte[] pixels,
         out uint width,
-        out uint height)
+        out uint height,
+        bool requestRgba)
     {
         pixels = [];
         width = 0;
@@ -154,9 +171,13 @@ internal static class PngSplashLoader
              sourceOffset < reconstructed.Length;
              sourceOffset += sourceBytesPerPixel, targetOffset += 4)
         {
-            pixels[targetOffset] = reconstructed[sourceOffset + 2];
+            pixels[targetOffset] = requestRgba
+                ? reconstructed[sourceOffset]
+                : reconstructed[sourceOffset + 2];
             pixels[targetOffset + 1] = reconstructed[sourceOffset + 1];
-            pixels[targetOffset + 2] = reconstructed[sourceOffset];
+            pixels[targetOffset + 2] = requestRgba
+                ? reconstructed[sourceOffset + 2]
+                : reconstructed[sourceOffset];
             pixels[targetOffset + 3] = sourceBytesPerPixel == 4
                 ? reconstructed[sourceOffset + 3]
                 : (byte)0xFF;

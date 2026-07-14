@@ -42,6 +42,9 @@ public sealed class GuiSettings
 
     public string? EmulatorPath { get; set; }
 
+    /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
+    public string Language { get; set; } = "en";
+
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
     public bool DiscordRichPresence { get; set; } = true;
 

@@ -47,7 +47,7 @@ internal sealed class SndPreviewPlayer
         {
             // Debounce so skimming through the library does not decode (or
             // start) a preview per tile.
-            await Task.Delay(300).ConfigureAwait(false);
+            await Task.Delay(120).ConfigureAwait(false);
 
             byte[]? wav;
             lock (_sync)

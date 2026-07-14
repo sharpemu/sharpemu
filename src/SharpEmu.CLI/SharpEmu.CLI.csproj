@@ -48,6 +48,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TargetPath>LICENSE.txt</TargetPath>
       <Visible>False</Visible>
     </Content>
+    <Content Include="..\SharpEmu.GUI\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
+      <Visible>False</Visible>
+    </Content>
   </ItemGroup>
 
   <!-- Keep glfw as a loose file next to the executable; every other native

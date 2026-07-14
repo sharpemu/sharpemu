@@ -621,6 +621,8 @@ internal static class Gen5ShaderTranslator
             0x10 => "SSendmsg",
             0x16 => "STtraceData",
             0x20 => "SInstPrefetch",
+            0x21 => "SClause",
+            0x23 => "SWaitcntDepctr",
             _ => string.Empty,
         };
 

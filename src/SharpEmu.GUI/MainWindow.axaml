@@ -9,6 +9,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         Title="SharpEmu"
         Width="1280" Height="820"
         MinWidth="980" MinHeight="640"
+        WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}"
         ExtendClientAreaToDecorationsHint="True"
@@ -17,7 +18,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
-  <Grid RowDefinitions="44,*,32">
+  <Grid RowDefinitions="Auto,*,Auto">
 
     <!-- Selected-game backdrop: key art behind the main content, dimmed by
          a scrim so tiles and text stay readable. Fades on selection. -->
@@ -41,8 +42,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
       </Border>
     </Panel>
 
-    <!-- Title bar -->
-    <Grid x:Name="TitleBar" Grid.Row="0" Background="{StaticResource ChromeBrush}">
+    <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
+         the game gets the whole screen. -->
+    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="{StaticResource ChromeBrush}">
       <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
@@ -54,106 +56,273 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid Grid.Row="1" Margin="18,14,18,14" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
 
-      <!-- Library toolbar -->
-      <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto" Margin="6,0,6,12">
-        <TextBlock Grid.Column="0" Text="Library" FontSize="22" FontWeight="Bold" VerticalAlignment="Center" />
-        <Border Grid.Column="1" Classes="pill" Margin="12,2,0,0" VerticalAlignment="Center">
-          <TextBlock x:Name="GameCountText" Text="0 games" FontSize="11" Foreground="{StaticResource MutedBrush}" />
-        </Border>
-        <TextBox Grid.Column="3" x:Name="SearchBox" Watermark="Search library…" Width="280"
-                 VerticalAlignment="Center" Margin="0,0,12,0" />
-        <Button Grid.Column="4" x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder"
-                VerticalAlignment="Center" Margin="0,0,8,0" />
-        <Button Grid.Column="5" x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan"
-                VerticalAlignment="Center" Margin="0,0,8,0" />
-        <Button Grid.Column="6" x:Name="OpenFileButton" Classes="ghost" Content="Open file…"
-                VerticalAlignment="Center" />
+      <!-- Library / Options page switcher, with the library toolbar sharing
+           the same row on the right. Plain buttons (not TabItem) so there is
+           no underline; LB/RB hint chips flank the pair and the gamepad's
+           shoulder buttons actually switch pages from anywhere. -->
+      <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+          <Border Classes="padHint" VerticalAlignment="Center">
+            <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+          </Border>
+          <Button x:Name="LibraryTabButton" Classes="segment active" Content="Library" />
+          <Button x:Name="OptionsTabButton" Classes="segment" Content="Options" />
+          <Border Classes="padHint" VerticalAlignment="Center">
+            <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+          </Border>
+        </StackPanel>
+
+        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
+                    VerticalAlignment="Center">
+          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="240" VerticalAlignment="Center" />
+          <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
+          <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
+          <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
+        </StackPanel>
       </Grid>
 
-      <!-- Cover-art grid -->
       <Panel Grid.Row="1">
-        <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                 SelectionMode="Single" Padding="0">
-          <ListBox.ContextMenu>
-            <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
-              <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
-                <MenuItem.Icon>
-                  <TextBlock Text="▶" FontSize="11" Foreground="{StaticResource AccentHoverBrush}"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </MenuItem.Icon>
-              </MenuItem>
-              <MenuItem x:Name="CtxOpenFolder" Header="Open game folder">
-                <MenuItem.Icon>
-                  <TextBlock Text="📂" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </MenuItem.Icon>
-              </MenuItem>
-              <Separator />
-              <MenuItem x:Name="CtxCopyPath" Header="Copy path">
-                <MenuItem.Icon>
-                  <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </MenuItem.Icon>
-              </MenuItem>
-              <MenuItem x:Name="CtxCopyTitleId" Header="Copy title ID">
-                <MenuItem.Icon>
-                  <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </MenuItem.Icon>
-              </MenuItem>
-              <Separator />
-              <MenuItem x:Name="CtxRemove" Header="Remove from library"
-                        Foreground="{StaticResource DangerHoverBrush}">
-                <MenuItem.Icon>
-                  <TextBlock Text="✕" FontSize="12" Foreground="{StaticResource DangerHoverBrush}"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </MenuItem.Icon>
-              </MenuItem>
-            </ContextMenu>
-          </ListBox.ContextMenu>
-          <ListBox.ItemsPanel>
-            <ItemsPanelTemplate>
-              <WrapPanel />
-            </ItemsPanelTemplate>
-          </ListBox.ItemsPanel>
-          <ListBox.ItemTemplate>
-            <DataTemplate>
-              <StackPanel Width="128" Height="186" Spacing="7">
-                <Border Classes="coverShadow" Width="128" Height="128">
-                  <Border Classes="coverClip">
-                    <Panel>
-                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                        <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
-                                   Foreground="#E8ECF4" Opacity="0.85"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-                      </Border>
-                      <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
-                    </Panel>
-                  </Border>
-                </Border>
-                <StackPanel Spacing="2">
-                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
-                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
-                  <TextBlock Text="{Binding Detail}" FontSize="11" Foreground="{StaticResource MutedBrush}"
-                             TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-              </StackPanel>
-            </DataTemplate>
-          </ListBox.ItemTemplate>
-        </ListBox>
 
-        <!-- Empty state -->
-        <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
-                    IsVisible="False">
-          <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
-          <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
-                     HorizontalAlignment="Center" />
-          <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
-                     FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-          <Button x:Name="EmptyAddFolderButton" Classes="accent" Content="＋ Add game folder"
-                  HorizontalAlignment="Center" Margin="0,8,0,0" />
-        </StackPanel>
+        <!-- Library page. The tile row gets extra top margin so it sits
+             closer to eye level (PS5 home-screen style) instead of hugging
+             the Library/Options switcher above it. -->
+        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
+          <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
+                   SelectionMode="Single" Padding="0">
+            <ListBox.ContextMenu>
+              <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
+                <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
+                  <MenuItem.Icon>
+                    <TextBlock Text="▶" FontSize="11" Foreground="{StaticResource AccentHoverBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxOpenFolder" Header="Open game folder">
+                  <MenuItem.Icon>
+                    <TextBlock Text="📂" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <Separator />
+                <MenuItem x:Name="CtxCopyPath" Header="Copy path">
+                  <MenuItem.Icon>
+                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxCopyTitleId" Header="Copy title ID">
+                  <MenuItem.Icon>
+                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <Separator />
+                <MenuItem x:Name="CtxRemove" Header="Remove from library"
+                          Foreground="{StaticResource DangerHoverBrush}">
+                  <MenuItem.Icon>
+                    <TextBlock Text="✕" FontSize="12" Foreground="{StaticResource DangerHoverBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+              </ContextMenu>
+            </ListBox.ContextMenu>
+            <ListBox.ItemsPanel>
+              <ItemsPanelTemplate>
+                <WrapPanel />
+              </ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Width="128" Height="172" Spacing="7">
+                  <Border Classes="coverShadow" Width="128" Height="128">
+                    <Border Classes="coverClip">
+                      <Panel>
+                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                          <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
+                                     Foreground="#E8ECF4" Opacity="0.85"
+                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
+                      </Panel>
+                    </Border>
+                  </Border>
+                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
+                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
+                             TextAlignment="Center" HorizontalAlignment="Center" />
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+
+          <!-- Empty state -->
+          <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      IsVisible="False">
+            <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
+            <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
+                       HorizontalAlignment="Center" />
+            <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
+                       FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
+            <Button x:Name="EmptyAddFolderButton" Classes="accent" Content="＋ Add game folder"
+                    HorizontalAlignment="Center" Margin="0,8,0,0" />
+          </StackPanel>
+
+          <!-- Loading state: covers the grid while a scan (initial load,
+               rescan, or a just-added folder) is in flight, so the screen
+               never looks blank mid-scan. -->
+          <StackPanel x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      IsVisible="False">
+            <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
+            <TextBlock x:Name="LoadingStateText" Text="Loading library…" FontSize="13"
+                       Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
+          </StackPanel>
+        </Panel>
+
+        <!-- Options page: sub-tabs so future categories (Graphics, …) slot
+             in next to General. Card-grouped sections match the visual
+             language used by the console panel and launch bar below. -->
+        <Grid x:Name="OptionsPage" IsVisible="False">
+          <TabControl>
+            <TabItem x:Name="GeneralTabItem" Header="General" FontSize="15">
+              <ScrollViewer>
+                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle" Text="EMULATION" />
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="CpuEngineLabel" Text="CPU engine" FontSize="13" />
+                          <TextBlock x:Name="CpuEngineDesc" Text="Execution engine used to run game code."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" x:Name="CpuEngineBox" Width="160" SelectedIndex="0"
+                                  VerticalAlignment="Center" CornerRadius="8">
+                          <ComboBoxItem x:Name="CpuEngineNativeItem" Content="Native" />
+                        </ComboBox>
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="StrictLabel" Text="Strict dynlib resolution" FontSize="13" />
+                          <TextBlock x:Name="StrictDesc" Text="Fail the launch when an imported symbol cannot be resolved."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="StrictToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle" Text="LOGGING" />
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="LogLevelLabel" Text="Log level" FontSize="13" />
+                          <TextBlock x:Name="LogLevelDesc" Text="Verbosity of the emulator console output."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" x:Name="LogLevelBox" Width="160" SelectedIndex="2"
+                                  VerticalAlignment="Center" CornerRadius="8">
+                          <ComboBoxItem x:Name="LogLevelTraceItem" Content="Trace" />
+                          <ComboBoxItem x:Name="LogLevelDebugItem" Content="Debug" />
+                          <ComboBoxItem x:Name="LogLevelInfoItem" Content="Info" />
+                          <ComboBoxItem x:Name="LogLevelWarningItem" Content="Warning" />
+                          <ComboBoxItem x:Name="LogLevelErrorItem" Content="Error" />
+                          <ComboBoxItem x:Name="LogLevelCriticalItem" Content="Critical" />
+                        </ComboBox>
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="TraceImportsLabel" Text="Import trace limit" FontSize="13" />
+                          <TextBlock x:Name="TraceImportsDesc" Text="Trace the first N imports per module (0 = off)."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <NumericUpDown Grid.Column="1" x:Name="TraceImportsBox" Width="160" Minimum="0"
+                                       Maximum="4096" Increment="16" Value="0" FormatString="0"
+                                       VerticalAlignment="Center" CornerRadius="8" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="LogToFileLabel" Text="Log to file" FontSize="13" />
+                          <TextBlock x:Name="LogToFileDesc" Text="Mirror emulator output to a log file."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="LogToFileToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="LogFilePathLabel" Text="Log file path" FontSize="13" />
+                          <TextBlock x:Name="LogFilePathText" Text="No custom path"
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1" x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…"
+                                VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="OverrideLogFileLabel" Text="Override log file" FontSize="13" />
+                          <TextBlock x:Name="OverrideLogFileDesc"
+                                     Text="Use the exact file path instead of appending title ID and timestamp."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle" Text="LAUNCHER" />
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="LanguageLabel" Text="Emulator language" FontSize="13" />
+                          <TextBlock x:Name="LanguageDesc"
+                                     Text="Language used throughout the launcher. Applies immediately."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ComboBox Grid.Column="1" x:Name="LanguageBox" Width="160"
+                                  VerticalAlignment="Center" CornerRadius="8"
+                                  DisplayMemberBinding="{Binding NativeName}" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="TitleMusicLabel" Text="Title music" FontSize="13" />
+                          <TextBlock x:Name="TitleMusicDesc" Text="Loop the selected game's preview music in the library."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="TitleMusicToggle" OnContent="On" OffContent="Off"
+                                      IsChecked="True" VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="DiscordLabel" Text="Discord presence" FontSize="13" />
+                          <TextBlock x:Name="DiscordDesc" Text="Show the running game on your Discord profile."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="DiscordToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                </StackPanel>
+              </ScrollViewer>
+            </TabItem>
+          </TabControl>
+        </Grid>
       </Panel>
 
       <!-- Console (collapsible) -->
@@ -161,7 +330,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Margin="0,12,0,0" IsVisible="False">
         <Grid RowDefinitions="Auto,*">
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
-            <TextBlock Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
+            <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
             <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
                     Watermark="Search..." Width="320" />
             <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
@@ -184,8 +353,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
       </Border>
 
-      <!-- Launch bar -->
-      <Border Grid.Row="3" Classes="card" Margin="0,12,0,0" Padding="14">
+      <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
+      <Border Grid.Row="3" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
         <StackPanel Spacing="14">
           <Grid ColumnDefinitions="Auto,*,Auto">
 
@@ -204,9 +373,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </Panel>
             </Border>
 
-            <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center" Margin="14,0,14,0">
-              <TextBlock x:Name="SelectedGameTitle" Text="No game selected" FontSize="16" FontWeight="Bold"
-                         TextTrimming="CharacterEllipsis" />
+            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="14,0,14,0">
+              <Grid ColumnDefinitions="Auto,Auto,*">
+                <TextBlock Grid.Column="0" x:Name="SelectedGameTitle" Text="No game selected" FontSize="16"
+                           FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                           MaxWidth="340" Margin="0,0,10,0" />
+
+                <!-- Title id / version / size badges, right next to the
+                     title. The title's own MaxWidth (not a "*" column) is
+                     what keeps them from drifting to the far right. -->
+                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="6"
+                            IsVisible="False" VerticalAlignment="Center">
+                  <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
+                    <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
+                               Foreground="{StaticResource MutedBrush}" />
+                  </Border>
+                  <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
+                    <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
+                               Foreground="{StaticResource MutedBrush}" />
+                  </Border>
+                  <Border Classes="pill">
+                    <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
+                               Foreground="{StaticResource MutedBrush}" />
+                  </Border>
+                </StackPanel>
+              </Grid>
+
               <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
                          FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
               <StackPanel Orientation="Horizontal" Spacing="7">
@@ -218,69 +410,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </StackPanel>
 
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-              <ToggleButton x:Name="OptionsToggle" Classes="ghost" Content="⚙ Options" />
               <ToggleButton x:Name="ConsoleToggle" Classes="ghost" Content="≡ Console" />
               <Button x:Name="LaunchButton" Classes="accent" Content="▶  Launch" IsEnabled="False" />
               <Button x:Name="StopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
             </StackPanel>
           </Grid>
-
-          <!-- Launch options (collapsible) -->
-          <WrapPanel x:Name="OptionsPanel" IsVisible="False">
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="CPU engine" />
-              <ComboBox x:Name="CpuEngineBox" Width="150" SelectedIndex="0" CornerRadius="8">
-                <ComboBoxItem Content="Native" />
-              </ComboBox>
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Log level" />
-              <ComboBox x:Name="LogLevelBox" Width="150" SelectedIndex="2" CornerRadius="8">
-                <ComboBoxItem Content="Trace" />
-                <ComboBoxItem Content="Debug" />
-                <ComboBoxItem Content="Info" />
-                <ComboBoxItem Content="Warning" />
-                <ComboBoxItem Content="Error" />
-                <ComboBoxItem Content="Critical" />
-              </ComboBox>
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Import trace limit (0 = off)" />
-              <NumericUpDown x:Name="TraceImportsBox" Width="170" Minimum="0" Maximum="4096" Increment="16"
-                             Value="0" FormatString="0" CornerRadius="8" />
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Strict dynlib resolution" />
-              <ToggleSwitch x:Name="StrictToggle" OnContent="On" OffContent="Off" />
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Log to file" />
-              <ToggleSwitch x:Name="LogToFileToggle" OnContent="On" OffContent="Off" />
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Log file path" />
-              <Button x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…"
-                VerticalAlignment="Center" />
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Override log file" />
-              <ToggleSwitch x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off" />
-            </StackPanel>
-            <StackPanel Margin="0,0,24,0">
-              <TextBlock Classes="fieldLabel" Text="Title music" />
-              <ToggleSwitch x:Name="TitleMusicToggle" OnContent="On" OffContent="Off" IsChecked="True" />
-            </StackPanel>
-            <StackPanel>
-              <TextBlock Classes="fieldLabel" Text="Discord presence" />
-              <ToggleSwitch x:Name="DiscordToggle" OnContent="On" OffContent="Off" />
-            </StackPanel>
-          </WrapPanel>
         </StackPanel>
       </Border>
     </Grid>
 
     <!-- Status bar -->
-    <Grid Grid.Row="2" Background="{StaticResource ChromeBrush}" ColumnDefinitions="*,Auto">
+    <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"
+          ColumnDefinitions="*,Auto">
       <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="11"
                  Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0"
                  TextTrimming="CharacterEllipsis" />

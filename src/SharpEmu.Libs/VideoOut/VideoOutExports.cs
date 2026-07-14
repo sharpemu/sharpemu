@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -133,9 +134,10 @@ public static class VideoOutExports
         var application = parts.Count == 0 ? "VideoOut" : string.Join(' ', parts);
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
         var commitSuffix = string.IsNullOrWhiteSpace(emulatorCommitSha) ? string.Empty : $" \u00b7 {emulatorCommitSha.Trim()}";
+        var hardwareSuffix = $" \u00b7 {HostSystemInfo.CpuName} \u00b7 {HostSystemInfo.GpuName}";
         lock (_stateGate)
         {
-            _windowTitle = $"SharpEmu{commitSuffix} - {application}{versionSuffix}";
+            _windowTitle = $"SharpEmu{commitSuffix} - {application}{versionSuffix}{hardwareSuffix}";
         }
     }
 

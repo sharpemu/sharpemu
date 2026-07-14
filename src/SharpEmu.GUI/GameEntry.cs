@@ -29,10 +29,12 @@ public sealed class GameEntry : INotifyPropertyChanged
     private long _sizeBytes;
 
     public GameEntry(
-        string name, string? titleId, string path, long sizeBytes, string? coverPath, string? backgroundPath)
+        string name, string? titleId, string? version, string path, long sizeBytes,
+        string? coverPath, string? backgroundPath)
     {
         Name = name;
         TitleId = titleId;
+        Version = version;
         Path = path;
         _sizeBytes = sizeBytes;
         CoverPath = coverPath;
@@ -45,6 +47,9 @@ public sealed class GameEntry : INotifyPropertyChanged
     public string Name { get; }
 
     public string? TitleId { get; }
+
+    /// <summary>Content version from sce_sys/param.json, e.g. "01.000.000".</summary>
+    public string? Version { get; }
 
     public string Path { get; }
 
@@ -65,7 +70,7 @@ public sealed class GameEntry : INotifyPropertyChanged
 
             _sizeBytes = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SizeBytes)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Detail)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SizeText)));
         }
     }
 
@@ -106,9 +111,15 @@ public sealed class GameEntry : INotifyPropertyChanged
 
     public bool HasCover => _cover is not null;
 
-    public string Detail => TitleId is not null
-        ? $"{TitleId}  •  {FormatSize(SizeBytes)}"
-        : FormatSize(SizeBytes);
+    public bool HasTitleId => TitleId is not null;
+
+    /// <summary>Badge text shown in the launch bar, e.g. "v01.000.000".</summary>
+    public string? VersionText => Version is null ? null : $"v{Version}";
+
+    public bool HasVersion => Version is not null;
+
+    /// <summary>Formatted install size badge shown in the launch bar.</summary>
+    public string SizeText => FormatSize(SizeBytes);
 
     private static string ComputeInitials(string name)
     {

@@ -1,0 +1,129 @@
+{
+  "_languageName": "Türkçe",
+
+  "Page.Library": "Kütüphane",
+  "Page.Options": "Ayarlar",
+  "Page.GameCount.One": "1 oyun",
+  "Page.GameCount.Other": "{0} oyun",
+
+  "Library.SearchWatermark": "Kütüphanede ara…",
+  "Library.AddFolder": "＋ Klasör ekle",
+  "Library.Rescan": "⟳ Yeniden tara",
+  "Library.OpenFile": "Dosya aç…",
+
+  "Library.Context.Launch": "Başlat",
+  "Library.Context.OpenFolder": "Oyun klasörünü aç",
+  "Library.Context.CopyPath": "Yolu kopyala",
+  "Library.Context.CopyTitleId": "Title ID'yi kopyala",
+  "Library.Context.Remove": "Kütüphaneden kaldır",
+
+  "Library.Empty.Title": "Kütüphaneniz boş",
+  "Library.Empty.Hint": "Başlamak için oyunlarınızı içeren bir klasör ekleyin.",
+  "Library.Empty.SearchTitle": "Aramanızla eşleşen oyun yok",
+  "Library.Empty.SearchHint": "Kütüphanede “{0}” ile eşleşen bir şey yok.",
+  "Library.Empty.AddFolder": "＋ Oyun klasörü ekle",
+
+  "Library.Loading": "Kütüphane yükleniyor…",
+
+  "Options.General": "Genel",
+  "Options.Section.Emulation": "EMÜLASYON",
+  "Options.Section.Logging": "GÜNLÜKLEME",
+  "Options.Section.Launcher": "BAŞLATICI",
+
+  "Options.CpuEngine.Label": "CPU motoru",
+  "Options.CpuEngine.Desc": "Oyun kodunu çalıştırmak için kullanılan yürütme motoru.",
+  "Options.CpuEngine.Native": "Native",
+
+  "Options.Strict.Label": "Katı dynlib çözümü",
+  "Options.Strict.Desc": "İçe aktarılan bir sembol çözümlenemediğinde başlatmayı başarısız kılar.",
+
+  "Options.LogLevel.Label": "Günlük seviyesi",
+  "Options.LogLevel.Desc": "Emülatör konsol çıktısının ayrıntı düzeyi.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Warning",
+  "Options.LogLevel.Error": "Error",
+  "Options.LogLevel.Critical": "Critical",
+
+  "Options.TraceImports.Label": "Import izleme sınırı",
+  "Options.TraceImports.Desc": "Modül başına ilk N import'u izle (0 = kapalı).",
+
+  "Options.LogToFile.Label": "Dosyaya günlükle",
+  "Options.LogToFile.Desc": "Emülatör çıktısını bir günlük dosyasına yansıt.",
+
+  "Options.LogFilePath.Label": "Günlük dosyası yolu",
+  "Options.LogFilePath.Default": "Özel yol yok — günlükler emülatörün yanındaki user/logs klasörüne yazılır.",
+  "Options.LogFilePath.Select": "Seç…",
+
+  "Options.OverrideLogFile.Label": "Günlük dosyasının üzerine yaz",
+  "Options.OverrideLogFile.Desc": "Title ID ve zaman damgası eklemek yerine tam dosya yolunu kullan.",
+
+  "Options.TitleMusic.Label": "Oyun müziği",
+  "Options.TitleMusic.Desc": "Kütüphanede seçili oyunun önizleme müziğini döngüye al.",
+
+  "Options.Discord.Label": "Discord durumu",
+  "Options.Discord.Desc": "Discord profilinde çalışan oyunu göster.",
+
+  "Options.Language.Label": "Emülatör dili",
+  "Options.Language.Desc": "Başlatıcı genelinde kullanılan dil. Hemen uygulanır.",
+
+  "Common.On": "Açık",
+  "Common.Off": "Kapalı",
+
+  "Console.Title": "KONSOL",
+  "Console.SearchWatermark": "Ara...",
+  "Console.AutoScroll": "Otomatik kaydır",
+  "Console.Split": "Ayır",
+  "Console.Copy": "Kopyala",
+  "Console.Clear": "Temizle",
+  "Console.WindowTitle": "SharpEmu Konsol",
+
+  "Launch.NoGameSelected": "Oyun seçilmedi",
+  "Launch.NoGameHint": "Kütüphaneden bir oyun seçin veya doğrudan bir eboot.bin açın.",
+  "Launch.Idle": "Boşta",
+  "Launch.Console": "≡ Konsol",
+  "Launch.Launch": "▶  Başlat",
+  "Launch.Stop": "■  Durdur",
+  "Launch.Running": "Çalışıyor — {0}",
+  "Launch.Stopping": "Durduruluyor…",
+  "Launch.Exited": "Çıkış kodu {0} ({1})",
+  "Launch.ExeNotFound": "SharpEmu çalıştırılabilir dosyası bulunamadı. Önce SharpEmu.CLI projesini derleyin (dotnet build).",
+  "Launch.LogFile": "Günlük dosyası: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Emülatör başlatılamadı: {0}",
+  "Launch.ProcessExited": "İşlem {0} kodla sonlandı ({1}).",
+
+  "Exit.Ok": "Tamam",
+  "Exit.InvalidArguments": "geçersiz argümanlar",
+  "Exit.EbootNotFound": "eboot bulunamadı",
+  "Exit.RuntimeException": "çalışma zamanı hatası",
+  "Exit.EmulationError": "emülasyon hatası",
+  "Exit.Unknown": "bilinmiyor",
+
+  "Status.EmulatorLocating": "Emülatör: bulunuyor…",
+  "Status.EmulatorPath": "Emülatör: {0}",
+  "Status.EmulatorNotFound": "Emülatör: SharpEmu çalıştırılabilir dosyası bulunamadı — önce SharpEmu.CLI'yi derleyin.",
+  "Status.ScanningLibrary": "Kütüphane taranıyor…",
+  "Status.AddFolderPrompt": "Kütüphaneyi doldurmak için bir oyun klasörü ekleyin.",
+  "Status.LibraryScanned": "Kütüphane tarandı: {1} klasörde {0} oyun.",
+  "Status.CouldNotOpenFolder": "Klasör açılamadı: {0}",
+  "Status.CopiedToClipboard": "{0} panoya kopyalandı.",
+  "Status.RemovedFromLibrary": "“{0}” kütüphaneden kaldırıldı. Geri getirmek için klasörünü yeniden ekleyin.",
+  "Status.Running": "{0} çalışıyor",
+  "Status.Stopping": "Durduruluyor…",
+  "Status.Idle": "Boşta",
+
+  "Clipboard.Path": "Yol",
+  "Clipboard.TitleId": "Title ID",
+
+  "Discord.Playing": "{0} oynuyor",
+  "Discord.Browsing": "Kütüphaneye göz atıyor",
+
+  "Dialog.ChooseGameFolder": "Oyunlarınızı içeren bir klasör seçin",
+  "Dialog.OpenExecutable": "Başlatılacak bir çalıştırılabilir dosya aç",
+  "Dialog.PsExecutables": "PS çalıştırılabilirleri",
+  "Dialog.SaveLogFile": "Günlük dosyasının kaydedileceği yeri seçin",
+  "Dialog.PlainTextFiles": "Düz Metin Dosyaları",
+  "Dialog.LogFiles": "Günlük Dosyaları"
+}

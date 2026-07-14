@@ -1,0 +1,129 @@
+﻿{
+  "_languageName": "Русский",
+
+  "Page.Library": "Библиотека",
+  "Page.Options": "Настройки",
+  "Page.GameCount.One": "1 игра",
+  "Page.GameCount.Other": "Игр: {0}",
+
+  "Library.SearchWatermark": "Поиск…",
+  "Library.AddFolder": "＋ Добавить папку",
+  "Library.Rescan": "⟳ Сканировать",
+  "Library.OpenFile": "Открыть файл…",
+
+  "Library.Context.Launch": "Запустить",
+  "Library.Context.OpenFolder": "Открыть папку с игрой",
+  "Library.Context.CopyPath": "Скопировать путь",
+  "Library.Context.CopyTitleId": "Скопировать ID игры",
+  "Library.Context.Remove": "Удалить из библиотеки",
+
+  "Library.Empty.Title": "Ваша библиотека пуста",
+  "Library.Empty.Hint": "Добавьте папку с играми, чтобы начать.",
+  "Library.Empty.SearchTitle": "По вашему запросу ничего не найдено",
+  "Library.Empty.SearchHint": "В библиотеке нет игр, соответствующих запросу «{0}».",
+  "Library.Empty.AddFolder": "＋ Добавить папку с играми",
+
+  "Library.Loading": "Загрузка библиотеки…",
+
+  "Options.General": "Основные",
+  "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
+  "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
+  "Options.Section.Launcher": "ЛАУНЧЕР",
+
+  "Options.CpuEngine.Label": "Движок ЦП",
+  "Options.CpuEngine.Desc": "Движок выполнения, используемый для запуска игрового кода.",
+  "Options.CpuEngine.Native": "Нативный",
+
+  "Options.Strict.Label": "Строгое разрешение динамических библиотек",
+  "Options.Strict.Desc": "Не запускать игру, если не удается найти или связать импортируемую функцию/переменную.",
+
+  "Options.LogLevel.Label": "Уровень логгирования",
+  "Options.LogLevel.Desc": "Подробность вывода в консоль эмулятора.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Warning",
+  "Options.LogLevel.Error": "Error",
+  "Options.LogLevel.Critical": "Critical",
+
+  "Options.TraceImports.Label": "Лимит трассировки импортов",
+  "Options.TraceImports.Desc": "Трассировать первые N импортов в каждом модуле (0 - выключено).",
+
+  "Options.LogToFile.Label": "Запись лога в файл",
+  "Options.LogToFile.Desc": "Дублировать вывод эмулятора в файл лога.",
+
+  "Options.LogFilePath.Label": "Путь к файлу лога",
+  "Options.LogFilePath.Default": "Пользовательский путь не задан: логи сохраняются в user/logs рядом с эмулятором.",
+  "Options.LogFilePath.Select": "Выбрать…",
+
+  "Options.OverrideLogFile.Label": "Переопределить файл лога",
+  "Options.OverrideLogFile.Desc": "Использовать указанный путь к файлу без добавления ID игры и метки времени.",
+
+  "Options.TitleMusic.Label": "Музыка игры",
+  "Options.TitleMusic.Desc": "Зацикленно воспроизводить музыку предпросмотра выбранной игры в библиотеке.",
+
+  "Options.Discord.Label": "Статус Discord",
+  "Options.Discord.Desc": "Показывать запущенную игру в профиле Discord.",
+
+  "Options.Language.Label": "Язык эмулятора",
+  "Options.Language.Desc": "Язык интерфейса лаунчера. Изменение применяется сразу.",
+
+  "Common.On": "Включено",
+  "Common.Off": "Выключено",
+
+  "Console.Title": "КОНСОЛЬ",
+  "Console.SearchWatermark": "Поиск...",
+  "Console.AutoScroll": "Авто-прокрутка",
+  "Console.Split": "Разделить",
+  "Console.Copy": "Скопировать",
+  "Console.Clear": "Очистить",
+  "Console.WindowTitle": "Консоль SharpEmu",
+
+  "Launch.NoGameSelected": "Ничего не выбрано",
+  "Launch.NoGameHint": "Выберите игру из библиотеки или откройте eboot.bin напрямую.",
+  "Launch.Idle": "Ожидание",
+  "Launch.Console": "≡ Консоль",
+  "Launch.Launch": "▶  Запустить",
+  "Launch.Stop": "■  Остановить",
+  "Launch.Running": "Запущено - {0}",
+  "Launch.Stopping": "Остановка…",
+  "Launch.Exited": "Завершено с кодом {0} ({1})",
+  "Launch.ExeNotFound": "Исполняемый файл SharpEmu не найден. Скомпилируйте сначала проект SharpEmu.CLI (dotnet build).",
+  "Launch.LogFile": "Лог: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Не удалось запустить эмулятор: {0}",
+  "Launch.ProcessExited": "Процесс завершился с кодом {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "некорректные аргументы",
+  "Exit.EbootNotFound": "eboot не найден",
+  "Exit.RuntimeException": "ошибка выполнения",
+  "Exit.EmulationError": "ошибка эмуляции",
+  "Exit.Unknown": "неизвестная ошибка",
+
+  "Status.EmulatorLocating": "Эмулятор: поиск…",
+  "Status.EmulatorPath": "Эмулятор: {0}",
+  "Status.EmulatorNotFound": "Эмулятор: исполняемый файл SharpEmu не был найден - скомпилируйте сначала SharpEmu.CLI.",
+  "Status.ScanningLibrary": "Сканирование библиотеки…",
+  "Status.AddFolderPrompt": "Добавьте папку с играми, чтобы заполнить библиотеку.",
+  "Status.LibraryScanned": "Сканирование библиотеки завершено: игр: {0}, папок: {1}.",
+  "Status.CouldNotOpenFolder": "Не удалось открыть папку: {0}",
+  "Status.CopiedToClipboard": "{0}: скопировано в буфер обмена.",
+  "Status.RemovedFromLibrary": "Игра «{0}» удалена из библиотеки. Добавьте её папку заново, чтобы вернуть.",
+  "Status.Running": "Запущено: {0}",
+  "Status.Stopping": "Остановка…",
+  "Status.Idle": "Ожидание",
+
+  "Clipboard.Path": "Путь",
+  "Clipboard.TitleId": "ID игры",
+
+  "Discord.Playing": "Играет в {0}",
+  "Discord.Browsing": "Просматривает библиотеку",
+
+  "Dialog.ChooseGameFolder": "Выберите папку, содержащую игры",
+  "Dialog.OpenExecutable": "Открыть исполняемый файл для запуска",
+  "Dialog.PsExecutables": "Исполняемые файлы PS",
+  "Dialog.SaveLogFile": "Выберите, куда сохранить файл с логами",
+  "Dialog.PlainTextFiles": "Текстовые файлы",
+  "Dialog.LogFiles": "Логи"
+}

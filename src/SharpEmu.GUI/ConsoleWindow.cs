@@ -27,8 +27,10 @@ public sealed class ConsoleWindow : Window
         Action clear,
         bool autoScroll)
     {
+        var loc = Localization.Instance;
+
         _sourceLines = lines;
-        Title = "SharpEmu Console";
+        Title = loc.Get("Console.WindowTitle");
         Width = 980;
         Height = 620;
         MinWidth = 520;
@@ -36,10 +38,15 @@ public sealed class ConsoleWindow : Window
         Background = new SolidColorBrush(Color.Parse("#0D1017"));
         Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
 
-        _searchBox = new TextBox { Watermark = "Search...", Width = 320, Margin = new Thickness(0, 0, 12, 0) };
+        _searchBox = new TextBox
+        {
+            Watermark = loc.Get("Console.SearchWatermark"),
+            Width = 320,
+            Margin = new Thickness(0, 0, 12, 0),
+        };
         _autoScrollCheck = new CheckBox
         {
-            Content = "Auto-scroll",
+            Content = loc.Get("Console.AutoScroll"),
             IsChecked = autoScroll,
             FontSize = 12,
             Margin = new Thickness(0, 0, 12, 0),
@@ -48,11 +55,16 @@ public sealed class ConsoleWindow : Window
         var copyButton = new Button
         {
             Classes = { "ghost" },
-            Content = "Copy",
+            Content = loc.Get("Console.Copy"),
             Padding = new Thickness(10, 4),
             Margin = new Thickness(0, 0, 8, 0),
         };
-        var clearButton = new Button { Classes = { "ghost" }, Content = "Clear", Padding = new Thickness(10, 4) };
+        var clearButton = new Button
+        {
+            Classes = { "ghost" },
+            Content = loc.Get("Console.Clear"),
+            Padding = new Thickness(10, 4),
+        };
         copyButton.Click += async (_, _) => await CopyAsync();
         clearButton.Click += (_, _) => clear();
         _searchBox.TextChanged += (_, _) => RefreshVisibleLines();
@@ -87,7 +99,7 @@ public sealed class ConsoleWindow : Window
                         new TextBlock
                         {
                             Classes = { "sectionTitle" },
-                            Text = "CONSOLE",
+                            Text = loc.Get("Console.Title"),
                             VerticalAlignment = VerticalAlignment.Center,
                         },
                         _searchBox.WithGridColumn(1),
