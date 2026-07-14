@@ -201,8 +201,8 @@ foreach (var (name, expectTranslate, words) in testPrograms)
         null,
         null)!;
 
-    object?[] compileArgs = [state, evaluation, null, null, 0, -1, 0];
-    if ((bool)tryCompile.Invoke(null, compileArgs)!)
+    var compileArgs = PadWithDefaults(tryCompile, [state, evaluation, null, null]);
+    if ((bool)tryCompile.Invoke(null, BindingFlags.OptionalParamBinding, null, compileArgs, null)!)
     {
         var shader = compileArgs[2]!;
         var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
@@ -216,8 +216,8 @@ foreach (var (name, expectTranslate, words) in testPrograms)
         Console.WriteLine($"[{name}] emit: FAILED ({compileArgs[3]})");
     }
 
-    object?[] computeArgs = [state, evaluation, 1u, 1u, 1u, null, null];
-    if ((bool)tryCompileCompute.Invoke(null, computeArgs)!)
+    var computeArgs = PadWithDefaults(tryCompileCompute, [state, evaluation, 1u, 1u, 1u, null, null]);
+    if ((bool)tryCompileCompute.Invoke(null, BindingFlags.OptionalParamBinding, null, computeArgs, null)!)
     {
         var shader = computeArgs[5]!;
         var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
@@ -236,6 +236,37 @@ Console.WriteLine(failures == 0
     ? "RESULT: all programs behaved as expected"
     : $"RESULT: {failures} unexpected outcome(s)");
 Environment.ExitCode = failures == 0 ? 0 : 1;
+
+// Reflection Invoke does not apply C# default parameter values, so a newly
+// added optional parameter on a translator entry point would otherwise throw
+// TargetParameterCountException. Type.Missing + OptionalParamBinding lets the
+// runtime substitute the declared defaults; only a new *required* parameter
+// should force a tool update.
+static object?[] PadWithDefaults(MethodInfo method, object?[] arguments)
+{
+    var parameters = method.GetParameters();
+    if (arguments.Length > parameters.Length)
+    {
+        throw new InvalidOperationException(
+            $"{method.DeclaringType?.Name}.{method.Name} takes fewer parameters than the tool supplies");
+    }
+
+    var padded = new object?[parameters.Length];
+    arguments.CopyTo(padded, 0);
+    for (var i = arguments.Length; i < padded.Length; i++)
+    {
+        if (!parameters[i].IsOptional)
+        {
+            throw new InvalidOperationException(
+                $"{method.DeclaringType?.Name}.{method.Name} gained a required parameter " +
+                $"'{parameters[i].Name}' — the tool needs updating");
+        }
+
+        padded[i] = Type.Missing;
+    }
+
+    return padded;
+}
 
 internal sealed class FakeMemory : ICpuMemory
 {
