@@ -1605,6 +1605,15 @@ internal static unsafe class VulkanVideoPresenter
                 Check(_vk.EnumeratePhysicalDevices(_instance, &deviceCount, devicePointer), "vkEnumeratePhysicalDevices");
             }
 
+            // Track the first usable (graphics + present) device as a fallback,
+            // but prefer a discrete GPU: on laptops the integrated GPU usually
+            // enumerates first, and it often lacks features the shader translator
+            // needs (e.g. shaderInt64), which makes translated shaders fail and
+            // the guest render black.
+            PhysicalDevice fallbackDevice = default;
+            uint fallbackQueueIndex = 0;
+            var haveFallback = false;
+
             foreach (var device in devices)
             {
                 uint queueCount = 0;
@@ -1624,13 +1633,32 @@ internal static unsafe class VulkanVideoPresenter
                         continue;
                     }
 
-                    _physicalDevice = device;
-                    _queueFamilyIndex = index;
-                    return;
+                    _vk.GetPhysicalDeviceProperties(device, out var properties);
+                    if (properties.DeviceType == PhysicalDeviceType.DiscreteGpu)
+                    {
+                        _physicalDevice = device;
+                        _queueFamilyIndex = index;
+                        return;
+                    }
+
+                    if (!haveFallback)
+                    {
+                        fallbackDevice = device;
+                        fallbackQueueIndex = index;
+                        haveFallback = true;
+                    }
+
+                    break;
                 }
             }
 
-            throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            if (!haveFallback)
+            {
+                throw new InvalidOperationException("No Vulkan graphics/present queue was found.");
+            }
+
+            _physicalDevice = fallbackDevice;
+            _queueFamilyIndex = fallbackQueueIndex;
         }
 
         private void CreateDevice()

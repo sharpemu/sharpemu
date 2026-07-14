@@ -14,7 +14,12 @@ public static class PadExports
     private const int OrbisPadErrorNotInitialized = unchecked((int)0x80920005);
     private const int OrbisPadErrorDeviceNotConnected = unchecked((int)0x80920007);
     private const int OrbisPadErrorDeviceNoHandle = unchecked((int)0x80920008);
-    private const int PrimaryUserId = 1;
+    // Must match libSceUserService's primary user id: the game passes the id it
+    // gets from sceUserServiceGetInitialUser straight into scePadOpen, and retail
+    // user-service ids begin at 0x3E8 (1000), not 1. With a mismatch scePadOpen
+    // returns DeviceNotConnected and titles that treat the result as a handle
+    // busy-wait forever on scePadReadState.
+    private const int PrimaryUserId = 1000;
     private const int StandardPortType = 0;
     private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;
