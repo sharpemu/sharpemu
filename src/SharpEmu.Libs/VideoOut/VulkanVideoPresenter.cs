@@ -1159,7 +1159,7 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Dictionary<HostBufferPoolKey, Stack<HostBufferAllocation>>
             _hostBufferPool = new();
         private readonly Dictionary<ulong, HostBufferAllocation> _hostBufferAllocations = new();
-        private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
+        private readonly GuestSubmissionScheduler<PendingGuestSubmission> _guestSubmissions;
 
         private readonly record struct GraphicsPipelineKey(
             string VertexShader,
@@ -1284,6 +1284,11 @@ internal static unsafe class VulkanVideoPresenter
 
         public Presenter(uint width, uint height)
         {
+            _guestSubmissions = new GuestSubmissionScheduler<PendingGuestSubmission>(
+                MaxInFlightGuestSubmissions,
+                WaitForGuestSubmission,
+                IsGuestSubmissionComplete,
+                ReleaseGuestSubmission);
             var options = WindowOptions.DefaultVulkan;
             options.Size = new Vector2D<int>((int)DefaultWindowWidth, (int)DefaultWindowHeight);
             options.Title = VideoOutExports.GetWindowTitle();
@@ -2244,7 +2249,7 @@ internal static unsafe class VulkanVideoPresenter
                 throw;
             }
 
-            _pendingGuestSubmissions.Enqueue(
+            _guestSubmissions.Track(
                 new PendingGuestSubmission(
                     fence,
                     commandBuffer,
@@ -2288,16 +2293,12 @@ internal static unsafe class VulkanVideoPresenter
 
         private void EnsureGuestSubmissionCapacity()
         {
-            CollectCompletedGuestSubmissions(waitForOldest: false);
-            if (_pendingGuestSubmissions.Count >= MaxInFlightGuestSubmissions)
-            {
-                CollectCompletedGuestSubmissions(waitForOldest: true);
-            }
+            _guestSubmissions.EnsureCapacity();
         }
 
         private void WaitForAllGuestSubmissions()
         {
-            while (_pendingGuestSubmissions.Count != 0)
+            while (_guestSubmissions.Count != 0)
             {
                 CollectCompletedGuestSubmissions(waitForOldest: true);
             }
@@ -2305,43 +2306,40 @@ internal static unsafe class VulkanVideoPresenter
 
         private void CollectCompletedGuestSubmissions(bool waitForOldest)
         {
-            if (waitForOldest && _pendingGuestSubmissions.TryPeek(out var oldest))
+            _guestSubmissions.Collect(waitForOldest);
+        }
+
+        private void WaitForGuestSubmission(PendingGuestSubmission submission)
+        {
+            var fence = submission.Fence;
+            Check(
+                _vk.WaitForFences(_device, 1, &fence, true, ulong.MaxValue),
+                $"vkWaitForFences(guest: {submission.DebugName})");
+        }
+
+        private bool IsGuestSubmissionComplete(PendingGuestSubmission submission)
+        {
+            var status = _vk.GetFenceStatus(_device, submission.Fence);
+            if (status == Result.NotReady)
             {
-                var fence = oldest.Fence;
-                var result = _vk.WaitForFences(
-                    _device,
-                    1,
-                    &fence,
-                    true,
-                    ulong.MaxValue);
-                Check(result, $"vkWaitForFences(guest: {oldest.DebugName})");
+                return false;
             }
 
-            while (_pendingGuestSubmissions.TryPeek(out var submission))
+            Check(status, $"vkGetFenceStatus(guest: {submission.DebugName})");
+            return true;
+        }
+
+        private void ReleaseGuestSubmission(PendingGuestSubmission submission)
+        {
+            foreach (var image in submission.TraceImages)
             {
-                var status = _vk.GetFenceStatus(_device, submission.Fence);
-                if (status == Result.NotReady)
-                {
-                    break;
-                }
-
-                Check(status, $"vkGetFenceStatus(guest: {submission.DebugName})");
-                _pendingGuestSubmissions.Dequeue();
-
-                foreach (var image in submission.TraceImages)
-                {
-                    TraceGuestImageContents(image);
-                }
-
-                DestroyTranslatedDrawResources(submission.Resources);
-                var commandBuffer = submission.CommandBuffer;
-                _vk.FreeCommandBuffers(
-                    _device,
-                    _commandPool,
-                    1,
-                    &commandBuffer);
-                _vk.DestroyFence(_device, submission.Fence, null);
+                TraceGuestImageContents(image);
             }
+
+            DestroyTranslatedDrawResources(submission.Resources);
+            var commandBuffer = submission.CommandBuffer;
+            _vk.FreeCommandBuffers(_device, _commandPool, 1, &commandBuffer);
+            _vk.DestroyFence(_device, submission.Fence, null);
         }
 
         private IReadOnlyList<GuestImageResource> GetTraceImages(
@@ -5674,7 +5672,7 @@ internal static unsafe class VulkanVideoPresenter
                         queuedGuestWork = _pendingGuestWork.Count;
                     }
 
-                    var gpuInFlight = _pendingGuestSubmissions.Count +
+                    var gpuInFlight = _guestSubmissions.Count +
                         (_presentationInFlight ? 1 : 0);
                     var readCount = Interlocked.Read(
                         ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadCount);
@@ -5794,7 +5792,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void WaitForRenderWork()
         {
-            var gpuWorkInFlight = _pendingGuestSubmissions.Count > 0 || _presentationInFlight;
+            var gpuWorkInFlight = _guestSubmissions.Count > 0 || _presentationInFlight;
             lock (_gate)
             {
                 if (_closed ||
