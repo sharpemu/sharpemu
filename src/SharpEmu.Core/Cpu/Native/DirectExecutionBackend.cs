@@ -687,8 +687,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static void TraceThreadMode(string message)
 	{
+		// Prefer the platform injected into the backend bound to this thread;
+		// the ambient is set on every guest/import/VEH transition this tracer
+		// observes. The singleton fallback only covers pre-run traces, where a
+		// constructed backend implies the platform resolved successfully.
+		var threading = _activeExecutionBackend?._hostThreading ?? HostPlatform.Current.Threading;
 		Console.Error.WriteLine(
-			$"[THREADMODE] {message} cycle={_threadModeCycleId} tid={HostPlatform.Current.Threading.CurrentThreadId} managed={Environment.CurrentManagedThreadId}");
+			$"[THREADMODE] {message} cycle={_threadModeCycleId} tid={threading.CurrentThreadId} managed={Environment.CurrentManagedThreadId}");
 		Console.Error.Flush();
 	}
 

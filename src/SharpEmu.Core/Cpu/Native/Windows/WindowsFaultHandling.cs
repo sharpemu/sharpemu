@@ -142,6 +142,7 @@ internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
         if (!_memory.Protect((ulong)ptr, stubSize, HostPageProtection.ReadExecute, out _))
         {
             Console.Error.WriteLine($"[LOADER][ERROR] VirtualProtect failed for exception handler trampoline at 0x{(nint)ptr:X16}");
+            _ = _memory.Free((ulong)ptr);
             return 0;
         }
         _memory.FlushInstructionCache((ulong)ptr, (ulong)offset);

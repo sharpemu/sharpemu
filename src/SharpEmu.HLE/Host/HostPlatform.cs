@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host.Windows;
 
 namespace SharpEmu.HLE.Host;
@@ -19,12 +20,15 @@ public static class HostPlatform
 
     private static IHostPlatform Create()
     {
-        if (OperatingSystem.IsWindows())
+        // The Windows backend executes guest x86-64 natively and emits x86-64
+        // stubs, so a native ARM64 process must be rejected here rather than
+        // crash undefined later (x64 processes under emulation report X64).
+        if (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64)
         {
             return new WindowsHostPlatform();
         }
 
         throw new PlatformNotSupportedException(
-            "SharpEmu native guest execution requires a host platform backend and none exists for this OS yet (currently Windows x64 only).");
+            "SharpEmu native guest execution requires a host platform backend and none exists for this OS/architecture yet (currently Windows x64 only).");
     }
 }

@@ -135,7 +135,7 @@ public sealed partial class DirectExecutionBackend
 		int num2 = 0;
 		List<ulong> list = new List<ulong>(16);
 		ulong num3 = scanStart;
-		var hostMemory = HostPlatform.Current.Memory;
+		var hostMemory = ResolveDiagnosticsHostMemory();
 		HostRegionInfo lpBuffer;
 		while (num3 < scanEnd && hostMemory.Query(num3, out lpBuffer))
 		{
@@ -352,7 +352,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (!HostPlatform.Current.Memory.Query(address, out var lpBuffer))
+		if (!ResolveDiagnosticsHostMemory().Query(address, out var lpBuffer))
 		{
 			return false;
 		}
@@ -393,7 +393,7 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		if (!HostPlatform.Current.Memory.Query(address, out var lpBuffer))
+		if (!ResolveDiagnosticsHostMemory().Query(address, out var lpBuffer))
 		{
 			return false;
 		}
@@ -415,6 +415,14 @@ public sealed partial class DirectExecutionBackend
 		}
 		ulong num = alignment - 1;
 		return (value + num) & ~num;
+	}
+
+	// Diagnostics helpers are static (reachable from static handler paths), so
+	// they use the platform injected into the backend active on this thread and
+	// fall back to the process-wide singleton only when no run is bound.
+	private static IHostMemory ResolveDiagnosticsHostMemory()
+	{
+		return _activeExecutionBackend?._hostMemory ?? HostPlatform.Current.Memory;
 	}
 
 	private static bool IsReadableProtection(uint protect)
