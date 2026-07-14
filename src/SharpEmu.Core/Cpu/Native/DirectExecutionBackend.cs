@@ -176,6 +176,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const uint PAGE_EXECUTE_READ = 32u;
 
+	private const uint MEM_IMAGE = 0x0100_0000u;
+
 	private const int TlsHandlerRegionSize = 16384;
 
 	private const ulong TlsModuleAllocStart = 140726751354880uL;
@@ -197,6 +199,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private uint _hostRspSlotTlsIndex = uint.MaxValue;
 
 	private nint _tlsGetValueAddress;
+
+	private nint _virtualQueryAddress;
 
 	private nint _queryPerformanceCounterAddress;
 
@@ -994,6 +998,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (_tlsGetValueAddress == 0)
 			{
 				throw new InvalidOperationException("Failed to resolve kernel32!TlsGetValue");
+			}
+			_virtualQueryAddress = kernel32 != 0 ? GetProcAddress(kernel32, "VirtualQuery") : 0;
+			if (_virtualQueryAddress == 0)
+			{
+				throw new InvalidOperationException("Failed to resolve kernel32!VirtualQuery");
 			}
 			_queryPerformanceCounterAddress = kernel32 != 0 ? GetProcAddress(kernel32, "QueryPerformanceCounter") : 0;
 			if (_queryPerformanceCounterAddress == 0)
@@ -2261,7 +2270,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
 	{
-		const uint stubSize = 256u;
+		const uint stubSize = 512u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
 		if (ptr == null)
 		{
@@ -2274,6 +2283,41 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xCD); // mov r13, rcx
+
+		// A hardware AV in coreclr or another loaded PE image may be the first step
+		// in constructing a managed exception. Re-entering managed diagnostics from
+		// that transition corrupts the CLR's thread mode. Guest ELF mappings are
+		// MEM_PRIVATE, so identify MEM_IMAGE faults natively and leave them to the
+		// owning runtime/driver VEH without crossing the managed boundary.
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x58); // sub rsp, 0x58
+		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x45); EmitByte(code, ref offset, 0x00); // mov rax, [r13]
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x10); // mov rcx, [rax+0x10]
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8D); EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x20); // lea rdx, [rsp+0x20]
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xB8); EmitUInt32(code, ref offset, (uint)sizeof(MEMORY_BASIC_INFORMATION64)); // mov r8d, sizeof(MBI)
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8); // mov rax, VirtualQuery
+		*(nint*)(code + offset) = _virtualQueryAddress;
+		offset += sizeof(nint);
+		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0); // call rax
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
+		EmitByte(code, ref offset, 0x74); // je continueFilter
+		int queryFailedJump = offset;
+		EmitByte(code, ref offset, 0x00);
+		EmitByte(code, ref offset, 0x81); EmitByte(code, ref offset, 0x7C); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x48); // cmp dword ptr [rsp+0x48], MEM_IMAGE
+		EmitUInt32(code, ref offset, MEM_IMAGE);
+		EmitByte(code, ref offset, 0x75); // jne continueFilter
+		int notImageJump = offset;
+		EmitByte(code, ref offset, 0x00);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x58); // add rsp, 0x58
+		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D); // pop r13
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C); // pop r12
+		EmitByte(code, ref offset, 0xC3); // ret
+		int continueFilterOffset = offset;
+		code[queryFailedJump] = checked((byte)(continueFilterOffset - (queryFailedJump + 1)));
+		code[notImageJump] = checked((byte)(continueFilterOffset - (notImageJump + 1)));
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x58); // add rsp, 0x58
+
 		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[8]
 		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
 		EmitUInt32(code, ref offset, 8u);

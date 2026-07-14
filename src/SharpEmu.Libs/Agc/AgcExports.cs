@@ -1386,6 +1386,36 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "w4-d0n60hdo",
+        ExportName = "sceAgcDcbSetUcRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegisterDirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var packedRegister = ctx[CpuRegister.Rsi];
+        var value = (uint)packedRegister;
+        var offset = (uint)(packedRegister >> 32);
+        if (commandBufferAddress == 0 || offset > ushort.MaxValue)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
+            !ctx.TryWriteUInt32(commandAddress, Pm4(3, ItSetUconfigReg, 0)) ||
+            !ctx.TryWriteUInt32(commandAddress + 4, offset) ||
+            !ctx.TryWriteUInt32(commandAddress + 8, value))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_set_uc_direct buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"offset=0x{offset:X4} value=0x{value:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
         Nid = "ZvwO9euwYzc",
         ExportName = "sceAgcDcbSetCxRegistersIndirect",
         Target = Generation.Gen5,
