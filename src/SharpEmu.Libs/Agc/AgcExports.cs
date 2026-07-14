@@ -142,6 +142,7 @@ public static partial class AgcExports
     private const uint Gen5TextureFormatR16G16B16A16Float = 12;
     private const uint Gen5TextureType1D = 8;
     private const uint Gen5TextureType2D = 9;
+    private const uint Gen5TextureType3D = 10;
     private const ulong MaxPresentedTextureBytes = 128UL * 1024UL * 1024UL;
     private const ulong VideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
     private const ulong VideoOutPixelFormatA8B8G8R8Srgb = 0x80002200;
@@ -7690,11 +7691,14 @@ public static partial class AgcExports
     {
         texture = default!;
         if ((descriptor.Type != Gen5TextureType1D &&
-             descriptor.Type != Gen5TextureType2D) ||
+             descriptor.Type != Gen5TextureType2D &&
+             descriptor.Type != Gen5TextureType3D) ||
             descriptor.Width == 0 ||
             descriptor.Height == 0 ||
+            descriptor.Depth == 0 ||
             descriptor.Width > 8192 ||
-            descriptor.Height > 8192)
+            descriptor.Height > 8192 ||
+            descriptor.Depth > 2048)
         {
             TraceTextureFallback(descriptor, "invalid-descriptor");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
@@ -7710,7 +7714,7 @@ public static partial class AgcExports
         var sourceByteCount = GetTextureByteCount(
             descriptor.Format,
             sourceWidth,
-            descriptor.Height);
+            descriptor.Height) * descriptor.Depth;
         if (sourceByteCount == 0 ||
             sourceByteCount > MaxPresentedTextureBytes ||
             sourceByteCount > int.MaxValue)
@@ -7770,7 +7774,9 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToGuestSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor),
+                Depth: descriptor.Depth,
+                Type: descriptor.Type);
             return true;
         }
 
@@ -7843,7 +7849,9 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToGuestSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor),
+                Depth: descriptor.Depth,
+                Type: descriptor.Type);
             return true;
         }
 
@@ -7869,7 +7877,9 @@ public static partial class AgcExports
                     descriptor.DstSelect,
                     descriptor.TileMode,
                     sourceWidth,
-                    sampler)))
+                    sampler,
+                    descriptor.Depth,
+                    descriptor.Type)))
         {
             texture = new GuestDrawTexture(
                 descriptor.Address,
@@ -7947,7 +7957,9 @@ public static partial class AgcExports
             Pitch: sourceWidth,
             TileMode: descriptor.TileMode,
             DstSelect: descriptor.DstSelect,
-            Sampler: ToGuestSampler(samplerDescriptor));
+            Sampler: ToGuestSampler(samplerDescriptor),
+            Depth: descriptor.Depth,
+            Type: descriptor.Type);
         return true;
     }
 
@@ -9904,6 +9916,7 @@ public static partial class AgcExports
             Address: 0,
             Width: 1,
             Height: 1,
+            Depth: 1,
             Format: format,
             NumberType: numberType,
             TileMode: tileMode,
@@ -10870,7 +10883,7 @@ public static partial class AgcExports
             : string.Join(',', values.Select(static value => $"{value:X8}"));
 
     private static string FormatTextureDescriptor(TextureDescriptor descriptor) =>
-        $"addr=0x{descriptor.Address:X16} {descriptor.Width}x{descriptor.Height} " +
+        $"addr=0x{descriptor.Address:X16} {descriptor.Width}x{descriptor.Height}x{descriptor.Depth} " +
         $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
         $"type={descriptor.Type} depth={descriptor.Depth} base_array={descriptor.BaseArray} " +
         $"levels={descriptor.BaseLevel}-{descriptor.LastLevel}/max{descriptor.MaxMip} " +
