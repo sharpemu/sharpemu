@@ -317,7 +317,55 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Grid>
                     </StackPanel>
                   </Border>
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                        <TextBlock x:Name="AboutSectionTitle"
+                                  Classes="sectionTitle"
+                                  Text="ABOUT" />
 
+                        <Grid ColumnDefinitions="*,Auto">
+                            <StackPanel VerticalAlignment="Center"
+                                        Spacing="2"
+                                        Margin="0,0,16,0">
+                                <TextBlock x:Name="GithubLabel"
+                                          Text="GitHub"
+                                          FontSize="13" />
+                                <TextBlock x:Name="GithubDesc"
+                                          Text="Source code, issues and project development."
+                                          FontSize="11"
+                                          Foreground="{StaticResource MutedBrush}"
+                                          TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <Button Grid.Column="1"
+                                    x:Name="GithubButton"
+                                    Classes="ghost"
+                                    Content="Open"
+                                    VerticalAlignment="Center" />
+                        </Grid>
+
+                        <Grid ColumnDefinitions="*,Auto">
+                            <StackPanel VerticalAlignment="Center"
+                                        Spacing="2"
+                                        Margin="0,0,16,0">
+                                <TextBlock x:Name="CommunityLabel"
+                                          Text="Discord"
+                                          FontSize="13" />
+                                <TextBlock x:Name="CommunityDesc"
+                                          Text="Join the community, get support and follow development."
+                                          FontSize="11"
+                                          Foreground="{StaticResource MutedBrush}"
+                                          TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <Button Grid.Column="1"
+                                    x:Name="DiscordButton"
+                                    Classes="ghost"
+                                    Content="Join"
+                                    VerticalAlignment="Center" />
+                        </Grid>
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
               </ScrollViewer>
             </TabItem>
