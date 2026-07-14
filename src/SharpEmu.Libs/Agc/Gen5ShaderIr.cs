@@ -271,11 +271,23 @@ internal sealed record Gen5ImageBinding(
     IReadOnlyList<uint> SamplerDescriptor,
     uint? MipLevel);
 
+[Flags]
+internal enum Gen5GlobalMemoryAccess
+{
+    None = 0,
+    Read = 1,
+    Write = 2,
+    ReadWrite = Read | Write,
+}
+
 internal sealed record Gen5GlobalMemoryBinding(
     uint ScalarAddress,
     ulong BaseAddress,
     IReadOnlyList<uint> InstructionPcs,
-    byte[] Data);
+    byte[] Data)
+{
+    public required Gen5GlobalMemoryAccess Access { get; set; }
+}
 
 internal sealed record Gen5VertexInputBinding(
     uint Pc,

@@ -215,6 +215,7 @@ internal static class Gen5ShaderScalarEvaluator
                 var key = (globalMemory.ScalarAddress, baseAddress);
                 if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
                 {
+                    existingBinding.Access |= ClassifyGlobalMemoryAccess(instruction.Opcode);
                     if (existingBinding.InstructionPcs is List<uint> instructionPcs)
                     {
                         instructionPcs.Add(instruction.Pc);
@@ -235,7 +236,10 @@ internal static class Gen5ShaderScalarEvaluator
                         globalMemory.ScalarAddress,
                         baseAddress,
                         new List<uint> { instruction.Pc },
-                        data);
+                        data)
+                    {
+                        Access = ClassifyGlobalMemoryAccess(instruction.Opcode),
+                    };
                     globalMemoryByAddress.Add(key, binding);
                     globalMemoryBindings.Add(binding);
                 }
@@ -328,6 +332,7 @@ internal static class Gen5ShaderScalarEvaluator
                 var key = (bufferMemory.ScalarResource, bufferDescriptor.BaseAddress);
                 if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
                 {
+                    existingBinding.Access |= ClassifyGlobalMemoryAccess(instruction.Opcode);
                     if (existingBinding.InstructionPcs is List<uint> instructionPcs)
                     {
                         instructionPcs.Add(instruction.Pc);
@@ -358,7 +363,10 @@ internal static class Gen5ShaderScalarEvaluator
                         bufferMemory.ScalarResource,
                         bufferDescriptor.BaseAddress,
                         new List<uint> { instruction.Pc },
-                        data);
+                        data)
+                    {
+                        Access = ClassifyGlobalMemoryAccess(instruction.Opcode),
+                    };
                     globalMemoryByAddress.Add(key, binding);
                     globalMemoryBindings.Add(binding);
                 }
@@ -1417,12 +1425,20 @@ internal static class Gen5ShaderScalarEvaluator
             var key = (scalarBase.Value, bufferDescriptor.BaseAddress);
             if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
             {
+                existingBinding.Access |= Gen5GlobalMemoryAccess.Read;
                 if (existingBinding.InstructionPcs is List<uint> instructionPcs) instructionPcs.Add(instruction.Pc);
             }
             else
             {
                 TryReadGlobalMemory(ctx, bufferDescriptor.BaseAddress, bufferDescriptor.SizeBytes, out var data);
-                var binding = new Gen5GlobalMemoryBinding(scalarBase.Value, bufferDescriptor.BaseAddress, new List<uint> { instruction.Pc }, data);
+                var binding = new Gen5GlobalMemoryBinding(
+                    scalarBase.Value,
+                    bufferDescriptor.BaseAddress,
+                    new List<uint> { instruction.Pc },
+                    data)
+                {
+                    Access = Gen5GlobalMemoryAccess.Read,
+                };
                 globalMemoryByAddress.Add(key, binding);
                 globalMemoryBindings.Add(binding);
             }
@@ -1432,6 +1448,7 @@ internal static class Gen5ShaderScalarEvaluator
             var key = (scalarBase.Value, baseAddress);
             if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
             {
+                existingBinding.Access |= Gen5GlobalMemoryAccess.Read;
                 if (existingBinding.InstructionPcs is List<uint> instructionPcs)
                 {
                     instructionPcs.Add(instruction.Pc);
@@ -1461,7 +1478,10 @@ internal static class Gen5ShaderScalarEvaluator
                     scalarBase.Value,
                     baseAddress,
                     new List<uint> { instruction.Pc },
-                    data);
+                    data)
+                {
+                    Access = Gen5GlobalMemoryAccess.Read,
+                };
                 globalMemoryByAddress.Add(key, binding);
                 globalMemoryBindings.Add(binding);
             }
@@ -1829,5 +1849,22 @@ internal static class Gen5ShaderScalarEvaluator
     private static bool UsesSampler(string opcode) =>
         opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
         opcode.StartsWith("ImageGather", StringComparison.Ordinal);
+
+    private static Gen5GlobalMemoryAccess ClassifyGlobalMemoryAccess(string opcode)
+    {
+        if (opcode.Contains("Atomic", StringComparison.Ordinal))
+        {
+            return Gen5GlobalMemoryAccess.ReadWrite;
+        }
+        if (opcode.Contains("Store", StringComparison.Ordinal))
+        {
+            return Gen5GlobalMemoryAccess.Write;
+        }
+        if (opcode.Contains("Load", StringComparison.Ordinal))
+        {
+            return Gen5GlobalMemoryAccess.Read;
+        }
+        return Gen5GlobalMemoryAccess.None;
+    }
 
 }

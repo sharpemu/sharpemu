@@ -3771,7 +3771,7 @@ public static class AgcExports
         var address = state.IndexBufferAddress + byteOffset;
         return (ctx.Memory.TryRead(address, data) ||
                 KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, data))
-            ? new VulkanGuestIndexBuffer(data, is32Bit)
+            ? new VulkanGuestIndexBuffer(data, is32Bit, address)
             : null;
     }
 
@@ -3817,7 +3817,10 @@ public static class AgcExports
             data[offset + 3] = (byte)(value >> 24);
         }
 
-        return new Gen5GlobalMemoryBinding(0, 0, [], data);
+        return new Gen5GlobalMemoryBinding(0, 0, [], data)
+        {
+            Access = Gen5GlobalMemoryAccess.Read,
+        };
     }
 
     private static ulong ComputeShaderStructureFingerprint(Gen5ShaderEvaluation evaluation)
@@ -4339,7 +4342,14 @@ public static class AgcExports
         {
             buffers[index] = new VulkanGuestMemoryBuffer(
                 bindings[index].BaseAddress,
-                bindings[index].Data);
+                bindings[index].Data,
+                bindings[index].Access switch
+                {
+                    Gen5GlobalMemoryAccess.Read => GuestBufferAccess.Read,
+                    Gen5GlobalMemoryAccess.Write => GuestBufferAccess.Write,
+                    Gen5GlobalMemoryAccess.ReadWrite => GuestBufferAccess.ReadWrite,
+                    _ => GuestBufferAccess.None,
+                });
         }
 
         return buffers;
