@@ -20,7 +20,7 @@
   "Library.Empty.Title": "Deine Bibliothek ist leer",
   "Library.Empty.Hint": "Füge einen Ordner mit deinen Spielen hinzu, um zu beginnen.",
   "Library.Empty.SearchTitle": "Keine Spiele gefunden",
-  "Library.Empty.SearchHint": "Nichts in der Bibliothek entspricht "{0}".",
+  "Library.Empty.SearchHint": "Nichts in der Bibliothek entspricht “{0}”.",
   "Library.Empty.AddFolder": "＋ Spielordner hinzufügen",
 
   "Library.Loading": "Bibliothek wird geladen…",
@@ -109,7 +109,7 @@
   "Status.LibraryScanned": "Bibliothek gescannt: {0} Spiel(e) in {1} Ordner(n).",
   "Status.CouldNotOpenFolder": "Ordner konnte nicht geöffnet werden: {0}",
   "Status.CopiedToClipboard": "{0} in die Zwischenablage kopiert.",
-  "Status.RemovedFromLibrary": ""{0}" wurde aus der Bibliothek entfernt. Füge den Ordner erneut hinzu, um es wiederherzustellen.",
+  "Status.RemovedFromLibrary": "“{0}” wurde aus der Bibliothek entfernt. Füge den Ordner erneut hinzu, um es wiederherzustellen.",
   "Status.Running": "Läuft {0}",
   "Status.Stopping": "Wird gestoppt…",
   "Status.Idle": "Bereit",
