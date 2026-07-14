@@ -953,13 +953,22 @@ public static partial class Gen5SpirvTranslator
                 case "VPkMulF16":
                 case "VPkMinF16":
                 case "VPkMaxF16":
-                case "VPkFmaF16":
                     if (!TryEmitPackedF16(instruction, out result, out error))
                     {
                         return false;
                     }
 
                     break;
+                case "VPkFmaF16":
+                    // Deliberately loud: a fused f16 FMA rounds the product+add once,
+                    // whereas doing the multiply-add in f32 and rounding to f16 at the
+                    // end double-rounds. Concrete miss: fma(0x4100, 0x7522, 0x04EA) is
+                    // 0x7A6B fused but 0x7A6A via f32. Exact emulation (round-to-odd
+                    // f32 product then RNE pack) is a planned follow-up slice.
+                    error =
+                        $"unsupported vop3p opcode {instruction.Opcode} " +
+                        "(fused f16 FMA requires single-rounding; deferred to a later slice)";
+                    return false;
                 default:
                     error = $"unsupported vector opcode {instruction.Opcode}";
                     return false;
@@ -988,12 +997,19 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        // Packed f16 (VOP3P) arithmetic. Each source register holds two f16 values.
-        // We unpack every operand to an f32 vec2 (UnpackHalf2x16), apply the op_sel
-        // half-selection and neg modifiers, run the operation component-wise in f32,
-        // and pack the result back with PackHalf2x16. The maths therefore happens in
-        // f32 with a single rounding at the pack, not with an exact intermediate f16
-        // rounding, which is accurate enough for the values shaders actually use.
+        // Packed f16 (VOP3P) arithmetic. Each source register holds two f16 values,
+        // one per result lane. Every f16<->f32 conversion is done with the explicit
+        // integer sequences below (EmitHalfToFloat / EmitFloatToHalf) instead of
+        // GLSL UnpackHalf2x16 / PackHalf2x16, whose subnormal and rounding behaviour
+        // is implementation-defined without float-controls execution modes. The two
+        // lanes are computed independently: each operand half is widened exactly to
+        // f32, op_sel/op_sel_hi pick the source half and neg_lo/neg_hi negate it, the
+        // op runs in f32, and the result is rounded back to f16 with round-to-nearest-
+        // even. For add and mul this is bit-exact to a true f16 op (the f32 result
+        // rounds losslessly to f16 by the double-rounding theorem; a f16 product even
+        // fits in f32 exactly). min/max carry no rounding, so they are exact once the
+        // conversions are. v_pk_fma_f16 is intentionally not routed here because a
+        // fused f16 FMA cannot be reproduced by an f32 multiply-add plus a pack.
         private bool TryEmitPackedF16(
             Gen5ShaderInstruction instruction,
             out uint result,
@@ -1013,75 +1029,180 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var sourceCount = instruction.Opcode == "VPkFmaF16" ? 3 : 2;
-            var operands = new uint[sourceCount];
-            for (var index = 0; index < sourceCount; index++)
+            for (var index = 0; index < 2; index++)
             {
-                if (!TryGetPackedF16Operand(instruction, control, index, out operands[index], out error))
+                var source = instruction.Sources[index];
+                if (source.Kind is not (Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister))
                 {
+                    error =
+                        $"unsupported vop3p operand {source} for {instruction.Opcode} (first slice: registers only)";
                     return false;
                 }
             }
 
-            var packed = instruction.Opcode switch
-            {
-                "VPkAddF16" => _module.AddInstruction(
-                    SpirvOp.FAdd, _vec2Type, operands[0], operands[1]),
-                "VPkMulF16" => _module.AddInstruction(
-                    SpirvOp.FMul, _vec2Type, operands[0], operands[1]),
-                // GLSL.std.450 FMin/FMax, matching the scalar v_min_f32/v_max_f32 path.
-                "VPkMinF16" => Ext(37, _vec2Type, operands[0], operands[1]),
-                "VPkMaxF16" => Ext(40, _vec2Type, operands[0], operands[1]),
-                "VPkFmaF16" => Ext(50, _vec2Type, operands[0], operands[1], operands[2]),
-                _ => 0u,
-            };
-            if (packed == 0)
-            {
-                error = $"unsupported packed opcode {instruction.Opcode}";
-                return false;
-            }
-
-            result = Ext(58, _uintType, packed);
+            var low = EmitPackedF16Lane(instruction, control, highLane: false);
+            var high = EmitPackedF16Lane(instruction, control, highLane: true);
+            result = BitwiseOr(low, ShiftLeftLogical(high, UInt(16)));
             return true;
         }
 
-        private bool TryGetPackedF16Operand(
+        // Computes one result lane (low or high) as a packed 16-bit f16 value.
+        private uint EmitPackedF16Lane(
             Gen5ShaderInstruction instruction,
             Gen5Vop3pControl control,
-            int sourceIndex,
-            out uint operand,
-            out string error)
+            bool highLane)
         {
-            operand = 0;
-            error = string.Empty;
-            var source = instruction.Sources[sourceIndex];
-            if (source.Kind is not (Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister))
+            var left = EmitPackedF16Operand(instruction, control, 0, highLane);
+            var right = EmitPackedF16Operand(instruction, control, 1, highLane);
+            var value = instruction.Opcode switch
             {
-                error =
-                    $"unsupported vop3p operand {source} for {instruction.Opcode} (first slice: registers only)";
-                return false;
-            }
-
-            var unpacked = Ext(62, _vec2Type, GetRawSource(instruction, sourceIndex));
-            var low = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 0);
-            var high = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 1);
-
-            var laneLow = ((control.OpSelMask >> sourceIndex) & 1) != 0 ? high : low;
-            var laneHigh = ((control.OpSelHiMask >> sourceIndex) & 1) != 0 ? high : low;
-            if (((control.NegLoMask >> sourceIndex) & 1) != 0)
-            {
-                laneLow = _module.AddInstruction(SpirvOp.FNegate, _floatType, laneLow);
-            }
-
-            if (((control.NegHiMask >> sourceIndex) & 1) != 0)
-            {
-                laneHigh = _module.AddInstruction(SpirvOp.FNegate, _floatType, laneHigh);
-            }
-
-            operand = _module.AddInstruction(
-                SpirvOp.CompositeConstruct, _vec2Type, laneLow, laneHigh);
-            return true;
+                "VPkAddF16" => _module.AddInstruction(SpirvOp.FAdd, _floatType, left, right),
+                "VPkMulF16" => _module.AddInstruction(SpirvOp.FMul, _floatType, left, right),
+                "VPkMinF16" => EmitPackedF16MinMax(left, right, isMax: false),
+                "VPkMaxF16" => EmitPackedF16MinMax(left, right, isMax: true),
+                _ => left,
+            };
+            return EmitFloatToHalf(Bitcast(_uintType, value));
         }
+
+        // Reads source `index`, selects the half feeding this lane (op_sel / op_sel_hi),
+        // widens it exactly to f32 and applies the lane's negate modifier (neg_lo / neg_hi).
+        private uint EmitPackedF16Operand(
+            Gen5ShaderInstruction instruction,
+            Gen5Vop3pControl control,
+            int index,
+            bool highLane)
+        {
+            var raw = GetRawSource(instruction, index);
+            var selectMask = highLane ? control.OpSelHiMask : control.OpSelMask;
+            var half = ((selectMask >> index) & 1) != 0
+                ? ShiftRightLogical(raw, UInt(16))
+                : raw;
+            var value = Bitcast(_floatType, EmitHalfToFloat(half));
+            var negateMask = highLane ? control.NegHiMask : control.NegLoMask;
+            if (((negateMask >> index) & 1) != 0)
+            {
+                value = _module.AddInstruction(SpirvOp.FNegate, _floatType, value);
+            }
+
+            return value;
+        }
+
+        // fminnum_like / fmaxnum_like: if one operand is NaN return the other; if both
+        // are NaN return a NaN; otherwise the ordered smaller/larger. The ordering of
+        // -0/+0 is unspecified under these opcodes, so the ordered compare is enough.
+        private uint EmitPackedF16MinMax(uint left, uint right, bool isMax)
+        {
+            var compare = _module.AddInstruction(
+                isMax ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
+                _boolType,
+                left,
+                right);
+            var numeric = _module.AddInstruction(
+                SpirvOp.Select, _floatType, compare, left, right);
+            var leftNan = _module.AddInstruction(SpirvOp.IsNan, _boolType, left);
+            var rightNan = _module.AddInstruction(SpirvOp.IsNan, _boolType, right);
+            var withRight = _module.AddInstruction(
+                SpirvOp.Select, _floatType, rightNan, left, numeric);
+            return _module.AddInstruction(
+                SpirvOp.Select, _floatType, leftNan, right, withRight);
+        }
+
+        // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
+        // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
+        // Mirrors the branchless HalfToFloat reference validated against System.Half.
+        private uint EmitHalfToFloat(uint halfBits)
+        {
+            var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
+            var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
+            var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
+
+            var normal = BitwiseOr(
+                ShiftLeftLogical(IAdd(exponent, UInt(112)), UInt(23)),
+                ShiftLeftLogical(mantissa, UInt(13)));
+            var infinityNan = BitwiseOr(UInt(0x7F80_0000), ShiftLeftLogical(mantissa, UInt(13)));
+
+            // Subnormal: normalise the mantissa. FindUMsb of (mantissa | 1) keeps the
+            // op defined when mantissa is 0; that lane is discarded by the select below.
+            var highBit = Ext(75, _uintType, BitwiseOr(mantissa, UInt(1)));
+            var shift = ISubU(UInt(23), highBit);
+            var subFraction = BitwiseAnd(ShiftLeftLogical(mantissa, shift), UInt(0x7F_FFFF));
+            var subnormal = SelectU(
+                IsNotZero(mantissa),
+                BitwiseOr(ShiftLeftLogical(IAdd(highBit, UInt(103)), UInt(23)), subFraction),
+                UInt(0));
+
+            var magnitude = SelectU(
+                Equal(exponent, 0),
+                subnormal,
+                SelectU(Equal(exponent, 31), infinityNan, normal));
+            return BitwiseOr(sign, magnitude);
+        }
+
+        // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to
+        // nearest even (subnormals, overflow-to-Inf and NaN/Inf handled). Mirrors the
+        // branchless FloatToHalf reference validated exhaustively against System.Half.
+        private uint EmitFloatToHalf(uint bits)
+        {
+            var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
+            var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
+
+            var isInfinityNan = UCmp(SpirvOp.UGreaterThanEqual, absolute, UInt(0x7F80_0000));
+            var isNan = UCmp(SpirvOp.UGreaterThan, absolute, UInt(0x7F80_0000));
+            var infinityNan = BitwiseOr(
+                BitwiseOr(sign, UInt(0x7C00)),
+                SelectU(isNan, UInt(0x200), UInt(0)));
+
+            var exponent = ShiftRightLogical(absolute, UInt(23));
+            var mantissa = BitwiseAnd(absolute, UInt(0x7F_FFFF));
+            var significand = BitwiseOr(mantissa, UInt(0x80_0000));
+
+            // Normal path: round the 24-bit significand down to 11 bits (>> 13) with
+            // round-to-nearest-even; the carry folds naturally into the exponent.
+            var roundBit = BitwiseAnd(ShiftRightLogical(significand, UInt(13)), UInt(1));
+            var rounded = ShiftRightLogical(IAdd(IAdd(significand, UInt(0xFFF)), roundBit), UInt(13));
+            var halfExponent = ISubU(exponent, UInt(112));
+            var normalBits = IAdd(ShiftLeftLogical(halfExponent, UInt(10)), ISubU(rounded, UInt(0x400)));
+            var normal = SelectU(
+                UCmp(SpirvOp.UGreaterThanEqual, exponent, UInt(113)),
+                SelectU(UCmp(SpirvOp.UGreaterThanEqual, normalBits, UInt(0x7C00)), UInt(0x7C00), normalBits),
+                UInt(0));
+
+            // Subnormal path: value = round(significand >> (126 - exponent)) with RNE.
+            // The shift is clamped to 25 so it stays defined; on this path it is >= 14.
+            var distance = ISubU(UInt(126), exponent);
+            var shift = SelectU(UCmp(SpirvOp.UGreaterThan, distance, UInt(25)), UInt(25), distance);
+            var shiftMask = ISubU(ShiftLeftLogical(UInt(1), shift), UInt(1));
+            var halfWay = ShiftLeftLogical(UInt(1), ISubU(shift, UInt(1)));
+            var lowBits = BitwiseAnd(significand, shiftMask);
+            var quotient = ShiftRightLogical(significand, shift);
+            var roundUp = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                UCmp(SpirvOp.UGreaterThan, lowBits, halfWay),
+                _module.AddInstruction(
+                    SpirvOp.LogicalAnd,
+                    _boolType,
+                    Equal(lowBits, halfWay),
+                    IsNotZero(BitwiseAnd(quotient, UInt(1)))));
+            var subnormal = IAdd(quotient, SelectU(roundUp, UInt(1), UInt(0)));
+
+            var isSubnormal = UCmp(SpirvOp.ULessThanEqual, exponent, UInt(112));
+            var finite = SelectU(isSubnormal, subnormal, normal);
+            return SelectU(isInfinityNan, infinityNan, BitwiseOr(sign, finite));
+        }
+
+        private uint SelectU(uint condition, uint whenTrue, uint whenFalse) =>
+            _module.AddInstruction(SpirvOp.Select, _uintType, condition, whenTrue, whenFalse);
+
+        private uint UCmp(SpirvOp operation, uint left, uint right) =>
+            _module.AddInstruction(operation, _boolType, left, right);
+
+        private uint Equal(uint value, uint constant) =>
+            _module.AddInstruction(SpirvOp.IEqual, _boolType, value, UInt(constant));
+
+        private uint ISubU(uint left, uint right) =>
+            _module.AddInstruction(SpirvOp.ISub, _uintType, left, right);
 
         private bool TryEmitVectorCompare(
             Gen5ShaderInstruction instruction,
