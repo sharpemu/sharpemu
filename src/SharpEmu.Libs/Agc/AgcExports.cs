@@ -78,6 +78,8 @@ public static partial class AgcExports
     private const uint SpiShaderPgmHiLs = 0x149;
     private const uint SpiShaderPgmLoGs = 0x8A;
     private const uint SpiShaderPgmHiGs = 0x8B;
+    private const uint SpiShaderPgmLoHs = 0x10A;
+    private const uint SpiShaderPgmHiHs = 0x10B;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
     private const uint ComputePgmLo = 0x20C;
@@ -10138,6 +10140,7 @@ public static partial class AgcExports
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
             4 => SpiShaderPgmLoGs,
+            5 => SpiShaderPgmLoHs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -10147,6 +10150,7 @@ public static partial class AgcExports
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
             4 => SpiShaderPgmHiGs,
+            5 => SpiShaderPgmHiHs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
