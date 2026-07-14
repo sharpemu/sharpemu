@@ -125,5 +125,13 @@
   "Dialog.PsExecutables": "Ejecutables de PS",
   "Dialog.SaveLogFile": "Selecciona dónde guardar el archivo de Logs",
   "Dialog.PlainTextFiles": "Archivos en texto plano",
-  "Dialog.LogFiles": "Archivos de Log"
+  "Dialog.LogFiles": "Archivos de Log",
+
+  "Options.About" : "Informacion",
+  "About.Github.Label": "GitHub",
+  "About.Github.Desc": "Código fuente, issues y desarrollo del proyecto.",
+  "About.Discord.Label": "Discord",
+  "About.Discord.Desc": "Únete a la comunidad, recibe soporte y sigue el desarrollo.",
+  "About.GithubButton": "Contribuye en GitHub!",
+  "About.DiscordButton": "Únete a nuestro Discord!"
 }

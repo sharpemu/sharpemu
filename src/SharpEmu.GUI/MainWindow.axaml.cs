@@ -147,6 +147,25 @@ public partial class MainWindow : Window
         };
         _gamepadTimer.Tick += (_, _) => PollGamepad();
         _gamepadTimer.Start();
+
+
+        GithubButton.Click += (_, _) =>
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "https://github.com/par274/sharpemu",
+                UseShellExecute = true
+            });
+        };
+
+        DiscordButton.Click += (_, _) =>
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "https://discord.com/invite/6GejPEDqpc",
+                UseShellExecute = true
+            });
+        };
     }
 
     /// <summary>
@@ -442,6 +461,14 @@ public partial class MainWindow : Window
         ConsoleToggle.Content = loc.Get("Launch.Console");
         LaunchButton.Content = loc.Get("Launch.Launch");
         StopButton.Content = loc.Get("Launch.Stop");
+
+        AboutSectionTitle.Text = loc.Get("Options.About");
+        GithubLabel.Text = loc.Get("About.Github.Label");
+        GithubDesc.Text = loc.Get("About.Github.Desc");
+        DiscordServerLabel.Text = loc.Get("About.Discord.Label");
+        DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
+        GithubButton.Content = loc.Get("About.GithubButton");
+        DiscordButton.Content = loc.Get("About.DiscordButton");
 
         UpdateEmptyStateTexts();
         UpdateSelectedGameTexts();

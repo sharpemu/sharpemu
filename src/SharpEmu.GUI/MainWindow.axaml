@@ -317,7 +317,73 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </Grid>
                     </StackPanel>
                   </Border>
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="AboutSectionTitle"
+                                Classes="sectionTitle"
+                                Text="ABOUT" />
+                      
+                      <!--Github-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0"
+                                      Orientation="Horizontal"
+                                      Spacing="8"
+                                      VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/github.png"
+                                    Width="20"
+                                    Height="20"
+                                    VerticalAlignment="Center" />
+                          <StackPanel VerticalAlignment="Center"
+                                          Spacing="2">
+                            <TextBlock x:Name="GithubLabel"
+                                            Text="GitHub"
+                                            FontSize="13" />
+                            <TextBlock x:Name="GithubDesc"
+                                            Text="Source code, issues and project development."
+                                            FontSize="11"
+                                            Foreground="{StaticResource MutedBrush}"
+                                            TextWrapping="Wrap" />
+                          </StackPanel>
+                        </StackPanel>
 
+                        <Button Grid.Column="1"
+                                x:Name="GithubButton"
+                                Classes="ghost"
+                                Content="Open"
+                                VerticalAlignment="Center" />
+                      </Grid>
+
+                      <!--Discord-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0"
+                                        Orientation="Horizontal"
+                                        Spacing="8"
+                                        VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/discord.png"
+                                  Width="20"
+                                  Height="20"
+                                  VerticalAlignment="Center" />
+                          <StackPanel VerticalAlignment="Center"
+                                      Spacing="2">
+                            <TextBlock x:Name="DiscordServerLabel"
+                                      Text="Discord"
+                                      FontSize="13" />
+                            <TextBlock x:Name="DiscordServerDesc"
+                                      Text="Join the community, get support and follow development."
+                                      FontSize="11"
+                                      Foreground="{StaticResource MutedBrush}"
+                                      TextWrapping="Wrap" />
+                          </StackPanel>
+                        </StackPanel>
+
+                        <Button Grid.Column="1"
+                                x:Name="DiscordButton"
+                                Classes="ghost"
+                                Content="Join"
+                                VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
               </ScrollViewer>
             </TabItem>

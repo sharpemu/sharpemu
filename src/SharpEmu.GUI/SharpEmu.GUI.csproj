@@ -28,6 +28,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
+    <AvaloniaResource Include="..\..\assets\images\github.png" Link="Assets/github.png" />
+    <AvaloniaResource Include="..\..\assets\images\discord.png" Link="Assets/discord.png" />
   </ItemGroup>
 
   <ItemGroup>
