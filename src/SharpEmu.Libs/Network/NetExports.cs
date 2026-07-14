@@ -96,6 +96,54 @@ public static class NetExports
     }
 
     [SysAbiExport(
+        Nid = "9T2pDF2Ryqg",
+        ExportName = "sceNetHtonl",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetHtonl(CpuContext ctx)
+    {
+        var value = unchecked((uint)ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "iWQWrwiSt8A",
+        ExportName = "sceNetHtons",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetHtons(CpuContext ctx)
+    {
+        var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "pQGpHYopAIY",
+        ExportName = "sceNetNtohl",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetNtohl(CpuContext ctx)
+    {
+        var value = unchecked((uint)ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "Rbvt+5Y2iEw",
+        ExportName = "sceNetNtohs",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetNtohs(CpuContext ctx)
+    {
+        var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "C4UgDHHPvdw",
         ExportName = "sceNetResolverCreate",
         Target = Generation.Gen4 | Generation.Gen5,

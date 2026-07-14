@@ -1,0 +1,134 @@
+{
+  "_languageName": "Italiano",
+
+  "Page.Library": "Libreria",
+  "Page.Options": "Opzioni",
+  "Page.GameCount.One": "1 gioco",
+  "Page.GameCount.Other": "{0} giochi",
+
+  "Library.SearchWatermark": "Cerca nella libreria…",
+  "Library.AddFolder": "＋ Aggiungi cartella",
+  "Library.Rescan": "⟳ Riscansiona",
+  "Library.OpenFile": "Apri file…",
+
+  "Library.Context.Launch": "Avvia",
+  "Library.Context.OpenFolder": "Apri cartella gioco",
+  "Library.Context.CopyPath": "Copia percorso",
+  "Library.Context.CopyTitleId": "Copia ID titolo",
+  "Library.Context.Remove": "Rimuovi dalla libreria",
+
+  "Library.Empty.Title": "La tua libreria è vuota",
+  "Library.Empty.Hint": "Aggiungi la cartella che contiene i tuoi giochi per partire.",
+  "Library.Empty.SearchTitle": "Nessun gioco corrisponde alla ricerca",
+  "Library.Empty.SearchHint": "Nulla nella libreria corrisponde a “{0}”.",
+  "Library.Empty.AddFolder": "＋ Aggiungi cartella giochi",
+
+  "Library.Loading": "Caricamento libreria…",
+
+  "Options.General": "Generale",
+  "Options.Section.Emulation": "EMULAZIONE",
+  "Options.Section.Logging": "LOG",
+  "Options.Section.Launcher": "LAUNCHER",
+
+  "Options.CpuEngine.Label": "CPU engine",
+  "Options.CpuEngine.Desc": "Motore di esecuzione utilizzato per eseguire il codice del gioco.",
+  "Options.CpuEngine.Native": "Nativo",
+
+  "Options.Strict.Label": "Risoluzione rigorosa dynlib",
+  "Options.Strict.Desc": "Interrompi l'avvio quando un simbolo importato non può essere trovato.",
+
+  "Options.LogLevel.Label": "Livello Log",
+  "Options.LogLevel.Desc": "Livello di dettaglio dell'output console dell'emulatore.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Warning",
+  "Options.LogLevel.Error": "Error",
+  "Options.LogLevel.Critical": "Critical",
+
+  "Options.TraceImports.Label": "Limite tracciamento import",
+  "Options.TraceImports.Desc": "Traccia i primi N import per modulo (0 = disattivato).",
+
+
+  "Options.LogToFile.Label": "Salva log su file",
+  "Options.LogToFile.Desc": "Duplica l'output dell'emulatore in un file di log.",
+
+
+  "Options.LogFilePath.Label": "Percorso file di log",
+  "Options.LogFilePath.Default": "Nessun percorso personalizzato — i log vengono salvati in user/logs accanto all'emulatore.",
+  "Options.LogFilePath.Select": "Seleziona…",
+
+  "Options.OverrideLogFile.Label": "Sovrascrivi file di log",
+  "Options.OverrideLogFile.Desc": "Usa esattamente il percorso specificato invece di aggiungere Title ID e timestamp.",
+
+
+  "Options.TitleMusic.Label": "Musica del titolo",
+  "Options.TitleMusic.Desc": "Riproduci in loop la musica di anteprima del gioco selezionato nella libreria.",
+
+  "Options.Discord.Label": "Presenza Discord",
+  "Options.Discord.Desc": "Mostra il gioco in esecuzione sul tuo profilo Discord.",
+
+  "Options.Language.Label": "Lingua dell'emulatore",
+  "Options.Language.Desc": "Lingua utilizzata in tutto il launcher. Viene applicata immediatamente.",
+
+  "Common.On": "On",
+  "Common.Off": "Off",
+
+  "Console.Title": "CONSOLE",
+  "Console.SearchWatermark": "Cerca...",
+  "Console.AutoScroll": "Scorrimento automatico",
+  "Console.Split": "Dividi",
+  "Console.Copy": "Copia",
+  "Console.Clear": "Cancella",
+  "Console.WindowTitle": "Console SharpEmu",
+
+  "Launch.NoGameSelected": "Nessun gioco selezionato",
+  "Launch.NoGameHint": "Scegli un gioco dalla libreria, oppure apri direttamente un eboot.bin.",
+  "Launch.Idle": "Inattivo",
+  "Launch.Console": "≡ Console",
+  "Launch.Launch": "▶  Avvia",
+  "Launch.Stop": "■  Ferma",
+  "Launch.Running": "In esecuzione — {0}",
+  "Launch.Stopping": "Arresto in corso…",
+  "Launch.Exited": "Terminato con codice {0} ({1})",
+  "Launch.ExeNotFound": "Eseguibile SharpEmu non trovato. Compila prima il progetto SharpEmu.CLI (dotnet build).",
+  "Launch.LogFile": "File di log: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Impossibile avviare l'emulatore: {0}",
+  "Launch.ProcessExited": "Processo terminato con codice {0} ({1}).",
+
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "argomenti non validi",
+  "Exit.EbootNotFound": "eboot non trovato",
+  "Exit.RuntimeException": "errore di runtime",
+  "Exit.EmulationError": "errore di emulazione",
+  "Exit.Unknown": "sconosciuto",
+
+  
+  "Status.EmulatorLocating": "Emulatore: ricerca in corso…",
+  "Status.EmulatorPath": "Emulatore: {0}",
+  "Status.EmulatorNotFound": "Emulatore: eseguibile SharpEmu non trovato — compila prima SharpEmu.CLI.",
+  "Status.ScanningLibrary": "Scansione della libreria…",
+  "Status.AddFolderPrompt": "Aggiungi una cartella di giochi per popolare la libreria.",
+  "Status.LibraryScanned": "Libreria scansionata: {0} gioco/giochi in {1} cartella/e.",
+  "Status.CouldNotOpenFolder": "Impossibile aprire la cartella: {0}",
+  "Status.CopiedToClipboard": "{0} copiato negli appunti.",
+  "Status.RemovedFromLibrary": "“{0}” rimosso dalla libreria. Riaggiungi la sua cartella per ripristinarlo.",
+  "Status.Running": "In esecuzione: {0}",
+  "Status.Stopping": "Arresto in corso…",
+  "Status.Idle": "Inattivo",
+
+  "Clipboard.Path": "Percorso",
+  "Clipboard.TitleId": "ID Titolo",
+
+  "Discord.Playing": "Sta giocando a {0}",
+  "Discord.Browsing": "Sta esplorando la libreria",
+  
+  "Dialog.ChooseGameFolder": "Scegli una cartella contenente giochi",
+  "Dialog.OpenExecutable": "Apri un eseguibile da avviare",
+  "Dialog.PsExecutables": "Eseguibili PS",
+  "Dialog.SaveLogFile": "Scegli dove salvare il file di log",
+  "Dialog.PlainTextFiles": "File di testo semplice",
+  "Dialog.LogFiles": "File di log"
+}

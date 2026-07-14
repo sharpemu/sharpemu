@@ -3,8 +3,8 @@
 
 #!/usr/bin/env python3
 
-import struct
 import hashlib
+import struct
 from base64 import b64encode as base64enc
 from binascii import unhexlify as uhx
 from pathlib import Path
@@ -21,7 +21,7 @@ def name2nid(name):
 def generate():
     names_path = Path(NAMES)
     output_path = Path(OUTPUT)
-    
+
     entries = []
     with open(names_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -29,12 +29,12 @@ def generate():
             if name:
                 nid = name2nid(name)
                 entries.append((nid, name))
-    
+
     print(f"Found {len(entries)} entries")
 
     data = bytearray()
     data.extend(struct.pack('<I', len(entries)))
-    
+
     for nid, name in entries:
         nid_bytes = nid.encode('utf-8')
         name_bytes = name.encode('utf-8')
@@ -42,10 +42,11 @@ def generate():
         data.extend(nid_bytes)
         data.extend(struct.pack('<H', len(name_bytes)))
         data.extend(name_bytes)
-    
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(data)
-    
+
     print(f"Generated: {output_path} ({len(data):,} bytes)")
     print(f"Total entries: {len(entries)}")
 
