@@ -21,7 +21,7 @@
   "Library.Empty.Hint": "أضف مجلداً يحتوي على ألعابك للبدء.",
   "Library.Empty.SearchTitle": "لا توجد ألعاب تطابق بحثك",
   "Library.Empty.SearchHint": "لا شيء في المكتبة يطابق “{0}”.",
-  "Library.Empty.AddFolder": "＋ إضافة مجلد لعبة",
+  "Library.Empty.AddFolder": "＋ إضافة مجلد ألعاب",
 
   "Library.Loading": "جاري تحميل المكتبة...",
 
@@ -105,7 +105,7 @@
   "Status.EmulatorPath": "المحاكي: {0}",
   "Status.EmulatorNotFound": "المحاكي: لم يُعثر على الملف التنفيذي SharpEmu — ابنِ SharpEmu.CLI أولاً.",
   "Status.ScanningLibrary": "جاري فحص المكتبة...",
-  "Status.AddFolderPrompt": "أضف مجلد لعبة لملء المكتبة.",
+  "Status.AddFolderPrompt": "أضف مجلد ألعاب لملء المكتبة.",
   "Status.LibraryScanned": "فُحصت المكتبة: {0} لعبة في {1} مجلد.",
   "Status.CouldNotOpenFolder": "تعذر فتح المجلد: {0}",
   "Status.CopiedToClipboard": "نُسخ {0} إلى الحافظة.",
