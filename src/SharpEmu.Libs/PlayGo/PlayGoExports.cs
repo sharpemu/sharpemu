@@ -262,6 +262,44 @@ public static class PlayGoExports
     }
 
     [SysAbiExport(
+        Nid = "IfiN+-oeVWI",
+        ExportName = "scePlayGoGetSupportedOptionalChunk",
+        Target = Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoGetSupportedOptionalChunk(CpuContext ctx)
+    {
+        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var optionalSet = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var outSupportedMask = ctx[CpuRegister.Rdx];
+
+        var validation = ValidateHandle(handle);
+        if (validation != 0)
+        {
+            return validation;
+        }
+
+        if (outSupportedMask == 0)
+        {
+            return OrbisPlayGoErrorBadPointer;
+        }
+
+        // The PS5 API reports the supported optional-chunk classes as a bit
+        // mask.  Content exposed through app0 is already fully installed, so
+        // every class is available for either optional set queried by UE.
+        TracePlayGo($"get_supported_optional_chunk set={optionalSet} mask=0x{ulong.MaxValue:X16}");
+        return ctx.TryWriteUInt64(outSupportedMask, ulong.MaxValue)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    [SysAbiExport(
+        Nid = "8-e7E989rCU",
+        ExportName = "scePlayGoGetInstallChunkId",
+        Target = Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoGetInstallChunkId(CpuContext ctx) => PlayGoGetChunkId(ctx);
+
+    [SysAbiExport(
         Nid = "v6EZ-YWRdMs",
         ExportName = "scePlayGoGetEta",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -682,9 +720,11 @@ public static class PlayGoExports
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
         {
-            // Full installs may omit PlayGo sidecar metadata.
-            TracePlayGo("metadata_missing; using fully-installed default chunk");
-            return new PlayGoMetadata(true, [(ushort)0]);
+            // Digital packages commonly omit PlayGo metadata because every
+            // chunk is already installed.  Returning NOT_SUPPORT from Open
+            // makes titles that unconditionally initialize PlayGo abort even
+            // though no staged content is actually missing.
+            return new PlayGoMetadata(true, Array.Empty<ushort>());
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);

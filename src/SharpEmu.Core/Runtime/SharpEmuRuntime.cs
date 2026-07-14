@@ -83,6 +83,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
         };
         var moduleManager = new ModuleManager();
+        moduleManager.RegisterFromAssembly(typeof(VideoOutExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
         moduleManager.RegisterFromAssembly(typeof(KernelExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
         moduleManager.Freeze();
 
@@ -426,7 +427,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return null;
         }
 
-        var app0Root = Path.GetDirectoryName(normalizedEbootPath);
+        var app0Root = FindAppContentRoot(normalizedEbootPath);
         if (string.IsNullOrWhiteSpace(app0Root))
         {
             return null;
@@ -434,6 +435,55 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Environment.SetEnvironmentVariable(app0VariableName, app0Root);
         return new App0BindingScope(app0VariableName);
+    }
+
+    // Some extracted PS5 packages keep the executable and PRX files under a
+    // "decrypted" directory while the Unreal game and engine content remain
+    // beside it.  Binding app0 to the executable directory makes the files
+    // visible but hides ../../../<game>/Content and ../../../engine/Content,
+    // causing Unreal's ICU bootstrap to abort.
+    private static string? FindAppContentRoot(string normalizedEbootPath)
+    {
+        var executableDirectory = Path.GetDirectoryName(normalizedEbootPath);
+        if (string.IsNullOrWhiteSpace(executableDirectory))
+        {
+            return null;
+        }
+
+        var current = new DirectoryInfo(executableDirectory);
+        for (var depth = 0; current is not null && depth < 4; depth++, current = current.Parent)
+        {
+            if (HasUnrealContentLayout(current.FullName))
+            {
+                return current.FullName;
+            }
+        }
+
+        return executableDirectory;
+    }
+
+    private static bool HasUnrealContentLayout(string root)
+    {
+        if (!Directory.Exists(Path.Combine(root, "engine", "content")))
+        {
+            return false;
+        }
+
+        try
+        {
+            return Directory.EnumerateDirectories(root)
+                .Any(directory =>
+                    !string.Equals(Path.GetFileName(directory), "engine", StringComparison.OrdinalIgnoreCase) &&
+                    Directory.Exists(Path.Combine(directory, "content")));
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private sealed class App0BindingScope(string variableName) : IDisposable

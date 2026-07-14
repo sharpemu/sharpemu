@@ -80,8 +80,19 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        // Completion output was written when the command was submitted.
-        TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
+        // sceKernelAprWaitCommandBuffer takes only the submission id. Dreamcore's
+        // call sites set EDI and deliberately leave RSI/RDX as scratch values from
+        // earlier calls, so interpreting either one as a result pointer corrupts
+        // unrelated guest memory. The result buffer belongs to the submission and
+        // was captured by sceKernelAprSubmitCommandBufferAndGetResult.
+        var resultAddress = submission.ResultAddress;
+        if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress))
+        {
+            TraceAprWaitFailure(ctx, "wait_result_fault", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, resultAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

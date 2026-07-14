@@ -110,15 +110,6 @@ public static class KernelMemoryCompatExports
     private static readonly HashSet<string> _negativeStatCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(StringComparer.OrdinalIgnoreCase);
     private static long _nextFileDescriptor = 2;
-
-    internal static int AllocateGuestFileDescriptor()
-    {
-        lock (_fdGate)
-        {
-            return (int)Interlocked.Increment(ref _nextFileDescriptor);
-        }
-    }
-
     private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
     private static ulong _mainDirectMemoryPoolBase = UnsetMainDirectMemoryPoolBase;
@@ -478,7 +469,7 @@ public static class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "LHMrG7e8G78",
-        ExportName = "wcsmisc",
+        ExportName = "wcslen",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Wcslen(CpuContext ctx)
@@ -810,6 +801,28 @@ public static class KernelMemoryCompatExports
 
         var rendered = FormatString(ctx, format, ref vaCursor);
         return WriteSnprintfOutput(ctx, destination, ulong.MaxValue, rendered);
+    }
+
+    // Helpers used by the socket/stdio compat layers upstream; provided here on
+    // top of the local FD/va_list infrastructure so those files compile.
+    internal static int AllocateGuestFileDescriptor()
+    {
+        lock (_fdGate)
+        {
+            return (int)Interlocked.Increment(ref _nextFileDescriptor);
+        }
+    }
+
+    internal static bool TryFormatStringFromVaList(CpuContext ctx, string format, ulong vaListAddress, out string rendered)
+    {
+        if (!TryCreateVaListCursor(ctx, vaListAddress, out var vaCursor))
+        {
+            rendered = format;
+            return false;
+        }
+
+        rendered = FormatString(ctx, format, ref vaCursor);
+        return true;
     }
 
     [SysAbiExport(
@@ -1489,214 +1502,6 @@ public static class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
-        Nid = "ob5xAW4ln-0",
-        ExportName = "strchr",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Strchr(CpuContext ctx)
-    {
-        var address = ctx[CpuRegister.Rdi];
-        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
-        if (address == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        // The terminator counts as part of the scanned range, so strchr(s, '\0')
-        // returns a pointer to the string's null byte just like a native libc.
-        Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < 1_048_576; index++)
-        {
-            if (!TryReadCompat(ctx, address + index, current))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (current[0] == needle)
-            {
-                ctx[CpuRegister.Rax] = address + index;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-
-            if (current[0] == 0)
-            {
-                break;
-            }
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "9yDWMxEFdJU",
-        ExportName = "strrchr",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Strrchr(CpuContext ctx)
-    {
-        var address = ctx[CpuRegister.Rdi];
-        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
-        if (address == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ulong match = 0;
-        var found = false;
-        Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < 1_048_576; index++)
-        {
-            if (!TryReadCompat(ctx, address + index, current))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (current[0] == needle)
-            {
-                match = address + index;
-                found = true;
-            }
-
-            if (current[0] == 0)
-            {
-                break;
-            }
-        }
-
-        ctx[CpuRegister.Rax] = found ? match : 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "8u8lPzUEq+U",
-        ExportName = "memchr",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Memchr(CpuContext ctx)
-    {
-        var address = ctx[CpuRegister.Rdi];
-        var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
-        var count = ctx[CpuRegister.Rdx];
-
-        Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < count; index++)
-        {
-            if (!TryReadCompat(ctx, address + index, current))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (current[0] == needle)
-            {
-                ctx[CpuRegister.Rax] = address + index;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "Ls4tzzhimqQ",
-        ExportName = "strcat",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Strcat(CpuContext ctx)
-    {
-        var destination = ctx[CpuRegister.Rdi];
-        var source = ctx[CpuRegister.Rsi];
-        if (!TryReadCString(ctx, source, 1_048_576, out var sourceBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (!TryReadCString(ctx, destination, 1_048_576, out var destinationBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        // Overwrite the destination terminator and re-terminate after the copied bytes.
-        var appendAddress = destination + (ulong)destinationBytes.Length;
-        var payload = new byte[sourceBytes.Length + 1];
-        sourceBytes.CopyTo(payload.AsSpan());
-        if (!TryWriteCompat(ctx, appendAddress, payload))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = destination;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "kHg45qPC6f0",
-        ExportName = "strncat",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Strncat(CpuContext ctx)
-    {
-        var destination = ctx[CpuRegister.Rdi];
-        var source = ctx[CpuRegister.Rsi];
-        var limit = ctx[CpuRegister.Rdx];
-
-        // Bounding the source read by the count yields strncat's "at most n bytes"
-        // semantics while still stopping early at the source terminator.
-        if (!TryReadCString(ctx, source, limit, out var sourceBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (!TryReadCString(ctx, destination, 1_048_576, out var destinationBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        var appendAddress = destination + (ulong)destinationBytes.Length;
-        var payload = new byte[sourceBytes.Length + 1];
-        sourceBytes.CopyTo(payload.AsSpan());
-        if (!TryWriteCompat(ctx, appendAddress, payload))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = destination;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "viiwFMaNamA",
-        ExportName = "strstr",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int Strstr(CpuContext ctx)
-    {
-        var haystack = ctx[CpuRegister.Rdi];
-        var needle = ctx[CpuRegister.Rsi];
-        if (!TryReadCString(ctx, haystack, 1_048_576, out var haystackBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (!TryReadCString(ctx, needle, 1_048_576, out var needleBytes))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        // An empty needle matches at the start of the haystack.
-        if (needleBytes.Length == 0)
-        {
-            ctx[CpuRegister.Rax] = haystack;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        var matchIndex = haystackBytes.AsSpan().IndexOf(needleBytes.AsSpan());
-        ctx[CpuRegister.Rax] = matchIndex >= 0 ? haystack + (ulong)matchIndex : 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
         Nid = "QrZZdJ8XsX0",
         ExportName = "fputs",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1747,6 +1552,7 @@ public static class KernelMemoryCompatExports
         }
 
         var hostPath = ResolveGuestPath(guestPath);
+        TryMaterializeSyntheticDescriptor(guestPath, hostPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
         try
@@ -1772,10 +1578,9 @@ public static class KernelMemoryCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                int directoryFd;
+                var directoryFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
                 lock (_fdGate)
                 {
-                    directoryFd = AllocateGuestFileDescriptor();
                     _openDirectories[directoryFd] = new OpenDirectory
                     {
                         Path = hostPath,
@@ -1796,10 +1601,9 @@ public static class KernelMemoryCompatExports
                 stream.Seek(0, SeekOrigin.End);
             }
 
-            int fd;
+            var fd = (int)Interlocked.Increment(ref _nextFileDescriptor);
             lock (_fdGate)
             {
-                fd = AllocateGuestFileDescriptor();
                 _openFiles[fd] = stream;
             }
 
@@ -1863,6 +1667,7 @@ public static class KernelMemoryCompatExports
         }
 
         var hostPath = ResolveGuestPath(guestPath);
+        TryMaterializeSyntheticDescriptor(guestPath, hostPath);
         var statCacheKey = GetNegativeStatCacheKey(guestPath);
         if (statCacheKey is not null && IsNegativeStatCached(statCacheKey))
         {
@@ -1889,30 +1694,6 @@ public static class KernelMemoryCompatExports
         LogUniqueStatTrace(guestPath, hostPath, found: true);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "E6ao34wPw+U",
-        ExportName = "stat",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PosixStat(CpuContext ctx)
-    {
-        var result = KernelStat(ctx);
-        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
-        {
-            return 0;
-        }
-
-        var errno = result switch
-        {
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
-            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
-            _ => 2,
-        };
-        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
-        ctx[CpuRegister.Rax] = ulong.MaxValue;
-        return -1;
     }
 
     [SysAbiExport(
@@ -2196,12 +1977,6 @@ public static class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (KernelSocketCompatExports.TryCloseSocketFd(fd))
-        {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
         FileStream? stream;
         lock (_fdGate)
         {
@@ -2242,17 +2017,6 @@ public static class KernelMemoryCompatExports
         if (requested == 0 || fd == 0)
         {
             ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        if (KernelSocketCompatExports.TryReadSocketFd(ctx, fd, bufferAddress, requested, out var socketBytesRead, out var socketError))
-        {
-            if (socketError != OrbisGen2Result.ORBIS_GEN2_OK)
-            {
-                return (int)socketError;
-            }
-
-            ctx[CpuRegister.Rax] = socketBytesRead;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2316,6 +2080,69 @@ public static class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelRead(CpuContext ctx) => KernelReadUnderscore(ctx);
+
+    // Positional read: pread(fd, buf, nbytes, offset). Unreal Engine uses this to read its
+    // project descriptor and cooked pak/IoStore files, so it must not disturb the file
+    // position (POSIX pread semantics).
+    [SysAbiExport(
+        Nid = "+r3rMFwItV4",
+        ExportName = "pread",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelPread(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var requested = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
+        var offset = unchecked((long)ctx[CpuRegister.Rcx]);
+        if (requested < 0 || offset < 0 || (requested > 0 && bufferAddress == 0))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (requested == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        FileStream? stream;
+        lock (_fdGate)
+        {
+            _openFiles.TryGetValue(fd, out stream);
+        }
+
+        if (stream is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        int read;
+        try
+        {
+            var savedPosition = stream.Position;
+            stream.Seek(offset, SeekOrigin.Begin);
+            var buffer = GC.AllocateUninitializedArray<byte>(requested);
+            read = stream.Read(buffer, 0, requested);
+            stream.Position = savedPosition;
+            if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            LogIoTrace(
+                "pread",
+                stream.Name,
+                $"fd={fd} off={offset} req={requested} read={read} preview='{PreviewIoBytes(buffer, read, 64)}'");
+        }
+        catch (IOException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)read);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 
     [SysAbiExport(
         Nid = "Oy6IpwgtYOk",
@@ -2485,17 +2312,6 @@ public static class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (KernelSocketCompatExports.TryWriteSocketFd(ctx, fd, payload, out var socketError))
-        {
-            if (socketError != OrbisGen2Result.ORBIS_GEN2_OK)
-            {
-                return (int)socketError;
-            }
-
-            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
         FileStream? stream;
         lock (_fdGate)
         {
@@ -2526,6 +2342,46 @@ public static class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelWrite(CpuContext ctx) => KernelWriteUnderscore(ctx);
+
+    [SysAbiExport(
+        Nid = "fTx66l5iWIA",
+        ExportName = "sceKernelFsync",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelFsync(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (fd is 1 or 2)
+        {
+            if (fd == 1)
+            {
+                Console.Out.Flush();
+            }
+            else
+            {
+                Console.Error.Flush();
+            }
+
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        FileStream? stream;
+        lock (_fdGate)
+        {
+            _openFiles.TryGetValue(fd, out stream);
+        }
+
+        if (stream is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        // KernelWriteUnderscore flushes every successful guest write before it
+        // returns.  A second FileStream.Flush here enters a blocking Windows flush
+        // syscall and can park Unreal's async writer indefinitely, so validating
+        // the descriptor is sufficient to provide the guest-visible barrier.
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 
     [SysAbiExport(
         Nid = "lLMT9vJAck0",
@@ -3245,7 +3101,7 @@ public static class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "4h6F1LLbTiw",
-        ExportName = "sceKernelMapNamedFlexibleMemoryInternal",
+        ExportName = "sceKernelMapFlexibleMemoryInternal",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapFlexibleMemoryInternal(CpuContext ctx)
@@ -3709,18 +3565,6 @@ public static class KernelMemoryCompatExports
             BinaryPrimitives.ReadUInt32LittleEndian(vaList[4..]),
             BinaryPrimitives.ReadUInt64LittleEndian(vaList[8..]),
             BinaryPrimitives.ReadUInt64LittleEndian(vaList[16..]));
-        return true;
-    }
-
-    internal static bool TryFormatStringFromVaList(CpuContext ctx, string format, ulong vaListAddress, out string rendered)
-    {
-        if (!TryCreateVaListCursor(ctx, vaListAddress, out var vaCursor))
-        {
-            rendered = format;
-            return false;
-        }
-
-        rendered = FormatString(ctx, format, ref vaCursor);
         return true;
     }
 
@@ -4197,7 +4041,7 @@ public static class KernelMemoryCompatExports
                             _ => unchecked((int)argumentSource.NextGpArg())
                         };
 
-                        var formatted = value.ToString(CultureInfo.InvariantCulture);
+                        var formatted = value.ToString();
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;
                         else if (spaceForSign && value >= 0)
@@ -4221,7 +4065,7 @@ public static class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = value.ToString(CultureInfo.InvariantCulture);
+                        var formatted = value.ToString();
                         sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
                     }
                     break;
@@ -4242,8 +4086,8 @@ public static class KernelMemoryCompatExports
                         };
 
                         var formatted = specifier == 'x'
-                            ? value.ToString("x", CultureInfo.InvariantCulture)
-                            : value.ToString("X", CultureInfo.InvariantCulture);
+                            ? value.ToString("x")
+                            : value.ToString("X");
 
                         if (alternateForm && value != 0)
                             formatted = specifier == 'x' ? "0x" + formatted : "0X" + formatted;
@@ -4351,10 +4195,7 @@ public static class KernelMemoryCompatExports
                         var formatStr = precision >= 0
                             ? $"{{0:{specifier}{precision}}}"
                             : $"{{0:{specifier}}}";
-                        var formatted = string.Format(
-                            CultureInfo.InvariantCulture,
-                            formatStr,
-                            value);
+                        var formatted = string.Format(formatStr, value);
 
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;
@@ -4709,6 +4550,34 @@ public static class KernelMemoryCompatExports
 
     public static string ResolveGuestPath(string guestPath)
     {
+        var result = ResolveGuestPathCore(guestPath);
+
+        // Always-on diagnostic for the UE project descriptor lookup - the current boot
+        // blocker. Fires only for .uproject paths so it stays quiet otherwise, and reports
+        // exactly how the guest path maps to a host path plus the active mount roots.
+        if (!string.IsNullOrEmpty(guestPath) &&
+            guestPath.Contains("uproject", StringComparison.OrdinalIgnoreCase))
+        {
+            bool exists;
+            try
+            {
+                exists = File.Exists(result) || Directory.Exists(result);
+            }
+            catch
+            {
+                exists = false;
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][DIAG] descriptor resolve: guest='{guestPath}' -> host='{result}' " +
+                $"exists={exists} app0='{ResolveApp0Root()}' devlog='{ResolveDevlogAppRoot()}'");
+        }
+
+        return result;
+    }
+
+    private static string ResolveGuestPathCore(string guestPath)
+    {
         if (string.IsNullOrWhiteSpace(guestPath))
         {
             return guestPath;
@@ -4721,14 +4590,12 @@ public static class KernelMemoryCompatExports
 
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
-            var relative = NormalizeMountRelativePath(guestPath["/devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return ResolveDevlogAppPath(guestPath["/devlog/app/".Length..]);
         }
 
         if (guestPath.StartsWith("devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
-            var relative = NormalizeMountRelativePath(guestPath["devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return ResolveDevlogAppPath(guestPath["devlog/app/".Length..]);
         }
 
         if (string.Equals(guestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
@@ -4919,6 +4786,31 @@ public static class KernelMemoryCompatExports
         return root;
     }
 
+    // Resolves a path under the /devlog/app mount. Some titles - notably Unreal Engine PS4/PS5
+    // builds - treat /devlog/app as the game's filesystem root and read all of their content
+    // (paks, movies, engine data) from under it. The loader binds the package root to app0, so
+    // when the requested file actually exists under app0 we serve it from there. Anything not
+    // present under app0 (log/save output that the guest writes, or files the package simply
+    // does not ship) falls back to the writable devlog scratch root, preserving prior behavior
+    // for titles that use /devlog/app purely as a log mount.
+    private static string ResolveDevlogAppPath(string relative)
+    {
+        var normalized = NormalizeMountRelativePath(relative);
+
+        var app0Root = ResolveApp0Root();
+        if (!string.IsNullOrWhiteSpace(app0Root))
+        {
+            var app0Candidate = Path.GetFullPath(Path.Combine(app0Root, normalized));
+            if (File.Exists(app0Candidate) || Directory.Exists(app0Candidate))
+            {
+                return app0Candidate;
+            }
+        }
+
+        var devlogRoot = ResolveDevlogAppRoot();
+        return Path.GetFullPath(Path.Combine(devlogRoot, normalized));
+    }
+
     private static string ResolveTemp0Root()
     {
         const string temp0VariableName = "SHARPEMU_TEMP0_DIR";
@@ -5025,6 +4917,64 @@ public static class KernelMemoryCompatExports
         if (!string.IsNullOrWhiteSpace(parentDirectory))
         {
             Directory.CreateDirectory(parentDirectory);
+        }
+    }
+
+    // The Unreal Engine boot path fatally aborts (GEngineLoop.PreInit Failed) if it cannot open
+    // its project descriptor (*.uproject). Cooked/packaged builds do not ship the descriptor, so
+    // when the guest opens or stats one that is not on disk we materialize a minimal valid
+    // descriptor at the resolved host path. This lets IProjectManager::LoadProjectFile succeed
+    // and the engine continue booting. Disable with SHARPEMU_NO_SYNTH_DESCRIPTOR=1.
+    private static void TryMaterializeSyntheticDescriptor(string guestPath, string hostPath)
+    {
+        if (string.IsNullOrWhiteSpace(hostPath) ||
+            string.IsNullOrEmpty(guestPath) ||
+            !guestPath.EndsWith(".uproject", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_NO_SYNTH_DESCRIPTOR"), "1", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(hostPath))
+            {
+                return;
+            }
+
+            var parentDirectory = Path.GetDirectoryName(hostPath);
+            if (!string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            var moduleName = Path.GetFileNameWithoutExtension(hostPath);
+            moduleName = string.IsNullOrWhiteSpace(moduleName)
+                ? "Game"
+                : char.ToUpperInvariant(moduleName[0]) + moduleName[1..];
+
+            var descriptor =
+                "{\n" +
+                "\t\"FileVersion\": 3,\n" +
+                "\t\"EngineAssociation\": \"\",\n" +
+                "\t\"Category\": \"\",\n" +
+                "\t\"Description\": \"\",\n" +
+                "\t\"Modules\": [\n" +
+                "\t\t{\n" +
+                $"\t\t\t\"Name\": \"{moduleName}\",\n" +
+                "\t\t\t\"Type\": \"Runtime\",\n" +
+                "\t\t\t\"LoadingPhase\": \"Default\"\n" +
+                "\t\t}\n" +
+                "\t]\n" +
+                "}\n";
+            File.WriteAllText(hostPath, descriptor);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Synthesized missing project descriptor '{guestPath}' -> '{hostPath}' (module='{moduleName}')");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Failed to synthesize descriptor '{hostPath}': {ex.GetType().Name}: {ex.Message}");
         }
     }
 

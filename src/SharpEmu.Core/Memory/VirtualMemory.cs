@@ -56,6 +56,22 @@ public sealed class VirtualMemory : IVirtualMemory
         }
     }
 
+    public bool Free(ulong virtualAddress, ulong memorySize)
+    {
+        _ = memorySize;
+        lock (_gate)
+        {
+            var index = _regions.FindIndex(region => region.Region.VirtualAddress == virtualAddress);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _regions.RemoveAt(index);
+            return true;
+        }
+    }
+
     public IReadOnlyList<VirtualMemoryRegion> SnapshotRegions()
     {
         lock (_gate)
