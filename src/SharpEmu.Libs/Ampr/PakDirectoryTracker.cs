@@ -54,20 +54,41 @@ internal static class PakDirectoryTracker
 
         if (state.Directory is { } entries)
         {
+            // Several unrelated archived files can share a byte count (e.g. a head model and a bot
+            // navigation file both 0x3A34 bytes). Directory order alone then picks whichever comes
+            // first, which is wrong when the game reads them out of order. id archives cluster
+            // related assets, and the guest streams them with locality, so disambiguate collisions
+            // by choosing the unconsumed match nearest the running read cursor.
+            DirectoryEntry? best = null;
+            var bestDistance = ulong.MaxValue;
             foreach (var entry in entries)
             {
-                if (!entry.Consumed && entry.FileLen == requestedSize)
+                if (entry.Consumed || entry.FileLen != requestedSize)
                 {
-                    entry.Consumed = true;
-                    if (_trace)
-                    {
-                        Console.Error.WriteLine(
-                            $"[LOADER][TRACE] pak.directory_match: id=0x{fileId:X8} name='{entry.Name}' " +
-                            $"filepos=0x{entry.FilePos:X8} filelen=0x{entry.FileLen:X8}");
-                    }
-
-                    return entry.FilePos;
+                    continue;
                 }
+
+                var distance = entry.FilePos >= state.NextOffset
+                    ? entry.FilePos - state.NextOffset
+                    : state.NextOffset - entry.FilePos;
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = entry;
+                }
+            }
+
+            if (best is not null)
+            {
+                best.Consumed = true;
+                if (_trace)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] pak.directory_match: id=0x{fileId:X8} name='{best.Name}' " +
+                        $"filepos=0x{best.FilePos:X8} filelen=0x{best.FileLen:X8}");
+                }
+
+                return best.FilePos;
             }
         }
 
