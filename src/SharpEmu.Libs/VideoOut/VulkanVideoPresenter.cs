@@ -1560,8 +1560,11 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
+            var selectedName = SilkMarshal.PtrToString((nint)selected.DeviceName) ?? "unknown";
             Console.Error.WriteLine(
-                $"[LOADER][INFO] Vulkan device: {SilkMarshal.PtrToString((nint)selected.DeviceName)} ({selected.DeviceType})");
+                $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
+            VideoOutExports.SetSelectedGpuName(selectedName);
+            _window.Title = VideoOutExports.GetWindowTitle();
         }
 
         private static int ScorePhysicalDevice(

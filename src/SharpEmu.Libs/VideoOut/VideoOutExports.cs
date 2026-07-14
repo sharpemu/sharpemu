@@ -103,6 +103,7 @@ public static class VideoOutExports
     private static int _nextHandle = 1;
     private static int _frameDumpCount;
     private static long _nextFrameDumpIndex;
+    private static string _windowTitleBase = "SharpEmu VideoOut";
     private static string _windowTitle = "SharpEmu VideoOut";
     private static readonly bool _logFrameRate = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
@@ -134,10 +135,24 @@ public static class VideoOutExports
         var application = parts.Count == 0 ? "VideoOut" : string.Join(' ', parts);
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
         var commitSuffix = string.IsNullOrWhiteSpace(emulatorCommitSha) ? string.Empty : $" \u00b7 {emulatorCommitSha.Trim()}";
-        var hardwareSuffix = $" \u00b7 {HostSystemInfo.CpuName} \u00b7 {HostSystemInfo.GpuName}";
+        var hardwareSuffix = $" \u00b7 {HostSystemInfo.CpuName}";
         lock (_stateGate)
         {
-            _windowTitle = $"SharpEmu{commitSuffix} - {application}{versionSuffix}{hardwareSuffix}";
+            _windowTitleBase = $"SharpEmu{commitSuffix} - {application}{versionSuffix}{hardwareSuffix}";
+            _windowTitle = $"{_windowTitleBase} \u00b7 {HostSystemInfo.GpuName}";
+        }
+    }
+
+    internal static void SetSelectedGpuName(string gpuName)
+    {
+        if (string.IsNullOrWhiteSpace(gpuName))
+        {
+            return;
+        }
+
+        lock (_stateGate)
+        {
+            _windowTitle = $"{_windowTitleBase} \u00b7 {gpuName.Trim()}";
         }
     }
 

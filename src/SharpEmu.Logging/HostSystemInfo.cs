@@ -103,8 +103,12 @@ public static class HostSystemInfo
         }
 
         if (name.Contains("nvidia", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("geforce", StringComparison.OrdinalIgnoreCase) ||
-            name.Contains("amd", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("geforce", StringComparison.OrdinalIgnoreCase))
+        {
+            return 3;
+        }
+
+        if (name.Contains("amd", StringComparison.OrdinalIgnoreCase) ||
             name.Contains("radeon", StringComparison.OrdinalIgnoreCase))
         {
             return 2;
