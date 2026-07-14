@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Fiber;
 using System.Buffers.Binary;
 using System.Diagnostics;
@@ -48,9 +49,6 @@ public static class KernelRuntimeCompatExports
     private const int MapFlagFixed = 0x10;
     private const ulong DefaultVirtualRangeAlignment = 0x4000UL;
     private const int AioInitParamSize = 0x3C;
-    private const uint MemCommit = 0x1000;
-    private const uint MemReserve = 0x2000;
-    private const uint PageExecuteReadWrite = 0x40;
     private static readonly object _stateGate = new();
     private static readonly long _processStartCounter = Stopwatch.GetTimestamp();
     private static readonly RdtscDelegate? _rdtscReader = CreateRdtscReader();
@@ -1893,7 +1891,7 @@ public static class KernelRuntimeCompatExports
 
         try
         {
-            nint stubAddress = VirtualAlloc(nint.Zero, (nuint)16, MemCommit | MemReserve, PageExecuteReadWrite);
+            nint stubAddress = unchecked((nint)HostPlatform.Current.Memory.Allocate(0, 16, HostPageProtection.ReadWriteExecute));
             if (stubAddress == 0)
             {
                 return null;
@@ -1922,9 +1920,6 @@ public static class KernelRuntimeCompatExports
             return null;
         }
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint VirtualAlloc(nint lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
 
     private static bool TryReserveVirtualRange(
         CpuContext ctx,
