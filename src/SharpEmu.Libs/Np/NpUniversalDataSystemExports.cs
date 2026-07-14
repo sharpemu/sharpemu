@@ -9,7 +9,10 @@ namespace SharpEmu.Libs.Np;
 public static class NpUniversalDataSystemExports
 {
     private const int NpUniversalDataSystemErrorInvalidArgument = unchecked((int)0x80553102);
+    private static readonly object _eventGate = new();
+    private static readonly HashSet<int> _createdEvents = [];
     private static int _nextHandle = 1;
+    private static int _nextEvent = 1;
 
     [SysAbiExport(
         Nid = "sjaobBgqeB4",
@@ -65,6 +68,76 @@ public static class NpUniversalDataSystemExports
         }
 
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
+    }
+
+    [SysAbiExport(
+        Nid = "p+GcLqwpL9M",
+        ExportName = "sceNpUniversalDataSystemCreateEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemCreateEvent(CpuContext ctx)
+    {
+        var parameterAddress = ctx[CpuRegister.Rdi];
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn(NpUniversalDataSystemErrorInvalidArgument, typeof(long));
+        }
+
+        var eventId = Interlocked.Increment(ref _nextEvent);
+        lock (_eventGate)
+        {
+            _createdEvents.Add(eventId);
+        }
+
+        if (ctx.TryWriteInt32(ctx[CpuRegister.Rdx], eventId, checkNil: true) ||
+            ctx.TryWriteInt32(ctx[CpuRegister.Rcx], eventId, checkNil: true))
+        {
+            return ctx.SetReturn(0, typeof(long));
+        }
+
+        lock (_eventGate)
+        {
+            _createdEvents.Remove(eventId);
+        }
+
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
+    }
+
+    [SysAbiExport(
+        Nid = "wG+84pnNIuo",
+        ExportName = "sceNpUniversalDataSystemDestroyEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx)
+    {
+        var eventId = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_eventGate)
+        {
+            _createdEvents.Remove(eventId);
+        }
+
+        return ctx.SetReturn(0, typeof(long));
+    }
+
+    [SysAbiExport(
+        Nid = "MfDb+4Nln64",
+        ExportName = "sceNpUniversalDataSystemEventPropertyObjectSetString",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyObjectSetString(CpuContext ctx)
+    {
+        var propertyObjectAddress = ctx[CpuRegister.Rsi];
+        var valueAddress = ctx[CpuRegister.Rdx];
+        if (propertyObjectAddress == 0 || valueAddress == 0)
+        {
+            return ctx.SetReturn(NpUniversalDataSystemErrorInvalidArgument, typeof(long));
+        }
+
+        Span<byte> probe = stackalloc byte[1];
+        return ctx.Memory.TryRead(propertyObjectAddress, probe) &&
+               ctx.Memory.TryRead(valueAddress, probe)
+            ? ctx.SetReturn(0, typeof(long))
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
     }
 
     [SysAbiExport(

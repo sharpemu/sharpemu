@@ -200,6 +200,40 @@ public static class KernelMemoryCompatExports
         }
     }
 
+    public static bool TryUnregisterGuestPathMount(string guestMountPoint)
+    {
+        if (string.IsNullOrWhiteSpace(guestMountPoint))
+        {
+            return false;
+        }
+
+        var normalizedMountPoint = NormalizeGuestStatCachePath(guestMountPoint);
+        if (normalizedMountPoint is null || normalizedMountPoint == "/")
+        {
+            return false;
+        }
+
+        var removed = false;
+        lock (_guestMountGate)
+        {
+            removed = _guestMounts.Remove(normalizedMountPoint);
+        }
+
+        if (!removed)
+        {
+            return false;
+        }
+
+        lock (_statCacheGate)
+        {
+            _negativeStatCache.RemoveWhere(path =>
+                string.Equals(path, normalizedMountPoint, StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith(normalizedMountPoint + "/", StringComparison.OrdinalIgnoreCase));
+        }
+
+        return true;
+    }
+
     internal static bool TryAllocateHleData(
         CpuContext ctx,
         ulong length,
