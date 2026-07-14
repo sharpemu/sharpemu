@@ -41,11 +41,15 @@ public enum OrbisGen2Result : int
     ORBIS_GEN2_ERROR_DEADLOCK = unchecked((int)0x8002000B),
 
     /// <summary>
-    /// Indicates that the waited-on object was deleted while the caller was
-    /// blocked on it. Matches the SCE kernel EACCES code that waiters of a
-    /// deleted semaphore observe.
+    /// Indicates that the caller may not access the requested resource.
+    /// Matches the SCE kernel EACCES code, which waiters of a deleted
+    /// semaphore observe and which direct memory queries report for
+    /// unallocated areas (titles rely on it to end enumeration loops).
     /// </summary>
-    ORBIS_GEN2_ERROR_DELETED = unchecked((int)0x8002000D),
+    ORBIS_GEN2_ERROR_ACCESS_DENIED = unchecked((int)0x8002000D),
+
+    /// <summary>Compatibility name for the EACCES result used by deleted wait objects.</summary>
+    ORBIS_GEN2_ERROR_DELETED = ORBIS_GEN2_ERROR_ACCESS_DENIED,
 
     /// <summary>
     /// Indicates that the target resource is busy.

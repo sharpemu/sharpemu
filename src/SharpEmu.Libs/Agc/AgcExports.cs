@@ -933,6 +933,32 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "t7PlZ9nt5Lc",
+        ExportName = "sceAgcCbNopGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbNopGetSize(CpuContext ctx)
+    {
+        // Byte size of the packet sceAgcCbNop emits for the same dword
+        // count: the packet occupies exactly that many dwords.
+        var dwordCount = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = (ulong)dwordCount * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "hL7C0IRpWZI",
+        ExportName = "sceAgcCbQueueEndOfPipeActionGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbQueueEndOfPipeActionGetSize(CpuContext ctx)
+    {
+        // End-of-pipe actions are release-mem style packets (8 dwords).
+        ctx[CpuRegister.Rax] = 8 * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "k3GhuSNmBLU",
         ExportName = "sceAgcCbDispatch",
         Target = Generation.Gen5,
@@ -1127,6 +1153,18 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "ewobAQeMo5k",
+        ExportName = "sceAgcAcbAcquireMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbAcquireMemGetSize(CpuContext ctx)
+    {
+        // Byte size of the packet sceAgcAcbAcquireMem emits (8 dwords).
+        ctx[CpuRegister.Rax] = 8 * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -1701,6 +1739,42 @@ public static partial class AgcExports
             $"agc.dcb_acquire_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"engine={engine} cbdb=0x{cbDbOp:X8} gcr=0x{gcrControl:X8} base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "-vnlTPPXPrw",
+        ExportName = "sceAgcDcbAcquireMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbAcquireMemGetSize(CpuContext ctx)
+    {
+        // Byte size of the packet sceAgcDcbAcquireMem emits (8 dwords).
+        ctx[CpuRegister.Rax] = 8 * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "QIXCsbipds0",
+        ExportName = "sceAgcDcbRewindGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbRewindGetSize(CpuContext ctx)
+    {
+        // Rewind packets are 2 dwords (header + valid flag).
+        ctx[CpuRegister.Rax] = 2 * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "VEGu4dixjUg",
+        ExportName = "sceAgcDcbJumpGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbJumpGetSize(CpuContext ctx)
+    {
+        // Jump packets are indirect-buffer chains (4 dwords).
+        ctx[CpuRegister.Rax] = 4 * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -2634,6 +2708,37 @@ public static partial class AgcExports
 
         TraceAgc($"agc.driver_delete_eq_event eq=0x{equeue:X16} id=0x{eventId:X16}");
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "XlNp7jzGiPo",
+        ExportName = "sceAgcDriverSetTFRing",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSetTFRing(CpuContext ctx)
+    {
+        // The tessellation-factor ring only matters to the real hardware
+        // scheduler; accept and record the registration so titles that
+        // treat a non-zero result as fatal keep booting.
+        var ringAddress = ctx[CpuRegister.Rdi];
+        var ringSizeBytes = (uint)ctx[CpuRegister.Rsi];
+        TraceAgc($"agc.driver_set_tf_ring addr=0x{ringAddress:X16} size=0x{ringSizeBytes:X}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "MM4IZSEYytQ",
+        ExportName = "sceAgcDriverSetHsOffchipParam",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSetHsOffchipParam(CpuContext ctx)
+    {
+        // Hull-shader off-chip LDS configuration only matters to the real
+        // hardware scheduler; accept it so the title's fatal-on-error
+        // bootstrap check passes.
+        var param = (uint)ctx[CpuRegister.Rdi];
+        TraceAgc($"agc.driver_set_hs_offchip_param param=0x{param:X8}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(

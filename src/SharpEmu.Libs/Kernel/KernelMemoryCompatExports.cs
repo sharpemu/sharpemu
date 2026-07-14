@@ -51,6 +51,7 @@ public static partial class KernelMemoryCompatExports
     private const int SeekCur = 1;
     private const int SeekEnd = 2;
     private const ulong DirectMemorySizeBytes = 16384UL * 1024 * 1024;
+    private const int DirectMemoryQueryFindNext = 0x1;
     private const ulong UnsetMainDirectMemoryPoolBase = ulong.MaxValue;
     private const ulong FlexibleMemorySizeBytes = 448UL * 1024 * 1024;
     private const int OrbisVirtualQueryInfoSize = 72;
@@ -2047,6 +2048,81 @@ public static partial class KernelMemoryCompatExports
     public static int KernelRead(CpuContext ctx) => KernelReadUnderscore(ctx);
 
     [SysAbiExport(
+        Nid = "OYL2VFX66hU",
+        ExportName = "_pread",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelPreadUnderscore(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var requested = (int)Math.Min(ctx[CpuRegister.Rdx], int.MaxValue);
+        var offset = unchecked((long)ctx[CpuRegister.Rcx]);
+        if (requested < 0 || offset < 0 || (requested > 0 && bufferAddress == 0))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (requested == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        FileStream? stream;
+        lock (_fdGate)
+        {
+            _openFiles.TryGetValue(fd, out stream);
+        }
+
+        if (stream is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var buffer = GC.AllocateUninitializedArray<byte>(requested);
+        int read;
+        try
+        {
+            // Positional read that leaves the descriptor's file position
+            // untouched, matching pread semantics.
+            read = RandomAccess.Read(stream.SafeFileHandle, buffer.AsSpan(0, requested), offset);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            LogIoTrace("pread", stream.Name, $"fd={fd} req={requested} offset={offset} error={ex.GetType().Name}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        LogIoTrace(
+            "pread",
+            stream.Name,
+            $"fd={fd} req={requested} offset={offset} read={read} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)}");
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)read);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "ezv-RSBNKqI",
+        ExportName = "pread",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPread(CpuContext ctx) => KernelPreadUnderscore(ctx);
+
+    [SysAbiExport(
+        Nid = "+r3rMFwItV4",
+        ExportName = "sceKernelPread",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelPread(CpuContext ctx) => KernelPreadUnderscore(ctx);
+
+    [SysAbiExport(
         Nid = "Oy6IpwgtYOk",
         ExportName = "lseek",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -3258,7 +3334,7 @@ public static partial class KernelMemoryCompatExports
     public static int KernelDirectMemoryQuery(CpuContext ctx)
     {
         var offset = ctx[CpuRegister.Rdi];
-        _ = ctx[CpuRegister.Rsi]; // flags
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
         var infoAddress = ctx[CpuRegister.Rdx];
         var infoSize = ctx[CpuRegister.Rcx];
         if (infoAddress == 0 || infoSize < 24)
@@ -3266,27 +3342,49 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var findNext = (flags & DirectMemoryQueryFindNext) != 0;
+        var found = false;
+        DirectAllocation match = default;
         lock (_memoryGate)
         {
             foreach (var block in _directAllocations.Values)
             {
-                if (offset < block.Start || offset >= block.Start + block.Length)
+                if (offset >= block.Start + block.Length)
                 {
                     continue;
                 }
 
-                if (!ctx.TryWriteUInt64(infoAddress, block.Start) ||
-                    !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), block.Start + block.Length) ||
-                    !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), block.MemoryType))
+                // Blocks above the queried offset only count in FIND_NEXT
+                // mode; otherwise the offset must fall inside the block.
+                if (offset < block.Start && !findNext)
                 {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                    continue;
                 }
 
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                if (!found || block.Start < match.Start)
+                {
+                    match = block;
+                    found = true;
+                }
             }
         }
 
-        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        if (!found)
+        {
+            // The kernel reports unallocated areas with the EACCES code;
+            // titles use it as the stop condition when walking direct
+            // memory with FIND_NEXT.
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ACCESS_DENIED;
+        }
+
+        if (!ctx.TryWriteUInt64(infoAddress, match.Start) ||
+            !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), match.Start + match.Length) ||
+            !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), match.MemoryType))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(

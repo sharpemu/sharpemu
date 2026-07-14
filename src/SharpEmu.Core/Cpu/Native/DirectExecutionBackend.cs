@@ -12,6 +12,7 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -2400,15 +2401,57 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void PatchTlsPatterns()
 	{
-        // Large Gen5 executables can keep valid code well past the first 32 MiB.
-        // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
-        const ulong MaxScanBytes = 134217728uL;
-		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
-		int num3 = 0;
-		int num4 = 0;
-		int num9 = 0;
+		// Prefer exact registered module ranges: large executables and LLE-loaded
+		// modules can keep TLS accesses far outside a fixed entry-point window.
+		const ulong FallbackScanBytes = 134217728uL;
+		int patchedLoads = 0;
+		int patchedStores = 0;
+		int patchedCanaries = 0;
 		int sse4aPatchCount = 0;
+		bool scannedAnyModule = false;
+		foreach (int moduleHandle in KernelModuleRegistry.GetModuleHandles(includeSystemModules: true))
+		{
+			if (!KernelModuleRegistry.TryGetModuleByHandle(moduleHandle, out var module) ||
+				module.BaseAddress == 0 ||
+				module.EndAddress <= module.BaseAddress)
+			{
+				continue;
+			}
+
+			scannedAnyModule = true;
+			PatchTlsPatternsInRange(
+				module.BaseAddress,
+				module.EndAddress,
+				ref patchedLoads,
+				ref patchedStores,
+				ref patchedCanaries,
+				ref sse4aPatchCount);
+		}
+
+		if (!scannedAnyModule)
+		{
+			PatchTlsPatternsInRange(
+				_entryPoint,
+				_entryPoint + FallbackScanBytes,
+				ref patchedLoads,
+				ref patchedStores,
+				ref patchedCanaries,
+				ref sse4aPatchCount);
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] Patched {patchedLoads} TLS loads, {patchedStores} TLS stores, " +
+			$"{patchedCanaries} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
+	}
+
+	private unsafe void PatchTlsPatternsInRange(
+		ulong num,
+		ulong num2,
+		ref int num3,
+		ref int num9,
+		ref int num4,
+		ref int sse4aPatchCount)
+	{
 		while (num < num2)
 		{
 			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
@@ -2453,7 +2496,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
 	}
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
