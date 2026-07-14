@@ -22,6 +22,8 @@ public sealed class Localization
     private const string EmbeddedResourceSuffix = ".json";
 
     private Dictionary<string, string> _strings = new();
+    private Dictionary<string, string> _fallbackStrings = new();
+
 
     private Localization()
     {
@@ -32,7 +34,16 @@ public sealed class Localization
 
     public string CurrentCode { get; private set; } = "en";
 
-    public string Get(string key) => _strings.TryGetValue(key, out var value) ? value : key;
+    public string Get(string key)
+    {
+        if (_strings.TryGetValue(key, out var value))
+            return value;
+
+        if (_fallbackStrings.TryGetValue(key, out var fallbackValue))
+            return fallbackValue;
+
+        return key;
+    }
 
     public string Format(string key, params object?[] args) => string.Format(Get(key), args);
 
@@ -74,13 +85,46 @@ public sealed class Localization
     }
 
     /// <summary>Loads a language by code (e.g. "en"): a loose override file first, then the embedded copy.</summary>
+    /// english is the fallback language
     public void Load(string code)
     {
-        if (!TryLoadLooseFile(code) && !TryLoadEmbedded(code) &&
-            !string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
+        if (_fallbackStrings.Count == 0 && !string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
         {
-            _ = TryLoadLooseFile("en") || TryLoadEmbedded("en");
+            if (!TryLoadLooseFile("en", out var fallback) && !TryLoadEmbedded("en", out fallback))
+            {
+                fallback = new Dictionary<string, string>();
+            }
+            _fallbackStrings = fallback;
         }
+        else if (string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryLoadLooseFile("en", out var enDict) || TryLoadEmbedded("en", out enDict))
+            {
+                _strings = enDict;
+                _fallbackStrings = enDict;
+            }
+            else
+            {
+                _strings = new Dictionary<string, string>();
+                _fallbackStrings = new Dictionary<string, string>();
+            }
+            CurrentCode = "en";
+            return;
+        }
+
+        // Load the requested language
+        if (TryLoadLooseFile(code, out var loaded) || TryLoadEmbedded(code, out loaded))
+        {
+            _strings = loaded;
+        }
+        else
+        {
+            if (_fallbackStrings.Count > 0)
+                _strings = new Dictionary<string, string>(_fallbackStrings);
+            else
+                _strings = new Dictionary<string, string>();
+        }
+        CurrentCode = code;
     }
 
     private static IEnumerable<string> EmbeddedLanguageCodes()
@@ -149,16 +193,64 @@ public sealed class Localization
         }
     }
 
-    private bool TryLoad(string code, string json)
+    private bool TryLoadLooseFile(string code, out Dictionary<string, string> result)
+    {
+        result = new Dictionary<string, string>();
+        try
+        {
+            var path = Path.Combine(LanguagesDirectory, $"{code}.json");
+            if (!File.Exists(path))
+                return false;
+
+            var json = File.ReadAllText(path);
+            return TryLoad(json, out result);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private bool TryLoadEmbedded(string code, out Dictionary<string, string> result)
+    {
+        result = new Dictionary<string, string>();
+        try
+        {
+            using var stream = OpenEmbeddedLanguageStream(code);
+            if (stream is null)
+                return false;
+
+            using var reader = new StreamReader(stream);
+            var json = reader.ReadToEnd();
+            return TryLoad(json, out result);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryLoad(string json, out Dictionary<string, string> result)
     {
         var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
         if (loaded is null)
         {
+            result = new Dictionary<string, string>();
             return false;
         }
 
-        _strings = loaded;
-        CurrentCode = code;
+        result = loaded;
         return true;
+    }
+    
+    private bool TryLoad(string code, string json)
+    {
+        if (TryLoad(json, out var dict))
+        {
+            _strings = dict;
+            CurrentCode = code;
+            return true;
+        }
+        return false;
     }
 }
