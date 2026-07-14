@@ -9,7 +9,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IDisposable
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IDisposable
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -319,6 +319,41 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _guestAllocationOffset = alignedOffset + size;
             return true;
         }
+    }
+
+    public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
+    {
+        if (size == 0)
+        {
+            return false;
+        }
+
+        return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
+    }
+
+    // Reproduces the decomposition KernelMemoryCompatExports.ResolveHostProtection
+    // performed before this seam existed; the Windows backend maps each case back
+    // to the identical PAGE_* value.
+    private static HostPageProtection ResolveProtection(GuestPageProtection protection)
+    {
+        var read = (protection & GuestPageProtection.Read) != 0;
+        var write = (protection & GuestPageProtection.Write) != 0;
+        var execute = (protection & GuestPageProtection.Execute) != 0;
+
+        if (execute)
+        {
+            return write
+                ? HostPageProtection.ReadWriteExecute
+                : read
+                    ? HostPageProtection.ReadExecute
+                    : HostPageProtection.Execute;
+        }
+
+        return write
+            ? HostPageProtection.ReadWrite
+            : read
+                ? HostPageProtection.ReadOnly
+                : HostPageProtection.NoAccess;
     }
 
     public void Clear()

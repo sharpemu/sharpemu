@@ -3,15 +3,12 @@
 
 using SharpEmu.HLE;
 using System;
-using System.Collections.Concurrent;
-using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 
 namespace SharpEmu.Libs.Kernel;
 
 internal static class KernelVirtualRangeAllocator
 {
-    private static readonly ConcurrentDictionary<Type, Accessor> _accessors = new();
-
     public static bool TryReserve(
         CpuContext ctx,
         ulong desiredAddress,
@@ -31,38 +28,24 @@ internal static class KernelVirtualRangeAllocator
 
         try
         {
-            if (!TryResolveAccessor(ctx.Memory, out var target, out var accessor))
+            if (!TryResolveAddressSpace(ctx.Memory, out var addressSpace))
             {
                 Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt missing on {ctx.Memory.GetType().FullName}");
                 return false;
             }
 
-            if (allowSearch && accessor.AllocateAtOrAbove is not null)
+            if (allowSearch &&
+                addressSpace.TryAllocateAtOrAbove(desiredAddress, length, executable, alignment, out var searchedAddress) &&
+                searchedAddress != 0)
             {
-                var searchArgs = new object[] { desiredAddress, length, executable, alignment, 0UL };
-                var searchResult = accessor.AllocateAtOrAbove.Invoke(target, searchArgs);
-                if (searchResult is bool trueValue && trueValue &&
-                    searchArgs[4] is ulong searchedAddress && searchedAddress != 0)
-                {
-                    mappedAddress = searchedAddress;
-                    return true;
-                }
+                mappedAddress = searchedAddress;
+                return true;
             }
 
-            if (accessor.AllocateAt is null)
+            var allocated = addressSpace.AllocateAt(desiredAddress, length, executable, allowAllocateAtAlternative);
+            if (allocated == 0)
             {
-                Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt missing on {target.GetType().FullName}");
-                return false;
-            }
-
-            var invokeArgs = accessor.AllocateAtHasAllowAlternativeArg
-                ? new object[] { desiredAddress, length, executable, allowAllocateAtAlternative }
-                : new object[] { desiredAddress, length, executable };
-            var result = accessor.AllocateAt.Invoke(target, invokeArgs);
-            if (result is not ulong allocated || allocated == 0)
-            {
-                var resultType = result?.GetType().FullName ?? "null";
-                Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt returned {resultType} value={result ?? "null"}");
+                Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt returned {typeof(ulong).FullName} value=0");
                 return false;
             }
 
@@ -76,84 +59,36 @@ internal static class KernelVirtualRangeAllocator
         }
     }
 
-    private static bool TryResolveAccessor(object rootMemory, out object target, out Accessor accessor)
+    /// <summary>
+    /// Finds the <see cref="IGuestAddressSpace"/> behind <paramref name="rootMemory"/>,
+    /// unwrapping decorators (bounded, like the reflection walker this replaced).
+    /// </summary>
+    public static bool TryResolveAddressSpace(ICpuMemory rootMemory, [NotNullWhen(true)] out IGuestAddressSpace? addressSpace)
     {
-        target = rootMemory;
-        accessor = default;
-
+        var target = rootMemory;
         for (var depth = 0; depth < 4; depth++)
         {
-            accessor = _accessors.GetOrAdd(target.GetType(), DiscoverAccessor);
-            if (accessor.AllocateAt is not null || accessor.AllocateAtOrAbove is not null)
+            if (target is IGuestAddressSpace resolved)
             {
+                addressSpace = resolved;
                 return true;
             }
 
-            if (accessor.InnerProperty is null)
+            if (target is not ICpuMemoryWrapper wrapper)
             {
                 break;
             }
 
-            var innerValue = accessor.InnerProperty.GetValue(target);
-            if (innerValue is null || ReferenceEquals(innerValue, target))
+            var inner = wrapper.Inner;
+            if (inner is null || ReferenceEquals(inner, target))
             {
                 break;
             }
 
-            target = innerValue;
+            target = inner;
         }
 
+        addressSpace = null;
         return false;
     }
-
-    private static Accessor DiscoverAccessor(Type type)
-    {
-        MethodInfo? allocateAt = null;
-        MethodInfo? allocateAtOrAbove = null;
-        var allocateAtHasAllowAlternativeArg = false;
-
-        foreach (var candidate in type.GetMethods(BindingFlags.Public | BindingFlags.Instance))
-        {
-            var parameters = candidate.GetParameters();
-            if (string.Equals(candidate.Name, "TryAllocateAtOrAbove", StringComparison.Ordinal) &&
-                parameters.Length == 5 &&
-                parameters[0].ParameterType == typeof(ulong) &&
-                parameters[1].ParameterType == typeof(ulong) &&
-                parameters[2].ParameterType == typeof(bool) &&
-                parameters[3].ParameterType == typeof(ulong) &&
-                parameters[4].ParameterType == typeof(ulong).MakeByRefType())
-            {
-                allocateAtOrAbove = candidate;
-            }
-            else if (string.Equals(candidate.Name, "AllocateAt", StringComparison.Ordinal))
-            {
-                if (parameters.Length == 3 &&
-                    parameters[0].ParameterType == typeof(ulong) &&
-                    parameters[1].ParameterType == typeof(ulong) &&
-                    parameters[2].ParameterType == typeof(bool))
-                {
-                    allocateAt = candidate;
-                    allocateAtHasAllowAlternativeArg = false;
-                }
-                else if (parameters.Length == 4 &&
-                    parameters[0].ParameterType == typeof(ulong) &&
-                    parameters[1].ParameterType == typeof(ulong) &&
-                    parameters[2].ParameterType == typeof(bool) &&
-                    parameters[3].ParameterType == typeof(bool))
-                {
-                    allocateAt = candidate;
-                    allocateAtHasAllowAlternativeArg = true;
-                }
-            }
-        }
-
-        var innerProperty = type.GetProperty("Inner", BindingFlags.Public | BindingFlags.Instance);
-        return new Accessor(allocateAt, allocateAtOrAbove, allocateAtHasAllowAlternativeArg, innerProperty);
-    }
-
-    private readonly record struct Accessor(
-        MethodInfo? AllocateAt,
-        MethodInfo? AllocateAtOrAbove,
-        bool AllocateAtHasAllowAlternativeArg,
-        PropertyInfo? InnerProperty);
 }
