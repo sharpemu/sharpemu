@@ -1,0 +1,129 @@
+{
+  "_languageName": "日本語",
+
+  "Page.Library": "ライブラリ",
+  "Page.Options": "オプション",
+  "Page.GameCount.One": "ゲーム 1本",
+  "Page.GameCount.Other": "ゲーム {0}本",
+
+  "Library.SearchWatermark": "ライブラリを検索…",
+  "Library.AddFolder": "＋ フォルダーを追加",
+  "Library.Rescan": "⟳ 再スキャン",
+  "Library.OpenFile": "ファイルを開く…",
+
+  "Library.Context.Launch": "起動",
+  "Library.Context.OpenFolder": "ゲームフォルダーを開く",
+  "Library.Context.CopyPath": "パスをコピー",
+  "Library.Context.CopyTitleId": "ゲームIDをコピー",
+  "Library.Context.Remove": "ライブラリから削除",
+
+  "Library.Empty.Title": "ライブラリが空です",
+  "Library.Empty.Hint": "開始するには、ゲームが含まれるフォルダーを追加してください。",
+  "Library.Empty.SearchTitle": "検索条件に一致するゲームが見つかりません",
+  "Library.Empty.SearchHint": "ライブラリに「{0}」と一致する項目はありません。",
+  "Library.Empty.AddFolder": "＋ ゲームフォルダーを追加",
+
+  "Library.Loading": "ライブラリを読み込み中…",
+
+  "Options.General": "一般",
+  "Options.Section.Emulation": "エミュレーション",
+  "Options.Section.Logging": "ロギング",
+  "Options.Section.Launcher": "ランチャー",
+
+  "Options.CpuEngine.Label": "CPUエンジン",
+  "Options.CpuEngine.Desc": "ゲームコードを実行するために使用される実行エンジン。",
+  "Options.CpuEngine.Native": "ネイティブ",
+
+  "Options.Strict.Label": "厳格な動的ライブラリ解決",
+  "Options.Strict.Desc": "インポートされたシンボルが解決できない場合、起動を中断します。",
+
+  "Options.LogLevel.Label": "ログレベル",
+  "Options.LogLevel.Desc": "エミュレータコンソールに表示されるメッセージの詳細度。",
+  "Options.LogLevel.Trace": "トレース",
+  "Options.LogLevel.Debug": "デバッグ",
+  "Options.LogLevel.Info": "情報",
+  "Options.LogLevel.Warning": "警告",
+  "Options.LogLevel.Error": "エラー",
+  "Options.LogLevel.Critical": "致命的なエラー",
+
+  "Options.TraceImports.Label": "インポートトレース制限",
+  "Options.TraceImports.Desc": "各モジュールの最初のN個のインポートをトレースします（0 = 無効）。",
+
+  "Options.LogToFile.Label": "ファイルに保存",
+  "Options.LogToFile.Desc": "エミュレータの出力をログファイルにコピーします。",
+
+  "Options.LogFilePath.Label": "ログファイルのパス",
+  "Options.LogFilePath.Default": "カスタムパスなし — ログはエミュレータと同じ場所の user/logs フォルダーに保存されます。",
+  "Options.LogFilePath.Select": "選択…",
+
+  "Options.OverrideLogFile.Label": "ログファイルを上書き",
+  "Options.OverrideLogFile.Desc": "ゲームIDやタイムスタンプを追加せず、指定されたパスをそのまま使用します。",
+
+  "Options.TitleMusic.Label": "ゲーム内音楽",
+  "Options.TitleMusic.Desc": "ライブラリで選択したゲームのプレビュー音楽をループ再生します。",
+
+  "Options.Discord.Label": "Discordステータス表示",
+  "Options.Discord.Desc": "現在プレイ中のゲームをDiscordのプロフィールに表示します。",
+
+  "Options.Language.Label": "エミュレータの言語",
+  "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
+
+  "Common.On": "オン",
+  "Common.Off": "オフ",
+
+  "Console.Title": "コンソール",
+  "Console.SearchWatermark": "検索…",
+  "Console.AutoScroll": "自動スクロール",
+  "Console.Split": "ウィンドウを分離",
+  "Console.Copy": "コピー",
+  "Console.Clear": "消去",
+  "Console.WindowTitle": "SharpEmu コンソール",
+
+  "Launch.NoGameSelected": "ゲームが選択されていません",
+  "Launch.NoGameHint": "ライブラリからゲームを選択するか、eboot.bin ファイルを直接開いてください。",
+  "Launch.Idle": "待機中",
+  "Launch.Console": "≡ コンソール",
+  "Launch.Launch": "▶  起動",
+  "Launch.Stop": "■  停止",
+  "Launch.Running": "実行中 — {0}",
+  "Launch.Stopping": "停止中…",
+  "Launch.Exited": "プロセスがコード {0} ({1}) で終了しました",
+  "Launch.ExeNotFound": "SharpEmuの実行ファイルが見つかりません。先に SharpEmu.CLI プロジェクトをビルドしてください（dotnet build）。",
+  "Launch.LogFile": "ログファイル: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "エミュレータを起動できませんでした: {0}",
+  "Launch.ProcessExited": "プロセスがコード {0} ({1}) で終了しました。",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "無効な引数",
+  "Exit.EbootNotFound": "eboot が見つかりません",
+  "Exit.RuntimeException": "ランタイム例外",
+  "Exit.EmulationError": "エミュレーションエラー",
+  "Exit.Unknown": "不明",
+
+  "Status.EmulatorLocating": "エミュレータ: 位置を検索中…",
+  "Status.EmulatorPath": "エミュレータ: {0}",
+  "Status.EmulatorNotFound": "エミュレータ: SharpEmuの実行ファイルが見つかりません — 先に SharpEmu.CLI をビルドしてください。",
+  "Status.ScanningLibrary": "ライブラリをスキャン中…",
+  "Status.AddFolderPrompt": "ライブラリに表示するゲームフォルダーを追加してください。",
+  "Status.LibraryScanned": "ライブラリのスキャン完了: {1} 個のフォルダーから {0} 本のゲームを検出。",
+  "Status.CouldNotOpenFolder": "フォルダーを開けませんでした: {0}",
+  "Status.CopiedToClipboard": "「{0}」をクリップボードにコピーしました。",
+  "Status.RemovedFromLibrary": "「{0}」がライブラリから削除されました。復元するにはフォルダーを再追加してください。",
+  "Status.Running": "{0} を実行中",
+  "Status.Stopping": "停止中…",
+  "Status.Idle": "待機中",
+
+  "Clipboard.Path": "パス",
+  "Clipboard.TitleId": "ゲームID",
+
+  "Discord.Playing": "{0} をプレイ中",
+  "Discord.Browsing": "ライブラリを閲覧中",
+
+  "Dialog.ChooseGameFolder": "ゲームが含まれるフォルダーを選択",
+  "Dialog.OpenExecutable": "起動する実行ファイルを開く",
+  "Dialog.PsExecutables": "PlayStation 実行ファイル",
+  "Dialog.SaveLogFile": "ログファイルの保存先を選択",
+  "Dialog.PlainTextFiles": "プレーンテキストファイル",
+  "Dialog.LogFiles": "ログファイル"
+}
