@@ -2114,6 +2114,25 @@ public static partial class Gen5SpirvTranslator
             var byteAddress = IAdd(
                 LoadV(control.VectorAddress),
                 UInt(unchecked((uint)control.OffsetBytes)));
+            if (control.UsesFlatAddress)
+            {
+                var evaluationBinding = bindingIndex - _globalBufferBase;
+                if ((uint)evaluationBinding >=
+                    (uint)_evaluation.GlobalMemoryBindings.Count)
+                {
+                    error = "missing flat-memory binding";
+                    return false;
+                }
+
+                byteAddress = _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _uintType,
+                    byteAddress,
+                    LoadS(
+                        _evaluation.GlobalMemoryBindings[evaluationBinding]
+                            .ScalarAddress));
+            }
+
             byteAddress = ApplyGuestBufferByteBias(bindingIndex, byteAddress);
             var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
 

@@ -1291,8 +1291,14 @@ public static class Gen5ShaderTranslator
         var opcode = (word >> 18) & 0x7F;
         sizeDwords = 2;
         error = string.Empty;
-        name = segment == 0x2
-            ? opcode switch
+        name = segment switch
+        {
+            0x0 => opcode switch
+            {
+                0x08 => "FlatLoadUbyte",
+                _ => string.Empty,
+            },
+            0x2 => opcode switch
             {
                 0x08 => "GlobalLoadUbyte",
                 0x09 => "GlobalLoadSbyte",
@@ -1319,8 +1325,9 @@ public static class Gen5ShaderTranslator
                 0x32 => "GlobalAtomicAdd",
                 0x38 => "GlobalAtomicUMax",
                 _ => string.Empty,
-            }
-            : string.Empty;
+            },
+            _ => string.Empty,
+        };
 
         return FinishDecode(
             name,
@@ -1884,6 +1891,7 @@ public static class Gen5ShaderTranslator
                     "GlobalStoreDword" or
                     "GlobalAtomicAdd" or
                     "GlobalAtomicUMax" => 1u,
+                    "FlatLoadUbyte" => 1u,
                     "GlobalLoadDword" => 1u,
                     "GlobalLoadDwordx2" => 2u,
                     "GlobalLoadDwordx3" => 3u,
@@ -1893,23 +1901,33 @@ public static class Gen5ShaderTranslator
                     "GlobalStoreDwordx4" => 4u,
                     _ => 0u,
                 };
-                sources =
-                [
-                    Gen5Operand.Vector(vectorAddress),
-                    Gen5Operand.Scalar(scalarAddress),
-                ];
-                destinations = opcode.StartsWith("GlobalLoad", StringComparison.Ordinal)
-                    ? Enumerable
-                        .Range((int)vectorData, checked((int)dwordCount))
-                        .Select(index => Gen5Operand.Vector((uint)index))
-                        .ToArray()
-                    : [];
+                var usesFlatAddress = ((word >> 14) & 0x3) == 0;
+                sources = usesFlatAddress
+                    ?
+                    [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Vector(vectorAddress + 1),
+                    ]
+                    :
+                    [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Scalar(scalarAddress),
+                    ];
+                destinations =
+                    opcode.StartsWith("GlobalLoad", StringComparison.Ordinal) ||
+                    opcode.StartsWith("FlatLoad", StringComparison.Ordinal)
+                        ? Enumerable
+                            .Range((int)vectorData, checked((int)dwordCount))
+                            .Select(index => Gen5Operand.Vector((uint)index))
+                            .ToArray()
+                        : [];
                 control = new Gen5GlobalMemoryControl(
                     dwordCount,
                     vectorAddress,
                     vectorData,
                     scalarAddress,
                     SignExtend(word & 0x1FFF, 13),
+                    usesFlatAddress,
                     ((word >> 16) & 1) != 0,
                     ((word >> 17) & 1) != 0);
                 break;

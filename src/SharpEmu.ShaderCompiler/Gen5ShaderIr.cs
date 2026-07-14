@@ -191,6 +191,7 @@ public sealed record Gen5GlobalMemoryControl(
     uint VectorData,
     uint ScalarAddress,
     int OffsetBytes,
+    bool UsesFlatAddress,
     bool Glc,
     bool Slc) : Gen5InstructionControl;
 

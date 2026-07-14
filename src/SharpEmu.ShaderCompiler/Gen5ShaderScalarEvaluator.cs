@@ -346,24 +346,38 @@ public static class Gen5ShaderScalarEvaluator
                     continue;
                 }
 
-                if (globalMemory.ScalarAddress >= ScalarRegisterCount - 1)
+                var scalarAddress = globalMemory.ScalarAddress;
+                if (globalMemory.UsesFlatAddress &&
+                    !TryResolveFlatAddressBase(
+                        state.Program,
+                        instruction.Pc,
+                        globalMemory.VectorAddress,
+                        out scalarAddress))
+                {
+                    error =
+                        $"flat-address-base-unresolved pc=0x{instruction.Pc:X} " +
+                        $"v{globalMemory.VectorAddress}:v{globalMemory.VectorAddress + 1}";
+                    return false;
+                }
+
+                if (scalarAddress >= ScalarRegisterCount - 1)
                 {
                     error =
                         $"global-address-register-range pc=0x{instruction.Pc:X} " +
-                        $"s{globalMemory.ScalarAddress}";
+                        $"s{scalarAddress}";
                     return false;
                 }
 
                 var baseAddress =
-                    scalarRegisters[globalMemory.ScalarAddress] |
-                    ((ulong)scalarRegisters[globalMemory.ScalarAddress + 1] << 32);
+                    scalarRegisters[scalarAddress] |
+                    ((ulong)scalarRegisters[scalarAddress + 1] << 32);
                 if (baseAddress == 0)
                 {
                     error = $"global-address-null pc=0x{instruction.Pc:X}";
                     return false;
                 }
 
-                var key = (globalMemory.ScalarAddress, baseAddress);
+                var key = (scalarAddress, baseAddress);
                 var writable = instruction.Opcode.StartsWith(
                         "GlobalStore",
                         StringComparison.Ordinal) ||
@@ -390,7 +404,7 @@ public static class Gen5ShaderScalarEvaluator
                     }
 
                     var binding = new Gen5GlobalMemoryBinding(
-                        globalMemory.ScalarAddress,
+                        scalarAddress,
                         baseAddress,
                         new List<uint> { instruction.Pc },
                         data,
@@ -959,6 +973,79 @@ public static class Gen5ShaderScalarEvaluator
         mipLevel = image.A16 ? raw & 0xFFFF : raw;
         return true;
     }
+
+    private static bool TryResolveFlatAddressBase(
+        Gen5ShaderProgram program,
+        uint pc,
+        uint vectorAddress,
+        out uint scalarAddress)
+    {
+        Gen5ShaderInstruction? lowProducer = null;
+        Gen5ShaderInstruction? highProducer = null;
+        for (var index = program.Instructions.Count - 1; index >= 0; index--)
+        {
+            var candidate = program.Instructions[index];
+            if (candidate.Pc >= pc)
+            {
+                continue;
+            }
+
+            foreach (var destination in candidate.Destinations)
+            {
+                if (destination.Kind != Gen5OperandKind.VectorRegister)
+                {
+                    continue;
+                }
+
+                if (destination.Value == vectorAddress && lowProducer is null)
+                {
+                    lowProducer = candidate;
+                }
+                else if (destination.Value == vectorAddress + 1 && highProducer is null)
+                {
+                    highProducer = candidate;
+                }
+            }
+
+            if (lowProducer is not null && highProducer is not null)
+            {
+                break;
+            }
+        }
+
+        if (lowProducer is null ||
+            highProducer is null ||
+            !IsAddressAdd(lowProducer.Opcode) ||
+            !IsAddressAdd(highProducer.Opcode))
+        {
+            scalarAddress = 0;
+            return false;
+        }
+
+        foreach (var lowSource in lowProducer.Sources)
+        {
+            if (lowSource.Kind != Gen5OperandKind.ScalarRegister)
+            {
+                continue;
+            }
+
+            var highScalar = lowSource.Value + 1;
+            if (highProducer.Sources.Any(
+                    source =>
+                        source.Kind == Gen5OperandKind.ScalarRegister &&
+                        source.Value == highScalar))
+            {
+                scalarAddress = lowSource.Value;
+                return true;
+            }
+        }
+
+        scalarAddress = 0;
+        return false;
+    }
+
+    private static bool IsAddressAdd(string opcode) =>
+        opcode is "VAddI32" or "VAddcU32" or "VAddCoU32";
 
     private static bool TryResolveConstantOperand(Gen5Operand operand, out uint value)
     {
