@@ -7,6 +7,7 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.AppContent;
@@ -86,14 +87,19 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         moduleManager.RegisterFromAssembly(typeof(KernelExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
         moduleManager.Freeze();
 
-        var virtualMemory = new PhysicalVirtualMemory();
+        // Resolve the host platform once at the composition root; on unsupported
+        // OSes this throws PlatformNotSupportedException with a clear message
+        // instead of failing on the first native call.
+        var hostPlatform = HostPlatform.Current;
+
+        var virtualMemory = new PhysicalVirtualMemory(hostPlatform.Memory);
 
         var fileSystem = new PhysicalFileSystem();
 
         return new SharpEmuRuntime(
             new SelfLoader(),
             virtualMemory,
-            new CpuDispatcher(virtualMemory, moduleManager),
+            new CpuDispatcher(virtualMemory, moduleManager, hostPlatform: hostPlatform),
             moduleManager,
             Aerolib.Instance,
             cpuExecutionOptions,

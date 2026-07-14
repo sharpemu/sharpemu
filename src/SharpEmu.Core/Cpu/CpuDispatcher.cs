@@ -7,6 +7,7 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu;
@@ -41,16 +42,19 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     ];
     private readonly IVirtualMemory _virtualMemory;
     private readonly IModuleManager _moduleManager;
+    private readonly IHostPlatform? _hostPlatform;
     private INativeCpuBackend? _nativeCpuBackend;
 
     public CpuDispatcher(
         IVirtualMemory virtualMemory,
         IModuleManager moduleManager,
-        INativeCpuBackend? nativeCpuBackend = null)
+        INativeCpuBackend? nativeCpuBackend = null,
+        IHostPlatform? hostPlatform = null)
     {
         _virtualMemory = virtualMemory ?? throw new ArgumentNullException(nameof(virtualMemory));
         _moduleManager = moduleManager ?? throw new ArgumentNullException(nameof(moduleManager));
         _nativeCpuBackend = nativeCpuBackend;
+        _hostPlatform = hostPlatform;
     }
 
     public ulong? LastEntryPoint { get; private set; }
@@ -266,7 +270,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             entryFrameDiagnostic,
             Environment.NewLine,
             "CpuEngine: native-only");
-        _nativeCpuBackend ??= new DirectExecutionBackend(_moduleManager);
+        _nativeCpuBackend ??= new DirectExecutionBackend(_moduleManager, _hostPlatform);
         if (_nativeCpuBackend.TryExecute(
                 context,
                 entryPoint,
