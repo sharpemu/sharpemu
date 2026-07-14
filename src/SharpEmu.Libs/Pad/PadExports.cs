@@ -192,7 +192,41 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadSetTriggerEffect(CpuContext ctx)
     {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var parameterAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (parameterAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> parameter = stackalloc byte[120];
+        if (!ctx.Memory.TryRead(parameterAddress, parameter))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var triggerMask = parameter[0];
+        XInputReader.SetTriggerRumble(
+            (triggerMask & 0x01) != 0 ? DecodeTriggerVibration(parameter[8..64]) : null,
+            (triggerMask & 0x02) != 0 ? DecodeTriggerVibration(parameter[64..120]) : null);
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    private static byte DecodeTriggerVibration(ReadOnlySpan<byte> command)
+    {
+        var mode = BinaryPrimitives.ReadUInt32LittleEndian(command);
+        var amplitude = mode switch
+        {
+            3 when command[10] != 0 => command[9],
+            6 when command[8] != 0 => command[9..19].ToArray().Max(),
+            _ => (byte)0,
+        };
+        return (byte)(Math.Min(amplitude, (byte)8) * 255 / 8);
     }
 
     [SysAbiExport(

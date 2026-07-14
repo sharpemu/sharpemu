@@ -39,6 +39,8 @@ internal static class XInputReader
     private static int _slot = -1; // connected XInput user index, -1 when none
     private static byte _motorLeft;
     private static byte _motorRight;
+    private static byte _triggerLeft;
+    private static byte _triggerRight;
 
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
     internal static void EnsureStarted()
@@ -99,6 +101,31 @@ internal static class XInputReader
         }
     }
 
+    /// <summary>Approximates per-trigger vibration on the two XInput body motors.</summary>
+    internal static void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
+    {
+        lock (Gate)
+        {
+            var changed = false;
+            if (leftTrigger is { } left)
+            {
+                changed |= _triggerLeft != left;
+                _triggerLeft = left;
+            }
+
+            if (rightTrigger is { } right)
+            {
+                changed |= _triggerRight != right;
+                _triggerRight = right;
+            }
+
+            if (changed)
+            {
+                SendRumbleLocked();
+            }
+        }
+    }
+
     private static void SendRumbleLocked()
     {
         if (_slot < 0)
@@ -108,8 +135,8 @@ internal static class XInputReader
 
         var vibration = new XInputVibration
         {
-            LeftMotorSpeed = (ushort)(_motorLeft * 257),   // 0..255 -> 0..65535
-            RightMotorSpeed = (ushort)(_motorRight * 257),
+            LeftMotorSpeed = (ushort)(Math.Max(_motorLeft, _triggerLeft) * 257),
+            RightMotorSpeed = (ushort)(Math.Max(_motorRight, _triggerRight) * 257),
         };
         _ = XInputSetState((uint)_slot, ref vibration);
     }
@@ -147,6 +174,8 @@ internal static class XInputReader
                     _slot = -1;
                     _motorLeft = 0;
                     _motorRight = 0;
+                    _triggerLeft = 0;
+                    _triggerRight = 0;
                     _state = default;
                 }
 
