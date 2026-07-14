@@ -35,7 +35,7 @@
   "Options.CpuEngine.Native": "Nativo",
 
   "Options.Strict.Label": "Resolución estricta de dynlib (Bibliotecas dinámicas)",
-  "Options.Strict.Desc": "Fallar la ejecución cuando un símbolo importado no se pueda resolver.",
+  "Options.Strict.Desc": "Detener la ejecución cuando un símbolo importado no se pueda resolver.",
 
   "Options.LogLevel.Label": "Nivel de Log",
   "Options.LogLevel.Desc": "Verbosidad de la salida en consola del emulador.",
