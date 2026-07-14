@@ -1431,6 +1431,17 @@ internal static unsafe class VulkanVideoPresenter
     {
         var format = (dataFormat, numberType) switch
         {
+            (1, 1) => Format.R8SNorm,
+            (1, 4) => Format.R8Uint,
+            (1, 5) => Format.R8Sint,
+            (2, 0) => Format.R16Unorm,
+            (2, 1) => Format.R16SNorm,
+            (2, 4) => Format.R16Uint,
+            (2, 5) => Format.R16Sint,
+            (2, 7) => Format.R16Sfloat,
+            (3, 1) => Format.R8G8SNorm,
+            (3, 4) => Format.R8G8Uint,
+            (3, 5) => Format.R8G8Sint,
             (4, 4) => Format.R32Uint,
             (4, 5) => Format.R32Sint,
             (4, 7) => Format.R32Sfloat,
@@ -1438,15 +1449,21 @@ internal static unsafe class VulkanVideoPresenter
             (5, 5) => Format.R16G16Sint,
             (5, 7) => Format.R16G16Sfloat,
             (6, 7) or (7, 7) => Format.B10G11R11UfloatPack32,
+            (8, 4) => Format.A2B10G10R10UintPack32,
+            (8, _) => Format.A2B10G10R10UnormPack32,
             (9, _) => Format.A2R10G10B10UnormPack32,
             (10, 4) => Format.R8G8B8A8Uint,
             (10, 5) => Format.R8G8B8A8Sint,
             (10, 9) => Format.R8G8B8A8Srgb,
             (10, _) => Format.R8G8B8A8Unorm,
+            (11, 4) => Format.R32G32Uint,
+            (11, 5) => Format.R32G32Sint,
             (11, 7) => Format.R32G32Sfloat,
             (12, 4) => Format.R16G16B16A16Uint,
             (12, 5) => Format.R16G16B16A16Sint,
             (12, 7) => Format.R16G16B16A16Sfloat,
+            (14, 4) => Format.R32G32B32A32Uint,
+            (14, 5) => Format.R32G32B32A32Sint,
             (13, 7) or (14, 7) => Format.R32G32B32A32Sfloat,
             (20, 0) => Format.R32Uint,
             (29, 0) or (4, 0) => Format.R32Sfloat,
@@ -1471,10 +1488,13 @@ internal static unsafe class VulkanVideoPresenter
 
         var outputKind = format switch
         {
-            Format.R8Uint or Format.R32Uint or Format.R16G16Uint or
-                Format.R8G8B8A8Uint or Format.R16G16B16A16Uint => Gen5PixelOutputKind.Uint,
-            Format.R32Sint or Format.R16G16Sint or Format.R8G8B8A8Sint or
-                Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
+            Format.R8Uint or Format.R16Uint or Format.R8G8Uint or Format.R32Uint or
+                Format.R16G16Uint or Format.A2B10G10R10UintPack32 or Format.R8G8B8A8Uint or
+                Format.R32G32Uint or Format.R16G16B16A16Uint or
+                Format.R32G32B32A32Uint => Gen5PixelOutputKind.Uint,
+            Format.R8Sint or Format.R16Sint or Format.R8G8Sint or Format.R32Sint or
+                Format.R16G16Sint or Format.R8G8B8A8Sint or Format.R32G32Sint or
+                Format.R16G16B16A16Sint or Format.R32G32B32A32Sint => Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
         result = new VulkanRenderTargetFormat(format, outputKind);
@@ -8383,6 +8403,19 @@ internal static unsafe class VulkanVideoPresenter
         private static Format GetRenderTargetFormat(uint format, uint numberType) =>
             (format, numberType) switch
             {
+                (1, 0) => Format.R8Unorm,
+                (1, 1) => Format.R8SNorm,
+                (1, 4) => Format.R8Uint,
+                (1, 5) => Format.R8Sint,
+                (2, 0) => Format.R16Unorm,
+                (2, 1) => Format.R16SNorm,
+                (2, 4) => Format.R16Uint,
+                (2, 5) => Format.R16Sint,
+                (2, 7) => Format.R16Sfloat,
+                (3, 0) => Format.R8G8Unorm,
+                (3, 1) => Format.R8G8SNorm,
+                (3, 4) => Format.R8G8Uint,
+                (3, 5) => Format.R8G8Sint,
                 (4, 4) => Format.R32Uint,
                 (4, 5) => Format.R32Sint,
                 (4, 7) => Format.R32Sfloat,
@@ -8391,16 +8424,22 @@ internal static unsafe class VulkanVideoPresenter
                 (5, 7) => Format.R16G16Sfloat,
                 (6, 7) => Format.B10G11R11UfloatPack32,
                 (7, 7) => Format.B10G11R11UfloatPack32,
+                (8, 4) => Format.A2B10G10R10UintPack32,
+                (8, _) => Format.A2B10G10R10UnormPack32,
                 (9, _) => Format.A2B10G10R10UnormPack32,
                 (10, 9) => Format.R8G8B8A8Srgb,
                 (10, 4) => Format.R8G8B8A8Uint,
                 (10, 5) => Format.R8G8B8A8Sint,
                 (10, _) => Format.R8G8B8A8Unorm,
+                (11, 4) => Format.R32G32Uint,
+                (11, 5) => Format.R32G32Sint,
                 (11, 7) => Format.R32G32Sfloat,
                 (12, 4) => Format.R16G16B16A16Uint,
                 (12, 5) => Format.R16G16B16A16Sint,
                 (12, 7) => Format.R16G16B16A16Sfloat,
                 (13, 7) => Format.R32G32B32A32Sfloat,
+                (14, 4) => Format.R32G32B32A32Uint,
+                (14, 5) => Format.R32G32B32A32Sint,
                 (14, 7) => Format.R32G32B32A32Sfloat,
                 (_, 0) => GetTextureFormat(format, numberType),
                 (_, 9) => GetTextureFormat(format, numberType),
