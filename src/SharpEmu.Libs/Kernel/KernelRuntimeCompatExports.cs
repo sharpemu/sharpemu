@@ -432,6 +432,18 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "HoLVWNanBBc",
+        ExportName = "getpid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int GetProcessId(CpuContext ctx)
+    {
+        var processId = Environment.ProcessId;
+        ctx[CpuRegister.Rax] = unchecked((uint)processId);
+        return processId;
+    }
+
+    [SysAbiExport(
         Nid = "fgxnMeTNUtY",
         ExportName = "sceKernelGetProcessTimeCounter",
         Target = Generation.Gen4 | Generation.Gen5,

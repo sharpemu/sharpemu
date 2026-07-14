@@ -30,13 +30,17 @@ public static class SaveDataExports
     private const uint MountModeCreate2 = 1u << 5;
     private const int MountResultSize = 0x40;
     private static readonly object _stateGate = new();
+    private static readonly HashSet<int> _transactionResources = [];
     private static string? _titleId;
+    private static int _nextTransactionResource;
 
     public static void ConfigureApplicationInfo(string? titleId)
     {
         lock (_stateGate)
         {
             _titleId = string.IsNullOrWhiteSpace(titleId) ? null : SanitizePathSegment(titleId.Trim());
+            _transactionResources.Clear();
+            _nextTransactionResource = 0;
         }
     }
 
@@ -251,26 +255,32 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataCreateTransactionResource(CpuContext ctx)
     {
-        // Gen5 ABI: memory size, resource output, reserved.
         var memorySize = ctx[CpuRegister.Rdi];
-        var resourceAddress = ctx[CpuRegister.Rsi];
-        var reserved = ctx[CpuRegister.Rdx];
-
-        if (resourceAddress == 0)
+        int resource;
+        lock (_stateGate)
         {
-            return ctx.SetReturn(OrbisSaveDataErrorParameter);
+            resource = ++_nextTransactionResource;
+            _transactionResources.Add(resource);
         }
 
-        // Offline HLE operations carry no transaction state.
-        if (!ctx.TryWriteUInt64(resourceAddress, 0))
+        TraceSaveData($"create_transaction_resource memory_size=0x{memorySize:X} resource={resource}");
+        return ctx.SetReturn(resource);
+    }
+
+    [SysAbiExport(
+        Nid = "lJUQuaKqoKY",
+        ExportName = "sceSaveDataDeleteTransactionResource",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataDeleteTransactionResource(CpuContext ctx)
+    {
+        var resource = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_stateGate)
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            _transactionResources.Remove(resource);
         }
 
-        TraceSaveData(
-            $"create_transaction_resource memory_size=0x{memorySize:X} reserved=0x{reserved:X} " +
-            $"resource_addr=0x{resourceAddress:X} resource=0x0");
-
+        TraceSaveData($"delete_transaction_resource resource={resource}");
         return ctx.SetReturn(0);
     }
 

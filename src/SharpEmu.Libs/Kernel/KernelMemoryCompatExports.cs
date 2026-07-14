@@ -1684,6 +1684,30 @@ public static class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "E6ao34wPw+U",
+        ExportName = "stat",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixStat(CpuContext ctx)
+    {
+        var result = KernelStat(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
+            _ => 2,
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
+
+    [SysAbiExport(
         Nid = "gEpBkcwxUjw",
         ExportName = "sceKernelAprResolveFilepathsToIdsAndFileSizes",
         Target = Generation.Gen4 | Generation.Gen5,
