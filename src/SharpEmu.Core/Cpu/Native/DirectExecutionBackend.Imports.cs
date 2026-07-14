@@ -818,6 +818,7 @@ public sealed partial class DirectExecutionBackend
 			"2Z+PpY6CaJg" or // pthread_mutex_unlock
 			"EgmLo6EWgso" or // pthread_rwlock_unlock
 			"+L98PIbGttk" or // scePthreadRwlockUnlock
+			"q1cHNfGycLI" or // scePadRead
 			"8aI7R7WaOlc" or // sceAmprCommandBufferConstructor
 			"zgXifHT9ErY" or // sceVideoOutIsFlipPending
 			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
@@ -1076,7 +1077,15 @@ public sealed partial class DirectExecutionBackend
 	}
 
 	private static bool IsImportLoopGuardBoundary(string nid) =>
-		string.Equals(nid, "1jfXLRVzisc", StringComparison.Ordinal);
+		nid switch
+		{
+			// Legitimate polling/yielding imports are observable progress and must
+			// not be mistaken for a stuck repeating import loop.
+			"1jfXLRVzisc" => true, // sceKernelUsleep
+			"QcteRwbsnV0" => true, // usleep
+			"n88vx3C5nW8" => true, // gettimeofday
+			_ => false
+		};
 
 	private void ResetImportLoopPattern()
 	{

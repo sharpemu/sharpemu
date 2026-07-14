@@ -80,14 +80,12 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        var resultAddress = ResolveWaitResultAddress(waitArg1, waitArg2, submission.ResultAddress);
-        if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress))
-        {
-            TraceAprWaitFailure(ctx, "wait_result_fault", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, resultAddress);
+        // The remaining wait arguments are scalar completion metadata, not guest
+        // pointers.  The result destination supplied at submission time has already
+        // been populated by CompleteCommandBuffer/TryWriteAprResult.  Treating rdx
+        // values such as 0x0f or a byte count as an address made every completed APR
+        // read fail with ORBIS_GEN2_ERROR_MEMORY_FAULT.
+        TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -167,27 +165,6 @@ public static class KernelAprCompatExports
         Span<byte> result = stackalloc byte[sizeof(ulong)];
         result.Clear();
         return ctx.Memory.TryWrite(resultAddress, result);
-    }
-
-    private static ulong ResolveWaitResultAddress(ulong waitArg1, ulong waitArg2, ulong submittedResultAddress)
-    {
-        if (waitArg2 == 0)
-        {
-            return submittedResultAddress;
-        }
-
-        if (IsAmprCompletionToken(waitArg1) && waitArg2 <= 0xFFFF)
-        {
-            return submittedResultAddress;
-        }
-
-        return waitArg2;
-    }
-
-    private static bool IsAmprCompletionToken(ulong value)
-    {
-        var tag = value >> 56;
-        return tag is 0x0C or 0x10;
     }
 
     private static void TraceApr(

@@ -32,6 +32,18 @@ public static class NpWebApi2Exports
     }
 
     [SysAbiExport(
+        Nid = "WV1GwM32NgY",
+        ExportName = "sceNpWebApi2InitializeForToolkit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2InitializeAlt(CpuContext ctx)
+    {
+        Interlocked.Exchange(ref _initialized, 1);
+        TraceNpWebApi2("init-alt", unchecked((int)ctx[CpuRegister.Rdi]), ctx[CpuRegister.Rsi]);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "bEvXpcEk200",
         ExportName = "sceNpWebApi2Terminate",
         Target = Generation.Gen4 | Generation.Gen5,

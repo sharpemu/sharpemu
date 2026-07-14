@@ -13,7 +13,11 @@ public static class UserServiceExports
     private const int OrbisUserServiceErrorNoEvent = unchecked((int)0x80960007);
     private const int OrbisUserServiceErrorInvalidParameter = unchecked((int)0x80960009);
     private const int OrbisUserServiceErrorBufferTooShort = unchecked((int)0x8096000A);
-    private const int PrimaryUserId = 1;
+    // Retail PS4/PS5 user-service IDs begin at 0x3E8.  Several Unreal
+    // platform paths retain this value and use it across Pad, SaveData and
+    // online initialization, so a small synthetic ID such as 1 is not
+    // interchangeable even when scePadOpen itself returns a valid handle.
+    private const int PrimaryUserId = 1000;
     private const int InvalidUserId = -1;
     private const string PrimaryUserName = "SharpEmu";
     private static int _loginEventDelivered;
@@ -111,7 +115,8 @@ public static class UserServiceExports
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var nameAddress = ctx[CpuRegister.Rsi];
         var capacity = ctx[CpuRegister.Rdx];
-        if (userId != PrimaryUserId)
+        // Gen5 callers may use zero for the current/default user.
+        if (userId != 0 && userId != PrimaryUserId)
         {
             return ctx.SetReturn(OrbisUserServiceErrorInvalidParameter);
         }
@@ -135,6 +140,31 @@ public static class UserServiceExports
         TraceUserService(
             $"get_user_name user={userId} out=0x{nameAddress:X16} capacity=0x{capacity:X} value='{PrimaryUserName}' result=0x{result:X8}");
         return ctx.SetReturn(result);
+    }
+
+    [SysAbiExport(
+        Nid = "-sD02mFDBh4",
+        ExportName = "sceUserServiceGetGamePresets",
+        Target = Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetGamePresets(CpuContext ctx)
+    {
+        // No persisted presets exist for the offline profile.  Ghostrunner 2
+        // treats an error here as an asynchronous platform-init failure, so
+        // provide a deterministic zero/default result.  The three observed
+        // result slots are 0x18 bytes apart.
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var resultAddress = ctx[CpuRegister.Rcx];
+        Span<byte> defaults = stackalloc byte[0x18];
+        if (resultAddress == 0 || !ctx.Memory.TryWrite(resultAddress, defaults))
+        {
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
+        }
+
+        TraceUserService(
+            $"get_game_presets user={userId} title=0x{ctx[CpuRegister.Rsi]:X16} " +
+            $"key=0x{ctx[CpuRegister.R9]:X} out=0x{resultAddress:X16} result=0x00000000");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(

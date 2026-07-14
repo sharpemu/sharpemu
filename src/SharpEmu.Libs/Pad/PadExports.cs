@@ -14,7 +14,7 @@ public static class PadExports
     private const int OrbisPadErrorNotInitialized = unchecked((int)0x80920005);
     private const int OrbisPadErrorDeviceNotConnected = unchecked((int)0x80920007);
     private const int OrbisPadErrorDeviceNoHandle = unchecked((int)0x80920008);
-    private const int PrimaryUserId = 1;
+    private const int PrimaryUserId = 1000;
     private const int StandardPortType = 0;
     private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;

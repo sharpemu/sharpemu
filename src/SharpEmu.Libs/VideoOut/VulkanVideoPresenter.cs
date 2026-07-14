@@ -600,7 +600,11 @@ internal static unsafe class VulkanVideoPresenter
         var traceSubmission = false;
         lock (_gate)
         {
-            var known = _availableGuestImages.ContainsKey(address);
+            // Registration only says that this is a legal VideoOut address.
+            // It does not mean Vulkan has created and rendered a guest image
+            // for it.  Presenting a merely registered address produces an
+            // uninitialized image and suppresses the translated-draw fallback.
+            var known = _gpuGuestImages.ContainsKey(address);
             if (ShouldTracePresentedGuestImageContentsForDiagnostics())
             {
                 Console.Error.WriteLine(
@@ -622,7 +626,7 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] vk.submit_guest_image_unknown addr=0x{address:X16} " +
-                        $"{width}x{height} - flip target was never registered as a render output");
+                        $"{width}x{height} - flip target has no completed GPU render output");
                 }
 
                 return false;

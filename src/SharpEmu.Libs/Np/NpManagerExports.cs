@@ -42,8 +42,19 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpGetOnlineId(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        // Gen5 passes the user id first and the output structure second.
+        return WriteOfflineOnlineId(ctx, ctx[CpuRegister.Rsi]);
+    }
+
+    [SysAbiExport(
+        Nid = "rbknaUjpqWo",
+        ExportName = "sceNpGetOnlineIdA",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpGetOnlineIdA(CpuContext ctx)
+    {
+        // The A variant takes a user id before the output OnlineId pointer.
+        return WriteOfflineOnlineId(ctx, ctx[CpuRegister.Rsi]);
     }
 
     [SysAbiExport(
@@ -157,5 +168,20 @@ public static class NpManagerExports
         }
 
         Console.Error.WriteLine($"[LOADER][TRACE] np.{message}");
+    }
+
+    private static int WriteOfflineOnlineId(CpuContext ctx, ulong address)
+    {
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // SceNpOnlineId: 16-byte handle, terminator, and three reserved bytes.
+        Span<byte> onlineId = stackalloc byte[20];
+        "Player"u8.CopyTo(onlineId);
+        return ctx.Memory.TryWrite(address, onlineId)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 }

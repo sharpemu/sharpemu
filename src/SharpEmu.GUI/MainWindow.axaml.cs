@@ -25,6 +25,7 @@ namespace SharpEmu.GUI;
 public partial class MainWindow : Window
 {
     private const int MaxConsoleLines = 4000;
+    private const int MaxConsoleLinesPerFlush = 500;
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -1263,7 +1264,8 @@ public partial class MainWindow : Window
         }
 
         var incoming = new List<LogLine>();
-        while (_pendingLines.TryDequeue(out var pending))
+        while (incoming.Count < MaxConsoleLinesPerFlush &&
+               _pendingLines.TryDequeue(out var pending))
         {
             WriteFileLog(pending.Line);
             incoming.Add(new LogLine(pending.Line, BrushForLine(pending.Line)));

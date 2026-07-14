@@ -125,6 +125,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const ulong GuestThreadRegionStride = 0x0100_0000UL;
 
+	private const int GuestThreadRegionSlotCount = 256;
+
 	private const uint PAGE_EXECUTE_READWRITE = 64u;
 
 	private const uint PAGE_READWRITE = 4u;
@@ -2757,7 +2759,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (hostThread is not null &&
 				!ReferenceEquals(hostThread, Thread.CurrentThread))
 			{
-				hostThread.Join(1);
+				// The handle is published before Start(), so a concurrent join can
+				// briefly observe an unstarted host thread.
+				if ((hostThread.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
+				{
+					Thread.Sleep(1);
+					continue;
+				}
+
+				try
+				{
+					hostThread.Join(1);
+				}
+				catch (ThreadStateException)
+				{
+					Thread.Sleep(1);
+				}
 			}
 			else
 			{
@@ -3446,7 +3463,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out ulong mappedBase,
 		out string? error)
 	{
-		for (int i = 0; i < 64; i++)
+		for (int i = 0; i < GuestThreadRegionSlotCount; i++)
 		{
 			var candidateBase = baseAddress - ((ulong)i * GuestThreadRegionStride);
 			if (!IsGuestThreadRegionFree(virtualMemory, candidateBase, size))
@@ -3480,7 +3497,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out ulong tlsBase,
 		out string? error)
 	{
-		for (int i = 0; i < 64; i++)
+		for (int i = 0; i < GuestThreadRegionSlotCount; i++)
 		{
 			var candidateBase = GuestThreadTlsBaseAddress - ((ulong)i * GuestThreadRegionStride);
 			var mappedBase = candidateBase - GuestThreadTlsPrefixSize;

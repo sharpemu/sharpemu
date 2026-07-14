@@ -202,7 +202,7 @@ public static class AudioOut2Exports
     {
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var outUserAddress = ctx[CpuRegister.Rsi];
-        if ((userId != 0 && userId != 1 && userId != 255) || outUserAddress == 0)
+        if ((userId != 0 && userId != 1 && userId != 1000 && userId != 255) || outUserAddress == 0)
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }

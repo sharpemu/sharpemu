@@ -192,6 +192,13 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "QcteRwbsnV0",
+        ExportName = "usleep",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixUsleep(CpuContext ctx) => KernelUsleep(ctx);
+
     private static void TraceUsleepSpin(CpuContext ctx, ulong micros)
     {
         if (!_traceUsleep)

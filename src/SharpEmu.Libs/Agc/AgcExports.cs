@@ -52,6 +52,8 @@ public static class AgcExports
     private const uint RFlip = 0x17;
     private const uint RReleaseMem = 0x18;
     private const uint RDmaData = 0x19;
+    private const uint RPredication = 0x1A;
+    private const uint RJump = 0x1B;
     private const uint SpiShaderPgmLoPs = 0x8;
     private const uint SpiShaderPgmHiPs = 0x9;
     private const uint SpiShaderPgmLoEs = 0xC8;
@@ -389,6 +391,7 @@ public static class AgcExports
         public Dictionary<uint, SubmittedDcbState> ComputeQueues { get; } = new();
         public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
         public ulong WorkSequence { get; set; }
+        public ulong FlipSequence { get; set; }
     }
 
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
@@ -1924,6 +1927,90 @@ public static class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "bbFueFP+J4k",
+        ExportName = "sceAgcDcbSetPredication",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetPredication(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var enable = (uint)ctx[CpuRegister.Rsi];
+        var predicateType = (uint)ctx[CpuRegister.Rdx];
+        var continuePredicate = (uint)ctx[CpuRegister.Rcx];
+        var predicateAddress = ctx[CpuRegister.R8];
+        if (commandBufferAddress == 0 || enable > 1 || continuePredicate > 1)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
+            !ctx.TryWriteUInt32(commandAddress, Pm4(5, ItNop, RPredication)) ||
+            !ctx.TryWriteUInt32(commandAddress + 4, enable) ||
+            !ctx.TryWriteUInt32(commandAddress + 8, predicateType) ||
+            !ctx.TryWriteUInt32(commandAddress + 12, continuePredicate) ||
+            !ctx.TryWriteUInt32(commandAddress + 16, unchecked((uint)predicateAddress)))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_set_predication buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"enable={enable} type={predicateType} continue={continuePredicate} addr=0x{predicateAddress:X16}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "xSAR0LTcRKM",
+        ExportName = "sceAgcDcbJump",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbJump(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var targetAddress = ctx[CpuRegister.Rsi];
+        if (commandBufferAddress == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
+            !ctx.TryWriteUInt32(commandAddress, Pm4(3, ItNop, RJump)) ||
+            !ctx.TryWriteUInt32(commandAddress + 4, unchecked((uint)targetAddress)) ||
+            !ctx.TryWriteUInt32(commandAddress + 8, unchecked((uint)(targetAddress >> 32))))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_jump buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"target=0x{targetAddress:X16}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "w6Dj1VJt5qY",
+        ExportName = "sceAgcSetPacketPredication",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetPacketPredication(CpuContext ctx)
+    {
+        var packetAddress = ctx[CpuRegister.Rdi];
+        var enabled = ctx[CpuRegister.Rsi] != 0;
+        if (packetAddress == 0 || !ctx.TryReadUInt32(packetAddress, out var packetHeader))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        packetHeader = enabled ? packetHeader | 1u : packetHeader & ~1u;
+        if (!ctx.TryWriteUInt32(packetAddress, packetHeader))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
         Nid = "w2rJhmD+dsE",
         ExportName = "sceAgcDriverAddEqEvent",
         Target = Generation.Gen5,
@@ -1975,9 +2062,23 @@ public static class AgcExports
     public static int DriverSubmitDcb(CpuContext ctx)
     {
         var packetAddress = ctx[CpuRegister.Rdi];
-        if (packetAddress == 0 ||
-            !ctx.TryReadUInt64(packetAddress, out var commandAddress) ||
-            !ctx.TryReadUInt32(packetAddress + 8, out var dwordCount))
+        // Gen5 callers can pass the DCB directly in RSI/RDX while older callers
+        // use a packed { address, dwordCount } object in RDI.
+        var commandAddress = ctx[CpuRegister.Rsi];
+        var directDwordCount = ctx[CpuRegister.Rdx];
+        uint dwordCount;
+        var directArguments = commandAddress != 0 &&
+            directDwordCount is > 0 and <= 1_000_000UL;
+        if (directArguments)
+        {
+            dwordCount = (uint)directDwordCount;
+        }
+        else if (packetAddress == 0 ||
+                 !ctx.TryReadUInt64(packetAddress, out commandAddress) ||
+                 !ctx.TryReadUInt32(packetAddress + 8, out dwordCount) ||
+                 commandAddress == 0 ||
+                 dwordCount == 0 ||
+                 dwordCount > 1_000_000)
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -1993,14 +2094,28 @@ public static class AgcExports
 
         if (tracePackets)
         {
-            TraceAgc($"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} dwords={dwordCount}");
+            TraceAgc(
+                $"agc.driver_submit_dcb abi={(directArguments ? "direct" : "packed")} " +
+                $"packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} dwords={dwordCount}");
         }
 
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        ulong flipSequenceBefore;
         lock (gpuState.Gate)
         {
+            flipSequenceBefore = gpuState.FlipSequence;
             ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
             DrainResumableDcbs(ctx, gpuState, tracePackets);
+        }
+
+        // Wake the AGC interrupt path for completed setup/work submissions. Flip
+        // submissions retain VideoOut pacing and must not be completed here.
+        if (gpuState.FlipSequence == flipSequenceBefore)
+        {
+            KernelEventQueueCompatExports.TriggerRegisteredEvents(
+                0,
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                0);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -2028,8 +2143,10 @@ public static class AgcExports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal);
 
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        ulong flipSequenceBefore;
         lock (gpuState.Gate)
         {
+            flipSequenceBefore = gpuState.FlipSequence;
             for (uint i = 0; i < bufferCount; i++)
             {
                 if (!ctx.TryReadUInt64(addressArray + i * 8, out var commandAddress) ||
@@ -2051,6 +2168,14 @@ public static class AgcExports
             }
 
             DrainResumableDcbs(ctx, gpuState, tracePackets);
+        }
+
+        if (gpuState.FlipSequence == flipSequenceBefore)
+        {
+            KernelEventQueueCompatExports.TriggerRegisteredEvents(
+                0,
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                0);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -2301,6 +2426,42 @@ public static class AgcExports
             }
 
             var packetType = header >> 30;
+            if (packetType == 0)
+            {
+                // Consume zero-filled alignment one dword at a time so odd
+                // padding cannot skip the next real packet.
+                if (header == 0)
+                {
+                    offset++;
+                    continue;
+                }
+
+                // Type-0 register packets are legal in native DCB streams. We
+                // do not consume their state yet, but preserve synchronization.
+                var type0Length = ((header >> 16) & 0x3FFFu) + 2u;
+                if (offset + type0Length > dwordCount)
+                {
+                    offset++;
+                    continue;
+                }
+
+                offset += type0Length;
+                continue;
+            }
+
+            if (packetType == 1)
+            {
+                const uint type1Length = 3;
+                if (offset + type1Length > dwordCount)
+                {
+                    offset++;
+                    continue;
+                }
+
+                offset += type1Length;
+                continue;
+            }
+
             if (packetType == 2)
             {
                 if (tracePackets)
@@ -2315,13 +2476,15 @@ public static class AgcExports
 
             if (packetType != 3)
             {
-                return;
+                offset++;
+                continue;
             }
 
             var length = Pm4Length(header);
             if (length == 0 || offset + length > dwordCount)
             {
-                return;
+                offset++;
+                continue;
             }
 
             var op = (header >> 8) & 0xFFu;
@@ -2559,6 +2722,7 @@ public static class AgcExports
 
             if (op == ItNop && register == RFlip && length >= 6)
             {
+                gpuState.FlipSequence++;
                 if (!ctx.TryReadUInt32(currentAddress + 4, out var videoOutHandle) ||
                     !ctx.TryReadUInt32(currentAddress + 8, out var displayBufferIndexRaw) ||
                     !ctx.TryReadUInt32(currentAddress + 12, out var flipMode) ||
@@ -2571,23 +2735,9 @@ public static class AgcExports
                 var flipArg = unchecked((long)(((ulong)flipArgHi << 32) | flipArgLo));
                 var displayBufferIndex = unchecked((int)displayBufferIndexRaw);
                 var handle = unchecked((int)videoOutHandle);
-                if (VideoOutExports.TryGetDisplayBufferInfo(
-                        handle,
-                        displayBufferIndex,
-                        out var cachedDisplayBuffer) &&
-                    VulkanVideoPresenter.TrySubmitGuestImage(
-                        cachedDisplayBuffer.Address,
-                        cachedDisplayBuffer.Width,
-                        cachedDisplayBuffer.Height,
-                        cachedDisplayBuffer.PitchInPixel))
-                {
-                    TraceDisplayBuffer(
-                        handle,
-                        displayBufferIndex,
-                        cachedDisplayBuffer,
-                        "gpu-cache");
-                }
-                else if (state.SawIndexedDraw &&
+                // Prefer output decoded from this DCB. A cached display image can
+                // be stale or merely registered without initialized GPU contents.
+                if (state.SawIndexedDraw &&
                     state.TranslatedDraw is { } translatedDraw &&
                     VideoOutExports.TryGetDisplayBufferInfo(
                         handle,
@@ -2650,6 +2800,22 @@ public static class AgcExports
                         state.GuestDrawKind,
                         displayBuffer.Width,
                         displayBuffer.Height);
+                }
+                else if (VideoOutExports.TryGetDisplayBufferInfo(
+                             handle,
+                             displayBufferIndex,
+                             out var cachedDisplayBuffer) &&
+                         VulkanVideoPresenter.TrySubmitGuestImage(
+                             cachedDisplayBuffer.Address,
+                             cachedDisplayBuffer.Width,
+                             cachedDisplayBuffer.Height,
+                             cachedDisplayBuffer.PitchInPixel))
+                {
+                    TraceDisplayBuffer(
+                        handle,
+                        displayBufferIndex,
+                        cachedDisplayBuffer,
+                        "gpu-cache");
                 }
 
                 _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);

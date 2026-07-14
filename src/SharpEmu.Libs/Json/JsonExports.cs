@@ -78,6 +78,58 @@ public static class JsonExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "WSOuge5IsCg",
+        ExportName = "_ZN3sce4Json15InitParameter2C2Ev",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson2")]
+    public static int InitParameter2Constructor(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        TraceJson("InitParameter2.ctor", thisAddress, ctx[CpuRegister.Rsi]);
+        ctx[CpuRegister.Rax] = thisAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "I2QC8PYhJWY",
+        ExportName = "_ZN3sce4Json15InitParameter212setAllocatorERNS0_12MemAllocatorE",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson2")]
+    public static int InitParameter2SetAllocator(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        TraceJson("InitParameter2.setAllocator", thisAddress, ctx[CpuRegister.Rsi]);
+        ctx[CpuRegister.Rax] = thisAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "Eu95jmqn5Rw",
+        ExportName = "_ZN3sce4Json15InitParameter217setFileBufferSizeEm",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson2")]
+    public static int InitParameter2SetFileBufferSize(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        TraceJson("InitParameter2.setFileBufferSize", thisAddress, ctx[CpuRegister.Rsi]);
+        ctx[CpuRegister.Rax] = thisAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "IXW-z8pggfg",
+        ExportName = "_ZN3sce4Json12Initializer2C1Ev",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson2")]
+    public static int Initializer2Constructor(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        TraceJson("Initializer2.ctor", thisAddress, ctx[CpuRegister.Rsi]);
+        ctx[CpuRegister.Rax] = thisAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static void TraceJson(string operation, ulong thisAddress, ulong argument)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_JSON"), "1", StringComparison.Ordinal))
