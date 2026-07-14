@@ -593,6 +593,18 @@ internal static partial class Gen5SpirvTranslator
                         Ext(38, _uintType, high, right));
                     break;
                 }
+                case "VSadU32":
+                {
+                    var left = GetRawSource(instruction, 0);
+                    var right = GetRawSource(instruction, 1);
+                    var difference = _module.AddInstruction(
+                        SpirvOp.ISub,
+                        _uintType,
+                        Ext(41, _uintType, left, right),
+                        Ext(38, _uintType, left, right));
+                    result = IAdd(difference, GetRawSource(instruction, 2));
+                    break;
+                }
                 case "VMed3I32":
                 {
                     var left = Bitcast(_intType, GetRawSource(instruction, 0));
