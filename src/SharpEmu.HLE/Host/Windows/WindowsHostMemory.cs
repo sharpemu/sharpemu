@@ -50,6 +50,11 @@ internal sealed unsafe class WindowsHostMemory : IHostMemory
         return VirtualProtect((void*)address, (nuint)size, ToNativeProtection(protection), out rawOldProtection);
     }
 
+    public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+    {
+        return VirtualProtect((void*)address, (nuint)size, rawProtection, out rawOldProtection);
+    }
+
     public bool Query(ulong address, out HostRegionInfo info)
     {
         if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MemoryBasicInformation64)) == 0)

@@ -34,6 +34,14 @@ public interface IHostMemory
     /// </summary>
     bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection);
 
+    /// <summary>
+    /// Restores a raw protection value previously returned by <see cref="Protect"/> or
+    /// <see cref="Query"/> on this same platform. Raw values are opaque to callers and
+    /// must never cross platforms; this exists so save/restore protection sequences
+    /// round-trip OS-specific modifier bits the neutral enum cannot represent.
+    /// </summary>
+    bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection);
+
     bool Query(ulong address, out HostRegionInfo info);
 
     void FlushInstructionCache(ulong address, ulong size);
