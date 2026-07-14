@@ -33,7 +33,7 @@ public static class NpWebApi2Exports
 
     [SysAbiExport(
         Nid = "WV1GwM32NgY",
-        ExportName = "sceNpWebApi2InitializeForToolkit",
+        ExportName = "sceNpWebApi2PushEventCreateHandle",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNpWebApi2")]
     public static int NpWebApi2InitializeAlt(CpuContext ctx)

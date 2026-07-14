@@ -36,6 +36,17 @@ public static class AvPlayerExports
     }
 
     [SysAbiExport(
+        Nid = "KMcEa+rHsIo",
+        ExportName = "sceAvPlayerAddSource",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerAddSource(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "JdksQu8pNdQ",
         ExportName = "sceAvPlayerGetVideoDataEx",
         Target = Generation.Gen4 | Generation.Gen5,

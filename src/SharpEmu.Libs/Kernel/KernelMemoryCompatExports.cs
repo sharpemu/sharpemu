@@ -6947,15 +6947,4 @@ public static class KernelMemoryCompatExports
         sum = left + right;
         return sum >= left;
     }
-
-    [SysAbiExport(
-        Nid = "KMcEa+rHsIo",
-        ExportName = "sceKernelMapMemory",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelMapMemory(CpuContext ctx)
-    {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
 }
