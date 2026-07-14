@@ -1,0 +1,160 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Runtime.InteropServices;
+
+namespace SharpEmu.HLE.Host.Windows;
+
+internal sealed unsafe class WindowsHostThreading : IHostThreading
+{
+    private const uint StackSizeParamIsAReservation = 0x00010000u;
+    private const uint ThreadGetContext = 0x0008u;
+    private const uint ThreadSuspendResume = 0x0002u;
+
+    // Win64 CONTEXT layout (CONTROL | INTEGER only — no XMM state is requested).
+    private const int Win64ContextSize = 0x4D0;
+    private const int Win64ContextFlagsOffset = 0x30;
+    private const uint ContextAmd64ControlInteger = 0x00100003u;
+    private const int CtxRax = 120;
+    private const int CtxRcx = 128;
+    private const int CtxRdx = 136;
+    private const int CtxRbx = 144;
+    private const int CtxRsp = 152;
+    private const int CtxRbp = 160;
+    private const int CtxRip = 248;
+
+    public uint AllocateTlsSlot() => TlsAlloc();
+
+    public bool FreeTlsSlot(uint slot) => TlsFree(slot);
+
+    public bool SetTlsValue(uint slot, nint value) => TlsSetValue(slot, value);
+
+    public nint GetTlsValue(uint slot) => TlsGetValue(slot);
+
+    public uint CurrentThreadId => GetCurrentThreadId();
+
+    public bool TrySetCurrentThreadAffinity(nuint affinityMask)
+    {
+        return SetThreadAffinityMask(GetCurrentThread(), affinityMask) != 0;
+    }
+
+    public nint CreateNativeThread(nint entry, nint parameter, nuint stackReserveBytes, out uint threadId)
+    {
+        return CreateThread(0, stackReserveBytes, entry, parameter, StackSizeParamIsAReservation, out threadId);
+    }
+
+    public bool WaitForThreadExit(nint threadHandle, uint timeoutMilliseconds)
+    {
+        return WaitForSingleObject(threadHandle, timeoutMilliseconds) == 0u;
+    }
+
+    public void CloseThreadHandle(nint threadHandle)
+    {
+        _ = CloseHandle(threadHandle);
+    }
+
+    public bool TryCaptureThreadRegisters(uint threadId, out HostCapturedRegisters registers)
+    {
+        registers = default;
+        var threadHandle = OpenThread(ThreadGetContext | ThreadSuspendResume, false, threadId);
+        if (threadHandle == 0)
+        {
+            return false;
+        }
+
+        void* contextRecord = null;
+        var suspended = false;
+        try
+        {
+            if (SuspendThread(threadHandle) == uint.MaxValue)
+            {
+                return false;
+            }
+
+            suspended = true;
+            contextRecord = NativeMemory.AllocZeroed((nuint)Win64ContextSize);
+            *(uint*)((byte*)contextRecord + Win64ContextFlagsOffset) = ContextAmd64ControlInteger;
+            if (!GetThreadContext(threadHandle, contextRecord))
+            {
+                return false;
+            }
+
+            registers = new HostCapturedRegisters(
+                ReadU64(contextRecord, CtxRip),
+                ReadU64(contextRecord, CtxRsp),
+                ReadU64(contextRecord, CtxRbp),
+                ReadU64(contextRecord, CtxRax),
+                ReadU64(contextRecord, CtxRbx),
+                ReadU64(contextRecord, CtxRcx),
+                ReadU64(contextRecord, CtxRdx));
+            return true;
+        }
+        finally
+        {
+            if (contextRecord != null)
+            {
+                NativeMemory.Free(contextRecord);
+            }
+            if (suspended)
+            {
+                _ = ResumeThread(threadHandle);
+            }
+            _ = CloseHandle(threadHandle);
+        }
+    }
+
+    private static ulong ReadU64(void* contextRecord, int offset)
+    {
+        return *(ulong*)((byte*)contextRecord + offset);
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern uint TlsAlloc();
+
+    [DllImport("kernel32.dll")]
+    private static extern bool TlsFree(uint dwTlsIndex);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool TlsSetValue(uint dwTlsIndex, nint lpTlsValue);
+
+    [DllImport("kernel32.dll")]
+    private static extern nint TlsGetValue(uint dwTlsIndex);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentThread();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint CreateThread(
+        nint lpThreadAttributes,
+        nuint dwStackSize,
+        nint lpStartAddress,
+        nint lpParameter,
+        uint dwCreationFlags,
+        out uint lpThreadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SuspendThread(nint hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(nint hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetThreadContext(nint hThread, void* lpContext);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(nint hObject);
+}

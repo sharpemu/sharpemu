@@ -12,4 +12,8 @@ namespace SharpEmu.HLE.Host;
 public interface IHostPlatform
 {
     IHostMemory Memory { get; }
+
+    IHostThreading Threading { get; }
+
+    IHostSymbolResolver Symbols { get; }
 }

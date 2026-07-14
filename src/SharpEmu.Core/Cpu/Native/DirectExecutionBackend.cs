@@ -12,6 +12,7 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -608,6 +609,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private nint _selfHandlePtr;
 
+	private readonly IHostPlatform _hostPlatform;
+
+	private readonly IHostThreading _hostThreading;
+
+	private readonly IHostSymbolResolver _hostSymbols;
+
 	private const int MinTlsPatchInstructionBytes = 9;
 
 	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
@@ -697,7 +704,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static void TraceThreadMode(string message)
 	{
 		Console.Error.WriteLine(
-			$"[THREADMODE] {message} cycle={_threadModeCycleId} tid={GetCurrentThreadId()} managed={Environment.CurrentManagedThreadId}");
+			$"[THREADMODE] {message} cycle={_threadModeCycleId} tid={HostPlatform.Current.Threading.CurrentThreadId} managed={Environment.CurrentManagedThreadId}");
 		Console.Error.Flush();
 	}
 
@@ -726,16 +733,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private const uint MSVC_CPP_EXCEPTION = 0xE06D7363u;
 
 	private const uint HostXmmSaveAreaSize = 0xA0u;
-
-	private const uint ContextAmd64ControlInteger = 0x00100003u;
-
-	private const uint ThreadGetContext = 0x0008u;
-
-	private const uint ThreadSuspendResume = 0x0002u;
-
-	private const int Win64ContextSize = 0x4D0;
-
-	private const int Win64ContextFlagsOffset = 0x30;
 
 	private readonly record struct HostThreadContextSnapshot(
 		bool IsValid,
@@ -876,30 +873,32 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_activeGuestThreadYieldReason = previousYieldReason;
 	}
 
-	public unsafe DirectExecutionBackend(IModuleManager moduleManager)
+	public unsafe DirectExecutionBackend(IModuleManager moduleManager, IHostPlatform? hostPlatform = null)
 	{
 		_moduleManager = moduleManager ?? throw new ArgumentNullException("moduleManager");
+		_hostPlatform = hostPlatform ?? HostPlatform.Current;
+		_hostThreading = _hostPlatform.Threading;
+		_hostSymbols = _hostPlatform.Symbols;
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
-		_guestTlsBaseTlsIndex = TlsAlloc();
-		_hostRspSlotTlsIndex = TlsAlloc();
+		_guestTlsBaseTlsIndex = _hostThreading.AllocateTlsSlot();
+		_hostRspSlotTlsIndex = _hostThreading.AllocateTlsSlot();
 		if (_guestTlsBaseTlsIndex == uint.MaxValue || _hostRspSlotTlsIndex == uint.MaxValue)
 		{
 			throw new OutOfMemoryException("Failed to allocate native TLS slots");
 		}
-		nint kernel32 = GetModuleHandle("kernel32.dll");
-		_tlsGetValueAddress = kernel32 != 0 ? GetProcAddress(kernel32, "TlsGetValue") : 0;
+		_tlsGetValueAddress = _hostSymbols.GetAddress(HostRuntimeFunction.TlsGetValue);
 		if (_tlsGetValueAddress == 0)
 		{
 			throw new InvalidOperationException("Failed to resolve kernel32!TlsGetValue");
 		}
-		_queryPerformanceCounterAddress = kernel32 != 0 ? GetProcAddress(kernel32, "QueryPerformanceCounter") : 0;
+		_queryPerformanceCounterAddress = _hostSymbols.GetAddress(HostRuntimeFunction.QueryPerformanceCounter);
 		if (_queryPerformanceCounterAddress == 0)
 		{
 			throw new InvalidOperationException("Failed to resolve kernel32!QueryPerformanceCounter");
 		}
-		_switchToThreadAddress = kernel32 != 0 ? GetProcAddress(kernel32, "SwitchToThread") : 0;
-		_sleepAddress = kernel32 != 0 ? GetProcAddress(kernel32, "Sleep") : 0;
+		_switchToThreadAddress = _hostSymbols.GetAddress(HostRuntimeFunction.SwitchToThread);
+		_sleepAddress = _hostSymbols.GetAddress(HostRuntimeFunction.Sleep);
 		if (_switchToThreadAddress == 0 || _sleepAddress == 0)
 		{
 			throw new InvalidOperationException("Failed to resolve kernel32 thread timing functions");
@@ -1636,7 +1635,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			context.FsBase = (ulong)num;
 			context.GsBase = (ulong)num;
 			SeedTlsLayout(num);
-			TlsSetValue(_guestTlsBaseTlsIndex, num);
+			_hostThreading.SetTlsValue(_guestTlsBaseTlsIndex, num);
 		}
 	}
 
@@ -3635,7 +3634,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
-		if (SetThreadAffinityMask(GetCurrentThread(), (nuint)hostAffinityMask) == 0 && _logGuestThreads)
+		if (!_hostThreading.TrySetCurrentThreadAffinity((nuint)hostAffinityMask) && _logGuestThreads)
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] Failed to set guest thread affinity guest=0x{guestAffinityMask:X} " +
@@ -3684,14 +3683,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(thread.ThreadHandle);
 		var previousGuestThreadState = _activeGuestThreadState;
 		ApplyGuestThreadAffinity(thread.AffinityMask);
-		Volatile.Write(ref thread.HostThreadId, unchecked((int)GetCurrentThreadId()));
+		Volatile.Write(ref thread.HostThreadId, unchecked((int)_hostThreading.CurrentThreadId));
 		_activeGuestThreadState = thread;
 		if (LogThreadMode)
 		{
 			_threadModeCycleId = Interlocked.Increment(ref _threadModeCycleCounter);
 			TraceThreadMode(
 				$"cycle_start name='{thread.Name}' guest=0x{thread.ThreadHandle:X16} reason={reason} " +
-				$"rsp_slot=0x{(ulong)TlsGetValue(_hostRspSlotTlsIndex):X}");
+				$"rsp_slot=0x{(ulong)_hostThreading.GetTlsValue(_hostRspSlotTlsIndex):X}");
 		}
 		try
 		{
@@ -3772,7 +3771,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				TraceThreadMode(
 					$"cycle_end name='{thread.Name}' state={thread.State} " +
 					$"imports={Interlocked.Read(ref thread.ImportCount)} " +
-					$"rsp_slot=0x{(ulong)TlsGetValue(_hostRspSlotTlsIndex):X}");
+					$"rsp_slot=0x{(ulong)_hostThreading.GetTlsValue(_hostRspSlotTlsIndex):X}");
 			}
 			_activeGuestThreadState = previousGuestThreadState;
 			Volatile.Write(ref thread.HostThreadId, 0);
@@ -3847,7 +3846,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousForcedExit = _activeForcedGuestExit;
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
-		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		nint previousHostRspSlotValue = _hostThreading.GetTlsValue(_hostRspSlotTlsIndex);
 		if (LogThreadMode)
 		{
 			TraceThreadMode(
@@ -4005,7 +4004,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
     }
     finally
     {
-        TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+        _hostThreading.SetTlsValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
         RestoreActiveExecutionThread(
             previousActiveBackend,
             previousActiveContext,
@@ -4045,7 +4044,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousForcedExit = _activeForcedGuestExit;
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
-		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		nint previousHostRspSlotValue = _hostThreading.GetTlsValue(_hostRspSlotTlsIndex);
 		if (LogThreadMode)
 		{
 			TraceThreadMode(
@@ -4152,7 +4151,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
-			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			_hostThreading.SetTlsValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
 			RestoreActiveExecutionThread(
 				previousActiveBackend,
 				previousActiveContext,
@@ -4259,7 +4258,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousForcedExit = _activeForcedGuestExit;
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
-		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		nint previousHostRspSlotValue = _hostThreading.GetTlsValue(_hostRspSlotTlsIndex);
 		try
 		{
 			_activeExecutionBackend = this;
@@ -4389,7 +4388,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				*(ulong*)_hostRspSlotStorage = num2;
 			}
-			TlsSetValue(_hostRspSlotTlsIndex, (nint)num2);
+			_hostThreading.SetTlsValue(_hostRspSlotTlsIndex, (nint)num2);
 			if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_SENTINEL_PROBE"), "1", StringComparison.Ordinal))
 			{
 				Console.Error.WriteLine("[LOADER][INFO] Running unresolved sentinel probe...");
@@ -4450,7 +4449,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			StopStallWatchdog();
 			ActiveEntryReturnSentinelRip = 0uL;
-			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			_hostThreading.SetTlsValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
 			if (_hostRspSlotStorage != 0)
 			{
 				*(long*)_hostRspSlotStorage = 0L;
@@ -4718,80 +4717,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
-	private unsafe static bool TryCaptureHostThreadContext(int hostThreadId, out HostThreadContextSnapshot snapshot)
+	private bool TryCaptureHostThreadContext(int hostThreadId, out HostThreadContextSnapshot snapshot)
 	{
 		snapshot = default;
-		if (hostThreadId == 0 || unchecked((uint)hostThreadId) == GetCurrentThreadId())
+		if (hostThreadId == 0 || unchecked((uint)hostThreadId) == _hostThreading.CurrentThreadId)
 		{
 			return false;
 		}
 
-		var threadHandle = OpenThread(ThreadGetContext | ThreadSuspendResume, false, unchecked((uint)hostThreadId));
-		if (threadHandle == 0)
+		if (!_hostThreading.TryCaptureThreadRegisters(unchecked((uint)hostThreadId), out var registers))
 		{
 			return false;
 		}
 
-		void* contextRecord = null;
-		var suspended = false;
-		try
-		{
-			if (SuspendThread(threadHandle) == uint.MaxValue)
-			{
-				return false;
-			}
-
-			suspended = true;
-			contextRecord = NativeMemory.AllocZeroed((nuint)Win64ContextSize);
-			WriteCtxU32(contextRecord, Win64ContextFlagsOffset, ContextAmd64ControlInteger);
-			if (!GetThreadContext(threadHandle, contextRecord))
-			{
-				return false;
-			}
-
-			snapshot = new HostThreadContextSnapshot(
-				true,
-				ReadCtxU64(contextRecord, 248),
-				ReadCtxU64(contextRecord, 152),
-				ReadCtxU64(contextRecord, 160),
-				ReadCtxU64(contextRecord, 120),
-				ReadCtxU64(contextRecord, 144),
-				ReadCtxU64(contextRecord, 128),
-				ReadCtxU64(contextRecord, 136));
-			return true;
-		}
-		finally
-		{
-			if (contextRecord != null)
-			{
-				NativeMemory.Free(contextRecord);
-			}
-			if (suspended)
-			{
-				_ = ResumeThread(threadHandle);
-			}
-			_ = CloseHandle(threadHandle);
-		}
+		snapshot = new HostThreadContextSnapshot(
+			true,
+			registers.Rip,
+			registers.Rsp,
+			registers.Rbp,
+			registers.Rax,
+			registers.Rbx,
+			registers.Rcx,
+			registers.Rdx);
+		return true;
 	}
-
-
-	[DllImport("kernel32.dll")]
-	private static extern uint TlsAlloc();
-
-	[DllImport("kernel32.dll")]
-	private static extern bool TlsFree(uint dwTlsIndex);
-
-	[DllImport("kernel32.dll")]
-	private static extern bool TlsSetValue(uint dwTlsIndex, nint lpTlsValue);
-
-	[DllImport("kernel32.dll")]
-	private static extern nint TlsGetValue(uint dwTlsIndex);
-
-	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-	private static extern nint GetModuleHandle(string lpModuleName);
-
-	[DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
-	private static extern nint GetProcAddress(nint hModule, string procName);
 
 	[DllImport("kernel32.dll")]
 	private unsafe static extern void* AddVectoredExceptionHandler(uint first, IntPtr handler);
@@ -4801,32 +4750,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	[DllImport("kernel32.dll")]
 	private static extern IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
-
-	[DllImport("kernel32.dll")]
-	private static extern uint GetCurrentThreadId();
-
-	[DllImport("kernel32.dll")]
-	private static extern nint GetCurrentThread();
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern nuint SetThreadAffinityMask(nint hThread, nuint dwThreadAffinityMask);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern nint OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern uint SuspendThread(nint hThread);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	private static extern uint ResumeThread(nint hThread);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private unsafe static extern bool GetThreadContext(nint hThread, void* lpContext);
-
-	[DllImport("kernel32.dll", SetLastError = true)]
-	[return: MarshalAs(UnmanagedType.Bool)]
-	private static extern bool CloseHandle(nint hObject);
 
 	public unsafe void Dispose()
 	{
@@ -4917,12 +4840,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		if (_guestTlsBaseTlsIndex != uint.MaxValue)
 		{
-			TlsFree(_guestTlsBaseTlsIndex);
+			_hostThreading.FreeTlsSlot(_guestTlsBaseTlsIndex);
 			_guestTlsBaseTlsIndex = uint.MaxValue;
 		}
 		if (_hostRspSlotTlsIndex != uint.MaxValue)
 		{
-			TlsFree(_hostRspSlotTlsIndex);
+			_hostThreading.FreeTlsSlot(_hostRspSlotTlsIndex);
 			_hostRspSlotTlsIndex = uint.MaxValue;
 		}
 		if (_unresolvedReturnStub != 0)
