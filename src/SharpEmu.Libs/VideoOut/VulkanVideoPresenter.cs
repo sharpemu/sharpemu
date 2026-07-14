@@ -996,7 +996,7 @@ internal static unsafe class VulkanVideoPresenter
         private bool _deviceLost;
         private bool _deviceLostLogged;
         private int _directPresentationCount;
-        private readonly Dictionary<ulong, GuestImageResource> _guestImages = new();
+        private readonly GuestImageCache _guestImages;
         private readonly HashSet<(ulong Address, uint Width, uint Height, Format Format)> _tracedTextureCacheHits = new();
         private static readonly bool _dumpTextures = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_DUMP_TEXTURES"),
@@ -1113,26 +1113,6 @@ internal static unsafe class VulkanVideoPresenter
             public uint OffsetBytes;
         }
 
-        private sealed class GuestImageResource
-        {
-            public ulong Address;
-            public uint Width;
-            public uint Height;
-            public uint MipLevels;
-            public Format Format;
-            public Image Image;
-            public DeviceMemory Memory;
-            public ImageView View;
-            public ImageView[] MipViews = [];
-            public Dictionary<(Format Format, uint MipLevel, uint LevelCount, uint DstSelect), ImageView> FormatViews { get; } = new();
-            public RenderPass RenderPass;
-            public Framebuffer Framebuffer;
-            public bool Initialized;
-            public bool InitialUploadPending;
-            public bool IsCpuBacked;
-            public ulong CpuContentFingerprint;
-        }
-
         private sealed record PendingGuestSubmission(
             Fence Fence,
             CommandBuffer CommandBuffer,
@@ -1142,6 +1122,7 @@ internal static unsafe class VulkanVideoPresenter
 
         public Presenter(uint width, uint height)
         {
+            _guestImages = new GuestImageCache(WaitForGuestImagesIdle, DestroyGuestImage);
             var options = WindowOptions.DefaultVulkan;
             options.Size = new Vector2D<int>((int)DefaultWindowWidth, (int)DefaultWindowHeight);
             options.Title = VideoOutExports.GetWindowTitle();
@@ -3606,6 +3587,7 @@ internal static unsafe class VulkanVideoPresenter
                 var guestImage = new GuestImageResource
                 {
                     Address = texture.Address,
+                    GuestSize = expectedSize,
                     Width = width,
                     Height = height,
                     MipLevels = 1,
@@ -3617,7 +3599,9 @@ internal static unsafe class VulkanVideoPresenter
                     IsCpuBacked = true,
                     CpuContentFingerprint = contentFingerprint,
                 };
-                _guestImages.Add(texture.Address, guestImage);
+                ForgetGuestImageTracking(
+                    _guestImages.InvalidateOverlaps(texture.Address, expectedSize));
+                _guestImages.Add(guestImage);
                 resource.OwnsStorage = false;
                 resource.GuestImage = guestImage;
                 lock (_gate)
@@ -4366,6 +4350,23 @@ internal static unsafe class VulkanVideoPresenter
                 : checked(((ulong)width + 3) / 4 * (((ulong)height + 3) / 4) * blockBytes);
         }
 
+        private static ulong GetTextureByteCount(
+            uint format,
+            uint width,
+            uint height,
+            uint mipLevels)
+        {
+            ulong size = 0;
+            for (uint mipLevel = 0; mipLevel < mipLevels; mipLevel++)
+            {
+                size = checked(size + GetTextureByteCount(format, width, height));
+                width = Math.Max(1, width >> 1);
+                height = Math.Max(1, height >> 1);
+            }
+
+            return size;
+        }
+
         private static Format GetTextureFormat(uint format, uint numberType) =>
             (format, numberType) switch
             {
@@ -4927,15 +4928,15 @@ internal static unsafe class VulkanVideoPresenter
 
                     return existing;
                 }
-
-                DestroyGuestImage(existing);
-                _guestImages.Remove(target.Address);
-                lock (_gate)
-                {
-                    _availableGuestImages.Remove(target.Address);
-                    _gpuGuestImages.Remove(target.Address);
-                }
             }
+
+            var guestSize = GetTextureByteCount(
+                target.Format,
+                target.Width,
+                target.Height,
+                mipLevels);
+            ForgetGuestImageTracking(
+                _guestImages.InvalidateOverlaps(target.Address, guestSize));
 
             var imageInfo = new ImageCreateInfo
             {
@@ -5015,6 +5016,7 @@ internal static unsafe class VulkanVideoPresenter
             var resource = new GuestImageResource
             {
                 Address = target.Address,
+                GuestSize = guestSize,
                 Width = target.Width,
                 Height = target.Height,
                 MipLevels = mipLevels,
@@ -5038,8 +5040,34 @@ internal static unsafe class VulkanVideoPresenter
             }
             SetDebugName(ObjectType.RenderPass, renderPass.Handle, $"{debugName} renderpass");
             SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{debugName} framebuffer");
-            _guestImages.Add(target.Address, resource);
+            _guestImages.Add(resource);
             return resource;
+        }
+
+        private void WaitForGuestImagesIdle()
+        {
+            CompletePendingPresentation(wait: true);
+            while (_pendingGuestSubmissions.Count != 0)
+            {
+                CollectCompletedGuestSubmissions(waitForOldest: true);
+            }
+        }
+
+        private void ForgetGuestImageTracking(IReadOnlyList<GuestImageResource> resources)
+        {
+            if (resources.Count == 0)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                foreach (var resource in resources)
+                {
+                    _availableGuestImages.Remove(resource.Address);
+                    _gpuGuestImages.Remove(resource.Address);
+                }
+            }
         }
 
         private (RenderPass RenderPass, Framebuffer Framebuffer) CreateRenderPassAndFramebuffer(
@@ -7075,11 +7103,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             _hostBufferAllocations.Clear();
             _hostBufferPool.Clear();
-            foreach (var guestImage in _guestImages.Values)
-            {
-                DestroyGuestImage(guestImage);
-            }
-            _guestImages.Clear();
+            _guestImages.Dispose();
             lock (_gate)
             {
                 _availableGuestImages.Clear();

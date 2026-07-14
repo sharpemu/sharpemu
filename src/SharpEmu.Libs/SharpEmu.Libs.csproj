@@ -15,6 +15,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Windowing" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Tests.GuestImageCache" />
+  </ItemGroup>
+
   <PropertyGroup>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
