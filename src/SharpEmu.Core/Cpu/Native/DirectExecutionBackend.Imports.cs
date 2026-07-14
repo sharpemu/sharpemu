@@ -68,12 +68,118 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
+		if (TryEmulateGuestInsertq(exceptionInfo))
+		{
+			return -1;
+		}
+
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
 	}
 
 	private unsafe static int RawUnhandledFilterManaged(void* exceptionInfo)
 	{
+		if (TryEmulateGuestInsertq(exceptionInfo))
+		{
+			return -1;
+		}
+
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
+	}
+
+	private unsafe static bool TryEmulateGuestInsertq(void* exceptionInfo)
+	{
+		const uint IllegalInstruction = 0xC000001D;
+		const int Xmm0ContextOffset = 0x1A0;
+
+		if (_activeExecutionBackend is null || exceptionInfo == null)
+		{
+			return false;
+		}
+
+		var pointers = (EXCEPTION_POINTERS*)exceptionInfo;
+		if (pointers->ExceptionRecord == null ||
+			pointers->ExceptionRecord->ExceptionCode != IllegalInstruction ||
+			pointers->ContextRecord == null)
+		{
+			return false;
+		}
+
+		var contextRecord = pointers->ContextRecord;
+		var rip = ReadCtxU64(contextRecord, 248);
+		var instruction = (byte*)rip;
+		if (instruction[0] != 0xF2)
+		{
+			return false;
+		}
+
+		var offset = 1;
+		byte rex = 0;
+		if ((instruction[offset] & 0xF0) == 0x40)
+		{
+			rex = instruction[offset++];
+		}
+
+		if (instruction[offset++] != 0x0F)
+		{
+			return false;
+		}
+
+		var opcode = instruction[offset++];
+		if (opcode is not (0x78 or 0x79))
+		{
+			return false;
+		}
+
+		var modRm = instruction[offset++];
+		if ((modRm & 0xC0) != 0xC0)
+		{
+			return false;
+		}
+
+		var destinationRegister = ((modRm >> 3) & 7) | ((rex & 4) != 0 ? 8 : 0);
+		var sourceRegister = (modRm & 7) | ((rex & 1) != 0 ? 8 : 0);
+		var destinationOffset = Xmm0ContextOffset + (destinationRegister * 16);
+		var sourceOffset = Xmm0ContextOffset + (sourceRegister * 16);
+		var destinationLow = ReadCtxU64(contextRecord, destinationOffset);
+		var sourceLow = ReadCtxU64(contextRecord, sourceOffset);
+
+		int fieldLength;
+		int bitIndex;
+		if (opcode == 0x78)
+		{
+			fieldLength = instruction[offset++] & 0x3F;
+			bitIndex = instruction[offset++] & 0x3F;
+		}
+		else
+		{
+			var sourceHigh = ReadCtxU64(contextRecord, sourceOffset + sizeof(ulong));
+			fieldLength = (int)(sourceHigh & 0x3F);
+			bitIndex = (int)((sourceHigh >> 8) & 0x3F);
+		}
+
+		fieldLength = fieldLength == 0 ? 64 : fieldLength;
+		if (bitIndex + fieldLength > 64)
+		{
+			return false;
+		}
+
+		var sourceMask = fieldLength == 64
+			? ulong.MaxValue
+			: (1UL << fieldLength) - 1;
+		var destinationMask = sourceMask << bitIndex;
+		var result = (destinationLow & ~destinationMask) |
+			((sourceLow & sourceMask) << bitIndex);
+		WriteCtxU64(contextRecord, destinationOffset, result);
+		WriteCtxU64(contextRecord, 248, rip + (ulong)offset);
+
+		var count = Interlocked.Increment(ref _insertqEmulationCount);
+		if (count <= 8)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Emulated SSE4a INSERTQ#{count} at 0x{rip:X16}: " +
+				$"xmm{destinationRegister},xmm{sourceRegister} length={fieldLength} index={bitIndex}");
+		}
+		return true;
 	}
 
 	private unsafe static int TryRecoverUnresolvedSentinel(void* exceptionInfo)

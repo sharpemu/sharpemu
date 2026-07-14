@@ -815,6 +815,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static int _nestedVehTraceCount;
 
+	private static int _insertqEmulationCount;
+
 	private const uint MEM_COMMIT = 4096u;
 
 	private const uint MEM_RESERVE = 8192u;
