@@ -12,4 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
     <Project Path="src/SharpEmu.Logging/SharpEmu.Logging.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
+  </Folder>
 </Solution>
