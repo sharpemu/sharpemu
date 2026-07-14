@@ -19,13 +19,59 @@ internal static partial class Gen5SpirvTranslator
         int globalBufferBase = 0,
         int totalGlobalBufferCount = -1,
         int imageBindingBase = 0,
+        int scalarRegisterBufferIndex = -1) =>
+        TryCompilePixelShader(
+            state,
+            evaluation,
+            [new Gen5PixelOutputBinding(0, 0, outputKind)],
+            out shader,
+            out error,
+            globalBufferBase,
+            totalGlobalBufferCount,
+            imageBindingBase,
+            scalarRegisterBufferIndex);
+
+    public static bool TryCompilePixelShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        IReadOnlyList<Gen5PixelOutputBinding> outputs,
+        out Gen5SpirvShader shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
         int scalarRegisterBufferIndex = -1)
     {
+        if (outputs.Count > 8 || outputs.Any(output => output.GuestSlot > 7))
+        {
+            shader = default!;
+            error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
+            return false;
+        }
+
+        if (outputs.Select(output => output.GuestSlot).Distinct().Count() != outputs.Count ||
+            outputs.Select(output => output.HostLocation).Distinct().Count() != outputs.Count)
+        {
+            shader = default!;
+            error = "pixel output guest slots and host locations must be unique";
+            return false;
+        }
+
+        if (!outputs
+                .OrderBy(output => output.HostLocation)
+                .Select((output, index) => output.HostLocation == (uint)index)
+                .All(isDense => isDense))
+        {
+            shader = default!;
+            error = "pixel output host locations must be dense in the 0..N-1 range";
+            return false;
+        }
+
         var context = new CompilationContext(
             Gen5SpirvStage.Pixel,
             state,
             evaluation,
-            outputKind,
+            outputs,
             1,
             1,
             1,
@@ -50,7 +96,7 @@ internal static partial class Gen5SpirvTranslator
             Gen5SpirvStage.Vertex,
             state,
             evaluation,
-            Gen5PixelOutputKind.Float,
+            [],
             1,
             1,
             1,
@@ -74,7 +120,7 @@ internal static partial class Gen5SpirvTranslator
             Gen5SpirvStage.Compute,
             state,
             evaluation,
-            Gen5PixelOutputKind.Float,
+            [],
             Math.Max(localSizeX, 1),
             Math.Max(localSizeY, 1),
             Math.Max(localSizeZ, 1),
@@ -91,7 +137,7 @@ internal static partial class Gen5SpirvTranslator
         private readonly Gen5SpirvStage _stage;
         private readonly Gen5ShaderState _state;
         private readonly Gen5ShaderEvaluation _evaluation;
-        private readonly Gen5PixelOutputKind _outputKind;
+        private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly uint _localSizeX;
         private readonly uint _localSizeY;
         private readonly uint _localSizeZ;
@@ -101,6 +147,7 @@ internal static partial class Gen5SpirvTranslator
         private readonly int _scalarRegisterBufferIndex;
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
+        private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
         private readonly List<SpirvImageResource> _imageResources = [];
@@ -133,7 +180,6 @@ internal static partial class Gen5SpirvTranslator
         private uint _lds;
         private uint _workgroupUintPointer;
         private uint _positionOutput;
-        private uint _pixelOutput;
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
         private uint _fragCoordInput;
@@ -163,11 +209,16 @@ internal static partial class Gen5SpirvTranslator
             uint Type,
             uint ComponentCount);
 
+        private readonly record struct SpirvPixelOutput(
+            uint Variable,
+            uint Type,
+            Gen5PixelOutputKind Kind);
+
         public CompilationContext(
             Gen5SpirvStage stage,
             Gen5ShaderState state,
             Gen5ShaderEvaluation evaluation,
-            Gen5PixelOutputKind outputKind,
+            IReadOnlyList<Gen5PixelOutputBinding> pixelOutputBindings,
             uint localSizeX,
             uint localSizeY,
             uint localSizeZ,
@@ -179,7 +230,7 @@ internal static partial class Gen5SpirvTranslator
             _stage = stage;
             _state = state;
             _evaluation = evaluation;
-            _outputKind = outputKind;
+            _pixelOutputBindings = pixelOutputBindings;
             _localSizeX = localSizeX;
             _localSizeY = localSizeY;
             _localSizeZ = localSizeZ;
@@ -700,19 +751,24 @@ internal static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.FragCoord);
                 _interfaces.Add(_fragCoordInput);
 
-                var outputType = _outputKind switch
+                foreach (var binding in _pixelOutputBindings)
                 {
-                    Gen5PixelOutputKind.Uint => _uvec4Type,
-                    Gen5PixelOutputKind.Sint => _module.TypeVector(_intType, 4),
-                    _ => _vec4Type,
-                };
-                var outputPointer =
-                    _module.TypePointer(SpirvStorageClass.Output, outputType);
-                _pixelOutput = _module.AddGlobalVariable(
-                    outputPointer,
-                    SpirvStorageClass.Output);
-                _module.AddDecoration(_pixelOutput, SpirvDecoration.Location, 0);
-                _interfaces.Add(_pixelOutput);
+                    var outputType = GetPixelOutputType(binding.Kind);
+                    var outputPointer =
+                        _module.TypePointer(SpirvStorageClass.Output, outputType);
+                    var variable = _module.AddGlobalVariable(
+                        outputPointer,
+                        SpirvStorageClass.Output);
+                    _module.AddName(variable, $"mrt{binding.GuestSlot}");
+                    _module.AddDecoration(
+                        variable,
+                        SpirvDecoration.Location,
+                        binding.HostLocation);
+                    _pixelOutputs.Add(
+                        binding.GuestSlot,
+                        new SpirvPixelOutput(variable, outputType, binding.Kind));
+                    _interfaces.Add(variable);
+                }
             }
             else
             {
@@ -831,7 +887,10 @@ internal static partial class Gen5SpirvTranslator
                     1);
                 StoreV(2, Bitcast(_uintType, x), guardWithExec: false);
                 StoreV(3, Bitcast(_uintType, y), guardWithExec: false);
-                Store(_pixelOutput, _module.ConstantNull(GetPixelOutputType()));
+                foreach (var output in _pixelOutputs.Values)
+                {
+                    Store(output.Variable, _module.ConstantNull(output.Type));
+                }
             }
             else
             {
@@ -2084,21 +2143,27 @@ internal static partial class Gen5SpirvTranslator
 
             if (_stage == Gen5SpirvStage.Pixel)
             {
-                if (export.Target != 0)
+                if (!_pixelOutputs.TryGetValue(export.Target, out var output))
                 {
                     return true;
                 }
 
-                var outputType = GetPixelOutputType();
                 var values = new uint[4];
                 for (var component = 0; component < 4; component++)
                 {
                     var enabled = (export.EnableMask & (1u << component)) != 0;
                     if (!enabled)
                     {
-                        values[component] = _outputKind == Gen5PixelOutputKind.Sint
-                            ? Bitcast(_intType, UInt(0))
-                            : UInt(0);
+                        values[component] = _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            output.Kind switch
+                            {
+                                Gen5PixelOutputKind.Uint => _uintType,
+                                Gen5PixelOutputKind.Sint => _intType,
+                                _ => _floatType,
+                            },
+                            Load(output.Type, output.Variable),
+                            (uint)component);
                         continue;
                     }
 
@@ -2107,7 +2172,7 @@ internal static partial class Gen5SpirvTranslator
                         var value = LoadCompressedExportComponent(
                             instruction,
                             component);
-                        values[component] = _outputKind switch
+                        values[component] = output.Kind switch
                         {
                             Gen5PixelOutputKind.Uint => _module.AddInstruction(
                                 SpirvOp.ConvertFToU,
@@ -2123,7 +2188,7 @@ internal static partial class Gen5SpirvTranslator
                     }
 
                     var raw = LoadV(instruction.Sources[component].Value);
-                    values[component] = _outputKind switch
+                    values[component] = output.Kind switch
                     {
                         Gen5PixelOutputKind.Uint => raw,
                         Gen5PixelOutputKind.Sint => Bitcast(_intType, raw),
@@ -2133,15 +2198,15 @@ internal static partial class Gen5SpirvTranslator
 
                 var vector = _module.AddInstruction(
                     SpirvOp.CompositeConstruct,
-                    outputType,
+                    output.Type,
                     values);
                 vector = _module.AddInstruction(
                     SpirvOp.Select,
-                    outputType,
+                    output.Type,
                     Load(_boolType, _exec),
                     vector,
-                    Load(outputType, _pixelOutput));
-                Store(_pixelOutput, vector);
+                    Load(output.Type, output.Variable));
+                Store(output.Variable, vector);
                 return true;
             }
 
@@ -2209,8 +2274,8 @@ internal static partial class Gen5SpirvTranslator
                 (uint)(component & 1));
         }
 
-        private uint GetPixelOutputType() =>
-            _outputKind switch
+        private uint GetPixelOutputType(Gen5PixelOutputKind kind) =>
+            kind switch
             {
                 Gen5PixelOutputKind.Uint => _uvec4Type,
                 Gen5PixelOutputKind.Sint => _module.TypeVector(_intType, 4),

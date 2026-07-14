@@ -49,6 +49,11 @@ internal enum Gen5PixelOutputKind
     Sint,
 }
 
+internal readonly record struct Gen5PixelOutputBinding(
+    uint GuestSlot,
+    uint HostLocation,
+    Gen5PixelOutputKind Kind);
+
 internal enum Gen5SpirvStage
 {
     Vertex,
