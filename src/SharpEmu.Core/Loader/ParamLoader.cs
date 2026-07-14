@@ -45,7 +45,13 @@ public static class Ps5ParamJsonReader
 
         try
         {
-            using var doc = JsonDocument.Parse(data);
+            ReadOnlyMemory<byte> json = data;
+            if (json.Span.StartsWith("\uFEFF"u8))
+            {
+                json = json[3..];
+            }
+
+            using var doc = JsonDocument.Parse(json);
             return TryReadPs5Param(doc.RootElement);
         }
         catch (JsonException)
@@ -56,12 +62,15 @@ public static class Ps5ParamJsonReader
 
     private static (string? Title, string? TitleId, string? Version) TryReadPs5Param(JsonElement root)
     {
-        string? titleId = root.TryGetProperty("titleId", out var eTid) ? eTid.GetString() : null;
+        if (root.ValueKind != JsonValueKind.Object)
+            return (null, null, null);
+
+        var titleId = GetString(root, "titleId");
 
         string? ver =
-            (root.TryGetProperty("contentVersion", out var cv) ? cv.GetString() : null)
-            ?? (root.TryGetProperty("masterVersion", out var mv) ? mv.GetString() : null)
-            ?? (root.TryGetProperty("targetContentVersion", out var tv) ? tv.GetString() : null);
+            GetString(root, "contentVersion")
+            ?? GetString(root, "masterVersion")
+            ?? GetString(root, "targetContentVersion");
 
         string? title = ExtractTitleName(root);
 
@@ -70,34 +79,49 @@ public static class Ps5ParamJsonReader
 
     private static string? ExtractTitleName(JsonElement root)
     {
-        if (!root.TryGetProperty("localizedParameters", out var lp))
+        if ((!root.TryGetProperty("localizedParameters", out var lp) || lp.ValueKind != JsonValueKind.Object) &&
+            root.TryGetProperty("disc", out var disc) && disc.ValueKind == JsonValueKind.Object)
         {
-            if (root.TryGetProperty("disc", out var disc) && disc.ValueKind == JsonValueKind.Object)
-            {
-                disc.TryGetProperty("localizedParameters", out lp);
-            }
+            disc.TryGetProperty("localizedParameters", out lp);
         }
 
         if (lp.ValueKind != JsonValueKind.Object)
             return null;
 
-        string? defLang = lp.TryGetProperty("defaultLanguage", out var dl) ? dl.GetString() : null;
+        var defLang = GetString(lp, "defaultLanguage");
 
         if (!string.IsNullOrEmpty(defLang))
         {
             if (lp.TryGetProperty(defLang, out var langObj) && langObj.ValueKind == JsonValueKind.Object)
             {
-                if (langObj.TryGetProperty("titleName", out var tn))
-                    return tn.GetString();
+                var title = GetString(langObj, "titleName");
+                if (!string.IsNullOrWhiteSpace(title))
+                    return title;
             }
         }
 
         if (lp.TryGetProperty("en-US", out var en) && en.ValueKind == JsonValueKind.Object)
         {
-            if (en.TryGetProperty("titleName", out var tn2))
-                return tn2.GetString();
+            var title = GetString(en, "titleName");
+            if (!string.IsNullOrWhiteSpace(title))
+                return title;
+        }
+
+        foreach (var property in lp.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Object)
+            {
+                var title = GetString(property.Value, "titleName");
+                if (!string.IsNullOrWhiteSpace(title))
+                    return title;
+            }
         }
 
         return null;
     }
+
+    private static string? GetString(JsonElement parent, string propertyName) =>
+        parent.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 }
