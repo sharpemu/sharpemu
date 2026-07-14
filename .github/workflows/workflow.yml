@@ -100,6 +100,9 @@ jobs:
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
 
+      - name: Validate synthetic shaders
+        run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
+
       - name: Publish win-x64 CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
 

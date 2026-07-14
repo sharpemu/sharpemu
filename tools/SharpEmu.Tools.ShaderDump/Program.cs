@@ -6,7 +6,7 @@
 // Feeds hand-assembled Gen5 (gfx10) instruction words through the real
 // decode -> SPIR-V pipeline (Gen5ShaderTranslator / Gen5SpirvTranslator, via
 // reflection so no emulator source changes are required) and writes the
-// resulting vertex and compute SPIR-V blobs to disk. The blobs can then be
+// resulting vertex, pixel, and compute SPIR-V blobs to disk. The blobs can then be
 // checked with spirv-val / spirv-dis.
 //
 // Programs that contain buffer_store_dword automatically get a single
@@ -14,7 +14,7 @@
 // guestBuffers[0] (descriptor set 0, binding 0).
 //
 // Each program carries an expectation: ExpectTranslate=true programs must
-// decode and emit both stages; ExpectTranslate=false programs pin a decode
+// decode and emit the requested stages; ExpectTranslate=false programs pin a decode
 // failure that must stay loud. Any unexpected outcome makes the tool exit
 // non-zero, so it can gate scripts/CI.
 //
@@ -41,6 +41,63 @@ const ulong ProgramAddress = 0x100000;
         0xD56A0005, 0x00020501, // v_mul_hi_u32 v5, v1, v2
         0xD56B0005, 0x00020501, // v_mul_lo_i32 v5, v1, v2
         0xD56C0005, 0x00020501, // v_mul_hi_i32 v5, v1, v2
+        0xBF810000,             // s_endpgm
+    ]),
+    ("mrt", true, [
+        0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
+        0x7E0202FF, 0x00000000, // v_mov_b32 v1, 0.0f
+        0x7E0402FF, 0x00000000, // v_mov_b32 v2, 0.0f
+        0x7E0602FF, 0x3F800000, // v_mov_b32 v3, 1.0f
+        0x7E0802FF, 0x00000001, // v_mov_b32 v4, 1u
+        0x7E0A02FF, 0x00000002, // v_mov_b32 v5, 2u
+        0x7E0C02FF, 0x00000003, // v_mov_b32 v6, 3u
+        0x7E0E02FF, 0x00000004, // v_mov_b32 v7, 4u
+        0x7E1002FF, 0xFFFFFFFF, // v_mov_b32 v8, -1
+        0x7E1202FF, 0x00000002, // v_mov_b32 v9, 2
+        0x7E1402FF, 0xFFFFFFFD, // v_mov_b32 v10, -3
+        0x7E1602FF, 0x00000004, // v_mov_b32 v11, 4
+        0xF800000F, 0x03020100, // exp mrt0 v0, v1, v2, v3
+        0xF800003F, 0x07060504, // exp mrt3 v4, v5, v6, v7
+        0xF800086F, 0x0B0A0908, // exp mrt6 v8, v9, v10, v11 done
+        0xBF810000,             // s_endpgm
+    ]),
+    ("mrt-float2", true, [
+        0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
+        0x7E0202FF, 0x3E800000, // v_mov_b32 v1, 0.25f
+        0x7E0402FF, 0x3E800000, // v_mov_b32 v2, 0.25f
+        0x7E0602FF, 0x3F000000, // v_mov_b32 v3, 0.5f
+        0xF800000F, 0x03020100, // exp mrt0 v0, v1, v2, v3
+        0xF800081F, 0x03020100, // exp mrt1 v0, v1, v2, v3 done
+        0xBF810000,             // s_endpgm
+    ]),
+    ("mrt8", true, [
+        0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
+        0x7E0202FF, 0x00000000, // v_mov_b32 v1, 0.0f
+        0x7E0402FF, 0x00000000, // v_mov_b32 v2, 0.0f
+        0x7E0602FF, 0x3F800000, // v_mov_b32 v3, 1.0f
+        0xF800000F, 0x03020100, // exp mrt0 v0, v1, v2, v3
+        0xF800001F, 0x03020100, // exp mrt1 v0, v1, v2, v3
+        0xF800002F, 0x03020100, // exp mrt2 v0, v1, v2, v3
+        0xF800003F, 0x03020100, // exp mrt3 v0, v1, v2, v3
+        0xF800004F, 0x03020100, // exp mrt4 v0, v1, v2, v3
+        0xF800005F, 0x03020100, // exp mrt5 v0, v1, v2, v3
+        0xF800006F, 0x03020100, // exp mrt6 v0, v1, v2, v3
+        0xF800087F, 0x03020100, // exp mrt7 v0, v1, v2, v3 done
+        0xBF810000,             // s_endpgm
+    ]),
+    ("mrt-partial", true, [
+        0x7E0002FF, 0x3F4CCCCD, // v_mov_b32 v0, 0.8f
+        0x7E0202FF, 0x3F333333, // v_mov_b32 v1, 0.7f
+        0xF8000803, 0x03020100, // exp mrt0 v0, v1, off, off done
+        0xBF810000,             // s_endpgm
+    ]),
+    ("mrt-partial-merge", true, [
+        0x7E0002FF, 0x3DCCCCCD, // v_mov_b32 v0, 0.1f
+        0x7E0202FF, 0x3E4CCCCD, // v_mov_b32 v1, 0.2f
+        0x7E0C02FF, 0x3E99999A, // v_mov_b32 v6, 0.3f
+        0x7E0E02FF, 0x3ECCCCCD, // v_mov_b32 v7, 0.4f
+        0xF8000003, 0x03020100, // exp mrt0 v0, v1, off, off
+        0xF800080C, 0x07060504, // exp mrt0 off, off, v6, v7 done
         0xBF810000,             // s_endpgm
     ]),
     ("sopp-hints", true, [
@@ -102,10 +159,18 @@ var imageBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5ImageBinding")
     ?? throw new InvalidOperationException("Gen5ImageBinding not found");
 var globalBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5GlobalMemoryBinding")
     ?? throw new InvalidOperationException("Gen5GlobalMemoryBinding not found");
+var pixelOutputBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5PixelOutputBinding")
+    ?? throw new InvalidOperationException("Gen5PixelOutputBinding not found");
+var pixelOutputKindType = assembly.GetType("SharpEmu.Libs.Agc.Gen5PixelOutputKind")
+    ?? throw new InvalidOperationException("Gen5PixelOutputKind not found");
 var tryCompile = spirvTranslator.GetMethod(
     "TryCompileVertexShader",
     BindingFlags.Public | BindingFlags.Static)
     ?? throw new InvalidOperationException("Gen5SpirvTranslator.TryCompileVertexShader not found");
+var tryCompilePixel = spirvTranslator.GetMethods(BindingFlags.Public | BindingFlags.Static)
+    .Single(method =>
+        method.Name == "TryCompilePixelShader" &&
+        method.GetParameters()[2].ParameterType.IsGenericType);
 var tryCompileCompute = spirvTranslator.GetMethod(
     "TryCompileComputeShader",
     BindingFlags.Public | BindingFlags.Static)
@@ -229,6 +294,94 @@ foreach (var (name, expectTranslate, words) in testPrograms)
     {
         failures++;
         Console.WriteLine($"[{name}] compute emit: FAILED ({computeArgs[6]})");
+    }
+
+    if (name.StartsWith("mrt", StringComparison.Ordinal))
+    {
+        (uint GuestSlot, uint HostLocation, string Kind)[] outputSpecs = name switch
+        {
+            "mrt" => new (uint GuestSlot, uint HostLocation, string Kind)[]
+            {
+                (0, 0, "Float"),
+                (3, 1, "Uint"),
+                (6, 2, "Sint"),
+            },
+            "mrt-float2" => [(0, 0, "Float"), (1, 1, "Float")],
+            "mrt8" => Enumerable.Range(0, 8)
+                .Select(index => ((uint)index, (uint)index, "Float"))
+                .ToArray(),
+            _ => [(0, 0, "Float")],
+        };
+        var pixelOutputs = Array.CreateInstance(pixelOutputBindingType, outputSpecs.Length);
+        for (var index = 0; index < outputSpecs.Length; index++)
+        {
+            var spec = outputSpecs[index];
+            pixelOutputs.SetValue(
+                Activator.CreateInstance(
+                    pixelOutputBindingType,
+                    spec.GuestSlot,
+                    spec.HostLocation,
+                    Enum.Parse(pixelOutputKindType, spec.Kind)),
+                index);
+        }
+
+        var pixelArgs = PadWithDefaults(
+            tryCompilePixel,
+            [state, evaluation, pixelOutputs, null, null]);
+        if ((bool)tryCompilePixel.Invoke(
+                null,
+                BindingFlags.OptionalParamBinding,
+                null,
+                pixelArgs,
+                null)!)
+        {
+            var shader = pixelArgs[3]!;
+            var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
+            var path = Path.Combine(outputDirectory, $"{name}-ps.spv");
+            File.WriteAllBytes(path, spirv);
+            Console.WriteLine($"[{name}] pixel emit: success, {spirv.Length} bytes -> {path}");
+        }
+        else
+        {
+            failures++;
+            Console.WriteLine($"[{name}] pixel emit: FAILED ({pixelArgs[4]})");
+        }
+
+        if (name == "mrt")
+        {
+            var invalidOutputs = Array.CreateInstance(pixelOutputBindingType, 2);
+            invalidOutputs.SetValue(
+                Activator.CreateInstance(
+                    pixelOutputBindingType,
+                    0u,
+                    0u,
+                    Enum.Parse(pixelOutputKindType, "Float")),
+                0);
+            invalidOutputs.SetValue(
+                Activator.CreateInstance(
+                    pixelOutputBindingType,
+                    3u,
+                    7u,
+                    Enum.Parse(pixelOutputKindType, "Float")),
+                1);
+            var invalidPixelArgs = PadWithDefaults(
+                tryCompilePixel,
+                [state, evaluation, invalidOutputs, null, null]);
+            if ((bool)tryCompilePixel.Invoke(
+                    null,
+                    BindingFlags.OptionalParamBinding,
+                    null,
+                    invalidPixelArgs,
+                    null)!)
+            {
+                failures++;
+                Console.WriteLine("[mrt] FAILED: sparse host locations were accepted");
+            }
+            else
+            {
+                Console.WriteLine($"[mrt] sparse host locations rejected as expected ({invalidPixelArgs[4]})");
+            }
+        }
     }
 }
 
