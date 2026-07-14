@@ -339,6 +339,359 @@ public static class LibcStdioExports
     }
 
     [SysAbiExport(
+        Nid = "8Q60JLJ6Rv4",
+        ExportName = "getc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Getc(CpuContext ctx) => FgetcCore(ctx);
+
+    [SysAbiExport(
+        Nid = "AEuF3F2f8TA",
+        ExportName = "fgetc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fgetc(CpuContext ctx) => FgetcCore(ctx);
+
+    private static int FgetcCore(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        if (!_fileHandles.TryGetValue(handle, out var stream))
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        try
+        {
+            var value = stream.ReadByte();
+            ctx[CpuRegister.Rax] = value < 0 ? unchecked((ulong)(-1L)) : (ulong)value;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (IOException)
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "LxcEU+ICu8U",
+        ExportName = "feof",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Feof(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var atEnd = _fileHandles.TryGetValue(handle, out var stream) &&
+            stream.CanRead && stream.Position >= stream.Length;
+        ctx[CpuRegister.Rax] = atEnd ? 1UL : 0UL;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "AHxyhN96dy4",
+        ExportName = "ferror",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Ferror(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "3QIPIh-GDjw",
+        ExportName = "rewind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Rewind(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        if (_fileHandles.TryGetValue(handle, out var stream))
+        {
+            try
+            {
+                stream.Seek(0, SeekOrigin.Begin);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "aZK8lNei-Qw",
+        ExportName = "fputc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fputc(CpuContext ctx)
+    {
+        var character = unchecked((byte)ctx[CpuRegister.Rdi]);
+        var handle = ctx[CpuRegister.Rsi];
+
+        if (_fileHandles.TryGetValue(handle, out var stream))
+        {
+            try
+            {
+                stream.WriteByte(character);
+            }
+            catch (IOException)
+            {
+                ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+        }
+        else
+        {
+            // Unknown streams are the bundled libc's real stdout/stderr FILE objects;
+            // mirror the fputs HLE and forward them to the host console.
+            Console.Out.Write((char)character);
+        }
+
+        ctx[CpuRegister.Rax] = character;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "MpxhMh8QFro",
+        ExportName = "fwrite",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fwrite(CpuContext ctx)
+    {
+        var source = ctx[CpuRegister.Rdi];
+        var elementSize = ctx[CpuRegister.Rsi];
+        var elementCount = ctx[CpuRegister.Rdx];
+        var handle = ctx[CpuRegister.Rcx];
+
+        if (elementSize == 0 || elementCount == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var knownHandle = _fileHandles.TryGetValue(handle, out var stream);
+        if (source == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var totalRequested = elementSize * elementCount;
+        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ReadChunkSize, totalRequested));
+        ulong totalWritten = 0;
+
+        try
+        {
+            while (totalWritten < totalRequested)
+            {
+                var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalWritten);
+                if (!ctx.Memory.TryRead(source + totalWritten, buffer.AsSpan(0, request)))
+                {
+                    ctx[CpuRegister.Rax] = totalWritten / elementSize;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                if (knownHandle)
+                {
+                    stream!.Write(buffer, 0, request);
+                }
+                else
+                {
+                    Console.Out.Write(System.Text.Encoding.UTF8.GetString(buffer, 0, request));
+                }
+
+                totalWritten += (ulong)request;
+            }
+        }
+        catch (IOException)
+        {
+            ctx[CpuRegister.Rax] = totalWritten / elementSize;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        ctx[CpuRegister.Rax] = totalWritten / elementSize;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "MUjC4lbHrK4",
+        ExportName = "fflush",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fflush(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+
+        try
+        {
+            if (handle == 0)
+            {
+                foreach (var stream in _fileHandles.Values)
+                {
+                    stream.Flush();
+                }
+            }
+            else if (_fileHandles.TryGetValue(handle, out var stream))
+            {
+                stream.Flush();
+            }
+        }
+        catch (IOException)
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "fffwELXNVFA",
+        ExportName = "fprintf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fprintf(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var formatAddress = ctx[CpuRegister.Rsi];
+
+        if (!KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, formatAddress, MaxPathLength, out var format))
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var rendered = KernelMemoryCompatExports.FormatStringFromVarArgs(ctx, format, firstGpArgIndex: 2);
+        return WriteRenderedText(ctx, handle, rendered);
+    }
+
+    [SysAbiExport(
+        Nid = "pDBDcY6uLSA",
+        ExportName = "vfprintf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Vfprintf(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var formatAddress = ctx[CpuRegister.Rsi];
+        var vaListAddress = ctx[CpuRegister.Rdx];
+
+        if (!KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, formatAddress, MaxPathLength, out var format))
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        KernelMemoryCompatExports.TryFormatStringFromVaList(ctx, format, vaListAddress, out var rendered);
+        return WriteRenderedText(ctx, handle, rendered);
+    }
+
+    private static int WriteRenderedText(CpuContext ctx, ulong handle, string rendered)
+    {
+        var payload = System.Text.Encoding.UTF8.GetBytes(rendered);
+
+        if (_fileHandles.TryGetValue(handle, out var stream))
+        {
+            try
+            {
+                stream.Write(payload, 0, payload.Length);
+            }
+            catch (IOException)
+            {
+                ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+        }
+        else
+        {
+            Console.Out.Write(rendered);
+        }
+
+        ctx[CpuRegister.Rax] = (ulong)payload.Length;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "gkWgn0p1AfU",
+        ExportName = "freopen",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Freopen(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        var modeAddress = ctx[CpuRegister.Rsi];
+        var handle = ctx[CpuRegister.Rdx];
+
+        if (pathAddress == 0 || modeAddress == 0 || handle == 0 ||
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, pathAddress, MaxPathLength, out var guestPath) ||
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode) ||
+            !TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (_fileHandles.TryRemove(handle, out var previousStream))
+        {
+            previousStream.Dispose();
+        }
+
+        var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        try
+        {
+            if (fileAccess != FileAccess.Read)
+            {
+                var parentDirectory = Path.GetDirectoryName(hostPath);
+                if (!string.IsNullOrWhiteSpace(parentDirectory))
+                {
+                    Directory.CreateDirectory(parentDirectory);
+                }
+            }
+
+            var stream = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            // freopen keeps the caller's FILE* identity, so rebind the same handle value.
+            _fileHandles[handle] = stream;
+
+            if (_traceStdio)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] freopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> OK handle=0x{handle:X}");
+            }
+
+            ctx[CpuRegister.Rax] = handle;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (_traceStdio)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] freopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> FAILED {ex.GetType().Name}: {ex.Message}");
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return ex is UnauthorizedAccessException
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+    }
+
+    [SysAbiExport(
         Nid = "sUP1hBaouOw",
         ExportName = "_Getpctype",
         Target = Generation.Gen4 | Generation.Gen5,

@@ -85,22 +85,29 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceKernelNanosleep",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelNanosleep(CpuContext ctx)
+    public static int KernelNanosleep(CpuContext ctx) => NanosleepCore(ctx, posix: false);
+
+    [SysAbiExport(
+        Nid = "yS8U2TGCe1A",
+        ExportName = "nanosleep",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixNanosleep(CpuContext ctx) => NanosleepCore(ctx, posix: true);
+
+    private static int NanosleepCore(CpuContext ctx, bool posix)
     {
         var requestAddress = ctx[CpuRegister.Rdi];
         var remainAddress = ctx[CpuRegister.Rsi];
 
         if (requestAddress == 0)
         {
-            ctx[CpuRegister.Rax] = Einval;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return NanosleepFailure(ctx, posix, Einval, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         Span<byte> timespecBuffer = stackalloc byte[16];
         if (!ctx.Memory.TryRead(requestAddress, timespecBuffer))
         {
-            ctx[CpuRegister.Rax] = Efault;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return NanosleepFailure(ctx, posix, Efault, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         var tvSec = BinaryPrimitives.ReadInt64LittleEndian(timespecBuffer);
@@ -108,8 +115,7 @@ public static class KernelRuntimeCompatExports
 
         if (tvSec < 0 || tvNsec < 0 || tvNsec >= 1_000_000_000L)
         {
-            ctx[CpuRegister.Rax] = Einval;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return NanosleepFailure(ctx, posix, Einval, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (tvSec == 0 && tvNsec == 0)
@@ -119,7 +125,7 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelNanosleep");
+        GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
 
         // TimeSpan resolution is 100 ns ticks, so sub-100 ns requests round up to
         // a single tick rather than collapsing to a zero-length (no-op) sleep.
@@ -136,6 +142,21 @@ public static class KernelRuntimeCompatExports
         WriteRemainingTime(ctx, remainAddress, 0, 0);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int NanosleepFailure(CpuContext ctx, bool posix, int errnoValue, OrbisGen2Result sceResult)
+    {
+        if (posix)
+        {
+            TrySetErrno(ctx, errnoValue);
+            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+        }
+        else
+        {
+            ctx[CpuRegister.Rax] = unchecked((ulong)errnoValue);
+        }
+
+        return (int)sceResult;
     }
 
     private static void WriteRemainingTime(CpuContext ctx, ulong remainAddress, long seconds, long nanoseconds)

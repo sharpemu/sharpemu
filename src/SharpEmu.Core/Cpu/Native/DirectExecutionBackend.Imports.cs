@@ -1077,14 +1077,15 @@ public sealed partial class DirectExecutionBackend
 	}
 
 	private static bool IsImportLoopGuardBoundary(string nid) =>
-		nid switch
-		{
-			// Polling and yielding imports count as progress.
-			"1jfXLRVzisc" => true, // sceKernelUsleep
-			"QcteRwbsnV0" => true, // usleep
-			"n88vx3C5nW8" => true, // gettimeofday
-			_ => false
-		};
+    nid switch
+    {
+        "1jfXLRVzisc" => true, // sceKernelUsleep
+        "QcteRwbsnV0" => true, // usleep
+        "n88vx3C5nW8" => true, // gettimeofday
+        "Zxa0VhQVIsk" => true,
+        "T72hz6ffq08" => true, // scePthreadYield
+        _ => false
+    };
 
 	private void ResetImportLoopPattern()
 	{

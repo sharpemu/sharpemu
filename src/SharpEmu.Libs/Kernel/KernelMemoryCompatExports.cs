@@ -3480,6 +3480,18 @@ public static class KernelMemoryCompatExports
         return true;
     }
 
+    internal static bool TryFormatStringFromVaList(CpuContext ctx, string format, ulong vaListAddress, out string rendered)
+    {
+        if (!TryCreateVaListCursor(ctx, vaListAddress, out var vaCursor))
+        {
+            rendered = format;
+            return false;
+        }
+
+        rendered = FormatString(ctx, format, ref vaCursor);
+        return true;
+    }
+
     private static int WriteSnprintfOutput(
         CpuContext ctx,
         ulong destination,

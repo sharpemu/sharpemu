@@ -140,7 +140,7 @@ public static class KernelPthreadCompatExports
         LibraryName = "libKernel")]
     public static int PthreadYield(CpuContext ctx)
     {
-        _ = ctx;
+        GuestThreadExecution.Scheduler?.Pump(ctx, "scePthreadYield");
         Thread.Yield();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

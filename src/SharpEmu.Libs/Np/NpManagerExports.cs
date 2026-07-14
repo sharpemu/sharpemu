@@ -23,6 +23,17 @@ public static class NpManagerExports
     }
 
     [SysAbiExport(
+        Nid = "S7QTn72PrDw",
+        ExportName = "sceNpDeleteRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpDeleteRequest(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "JELHf4xPufo",
         ExportName = "sceNpCheckCallbackForLib",
         Target = Generation.Gen4 | Generation.Gen5,
