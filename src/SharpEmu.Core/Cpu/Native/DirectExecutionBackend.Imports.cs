@@ -1082,7 +1082,7 @@ public sealed partial class DirectExecutionBackend
         "1jfXLRVzisc" => true, // sceKernelUsleep
         "QcteRwbsnV0" => true, // usleep
         "n88vx3C5nW8" => true, // gettimeofday
-        "Zxa0VhQVIsk" => true,
+        "Zxa0VhQVTsk" => true, // sceKernelWaitSema
         "T72hz6ffq08" => true, // scePthreadYield
         _ => false
     };
