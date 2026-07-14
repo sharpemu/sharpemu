@@ -2814,6 +2814,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 							thread.State = GuestThreadRunState.Running;
 							break;
 						}
+
+						if (_logGuestThreads)
+						{
+							Console.Error.WriteLine(
+								$"[LOADER][INFO] guest_threads.discard name='{candidate.Name}' state={candidate.State}");
+						}
 					}
 				}
 				if (thread == null)
@@ -2903,12 +2909,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Interlocked.Increment(ref _readyGuestThreadCount);
 				_lastWokenGuestThreadByKey[wakeKey] = thread.ThreadHandle;
 				wakeCount++;
+				if (_logGuestThreads)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] guest_threads.wake name='{thread.Name}' key={wakeKey}");
+				}
 			}
 		}
 
 		if (wakeCount != 0 && _logGuestThreads)
 		{
 			Console.Error.WriteLine($"[LOADER][INFO] guest_threads.wake key={wakeKey} count={wakeCount}");
+		}
+
+		// A woken thread only runs when something pumps the ready queue, and
+		// after thread creation stops the remaining Pump call sites can all go
+		// quiet (the primary guest parks host-side and continuously running
+		// guests never re-enter a pumping import). Dispatch here so a wake is
+		// never left sitting Ready in the queue indefinitely.
+		if (wakeCount != 0 && _cpuContext is { } wakeContext)
+		{
+			Pump(wakeContext, "wake");
 		}
 
 		return wakeCount;
@@ -2988,6 +3009,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_readyGuestThreads.Enqueue(thread);
 				Interlocked.Increment(ref _readyGuestThreadCount);
 				wakeCount++;
+				if (_logGuestThreads)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] guest_threads.timeout_wake name='{thread.Name}'");
+				}
 			}
 		}
 
@@ -4536,6 +4562,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				if (_stallWatchdogStop)
 				{
 					break;
+				}
+				// Liveness backstop: expired timed waits and missed wake-ups only
+				// dispatch when something pumps, and overall import progress from
+				// continuously running guests keeps the stall path below from ever
+				// firing. Bound the scheduling latency of a Ready thread to one
+				// watchdog tick instead.
+				if (HasReadyGuestThread() && _cpuContext is { } tickContext)
+				{
+					Pump(tickContext, "watchdog_tick");
 				}
 				long num2 = Stopwatch.GetTimestamp() - Volatile.Read(ref _lastProgressTimestamp);
 				if (num2 < num)
