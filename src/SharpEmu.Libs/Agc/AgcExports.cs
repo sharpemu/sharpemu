@@ -4133,25 +4133,28 @@ public static class AgcExports
 
         TraceTextureHash(descriptor, source);
 
-        var nonZero = 0;
-        for (var i = 0; i < source.Length; i++)
+        if (_traceAgcShader)
         {
-            if (source[i] != 0)
+            var nonZero = 0;
+            for (var i = 0; i < source.Length; i++)
             {
-                nonZero++;
-                if (nonZero >= 64)
+                if (source[i] != 0)
                 {
-                    break;
+                    nonZero++;
+                    if (nonZero >= 64)
+                    {
+                        break;
+                    }
                 }
             }
-        }
 
-        TraceAgcShader(
-            $"agc.texture_source addr=0x{descriptor.Address:X16} " +
-            $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
-            $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
-            $"dst=0x{descriptor.DstSelect:X3} " +
-            $"bytes={source.Length} nonzero64={nonZero}");
+            TraceAgcShader(
+                $"agc.texture_source addr=0x{descriptor.Address:X16} " +
+                $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
+                $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
+                $"dst=0x{descriptor.DstSelect:X3} " +
+                $"bytes={source.Length} nonzero64={nonZero}");
+        }
 
         var rgba = source;
         texture = new VulkanGuestDrawTexture(
@@ -5862,6 +5865,16 @@ public static class AgcExports
         Console.Error.WriteLine($"[LOADER][TRACE] {message}");
     }
 
+    private static void TraceAgc(ref AgcTraceHandler message)
+    {
+        if (!_traceAgc)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+    }
+
     private static void TraceAgcShader(string message)
     {
         if (!_traceAgcShader)
@@ -5870,6 +5883,62 @@ public static class AgcExports
         }
 
         Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+    }
+
+    private static void TraceAgcShader(ref AgcShaderTraceHandler message)
+    {
+        if (!_traceAgcShader)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+    }
+
+    [InterpolatedStringHandler]
+    internal ref struct AgcTraceHandler
+    {
+        private DefaultInterpolatedStringHandler _inner;
+
+        public AgcTraceHandler(int literalLength, int formattedCount, out bool isEnabled)
+        {
+            isEnabled = _traceAgc;
+            _inner = isEnabled
+                ? new DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) =>
+            _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
+    }
+
+    [InterpolatedStringHandler]
+    internal ref struct AgcShaderTraceHandler
+    {
+        private DefaultInterpolatedStringHandler _inner;
+
+        public AgcShaderTraceHandler(int literalLength, int formattedCount, out bool isEnabled)
+        {
+            isEnabled = _traceAgcShader;
+            _inner = isEnabled
+                ? new DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) =>
+            _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
     }
 
     private static string FormatShaderDwords(IReadOnlyList<uint> values) =>

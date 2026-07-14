@@ -48,54 +48,106 @@ public static class VideoOutExports
     private static readonly Dictionary<int, VideoOutPortState> _ports = new();
 
     // Hardware raises vblank autonomously; UE blocks its frame loop on it.
-    private static Timer? _vblankPumpTimer;
-    private static int _vblankPumpActive;
-    private const int VblankPumpIntervalMs = 16;
+    private const double VblankHz = 60.0;
+    private const int VblankWaitTimeoutMilliseconds = 100;
+    private static Thread? _vblankPumpThread;
+    private static int _vblankPumpStarted;
+
+    private static readonly object _vblankEdgeGate = new();
+    private static ulong _vblankEdgeSequence;
+    private static long _vblankMissedEdges;
 
     private static void EnsureVblankPumpStarted()
     {
-        if (_vblankPumpTimer is not null)
+        if (Interlocked.Exchange(ref _vblankPumpStarted, 1) != 0)
         {
             return;
         }
 
-        _vblankPumpTimer = new Timer(
-            static _ => PumpVblanks(),
-            null,
-            VblankPumpIntervalMs,
-            VblankPumpIntervalMs);
+        HostTimerResolution.Request();
+
+        _vblankPumpThread = new Thread(VblankPumpLoop)
+        {
+            IsBackground = true,
+            Name = "SharpEmu VideoOut vblank",
+            Priority = ThreadPriority.AboveNormal,
+        };
+        _vblankPumpThread.Start();
+    }
+
+    private static void VblankPumpLoop()
+    {
+        var intervalTicks = Math.Max(1L, (long)(Stopwatch.Frequency / VblankHz));
+        var nextEdge = Stopwatch.GetTimestamp() + intervalTicks;
+
+        while (true)
+        {
+            WaitUntilTimestamp(nextEdge);
+            PumpVblanks();
+
+            nextEdge += intervalTicks;
+
+            var now = Stopwatch.GetTimestamp();
+            if (nextEdge < now)
+            {
+                var missed = (now - nextEdge) / intervalTicks + 1;
+                Interlocked.Add(ref _vblankMissedEdges, missed);
+                nextEdge = now + intervalTicks;
+            }
+        }
+    }
+
+    private static void WaitUntilTimestamp(long deadlineTicks)
+    {
+        var spinThresholdTicks = Stopwatch.Frequency * 2L / 1000L;
+
+        while (true)
+        {
+            var remaining = deadlineTicks - Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                return;
+            }
+
+            if (remaining > spinThresholdTicks)
+            {
+                var sleepMilliseconds =
+                    (int)((remaining - spinThresholdTicks) * 1000L / Stopwatch.Frequency);
+                if (sleepMilliseconds > 0)
+                {
+                    Thread.Sleep(sleepMilliseconds);
+                    continue;
+                }
+            }
+
+            Thread.SpinWait(64);
+        }
     }
 
     private static void PumpVblanks()
     {
-        if (Interlocked.Exchange(ref _vblankPumpActive, 1) != 0)
+        lock (_vblankEdgeGate)
         {
-            return;
+            _vblankEdgeSequence++;
+            Monitor.PulseAll(_vblankEdgeGate);
         }
 
-        try
+        VideoOutPortState[] ports;
+        lock (_stateGate)
         {
-            VideoOutPortState[] ports;
-            lock (_stateGate)
+            if (_ports.Count == 0)
             {
-                if (_ports.Count == 0)
-                {
-                    return;
-                }
-
-                // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one global
-                // flag. Waking an unwatched queue would hold it 60x/sec and starve guest threads.
-                ports = _ports.Values.Where(static port => port.VblankEvents.Count != 0).ToArray();
+                return;
             }
 
-            foreach (var port in ports)
-            {
-                SignalVblank(port);
-            }
+            // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one global
+            // flag. Waking an unwatched queue would hold it 60x/sec and starve guest threads.
+            ports = _ports.Values.Where(static port => port.VblankEvents.Count != 0).ToArray();
         }
-        finally
+
+        foreach (var port in ports)
         {
-            Volatile.Write(ref _vblankPumpActive, 0);
+            SignalVblank(port);
         }
     }
 
@@ -111,6 +163,10 @@ public static class VideoOutExports
         StringComparison.Ordinal);
     private static readonly bool _logVideoOutSync = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_SYNC"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly bool _dumpVideoOut = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
         "1",
         StringComparison.Ordinal);
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
@@ -391,7 +447,20 @@ public static class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        Thread.Sleep(1);
+        EnsureVblankPumpStarted();
+
+        lock (_vblankEdgeGate)
+        {
+            var entryEdge = _vblankEdgeSequence;
+            while (_vblankEdgeSequence == entryEdge)
+            {
+                if (!Monitor.Wait(_vblankEdgeGate, VblankWaitTimeoutMilliseconds))
+                {
+                    break;
+                }
+            }
+        }
+
         SignalVblank(port);
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1002,10 +1071,7 @@ public static class VideoOutExports
                 displayBuffer.PitchInPixel);
         }
 
-        if (string.Equals(
-                Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
-                "1",
-                StringComparison.Ordinal))
+        if (_dumpVideoOut)
         {
             _ = TryDumpFrame(ctx, port, bufferIndex, flipMode, flipArg);
         }
@@ -1065,9 +1131,11 @@ public static class VideoOutExports
         var elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
         var submitted = Interlocked.Exchange(ref _submittedFrameCount, 0);
         var presentedCount = Interlocked.Exchange(ref _presentedFrameCount, 0);
+        var missedEdges = Interlocked.Exchange(ref _vblankMissedEdges, 0);
         Console.Error.WriteLine(
             $"[LOADER][PERF] videoout submitted_fps={submitted / elapsedSeconds:F1} " +
-            $"presented_fps={presentedCount / elapsedSeconds:F1}");
+            $"presented_fps={presentedCount / elapsedSeconds:F1} " +
+            $"vblank_missed={missedEdges}");
     }
 
     private static int RegisterBufferRange(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex = -1)

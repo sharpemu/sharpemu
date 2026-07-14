@@ -25,6 +25,26 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	private enum ImportStubKind : byte
+	{
+		Normal = 0,
+		BootstrapBridge = 1,
+		KernelDynlibDlsym = 2,
+		Il2CppApiLookupSymbol = 3,
+	}
+
+	[Flags]
+	private enum ImportStubTraceFlags : byte
+	{
+		None = 0,
+		Memset = 1 << 0,
+		CxaAtexit = 1 << 1,
+		RawArgs = 1 << 2,
+		StackChkFail = 1 << 3,
+		PeriodicEvery1000 = 1 << 4,
+		PeriodicEvery128 = 1 << 5,
+	}
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -33,12 +53,36 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public ExportedFunction? Export { get; }
 
+		public ImportStubKind Kind { get; }
+
+		public ImportStubTraceFlags TraceFlags { get; }
+
 		public ImportStubEntry(ulong address, string nid, ExportedFunction? export)
 		{
 			Address = address;
 			Nid = nid;
 			Export = export;
+			Kind = ClassifyKind(nid);
+			TraceFlags = ClassifyTraceFlags(nid);
 		}
+
+		private static ImportStubKind ClassifyKind(string nid) => nid switch
+		{
+			RuntimeStubNids.BootstrapBridge => ImportStubKind.BootstrapBridge,
+			RuntimeStubNids.KernelDynlibDlsym or "LwG8g3niqwA" => ImportStubKind.KernelDynlibDlsym,
+			"r8mvOaWdi28" => ImportStubKind.Il2CppApiLookupSymbol,
+			_ => ImportStubKind.Normal,
+		};
+
+		private static ImportStubTraceFlags ClassifyTraceFlags(string nid) => nid switch
+		{
+			"8zTFvBIAIN8" => ImportStubTraceFlags.Memset,
+			"tsvEmnenz48" => ImportStubTraceFlags.CxaAtexit | ImportStubTraceFlags.PeriodicEvery1000,
+			"bzQExy189ZI" or "8G2LB+A3rzg" => ImportStubTraceFlags.RawArgs,
+			"Ou3iL1abvng" => ImportStubTraceFlags.StackChkFail,
+			"rTXw65xmLIA" => ImportStubTraceFlags.PeriodicEvery128,
+			_ => ImportStubTraceFlags.None,
+		};
 	}
 
 	private readonly record struct RecentImportTraceEntry(

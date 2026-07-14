@@ -106,6 +106,13 @@
       "sharpemu.logging": {
         "type": "Project"
       }
+    },
+    "net10.0/win-x64": {
+      "Ultz.Native.GLFW": {
+        "type": "Transitive",
+        "resolved": "3.4.0",
+        "contentHash": "Iy22JopynbOJ32vA0lBhFEzGi65GQJBuJHYBYRBpydrDpNoTiHnjIXfA65Gu+8qsOr/ZEoIF8r9aHCgAXuO6DA=="
+      }
     }
   }
 }

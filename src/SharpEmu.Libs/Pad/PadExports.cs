@@ -19,6 +19,13 @@ public static class PadExports
     private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;
     private const int PadDataSize = 0x78;
+    private static readonly long InputSampleIntervalTicks = Math.Max(1, Stopwatch.Frequency / 1000);
+
+    [ThreadStatic]
+    private static long _lastInputSampleTicks;
+
+    [ThreadStatic]
+    private static PadState _cachedInputState;
 
     private static bool _initialized;
 
@@ -260,6 +267,44 @@ public static class PadExports
     {
         Span<byte> data = stackalloc byte[PadDataSize];
         data.Clear();
+        var input = ReadHostInputState();
+        var buttons = input.Buttons;
+        var leftX = input.LeftX;
+        var leftY = input.LeftY;
+        var rightX = input.RightX;
+        var rightY = input.RightY;
+        var l2 = input.L2;
+        var r2 = input.R2;
+
+        BinaryPrimitives.WriteUInt32LittleEndian(data[0x00..], buttons);
+        data[0x04] = leftX;
+        data[0x05] = leftY;
+        data[0x06] = rightX;
+        data[0x07] = rightY;
+        data[0x08] = l2;
+        data[0x09] = r2;
+        BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
+        data[0x4C] = 1;
+        var timestampTicks = Stopwatch.GetTimestamp();
+        var timestampMicroseconds =
+            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
+            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            data[0x50..],
+            timestampMicroseconds);
+        data[0x68] = 1;
+
+        return ctx.Memory.TryWrite(dataAddress, data);
+    }
+
+    private static PadState ReadHostInputState()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks)
+        {
+            return _cachedInputState;
+        }
+
         var acceptsKeyboardInput = IsEmulatorWindowFocused();
         var buttons = acceptsKeyboardInput ? ReadKeyboardButtons() : 0;
         var leftX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x41), IsKeyDown(0x44)) : (byte)128;
@@ -293,25 +338,17 @@ public static class PadExports
             r2 = Math.Max(r2, xpad.R2);
         }
 
-        BinaryPrimitives.WriteUInt32LittleEndian(data[0x00..], buttons);
-        data[0x04] = leftX;
-        data[0x05] = leftY;
-        data[0x06] = rightX;
-        data[0x07] = rightY;
-        data[0x08] = l2;
-        data[0x09] = r2;
-        BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
-        data[0x4C] = 1;
-        var timestampTicks = Stopwatch.GetTimestamp();
-        var timestampMicroseconds =
-            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
-            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
-        BinaryPrimitives.WriteUInt64LittleEndian(
-            data[0x50..],
-            timestampMicroseconds);
-        data[0x68] = 1;
-
-        return ctx.Memory.TryWrite(dataAddress, data);
+        _cachedInputState = new PadState(
+            Connected: true,
+            Buttons: buttons,
+            LeftX: leftX,
+            LeftY: leftY,
+            RightX: rightX,
+            RightY: rightY,
+            L2: l2,
+            R2: r2);
+        _lastInputSampleTicks = now;
+        return _cachedInputState;
     }
 
     [DllImport("user32.dll")]

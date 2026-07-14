@@ -6,19 +6,15 @@ using System.Text;
 
 namespace SharpEmu.Logging;
 
-/// <summary>
-/// Writes log entries to a file. Thread-safe via an internal lock.
-/// <see cref="StreamWriter.AutoFlush"/> is enabled so entries survive a crash.
-/// </summary>
 public sealed class FileLogSink : ISharpEmuLogSink, IDisposable
 {
+    private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(500);
+
     private readonly object _sync = new();
     private readonly StreamWriter _writer;
+    private readonly Timer _flushTimer;
     private bool _disposed;
 
-    /// <param name="path">Absolute or relative file path. Parent directories are created if missing.</param>
-    /// <param name="append"><see langword="true"/> to append to an existing file; <see langword="false"/> to overwrite.</param>
-    /// <param name="includeTimestamp">Always recommended for file logs — entries include a full date-time prefix.</param>
     public FileLogSink(string path, bool append = true, bool includeTimestamp = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -34,14 +30,20 @@ public sealed class FileLogSink : ISharpEmuLogSink, IDisposable
             append ? FileMode.Append : FileMode.Create,
             FileAccess.Write,
             FileShare.Read,
-            bufferSize: 4096,
+            bufferSize: 65536,
             FileOptions.SequentialScan);
-        _writer = new StreamWriter(fileStream, Encoding.UTF8)
+        _writer = new StreamWriter(fileStream, Encoding.UTF8, bufferSize: 65536)
         {
-            AutoFlush = true
+            AutoFlush = false
         };
 
         IncludeTimestamp = includeTimestamp;
+
+        _flushTimer = new Timer(
+            static state => ((FileLogSink)state!).FlushBuffered(),
+            this,
+            FlushInterval,
+            FlushInterval);
     }
 
     public bool IncludeTimestamp { get; set; }
@@ -84,11 +86,31 @@ public sealed class FileLogSink : ISharpEmuLogSink, IDisposable
             {
                 _writer.WriteLine(entry.Exception);
             }
+
+            if (entry.Level >= LogLevel.Error)
+            {
+                _writer.Flush();
+            }
+        }
+    }
+
+    private void FlushBuffered()
+    {
+        lock (_sync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _writer.Flush();
         }
     }
 
     public void Dispose()
     {
+        _flushTimer.Dispose();
+
         lock (_sync)
         {
             if (_disposed)
