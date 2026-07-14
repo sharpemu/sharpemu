@@ -157,7 +157,7 @@ public static class AgcExports
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
     private static readonly Dictionary<(ulong Ps, ulong State, Gen5PixelOutputKind Output), byte[]> _pixelSpirvCache = new();
     private static readonly Dictionary<
-        (ulong Es, ulong EsState, ulong Ps, ulong PsState, Gen5PixelOutputKind Output, uint Attributes),
+        (ulong Es, ulong EsState, ulong Ps, ulong PsState, string OutputLayout, uint Attributes),
         (byte[] Vertex, byte[] Pixel)> _graphicsSpirvCache = new();
     private static readonly Dictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ),
@@ -3329,12 +3329,13 @@ public static class AgcExports
                     textures,
                     globalMemoryBuffers,
                     translatedDraw.AttributeCount,
-                    new VulkanGuestRenderTarget(
-                        firstTarget.Address,
-                        firstTarget.Width,
-                            firstTarget.Height,
-                            firstTarget.Format,
-                            firstTarget.NumberType),
+                    translatedDraw.RenderTargets.Select(target =>
+                        new VulkanGuestRenderTarget(
+                            target.Address,
+                            target.Width,
+                            target.Height,
+                            target.Format,
+                            target.NumberType)).ToArray(),
                         translatedDraw.VertexSpirv,
                         translatedDraw.VertexCount,
                         translatedDraw.InstanceCount,
@@ -3462,11 +3463,34 @@ public static class AgcExports
         }
 
         var renderTargets = GetRenderTargets(state.CxRegisters)
-            .Where(target =>
-                target.Slot == 0 &&
-                HasPixelColorExport(pixelState, target.Slot))
+            .Where(target => HasPixelColorExport(pixelState, target.Slot))
+            .OrderBy(target => target.Slot)
             .ToArray();
-        var outputKind = GetPixelOutputKind(renderTargets.FirstOrDefault().NumberType);
+        var renderTargetFormats = new VulkanRenderTargetFormat[renderTargets.Length];
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            var target = renderTargets[index];
+            if (!VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                    target.Format,
+                    target.NumberType,
+                    out renderTargetFormats[index]))
+            {
+                error =
+                    $"unsupported color target format={target.Format} number_type={target.NumberType}";
+                return false;
+            }
+        }
+
+        var pixelOutputs = renderTargets
+            .Select((target, location) => new Gen5PixelOutputBinding(
+                target.Slot,
+                (uint)location,
+                renderTargetFormats[location].OutputKind))
+            .ToArray();
+        var outputLayout = string.Join(
+            ';',
+            pixelOutputs.Select(output =>
+                $"{output.GuestSlot}:{output.HostLocation}:{(int)output.Kind}"));
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = ComputeShaderStructureFingerprint(exportEvaluation);
         var pixelStateFingerprint = ComputeShaderStructureFingerprint(pixelEvaluation);
@@ -3475,7 +3499,7 @@ public static class AgcExports
             exportStateFingerprint,
             pixelShaderAddress,
             pixelStateFingerprint,
-            outputKind,
+            outputLayout,
             attributeCount);
         var totalGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
@@ -3491,7 +3515,7 @@ public static class AgcExports
             if (!Gen5SpirvTranslator.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
-                    outputKind,
+                    pixelOutputs,
                     out var pixelShader,
                     out error,
                     globalBufferBase: 0,
@@ -3579,7 +3603,7 @@ public static class AgcExports
             vertexInputs,
             renderTargets,
             ApplyTransparentPremultipliedFillClear(
-                CreateRenderState(state.CxRegisters, renderTargets.FirstOrDefault()),
+                CreateRenderState(state.CxRegisters, renderTargets, pixelState),
                 textures,
                 vertexInputs,
                 pixelEvaluation.InitialScalarRegisters));
@@ -3595,7 +3619,8 @@ public static class AgcExports
     /// Chowdren resets its effect layers with an untextured transparent-black
     /// fill using premultiplied blending. With One/OneMinusSrcAlpha that draw
     /// is otherwise a no-op, causing fog and vignette layers to accumulate.
-    /// Treat precisely that draw shape as an overwrite.
+    /// Treat precisely that draw shape as an overwrite only when every MRT
+    /// attachment uses the same premultiplied blend pattern.
     /// </summary>
     private static VulkanGuestRenderState ApplyTransparentPremultipliedFillClear(
         VulkanGuestRenderState renderState,
@@ -3607,13 +3632,7 @@ public static class AgcExports
             textures.Count != 0 ||
             vertexInputs.Count != 0 ||
             pixelUserData.Count < 4 ||
-            renderState.Blend is not
-            {
-                Enable: true,
-                ColorSrcFactor: 1,
-                ColorDstFactor: 5,
-                ColorFunc: 0,
-            })
+            !renderState.Blends.All(IsTransparentPremultipliedFillBlend))
         {
             return renderState;
         }
@@ -3628,9 +3647,20 @@ public static class AgcExports
 
         return renderState with
         {
-            Blend = renderState.Blend with { Enable = false },
+            Blends = renderState.Blends
+                .Select(blend => blend with { Enable = false })
+                .ToArray(),
         };
     }
+
+    private static bool IsTransparentPremultipliedFillBlend(VulkanGuestBlendState blend) =>
+        blend is
+        {
+            Enable: true,
+            ColorSrcFactor: 1,
+            ColorDstFactor: 5,
+            ColorFunc: 0,
+        };
 
     private static VulkanGuestIndexBuffer? CreateVulkanIndexBuffer(
         CpuContext ctx,
@@ -3654,19 +3684,15 @@ public static class AgcExports
             : null;
     }
 
-    private static Gen5PixelOutputKind GetPixelOutputKind(uint numberType) =>
-        numberType switch
-        {
-            4 => Gen5PixelOutputKind.Uint,
-            5 => Gen5PixelOutputKind.Sint,
-            _ => Gen5PixelOutputKind.Float,
-        };
-
     private static bool HasPixelColorExport(Gen5ShaderState state, uint target) =>
-        state.Program.Instructions.Any(instruction =>
-            instruction.Control is Gen5ExportControl export &&
-            export.Target == target &&
-            export.EnableMask != 0);
+        GetPixelColorExportMask(state, target) != 0;
+
+    private static uint GetPixelColorExportMask(Gen5ShaderState state, uint target) =>
+        state.Program.Instructions
+            .Select(instruction => instruction.Control)
+            .OfType<Gen5ExportControl>()
+            .Where(export => export.Target == target)
+            .Aggregate(0u, (mask, export) => mask | (export.EnableMask & 0xFu));
 
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
@@ -3824,11 +3850,25 @@ public static class AgcExports
 
     private static VulkanGuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
-        RenderTargetDescriptor target)
+        IReadOnlyList<RenderTargetDescriptor> targets,
+        Gen5ShaderState pixelState)
     {
+        if (targets.Count == 0)
+        {
+            return VulkanGuestRenderState.Default;
+        }
+
+        var target = targets[0];
         var scissor = DecodeScissor(registers, target.Width, target.Height);
         return new VulkanGuestRenderState(
-            DecodeBlendState(registers, target.Slot),
+            targets.Select(target =>
+            {
+                var blend = DecodeBlendState(registers, target.Slot);
+                return blend with
+                {
+                    WriteMask = blend.WriteMask & GetPixelColorExportMask(pixelState, target.Slot),
+                };
+            }).ToArray(),
             scissor,
             DecodeViewport(registers, target.Width, target.Height, scissor));
     }
@@ -3853,7 +3893,7 @@ public static class AgcExports
             (control >> 24) & 0x1Fu,
             (control >> 21) & 0x7u,
             ((control >> 29) & 1u) != 0,
-            writeMask == 0 ? 0xFu : writeMask);
+            writeMask);
     }
 
     private static VulkanGuestRect? DecodeScissor(
@@ -5191,7 +5231,7 @@ public static class AgcExports
                         if (Gen5SpirvTranslator.TryCompilePixelShader(
                                  pixelState,
                                  evaluation,
-                                 Gen5PixelOutputKind.Float,
+                                 [new(0, 0, Gen5PixelOutputKind.Float)],
                                  out var compiledPixel,
                                  out var compileError))
                         {
