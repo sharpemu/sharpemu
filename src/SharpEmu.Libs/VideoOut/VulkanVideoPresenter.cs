@@ -178,7 +178,7 @@ internal static unsafe class VulkanVideoPresenter
     private const uint GuestFormatR16G16B16A16Sint = 0x2000C;
 
     private static readonly object _gate = new();
-    private static readonly Queue<object> _pendingGuestWork = new();
+    private static readonly GuestWorkScheduler _guestWork = new(MaxPendingGuestWork);
     private static readonly Dictionary<ulong, uint> _availableGuestImages = new();
     private static readonly Dictionary<ulong, uint> _gpuGuestImages = new();
     private static readonly HashSet<(ulong Address, uint Width, uint Height)>
@@ -192,8 +192,6 @@ internal static unsafe class VulkanVideoPresenter
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
     private const uint NvidiaVendorId = 0x10DE;
     private static bool _splashHidden;
-    private static long _enqueuedGuestWorkSequence;
-    private static long _completedGuestWorkSequence;
 
     private static bool ShouldTracePresentedGuestImageContentsForDiagnostics()
     {
@@ -238,7 +236,7 @@ internal static unsafe class VulkanVideoPresenter
                     1,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                    RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                     IsSplash: false)
                 : hasSplash
                 ? new Presentation(
@@ -248,7 +246,7 @@ internal static unsafe class VulkanVideoPresenter
                     1,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                    RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                     IsSplash: true)
                 : new Presentation(
                     null,
@@ -257,7 +255,7 @@ internal static unsafe class VulkanVideoPresenter
                     0,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                    RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                     IsSplash: false);
             _thread = new Thread(Run)
             {
@@ -286,7 +284,7 @@ internal static unsafe class VulkanVideoPresenter
                 sequence,
                 GuestDrawKind.None,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                 IsSplash: false);
             System.Threading.Monitor.PulseAll(_gate);
             Console.Error.WriteLine("[LOADER][INFO] Vulkan VideoOut hid splash");
@@ -320,7 +318,7 @@ internal static unsafe class VulkanVideoPresenter
                 sequence,
                 GuestDrawKind.None,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                 IsSplash: false);
             System.Threading.Monitor.PulseAll(_gate);
             if (_thread is not null)
@@ -370,7 +368,7 @@ internal static unsafe class VulkanVideoPresenter
                 sequence,
                 drawKind,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                 IsSplash: false);
             System.Threading.Monitor.PulseAll(_gate);
             if (_thread is not null)
@@ -441,7 +439,7 @@ internal static unsafe class VulkanVideoPresenter
                     primitiveType,
                     indexBuffer,
                     renderState ?? VulkanGuestRenderState.Default),
-                RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
+                RequiredGuestWorkSequence: _guestWork.Snapshot().EnqueuedSequence,
                 IsSplash: false);
             System.Threading.Monitor.PulseAll(_gate);
             if (_thread is not null)
@@ -985,6 +983,7 @@ internal static unsafe class VulkanVideoPresenter
         }
         finally
         {
+            _guestWork.Close();
             lock (_gate)
             {
                 _closed = true;
@@ -1000,7 +999,7 @@ internal static unsafe class VulkanVideoPresenter
         {
             if (_latestPresentation is not { } latest ||
                 latest.Sequence == presentedSequence ||
-                latest.RequiredGuestWorkSequence > _completedGuestWorkSequence)
+                latest.RequiredGuestWorkSequence > _guestWork.Snapshot().CompletedSequence)
             {
                 presentation = default;
                 return false;
@@ -1015,34 +1014,26 @@ internal static unsafe class VulkanVideoPresenter
     {
         while (!_closed &&
                _thread is not null &&
-               _pendingGuestWork.Count >= MaxPendingGuestWork)
+               _guestWork.Snapshot().Queued >= MaxPendingGuestWork)
         {
             System.Threading.Monitor.Wait(_gate);
         }
 
-        if (_closed)
+        if (_closed || !_guestWork.TryEnqueue(work))
         {
             return;
         }
-
-        _pendingGuestWork.Enqueue(work);
-        _enqueuedGuestWorkSequence++;
         System.Threading.Monitor.PulseAll(_gate);
     }
 
-    private static bool TryTakeGuestWork(out object work)
-    {
-        lock (_gate)
-        {
-            return _pendingGuestWork.TryDequeue(out work!);
-        }
-    }
+    private static bool TryTakeGuestWork(out object work) =>
+        _guestWork.TryTake(out work);
 
     private static void CompleteGuestWork()
     {
+        _guestWork.Complete();
         lock (_gate)
         {
-            _completedGuestWorkSequence++;
             System.Threading.Monitor.PulseAll(_gate);
         }
     }
@@ -5664,15 +5655,9 @@ internal static unsafe class VulkanVideoPresenter
                     var hotName = hottestThreadId == 0
                         ? "idle"
                         : GetPerformanceThreadName(hottestThreadId);
-                    long guestBacklog;
-                    int queuedGuestWork;
-                    lock (_gate)
-                    {
-                        guestBacklog = Math.Max(
-                            0,
-                            _enqueuedGuestWorkSequence - _completedGuestWorkSequence);
-                        queuedGuestWork = _pendingGuestWork.Count;
-                    }
+                    var guestWork = _guestWork.Snapshot();
+                    var guestBacklog = guestWork.Backlog;
+                    var queuedGuestWork = guestWork.Queued;
 
                     var gpuInFlight = _pendingGuestSubmissions.Count +
                         (_presentationInFlight ? 1 : 0);
@@ -5797,11 +5782,12 @@ internal static unsafe class VulkanVideoPresenter
             var gpuWorkInFlight = _pendingGuestSubmissions.Count > 0 || _presentationInFlight;
             lock (_gate)
             {
+                var guestWork = _guestWork.Snapshot();
                 if (_closed ||
-                    _pendingGuestWork.Count > 0 ||
+                    guestWork.Queued > 0 ||
                     (_latestPresentation is { } latest &&
                      latest.Sequence != _presentedSequence &&
-                     latest.RequiredGuestWorkSequence <= _completedGuestWorkSequence))
+                     latest.RequiredGuestWorkSequence <= guestWork.CompletedSequence))
                 {
                     return;
                 }

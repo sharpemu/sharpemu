@@ -14,5 +14,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
+    <Project Path="tests/SharpEmu.Tests.GuestWorkScheduler/SharpEmu.Tests.GuestWorkScheduler.csproj" />
   </Folder>
 </Solution>

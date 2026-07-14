@@ -103,6 +103,9 @@ jobs:
       - name: Validate synthetic shaders
         run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
 
+      - name: Test guest work scheduler
+        run: dotnet run --project tests/SharpEmu.Tests.GuestWorkScheduler/SharpEmu.Tests.GuestWorkScheduler.csproj -c Release --no-build
+
       - name: Publish win-x64 CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
 
