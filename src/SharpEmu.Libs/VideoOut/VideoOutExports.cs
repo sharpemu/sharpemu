@@ -64,6 +64,110 @@ public static class VideoOutExports
     private static long _vblankSignalCount;
     private static long _flipSubmitCount;
 
+    // Hardware raises vblank autonomously; engines that register vblank events
+    // and then block on the event queue (rather than polling GetVblankStatus)
+    // starve without a periodic edge — they stop issuing scene draws while
+    // their unpaced UI/flip path keeps running.
+    private const double VblankHz = 60.0;
+    private static Thread? _vblankPumpThread;
+    private static int _vblankPumpStarted;
+
+    private static void EnsureVblankPumpStarted()
+    {
+        if (Interlocked.Exchange(ref _vblankPumpStarted, 1) != 0)
+        {
+            return;
+        }
+
+        HostTimerResolution.Request();
+
+        _vblankPumpThread = new Thread(VblankPumpLoop)
+        {
+            IsBackground = true,
+            Name = "SharpEmu VideoOut vblank",
+            Priority = ThreadPriority.AboveNormal,
+        };
+        _vblankPumpThread.Start();
+    }
+
+    private static void VblankPumpLoop()
+    {
+        var intervalTicks = Math.Max(1L, (long)(Stopwatch.Frequency / VblankHz));
+        var nextEdge = Stopwatch.GetTimestamp() + intervalTicks;
+
+        while (true)
+        {
+            WaitUntilTimestamp(nextEdge);
+            PumpVblanks();
+
+            nextEdge += intervalTicks;
+
+            var now = Stopwatch.GetTimestamp();
+            if (nextEdge < now)
+            {
+                nextEdge = now + intervalTicks;
+            }
+        }
+    }
+
+    private static void WaitUntilTimestamp(long deadlineTicks)
+    {
+        var spinThresholdTicks = Stopwatch.Frequency * 2L / 1000L;
+
+        while (true)
+        {
+            var remaining = deadlineTicks - Stopwatch.GetTimestamp();
+            if (remaining <= 0)
+            {
+                return;
+            }
+
+            if (remaining > spinThresholdTicks)
+            {
+                var sleepMilliseconds =
+                    (int)((remaining - spinThresholdTicks) * 1000L / Stopwatch.Frequency);
+                if (sleepMilliseconds > 0)
+                {
+                    Thread.Sleep(sleepMilliseconds);
+                    continue;
+                }
+            }
+
+            Thread.SpinWait(64);
+        }
+    }
+
+    private static void PumpVblanks()
+    {
+        VideoOutPortState[] ports;
+        lock (_stateGate)
+        {
+            if (_ports.Count == 0)
+            {
+                return;
+            }
+
+            // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one
+            // global flag. Waking an unwatched queue would hold it 60x/sec and starve
+            // guest threads.
+            var watched = new List<VideoOutPortState>(_ports.Count);
+            foreach (var port in _ports.Values)
+            {
+                if (port.VblankEvents.Count != 0)
+                {
+                    watched.Add(port);
+                }
+            }
+
+            ports = watched.ToArray();
+        }
+
+        foreach (var port in ports)
+        {
+            SignalVblank(port);
+        }
+    }
+
     public static void ConfigureApplicationInfo(string? title, string? titleId, string? version, string? emulatorCommitSha)
     {
         var parts = new List<string>();
@@ -177,6 +281,7 @@ public static class VideoOutExports
             {
                 Handle = handle,
             };
+            EnsureVblankPumpStarted();
             return handle;
         }
     }
