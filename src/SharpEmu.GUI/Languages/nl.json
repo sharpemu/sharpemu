@@ -1,0 +1,129 @@
+{
+  "_languageName": "Nederlands",
+
+  "Page.Library": "Bibliotheek",
+  "Page.Options": "Opties",
+  "Page.GameCount.One": "1 game",
+  "Page.GameCount.Other": "{0} games",
+
+  "Library.SearchWatermark": "Zoeken in bibliotheek…",
+  "Library.AddFolder": "＋ Map toevoegen",
+  "Library.Rescan": "⟳ Opnieuw scannen",
+  "Library.OpenFile": "Bestand openen…",
+
+  "Library.Context.Launch": "Starten",
+  "Library.Context.OpenFolder": "Gamemap openen",
+  "Library.Context.CopyPath": "Pad kopiëren",
+  "Library.Context.CopyTitleId": "Titel-ID kopiëren",
+  "Library.Context.Remove": "Verwijderen uit bibliotheek",
+
+  "Library.Empty.Title": "Je bibliotheek is leeg",
+  "Library.Empty.Hint": "Voeg een map met je games toe om te beginnen.",
+  "Library.Empty.SearchTitle": "Geen games komen overeen met je zoekopdracht",
+  "Library.Empty.SearchHint": "Niets in de bibliotheek komt overeen met “{0}”.",
+  "Library.Empty.AddFolder": "＋ Gamemap toevoegen",
+
+  "Library.Loading": "Bibliotheek laden…",
+
+  "Options.General": "Algemeen",
+  "Options.Section.Emulation": "EMULATIE",
+  "Options.Section.Logging": "LOGGING",
+  "Options.Section.Launcher": "LAUNCHER",
+
+  "Options.CpuEngine.Label": "CPU-engine",
+  "Options.CpuEngine.Desc": "Engine die wordt gebruikt om gamecode uit te voeren.",
+  "Options.CpuEngine.Native": "Native",
+
+  "Options.Strict.Label": "Strikte dynlib-resolutie",
+  "Options.Strict.Desc": "Laat het opstarten mislukken wanneer een geïmporteerd symbool niet kan worden opgelost.",
+
+  "Options.LogLevel.Label": "Logniveau",
+  "Options.LogLevel.Desc": "Uitgebreidheid van de console-uitvoer van de emulator.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Info",
+  "Options.LogLevel.Warning": "Waarschuwing",
+  "Options.LogLevel.Error": "Fout",
+  "Options.LogLevel.Critical": "Kritiek",
+
+  "Options.TraceImports.Label": "Tracelimiet voor imports",
+  "Options.TraceImports.Desc": "Traceer de eerste N imports per module (0 = uit).",
+
+  "Options.LogToFile.Label": "Loggen naar bestand",
+  "Options.LogToFile.Desc": "Stuur de uitvoer van de emulator ook naar een logbestand.",
+
+  "Options.LogFilePath.Label": "Pad naar logbestand",
+  "Options.LogFilePath.Default": "Geen aangepast pad — logs komen terecht in user/logs naast de emulator.",
+  "Options.LogFilePath.Select": "Selecteren…",
+
+  "Options.OverrideLogFile.Label": "Logbestand overschrijven",
+  "Options.OverrideLogFile.Desc": "Gebruik het exacte bestandspad in plaats van de titel-ID en tijdstempel toe te voegen.",
+
+  "Options.TitleMusic.Label": "Titelmuziek",
+  "Options.TitleMusic.Desc": "Herhaal de voorbeeldmuziek van de geselecteerde game in de bibliotheek.",
+
+  "Options.Discord.Label": "Discord-aanwezigheid",
+  "Options.Discord.Desc": "Toon de actieve game op je Discord-profiel.",
+
+  "Options.Language.Label": "Taal van de emulator",
+  "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
+
+  "Common.On": "Aan",
+  "Common.Off": "Uit",
+
+  "Console.Title": "CONSOLE",
+  "Console.SearchWatermark": "Zoeken...",
+  "Console.AutoScroll": "Automatisch scrollen",
+  "Console.Split": "Splitsen",
+  "Console.Copy": "Kopiëren",
+  "Console.Clear": "Wissen",
+  "Console.WindowTitle": "SharpEmu-console",
+
+  "Launch.NoGameSelected": "Geen game geselecteerd",
+  "Launch.NoGameHint": "Kies een game uit de bibliotheek, of open direct een eboot.bin-bestand.",
+  "Launch.Idle": "Inactief",
+  "Launch.Console": "≡ Console",
+  "Launch.Launch": "▶  Starten",
+  "Launch.Stop": "■  Stoppen",
+  "Launch.Running": "Actief — {0}",
+  "Launch.Stopping": "Stoppen…",
+  "Launch.Exited": "Afgesloten met code {0} ({1})",
+  "Launch.ExeNotFound": "SharpEmu-uitvoerbaar bestand niet gevonden. Bouw eerst het SharpEmu.CLI-project (dotnet build).",
+  "Launch.LogFile": "Logbestand: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Starten van de emulator mislukt: {0}",
+  "Launch.ProcessExited": "Proces afgesloten met code {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "ongeldige argumenten",
+  "Exit.EbootNotFound": "eboot niet gevonden",
+  "Exit.RuntimeException": "runtime-uitzondering",
+  "Exit.EmulationError": "emulatiefout",
+  "Exit.Unknown": "onbekend",
+
+  "Status.EmulatorLocating": "Emulator: zoeken…",
+  "Status.EmulatorPath": "Emulator: {0}",
+  "Status.EmulatorNotFound": "Emulator: SharpEmu-uitvoerbaar bestand niet gevonden — bouw eerst SharpEmu.CLI.",
+  "Status.ScanningLibrary": "Bibliotheek scannen…",
+  "Status.AddFolderPrompt": "Voeg een gamemap toe om de bibliotheek te vullen.",
+  "Status.LibraryScanned": "Bibliotheek gescand: {0} game(s) in {1} map(pen).",
+  "Status.CouldNotOpenFolder": "Kan map niet openen: {0}",
+  "Status.CopiedToClipboard": "{0} gekopieerd naar klembord.",
+  "Status.RemovedFromLibrary": "“{0}” verwijderd uit de bibliotheek. Voeg de map opnieuw toe om dit te herstellen.",
+  "Status.Running": "Actief {0}",
+  "Status.Stopping": "Stoppen…",
+  "Status.Idle": "Inactief",
+
+  "Clipboard.Path": "Pad",
+  "Clipboard.TitleId": "Titel-ID",
+
+  "Discord.Playing": "Speelt {0}",
+  "Discord.Browsing": "Bladert door de bibliotheek",
+
+  "Dialog.ChooseGameFolder": "Kies een map met games",
+  "Dialog.OpenExecutable": "Open een uitvoerbaar bestand om te starten",
+  "Dialog.PsExecutables": "PS-uitvoerbare bestanden",
+  "Dialog.SaveLogFile": "Selecteer waar het logbestand moet worden opgeslagen",
+  "Dialog.PlainTextFiles": "Platte tekstbestanden",
+  "Dialog.LogFiles": "Logbestanden"
+}
