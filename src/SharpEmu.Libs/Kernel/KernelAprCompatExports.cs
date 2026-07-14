@@ -80,11 +80,7 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        // The remaining wait arguments are scalar completion metadata, not guest
-        // pointers.  The result destination supplied at submission time has already
-        // been populated by CompleteCommandBuffer/TryWriteAprResult.  Treating rdx
-        // values such as 0x0f or a byte count as an address made every completed APR
-        // read fail with ORBIS_GEN2_ERROR_MEMORY_FAULT.
+        // Completion output was written when the command was submitted.
         TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

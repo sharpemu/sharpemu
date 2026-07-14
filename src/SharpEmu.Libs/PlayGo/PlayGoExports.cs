@@ -682,10 +682,7 @@ public static class PlayGoExports
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
         {
-            // A dumped/full-install title commonly has no PlayGo sidecar files.  The
-            // retail service still permits the title to open PlayGo and observes its
-            // content as local; treating absent host metadata as "PlayGo unsupported"
-            // makes some Unreal titles wait forever during platform startup.
+            // Full installs may omit PlayGo sidecar metadata.
             TracePlayGo("metadata_missing; using fully-installed default chunk");
             return new PlayGoMetadata(true, [(ushort)0]);
         }

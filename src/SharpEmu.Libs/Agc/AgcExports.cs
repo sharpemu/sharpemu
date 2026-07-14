@@ -2062,8 +2062,7 @@ public static class AgcExports
     public static int DriverSubmitDcb(CpuContext ctx)
     {
         var packetAddress = ctx[CpuRegister.Rdi];
-        // Gen5 callers can pass the DCB directly in RSI/RDX while older callers
-        // use a packed { address, dwordCount } object in RDI.
+        // Gen5 supports direct RSI/RDX and packed RDI submissions.
         var commandAddress = ctx[CpuRegister.Rsi];
         var directDwordCount = ctx[CpuRegister.Rdx];
         uint dwordCount;
@@ -2108,8 +2107,7 @@ public static class AgcExports
             DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
-        // Wake the AGC interrupt path for completed setup/work submissions. Flip
-        // submissions retain VideoOut pacing and must not be completed here.
+        // Flip submissions are completed through VideoOut pacing.
         if (gpuState.FlipSequence == flipSequenceBefore)
         {
             KernelEventQueueCompatExports.TriggerRegisteredEvents(
@@ -2428,16 +2426,14 @@ public static class AgcExports
             var packetType = header >> 30;
             if (packetType == 0)
             {
-                // Consume zero-filled alignment one dword at a time so odd
-                // padding cannot skip the next real packet.
+                // Consume alignment padding one dword at a time.
                 if (header == 0)
                 {
                     offset++;
                     continue;
                 }
 
-                // Type-0 register packets are legal in native DCB streams. We
-                // do not consume their state yet, but preserve synchronization.
+                // Preserve stream alignment across type-0 packets.
                 var type0Length = ((header >> 16) & 0x3FFFu) + 2u;
                 if (offset + type0Length > dwordCount)
                 {
@@ -2735,8 +2731,7 @@ public static class AgcExports
                 var flipArg = unchecked((long)(((ulong)flipArgHi << 32) | flipArgLo));
                 var displayBufferIndex = unchecked((int)displayBufferIndexRaw);
                 var handle = unchecked((int)videoOutHandle);
-                // Prefer output decoded from this DCB. A cached display image can
-                // be stale or merely registered without initialized GPU contents.
+                // Prefer output decoded from the current DCB.
                 if (state.SawIndexedDraw &&
                     state.TranslatedDraw is { } translatedDraw &&
                     VideoOutExports.TryGetDisplayBufferInfo(

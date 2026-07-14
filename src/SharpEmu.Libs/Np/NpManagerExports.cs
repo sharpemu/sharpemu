@@ -42,7 +42,7 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpGetOnlineId(CpuContext ctx)
     {
-        // Gen5 passes the user id first and the output structure second.
+        // Gen5 ABI: user ID, then output structure.
         return WriteOfflineOnlineId(ctx, ctx[CpuRegister.Rsi]);
     }
 
@@ -53,7 +53,7 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpGetOnlineIdA(CpuContext ctx)
     {
-        // The A variant takes a user id before the output OnlineId pointer.
+        // The A variant takes a user ID before OnlineId.
         return WriteOfflineOnlineId(ctx, ctx[CpuRegister.Rsi]);
     }
 
@@ -177,7 +177,7 @@ public static class NpManagerExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // SceNpOnlineId: 16-byte handle, terminator, and three reserved bytes.
+        // SceNpOnlineId is a 16-byte handle plus four trailing bytes.
         Span<byte> onlineId = stackalloc byte[20];
         "Player"u8.CopyTo(onlineId);
         return ctx.Memory.TryWrite(address, onlineId)

@@ -600,10 +600,7 @@ internal static unsafe class VulkanVideoPresenter
         var traceSubmission = false;
         lock (_gate)
         {
-            // Registration only says that this is a legal VideoOut address.
-            // It does not mean Vulkan has created and rendered a guest image
-            // for it.  Presenting a merely registered address produces an
-            // uninitialized image and suppresses the translated-draw fallback.
+            // VideoOut registration does not imply a rendered Vulkan image.
             var known = _gpuGuestImages.ContainsKey(address);
             if (ShouldTracePresentedGuestImageContentsForDiagnostics())
             {

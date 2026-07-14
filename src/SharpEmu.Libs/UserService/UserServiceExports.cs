@@ -13,10 +13,7 @@ public static class UserServiceExports
     private const int OrbisUserServiceErrorNoEvent = unchecked((int)0x80960007);
     private const int OrbisUserServiceErrorInvalidParameter = unchecked((int)0x80960009);
     private const int OrbisUserServiceErrorBufferTooShort = unchecked((int)0x8096000A);
-    // Retail PS4/PS5 user-service IDs begin at 0x3E8.  Several Unreal
-    // platform paths retain this value and use it across Pad, SaveData and
-    // online initialization, so a small synthetic ID such as 1 is not
-    // interchangeable even when scePadOpen itself returns a valid handle.
+    // Retail user-service IDs begin at 0x3E8.
     private const int PrimaryUserId = 1000;
     private const int InvalidUserId = -1;
     private const string PrimaryUserName = "SharpEmu";
@@ -115,7 +112,7 @@ public static class UserServiceExports
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var nameAddress = ctx[CpuRegister.Rsi];
         var capacity = ctx[CpuRegister.Rdx];
-        // Gen5 callers may use zero for the current/default user.
+        // Zero selects the current user.
         if (userId != 0 && userId != PrimaryUserId)
         {
             return ctx.SetReturn(OrbisUserServiceErrorInvalidParameter);
@@ -149,10 +146,7 @@ public static class UserServiceExports
         LibraryName = "libSceUserService")]
     public static int UserServiceGetGamePresets(CpuContext ctx)
     {
-        // No persisted presets exist for the offline profile.  Ghostrunner 2
-        // treats an error here as an asynchronous platform-init failure, so
-        // provide a deterministic zero/default result.  The three observed
-        // result slots are 0x18 bytes apart.
+        // Return deterministic defaults for the offline profile.
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var resultAddress = ctx[CpuRegister.Rcx];
         Span<byte> defaults = stackalloc byte[0x18];

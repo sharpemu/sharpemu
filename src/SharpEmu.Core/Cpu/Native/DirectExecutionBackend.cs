@@ -2759,8 +2759,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (hostThread is not null &&
 				!ReferenceEquals(hostThread, Thread.CurrentThread))
 			{
-				// The handle is published before Start(), so a concurrent join can
-				// briefly observe an unstarted host thread.
+				// The handle is published before the host thread starts.
 				if ((hostThread.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
 				{
 					Thread.Sleep(1);

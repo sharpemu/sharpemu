@@ -1079,8 +1079,7 @@ public sealed partial class DirectExecutionBackend
 	private static bool IsImportLoopGuardBoundary(string nid) =>
 		nid switch
 		{
-			// Legitimate polling/yielding imports are observable progress and must
-			// not be mistaken for a stuck repeating import loop.
+			// Polling and yielding imports count as progress.
 			"1jfXLRVzisc" => true, // sceKernelUsleep
 			"QcteRwbsnV0" => true, // usleep
 			"n88vx3C5nW8" => true, // gettimeofday

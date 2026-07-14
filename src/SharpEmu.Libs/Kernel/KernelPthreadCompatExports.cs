@@ -379,9 +379,7 @@ public static class KernelPthreadCompatExports
         }
         else
         {
-            // Orbis uses monotonic absolute deadlines for engine condition
-            // variables. Subtracting these from Unix time makes every wait
-            // expire immediately.
+            // Engine condition variables use monotonic deadlines.
             KernelRuntimeCompatExports.GetProcessMonotonicTime(out nowSeconds, out nowNanoseconds);
         }
 
@@ -727,11 +725,7 @@ public static class KernelPthreadCompatExports
         {
             TraceContendedMutex(ctx, mutexAddress, resolvedAddress, state, currentThreadId);
             var waiter = new PthreadMutexWaiter { ThreadId = currentThreadId };
-            // Suspending a fiber in the import gateway loses the fiber switch continuation
-            // (Demon's Souls sceFiberSwitch -> ESRCH), so fibers retain the synchronous
-            // fallback unless explicitly opted in. Plain guest pthreads can safely yield
-            // their scheduler worker; blocking that worker here can strand the lock owner
-            // and produce a guest-wide lock convoy during UE render startup.
+            // Fibers retain the synchronous fallback to preserve switch state.
             var currentFiber = FiberExports.GetCurrentFiberAddressForDiagnostics(ctx);
             var canCooperativelyBlock = _enableMutexLockBlocking || currentFiber == 0;
             if (canCooperativelyBlock &&
@@ -1349,16 +1343,7 @@ public static class KernelPthreadCompatExports
                 state.Waiters = Math.Max(0, state.Waiters - 1);
                 TracePthreadCond("wait-wake-pending", condAddress, mutexAddress, state, timed, waitResult);
 
-                // Never wait for the guest mutex while holding the condition-state
-                // monitor. A signaler normally holds the guest mutex while entering
-                // PthreadCondSignalCore, which needs this monitor. Keeping the monitor
-                // here creates an AB/BA deadlock:
-                //
-                //   waiter:   condition monitor -> guest mutex
-                //   signaler: guest mutex        -> condition monitor
-                //
-                // The normal wake and continuation paths already relock after leaving
-                // this monitor. Do the same for a wake consumed from PendingSignals.
+                // Relock outside SyncRoot to preserve lock ordering.
                 Monitor.Exit(state.SyncRoot);
                 try
                 {
@@ -1367,8 +1352,7 @@ public static class KernelPthreadCompatExports
                 }
                 finally
                 {
-                    // Balance the surrounding lock statement. Its generated finally
-                    // will perform the matching exit as the method returns.
+                    // Balance the surrounding lock statement.
                     Monitor.Enter(state.SyncRoot);
                 }
             }
@@ -1733,13 +1717,7 @@ public static class KernelPthreadCompatExports
             return TimeSpan.Zero;
         }
 
-        // Monitor.Wait ultimately uses the host's millisecond wait primitive. Passing
-        // a positive sub-millisecond TimeSpan can collapse to a zero-duration poll on
-        // Windows. UE commonly supplies absolute deadlines 500-950 us in the future;
-        // treating those as zero makes the main thread spin millions of times while it
-        // retains outer engine locks, permanently starving RenderThread. Preserve an
-        // actually-expired deadline as zero above, but round every positive wait up to
-        // the minimum host sleep quantum.
+        // Round positive sub-millisecond waits to the host sleep quantum.
         return timeoutUsec < 1_000
             ? TimeSpan.FromMilliseconds(1)
             : TimeSpan.FromTicks((long)timeoutUsec * 10L);

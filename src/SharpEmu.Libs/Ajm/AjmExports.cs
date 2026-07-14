@@ -20,9 +20,7 @@ public static class AjmExports
         var reserved = ctx[CpuRegister.Rdi];
         var outContextAddress = ctx[CpuRegister.Rsi];
 
-        // The public AJM ABI requires reserved to be zero.  In particular, do
-        // not report success without initializing the context: audio engines
-        // then start worker threads around a nonexistent AJM backend.
+        // AJM requires a zero reserved argument.
         if (reserved != 0 || outContextAddress == 0)
         {
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);

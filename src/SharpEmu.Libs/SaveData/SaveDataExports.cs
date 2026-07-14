@@ -251,9 +251,7 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataCreateTransactionResource(CpuContext ctx)
     {
-        // Gen5 ABI: (size_t memorySize, SceSaveDataTransactionResource* resource,
-        // void* reserved).  The previous user-id-first interpretation treated the
-        // null reserved argument as the output pointer and rejected every call.
+        // Gen5 ABI: memory size, resource output, reserved.
         var memorySize = ctx[CpuRegister.Rdi];
         var resourceAddress = ctx[CpuRegister.Rsi];
         var reserved = ctx[CpuRegister.Rdx];
@@ -263,10 +261,7 @@ public static class SaveDataExports
             return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
-        // The native runtime returns allocator-owned storage here.  A synthetic
-        // integer handle is unsafe because UE releases this value through its
-        // allocator during shutdown/error cleanup.  The offline HLE operations
-        // carry no transaction state, so use a null resource sentinel.
+        // Offline HLE operations carry no transaction state.
         if (!ctx.TryWriteUInt64(resourceAddress, 0))
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
