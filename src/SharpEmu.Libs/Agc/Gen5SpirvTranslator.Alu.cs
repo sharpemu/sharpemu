@@ -917,7 +917,8 @@ internal static partial class Gen5SpirvTranslator
                 condition = _module.AddInstruction(operation, _boolType, left, right);
             }
 
-            StoreWaveMask(106, condition);
+            // On gfx10, VCmpx writes EXEC only and preserves VCC; the sdst
+            // operand was removed from the cmpx encodings on this generation.
             if (opcode.StartsWith("VCmpx", StringComparison.Ordinal))
             {
                 var active = _module.AddInstruction(
@@ -926,6 +927,10 @@ internal static partial class Gen5SpirvTranslator
                     Load(_boolType, _exec),
                     condition);
                 StoreWaveMask(126, active);
+            }
+            else
+            {
+                StoreWaveMask(106, condition);
             }
 
             return true;
