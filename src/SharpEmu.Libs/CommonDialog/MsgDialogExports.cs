@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using System.Buffers.Binary;
 using System.Threading;
 
 namespace SharpEmu.Libs.CommonDialog;
@@ -10,10 +11,21 @@ public static class MsgDialogExports
 {
     private const int StatusNone = 0;
     private const int StatusInitialized = 1;
+    private const int StatusRunning = 2;
     private const int StatusFinished = 3;
-    private const int ResultSize = 0x20;
 
-    private static int _initialized;
+    private const int ErrorOk = 0;
+    private const int ErrorNotInitialized = unchecked((int)0x80B80003);
+    private const int ErrorNotFinished = unchecked((int)0x80B80005);
+    private const int ErrorBusy = unchecked((int)0x80B80007);
+    private const int ErrorNotRunning = unchecked((int)0x80B8000B);
+    private const int ErrorArgNull = unchecked((int)0x80B8000D);
+
+    // Result buffer layout follows the common dialog convention: mode at +0x00,
+    // result at +0x04, buttonId at +0x08. The affirmative button (OK/YES) is 1.
+    private const int ResultSize = 0x20;
+    private const int ButtonIdAffirmative = 1;
+
     private static int _status;
 
     [SysAbiExport(
@@ -24,11 +36,10 @@ public static class MsgDialogExports
     public static int MsgDialogInitialize(CpuContext ctx)
     {
         // Treat repeated initialization as success. The dialog service is process-global in
-        // this HLE implementation and has no per-call resources to recreate.
-        Interlocked.Exchange(ref _initialized, 1);
-        Interlocked.Exchange(ref _status, StatusInitialized);
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        // this HLE implementation and has no per-call resources to recreate. Only promote
+        // from NONE so re-initializing mid-flow cannot clobber a running/finished dialog.
+        Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -38,9 +49,12 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogTerminate(CpuContext ctx)
     {
-        Interlocked.Exchange(ref _initialized, 0);
-        Interlocked.Exchange(ref _status, StatusNone);
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        if (Interlocked.Exchange(ref _status, StatusNone) == StatusNone)
+        {
+            return ctx.SetReturn(ErrorNotInitialized);
+        }
+
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -50,13 +64,29 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogOpen(CpuContext ctx)
     {
-        LogDialogMessage(ctx, ctx[CpuRegister.Rdi]);
+        var paramAddress = ctx[CpuRegister.Rdi];
+        if (paramAddress == 0)
+        {
+            return ctx.SetReturn(ErrorArgNull);
+        }
 
-        // There is no host popup to actually show. Complete immediately with "finished" so a
-        // guest polling loop (GetStatus/UpdateStatus -> GetResult -> Close) sees a dismissed
-        // dialog on its very first poll instead of spinning forever waiting for user input.
-        Interlocked.Exchange(ref _status, StatusFinished);
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        var status = Volatile.Read(ref _status);
+        if (status == StatusNone)
+        {
+            return ctx.SetReturn(ErrorNotInitialized);
+        }
+
+        if (status == StatusRunning)
+        {
+            return ctx.SetReturn(ErrorBusy);
+        }
+
+        LogDialogMessage(ctx, paramAddress);
+
+        // There is no host popup to actually show. Enter RUNNING so close/cancel paths see
+        // a live dialog; the guest's next status poll auto-dismisses it (see PollStatus).
+        Interlocked.Exchange(ref _status, StatusRunning);
+        return ctx.SetReturn(ErrorOk);
     }
 
     // Best-effort extraction of the dialog text so fatal-error popups are visible in the
@@ -65,12 +95,6 @@ public static class MsgDialogExports
     // level deep, then a second level for nested sub-param structs.
     private static void LogDialogMessage(CpuContext ctx, ulong paramAddress)
     {
-        if (paramAddress == 0)
-        {
-            Console.Error.WriteLine("[LOADER][INFO] sceMsgDialogOpen: param=NULL");
-            return;
-        }
-
         Console.Error.WriteLine($"[LOADER][INFO] sceMsgDialogOpen: param=0x{paramAddress:X12}");
 
         Span<byte> head = stackalloc byte[0xA0];
@@ -134,14 +158,24 @@ public static class MsgDialogExports
         ExportName = "sceMsgDialogGetStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceMsgDialog")]
-    public static int MsgDialogGetStatus(CpuContext ctx) => SetReturn(ctx, Volatile.Read(ref _status));
+    public static int MsgDialogGetStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
 
     [SysAbiExport(
         Nid = "6fIC3XKt2k0",
         ExportName = "sceMsgDialogUpdateStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceMsgDialog")]
-    public static int MsgDialogUpdateStatus(CpuContext ctx) => SetReturn(ctx, Volatile.Read(ref _status));
+    public static int MsgDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
+
+    // With no host UI the dialog cannot wait for user input: the first status poll after
+    // Open observes the dialog as already dismissed. Advancing on both UpdateStatus and
+    // GetStatus keeps every guest polling pattern free of infinite RUNNING loops, while
+    // an Open -> Close sequence with no poll in between still exercises the close path.
+    private static int PollStatus()
+    {
+        Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
+        return Volatile.Read(ref _status);
+    }
 
     [SysAbiExport(
         Nid = "Lr8ovHH9l6A",
@@ -153,17 +187,27 @@ public static class MsgDialogExports
         var resultAddress = ctx[CpuRegister.Rdi];
         if (resultAddress == 0)
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return ctx.SetReturn(ErrorArgNull);
         }
 
+        if (Volatile.Read(ref _status) != StatusFinished)
+        {
+            return ctx.SetReturn(ErrorNotFinished);
+        }
+
+        // Report the affirmative button so yes/no prompts take the confirming branch;
+        // buttonId 0 is the "invalid" sentinel and games may treat it as an error.
         Span<byte> result = stackalloc byte[ResultSize];
         result.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(result[0x04..], 0);
+        BinaryPrimitives.WriteInt32LittleEndian(result[0x08..], ButtonIdAffirmative);
+
         if (!ctx.Memory.TryWrite(resultAddress, result))
         {
-            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -173,13 +217,44 @@ public static class MsgDialogExports
         LibraryName = "libSceMsgDialog")]
     public static int MsgDialogClose(CpuContext ctx)
     {
-        Interlocked.Exchange(ref _status, StatusFinished);
-        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        if (Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning) != StatusRunning)
+        {
+            return ctx.SetReturn(ErrorNotRunning);
+        }
+
+        return ctx.SetReturn(ErrorOk);
     }
 
-    private static int SetReturn(CpuContext ctx, int result)
+    [SysAbiExport(
+        Nid = "wTpfglkmv34",
+        ExportName = "sceMsgDialogProgressBarSetValue",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceMsgDialog")]
+    public static int MsgDialogProgressBarSetValue(CpuContext ctx) => ProgressBarNoOp(ctx);
+
+    [SysAbiExport(
+        Nid = "Gc5k1qcK4fs",
+        ExportName = "sceMsgDialogProgressBarInc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceMsgDialog")]
+    public static int MsgDialogProgressBarInc(CpuContext ctx) => ProgressBarNoOp(ctx);
+
+    [SysAbiExport(
+        Nid = "6H-71OdrpXM",
+        ExportName = "sceMsgDialogProgressBarSetMsg",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceMsgDialog")]
+    public static int MsgDialogProgressBarSetMsg(CpuContext ctx) => ProgressBarNoOp(ctx);
+
+    // There is no visible bar to update. Accept the call whenever the service is alive so
+    // save/install loops that report progress do not abort on an unexpected error.
+    private static int ProgressBarNoOp(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = unchecked((ulong)result);
-        return result;
+        if (Volatile.Read(ref _status) == StatusNone)
+        {
+            return ctx.SetReturn(ErrorNotInitialized);
+        }
+
+        return ctx.SetReturn(ErrorOk);
     }
 }

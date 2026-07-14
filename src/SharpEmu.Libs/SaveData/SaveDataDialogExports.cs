@@ -21,6 +21,7 @@ public static class SaveDataDialogExports
     private const int ErrorArgNull = unchecked((int)0x80B8000D);
 
     private const int ResultSize = 0x48;
+    private const int ButtonIdAffirmative = 1;
     private static int _status;
     private static int _lastMode;
     private static ulong _lastUserData;
@@ -61,10 +62,10 @@ public static class SaveDataDialogExports
         _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
         _lastUserData = ctx.TryReadUInt64(paramAddress + 0xC8, out var userData) ? userData : 0;
 
-        // There is no host save dialog yet. Complete immediately with OK so
-        // guest polling sees a finished dialog instead of spinning forever.
-        Interlocked.Exchange(ref _status, StatusFinished);
-        TraceSaveDataDialog($"open mode={_lastMode} userData=0x{_lastUserData:X16} -> finished");
+        // There is no host save dialog yet. Enter RUNNING so the close path sees a live
+        // dialog; the guest's next status poll auto-dismisses it (see PollStatus).
+        Interlocked.Exchange(ref _status, StatusRunning);
+        TraceSaveDataDialog($"open mode={_lastMode} userData=0x{_lastUserData:X16} -> running");
         return ctx.SetReturn(ErrorOk);
     }
 
@@ -73,14 +74,24 @@ public static class SaveDataDialogExports
         ExportName = "sceSaveDataDialogGetStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogGetStatus(CpuContext ctx) => ctx.SetReturn(Volatile.Read(ref _status));
+    public static int SaveDataDialogGetStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
 
     [SysAbiExport(
         Nid = "KK3Bdg1RWK0",
         ExportName = "sceSaveDataDialogUpdateStatus",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveDataDialog")]
-    public static int SaveDataDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(Volatile.Read(ref _status));
+    public static int SaveDataDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
+
+    // With no host UI the dialog cannot wait for user input: the first status poll after
+    // Open observes the dialog as already dismissed. Advancing on both UpdateStatus and
+    // GetStatus keeps every guest polling pattern free of infinite RUNNING loops, while
+    // an Open -> Close sequence with no poll in between still exercises the close path.
+    private static int PollStatus()
+    {
+        Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
+        return Volatile.Read(ref _status);
+    }
 
     [SysAbiExport(
         Nid = "en7gNVnh878",
@@ -107,11 +118,13 @@ public static class SaveDataDialogExports
             return ctx.SetReturn(ErrorNotFinished);
         }
 
+        // Report the affirmative button so save prompts take the confirming branch;
+        // buttonId 0 is the "invalid" sentinel and games may treat it as an error.
         Span<byte> result = stackalloc byte[ResultSize];
         result.Clear();
         BinaryPrimitives.WriteInt32LittleEndian(result[0x00..], _lastMode);
         BinaryPrimitives.WriteInt32LittleEndian(result[0x04..], 0);
-        BinaryPrimitives.WriteInt32LittleEndian(result[0x08..], 0);
+        BinaryPrimitives.WriteInt32LittleEndian(result[0x08..], ButtonIdAffirmative);
         BinaryPrimitives.WriteUInt64LittleEndian(result[0x20..], _lastUserData);
 
         if (!ctx.Memory.TryWrite(resultAddress, result))
