@@ -13,24 +13,6 @@ internal static class Gen5ShaderScalarEvaluator
     private const int ImageDescriptorDwords = 8;
     private const int SamplerDescriptorDwords = 4;
     private const int MaxGlobalMemoryBindingBytes = 16 * 1024 * 1024;
-    private static readonly int DefaultGlobalMemoryBindingBytes =
-        int.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_GLOBAL_BINDING_BYTES"),
-            out var configured) && configured >= sizeof(uint)
-            ? Math.Min(configured, MaxGlobalMemoryBindingBytes)
-            : 1 * 1024 * 1024;
-
-    internal static long GlobalMemoryReadCount;
-    internal static long GlobalMemoryReadBytes;
-    internal static long GlobalMemoryReadCacheHits;
-    internal static long GlobalMemoryReadPvmBytes;
-    internal static long GlobalMemoryReadLibcBytes;
-    internal static long GlobalMemoryReadReuses;
-
-    private const long CrossFrameReadCacheMaxBytes = 1024L * 1024 * 1024;
-    private static readonly object _crossFrameReadGate = new();
-    private static readonly Dictionary<(ulong BaseAddress, int SizeBytes), byte[]> _crossFrameReadCache = new();
-    private static long _crossFrameReadCacheBytes;
     private const ulong RdnaWaveMask = 0xFFFF_FFFFUL;
 
     private readonly record struct BufferDescriptor(
@@ -62,8 +44,7 @@ internal static class Gen5ShaderScalarEvaluator
         Gen5ShaderState state,
         out Gen5ShaderEvaluation evaluation,
         out string error,
-        bool resolveVertexInputs = false,
-        uint? vertexRecordLimit = null)
+        bool resolveVertexInputs = false)
     {
         evaluation = default!;
         error = string.Empty;
@@ -95,6 +76,27 @@ internal static class Gen5ShaderScalarEvaluator
         var scalarRegisterSnapshots = new Dictionary<uint, IReadOnlyList<uint>>();
         var scalarConditionCode = false;
         uint? skipUntilPc = null;
+
+        void AddRobustNullBufferBinding(uint scalarResource, uint pc)
+        {
+            var key = (scalarResource, 0UL);
+            if (globalMemoryByAddress.TryGetValue(key, out var existing))
+            {
+                if (existing.InstructionPcs is List<uint> pcs)
+                {
+                    pcs.Add(pc);
+                }
+                return;
+            }
+
+            var binding = new Gen5GlobalMemoryBinding(
+                scalarResource,
+                0,
+                new List<uint> { pc },
+                new byte[sizeof(uint)]);
+            globalMemoryByAddress.Add(key, binding);
+            globalMemoryBindings.Add(binding);
+        }
 
         foreach (var instruction in state.Program.Instructions)
         {
@@ -208,8 +210,10 @@ internal static class Gen5ShaderScalarEvaluator
                     ((ulong)scalarRegisters[globalMemory.ScalarAddress + 1] << 32);
                 if (baseAddress == 0)
                 {
-                    error = $"global-address-null pc=0x{instruction.Pc:X}";
-                    return false;
+                    AddRobustNullBufferBinding(
+                        globalMemory.ScalarAddress,
+                        instruction.Pc);
+                    continue;
                 }
 
                 var key = (globalMemory.ScalarAddress, baseAddress);
@@ -225,10 +229,10 @@ internal static class Gen5ShaderScalarEvaluator
                     byte[] data;
                     if (!TryReadGlobalMemory(ctx, baseAddress, out data))
                     {
-                        error =
-                            $"global-memory-read-failed pc=0x{instruction.Pc:X} " +
-                            $"address=0x{baseAddress:X16}";
-                        return false;
+                        AddRobustNullBufferBinding(
+                            globalMemory.ScalarAddress,
+                            instruction.Pc);
+                        continue;
                     }
 
                     var binding = new Gen5GlobalMemoryBinding(
@@ -259,51 +263,38 @@ internal static class Gen5ShaderScalarEvaluator
                         strictType: true,
                         out var bufferDescriptor))
                 {
-                    error =
-                        $"buffer-descriptor-invalid pc=0x{instruction.Pc:X} " +
-                        $"s{bufferMemory.ScalarResource}";
-                    return false;
+                    AddRobustNullBufferBinding(
+                        bufferMemory.ScalarResource,
+                        instruction.Pc);
+                    continue;
                 }
 
                 if (bufferDescriptor.BaseAddress == 0)
                 {
-                    error = $"buffer-address-null pc=0x{instruction.Pc:X}";
-                    return false;
+                    AddRobustNullBufferBinding(
+                        bufferMemory.ScalarResource,
+                        instruction.Pc);
+                    continue;
                 }
 
                 if (resolveVertexInputs &&
                     IsVertexFetchCandidate(instruction, bufferMemory, bufferDescriptor))
                 {
-                    var vertexReadSize = bufferDescriptor.SizeBytes;
-                    if (vertexRecordLimit is { } recordLimit &&
-                        instruction.Sources.Count > 2 &&
-                        TryEvaluateScalarOperand(
-                            instruction.Sources[2],
-                            scalarRegisters,
-                            out var scalarOffset))
-                    {
-                        var bindingOffset = unchecked((uint)bufferMemory.OffsetBytes + scalarOffset);
-                        var requiredBytes =
-                            (ulong)bindingOffset +
-                            (ulong)(Math.Max(recordLimit, 1u) - 1u) * bufferDescriptor.Stride +
-                            (ulong)bufferMemory.DwordCount * sizeof(uint);
-                        vertexReadSize = Math.Min(
-                            bufferDescriptor.SizeBytes,
-                            Math.Max(requiredBytes, sizeof(uint)));
-                    }
-
                     if (!TryReadGlobalMemory(
                             ctx,
                             bufferDescriptor.BaseAddress,
-                            vertexReadSize,
+                            bufferDescriptor.SizeBytes,
                             out var vertexData))
                     {
-                        error =
-                            $"vertex-buffer-read-failed pc=0x{instruction.Pc:X} " +
-                            $"address=0x{bufferDescriptor.BaseAddress:X16} " +
-                            $"bytes={bufferDescriptor.SizeBytes} " +
-                            $"stride={bufferDescriptor.Stride} records={bufferDescriptor.NumRecords}";
-                        return false;
+                        // Scalar evaluation is intentionally conservative and can visit
+                        // resource fetches on branches that the real wave never takes. A
+                        // runtime-dependent descriptor on such a path must not discard the
+                        // complete shader. Leaving this fetch without a vertex-input binding
+                        // makes the translator emit the hardware robust/default value.
+                        AddRobustNullBufferBinding(
+                            bufferMemory.ScalarResource,
+                            instruction.Pc);
+                        continue;
                     }
 
                     if (!TryCreateVertexInputBinding(
@@ -341,17 +332,14 @@ internal static class Gen5ShaderScalarEvaluator
                             bufferDescriptor.SizeBytes,
                             out var data))
                     {
-                        var descriptorWords = string.Join(
-                            ':',
-                            Enumerable.Range(0, 4).Select(index =>
-                                $"{scalarRegisters[bufferMemory.ScalarResource + (uint)index]:X8}"));
-                        error =
-                            $"buffer-memory-read-failed pc=0x{instruction.Pc:X} " +
-                            $"address=0x{bufferDescriptor.BaseAddress:X16} " +
-                            $"bytes={bufferDescriptor.SizeBytes} " +
-                            $"stride={bufferDescriptor.Stride} records={bufferDescriptor.NumRecords} " +
-                            $"s{bufferMemory.ScalarResource}=[{descriptorWords}]";
-                        return false;
+                        // Optional, transient and runtime-computed descriptors can be
+                        // unavailable while translating. Vulkan robust access semantics are
+                        // represented by a small zero buffer so the reachable portion of the
+                        // shader and the rest of the draw can still execute.
+                        AddRobustNullBufferBinding(
+                            bufferMemory.ScalarResource,
+                            instruction.Pc);
+                        continue;
                     }
 
                     var binding = new Gen5GlobalMemoryBinding(
@@ -407,6 +395,46 @@ internal static class Gen5ShaderScalarEvaluator
                     out var mipLevel)
                     ? mipLevel
                     : null));
+        }
+
+        // Scalar pre-evaluation follows unconditional branches to resolve the
+        // dominant path. The translated shader still contains alternate paths,
+        // however, and Vulkan requires descriptors for every statically present
+        // image instruction. Fill any branch-omitted bindings from the final
+        // resolved scalar state so one optional path cannot discard the complete
+        // scene shader during SPIR-V generation.
+        var resolvedImagePcs = resolved.Select(binding => binding.Pc).ToHashSet();
+        foreach (var instruction in state.Program.Instructions)
+        {
+            if (instruction.Control is not Gen5ImageControl image ||
+                resolvedImagePcs.Contains(instruction.Pc) ||
+                !TryCopyRegisters(
+                    scalarRegisters,
+                    image.ScalarResource,
+                    ImageDescriptorDwords,
+                    out var resourceDescriptor))
+            {
+                continue;
+            }
+
+            IReadOnlyList<uint> samplerDescriptor = [];
+            if (UsesSampler(instruction.Opcode) &&
+                !TryCopyRegisters(
+                    scalarRegisters,
+                    image.ScalarSampler,
+                    SamplerDescriptorDwords,
+                    out samplerDescriptor))
+            {
+                continue;
+            }
+
+            resolved.Add(new Gen5ImageBinding(
+                instruction.Pc,
+                instruction.Opcode,
+                image,
+                resourceDescriptor,
+                samplerDescriptor,
+                null));
         }
 
         evaluation = new Gen5ShaderEvaluation(
@@ -570,29 +598,22 @@ internal static class Gen5ShaderScalarEvaluator
         return false;
     }
 
-    [ThreadStatic]
-    private static Dictionary<(ulong BaseAddress, int SizeBytes), byte[]>? _globalMemoryReadCache;
-
-    internal static void BeginGlobalMemoryReadScope()
-    {
-        _globalMemoryReadCache = new Dictionary<(ulong, int), byte[]>();
-    }
-
-    internal static void EndGlobalMemoryReadScope()
-    {
-        _globalMemoryReadCache = null;
-    }
-
     private static bool TryReadGlobalMemory(
         CpuContext ctx,
         ulong baseAddress,
         out byte[] data)
     {
-        return TryReadGlobalMemory(
-            ctx,
-            baseAddress,
-            (ulong)DefaultGlobalMemoryBindingBytes,
-            out data);
+        for (var size = MaxGlobalMemoryBindingBytes; size >= 4096; size >>= 1)
+        {
+            data = GC.AllocateUninitializedArray<byte>(size);
+            if (ctx.Memory.TryRead(baseAddress, data))
+            {
+                return true;
+            }
+        }
+
+        data = [];
+        return false;
     }
 
     private static bool TryReadGlobalMemory(
@@ -614,74 +635,13 @@ internal static class Gen5ShaderScalarEvaluator
             return false;
         }
 
-        var cache = _globalMemoryReadCache;
-        var cacheKey = (baseAddress, (int)cappedSize);
-        if (cache is not null && cache.TryGetValue(cacheKey, out var cached))
-        {
-            Interlocked.Increment(ref GlobalMemoryReadCacheHits);
-            data = cached;
-            return true;
-        }
-
-        byte[]? previous;
-        lock (_crossFrameReadGate)
-        {
-            _crossFrameReadCache.TryGetValue(cacheKey, out previous);
-        }
-
-        if (previous is not null && ctx.Memory.TryCompare(baseAddress, previous))
-        {
-            Interlocked.Increment(ref GlobalMemoryReadReuses);
-            if (cache is not null)
-            {
-                cache[cacheKey] = previous;
-            }
-
-            data = previous;
-            return true;
-        }
-
         var candidateSize = (int)cappedSize;
         while (candidateSize >= sizeof(uint))
         {
             data = GC.AllocateUninitializedArray<byte>(candidateSize);
-            var readFromPvm = ctx.Memory.TryRead(baseAddress, data);
-            if (readFromPvm ||
+            if (ctx.Memory.TryRead(baseAddress, data) ||
                 KernelMemoryCompatExports.TryReadTrackedLibcHeap(baseAddress, data))
             {
-                Interlocked.Increment(ref GlobalMemoryReadCount);
-                Interlocked.Add(ref GlobalMemoryReadBytes, data.Length);
-                if (readFromPvm)
-                {
-                    Interlocked.Add(ref GlobalMemoryReadPvmBytes, data.Length);
-                }
-                else
-                {
-                    Interlocked.Add(ref GlobalMemoryReadLibcBytes, data.Length);
-                }
-
-                if (cache is not null)
-                {
-                    cache[cacheKey] = data;
-                }
-
-                lock (_crossFrameReadGate)
-                {
-                    if (_crossFrameReadCache.TryGetValue(cacheKey, out var replaced))
-                    {
-                        _crossFrameReadCacheBytes -= replaced.Length;
-                    }
-
-                    if (_crossFrameReadCacheBytes + data.Length > CrossFrameReadCacheMaxBytes)
-                    {
-                        _crossFrameReadCache.Clear();
-                        _crossFrameReadCacheBytes = 0;
-                    }
-
-                    _crossFrameReadCache[cacheKey] = data;
-                    _crossFrameReadCacheBytes += data.Length;
-                }
-
                 return true;
             }
 
@@ -841,6 +801,59 @@ internal static class Gen5ShaderScalarEvaluator
             return true;
         }
 
+        if (instruction.Opcode is "SFF1I32B64" or "SFlbitI32B64")
+        {
+            if (!TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    execMask,
+                    out var source64))
+            {
+                error = $"scalar-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            registers[destination.Value] = source64 == 0
+                ? uint.MaxValue
+                : instruction.Opcode == "SFF1I32B64"
+                    ? (uint)BitOperations.TrailingZeroCount(source64)
+                    : (uint)BitOperations.LeadingZeroCount(source64);
+            return true;
+        }
+
+        if (instruction.Opcode == "SAndSaveexecB32")
+        {
+            if (!TryEvaluateScalarOperand(instruction.Sources[0], registers, out var source32))
+            {
+                error = $"scalar-source0 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            var oldExec = (uint)execMask;
+            registers[destination.Value] = oldExec;
+            execMask = oldExec & source32;
+            WriteScalarPair(registers, 126, execMask, ref execMask);
+            scalarConditionCode = execMask != 0;
+            return true;
+        }
+
+        if (instruction.Opcode == "SBfmB64")
+        {
+            if (instruction.Sources.Count < 2 ||
+                !TryEvaluateScalarOperand(instruction.Sources[0], registers, out var widthSource) ||
+                !TryEvaluateScalarOperand(instruction.Sources[1], registers, out var offsetSource))
+            {
+                error = $"scalar-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            var width = (int)widthSource & 63;
+            var offset = (int)offsetSource & 63;
+            var value = width == 0 ? 0UL : ((1UL << width) - 1UL) << offset;
+            WriteScalarPair(registers, destination.Value, value, ref execMask);
+            return true;
+        }
+
         if (instruction.Opcode is
             "SCselectB64" or
             "SAndB64" or
@@ -885,6 +898,19 @@ internal static class Gen5ShaderScalarEvaluator
             return true;
         }
 
+        if (instruction.Opcode == "SGetregB32")
+        {
+            // S_GETREG_B32 reads a hardware register (HW_ID, MODE, STATUS,
+            // SHADER_CYCLES, ...) whose source operand encodes the register id,
+            // not an SGPR/constant the translate-time scalar evaluator can fold.
+            // These values are runtime GPU state that normally feed mode bits or
+            // control flow rather than resource descriptors, so resolve to 0 and
+            // keep translating instead of aborting the whole compute pass. See
+            // [[dreamcore-ue-rendering]].
+            registers[destination.Value] = 0;
+            return true;
+        }
+
         if (instruction.Sources.Count == 0 ||
             !TryEvaluateScalarOperand(instruction.Sources[0], registers, out var left))
         {
@@ -901,10 +927,17 @@ internal static class Gen5ShaderScalarEvaluator
             return true;
         }
 
+        if (instruction.Opcode == "SBitset0B32")
+        {
+            registers[destination.Value] &= ~(1u << ((int)left & 31));
+            return true;
+        }
+
         if (instruction.Opcode is
             "SNotB32" or
             "SBrevB32" or
             "SBcnt1I32B32" or
+            "SFF0I32B32" or
             "SFF1I32B32" or
             "SBitset1B32")
         {
@@ -913,6 +946,9 @@ internal static class Gen5ShaderScalarEvaluator
                 "SNotB32" => ~left,
                 "SBrevB32" => ReverseBits(left),
                 "SBcnt1I32B32" => (uint)BitOperations.PopCount(left),
+                // S_FF0_I32_B32: bit position of the first 0 from the LSB, or -1
+                // if there are none. S_FF1 is the same over the inverted value.
+                "SFF0I32B32" => (~left) == 0 ? uint.MaxValue : (uint)BitOperations.TrailingZeroCount(~left),
                 "SFF1I32B32" => left == 0 ? uint.MaxValue : (uint)BitOperations.TrailingZeroCount(left),
                 _ => registers[destination.Value] | (1u << ((int)left & 31)),
             };
@@ -1280,6 +1316,29 @@ internal static class Gen5ShaderScalarEvaluator
             var bit = (int)(right & 63u);
             var isSet = ((wide >> bit) & 1UL) != 0;
             scalarConditionCode = instruction.Opcode == "SBitcmp1B64" ? isSet : !isSet;
+            return true;
+        }
+
+        if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+        {
+            if (!TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    ulong.MaxValue,
+                    out var wideLeft) ||
+                !TryEvaluateScalarOperand64(
+                    instruction.Sources[1],
+                    registers,
+                    ulong.MaxValue,
+                    out var wideRight))
+            {
+                error = $"scalar-compare-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            scalarConditionCode = instruction.Opcode == "SCmpEqU64"
+                ? wideLeft == wideRight
+                : wideLeft != wideRight;
             return true;
         }
 

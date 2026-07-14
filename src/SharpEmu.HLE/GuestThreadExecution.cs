@@ -46,6 +46,7 @@ public interface IGuestThreadScheduler
         ulong entryPoint,
         ulong arg0,
         ulong arg1,
+        ulong arg2,
         ulong stackAddress,
         ulong stackSize,
         string reason,
@@ -141,7 +142,75 @@ public static class GuestThreadExecution
     [ThreadStatic]
     private static ulong _currentImportReturnSlotAddress;
 
-    public static IGuestThreadScheduler? Scheduler { get; set; }
+    // Process-level (not thread-local) exit state. exit()/_exit() terminate the whole
+    // guest process, so the requested status must survive independently of which guest
+    // thread issued the call and of the numeric value the entry stub happens to return.
+    private static readonly object _processExitGate = new();
+    private static bool _processExitRequested;
+    private static int _processExitStatus;
+    private static string? _processExitReason;
+
+    private static IGuestThreadScheduler? _scheduler;
+    private static int _threadWatchdogStarted;
+
+    public static IGuestThreadScheduler? Scheduler
+    {
+        get => _scheduler;
+        set
+        {
+            _scheduler = value;
+            // Opt-in stall diagnostics: periodically dump every guest thread's
+            // state/block-reason so an idle deadlock (e.g. HN2's UE4 render-thread
+            // init hang) shows what each thread is waiting on. See
+            // [[dreamcore-ue-rendering]].
+            if (value is not null &&
+                string.Equals(
+                    Environment.GetEnvironmentVariable("SHARPEMU_DUMP_THREADS"),
+                    "1",
+                    StringComparison.Ordinal) &&
+                System.Threading.Interlocked.Exchange(ref _threadWatchdogStarted, 1) == 0)
+            {
+                StartThreadStateWatchdog();
+            }
+        }
+    }
+
+    private static void StartThreadStateWatchdog()
+    {
+        var thread = new System.Threading.Thread(() =>
+        {
+            while (true)
+            {
+                System.Threading.Thread.Sleep(5000);
+                var scheduler = _scheduler;
+                if (scheduler is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Console.Error.WriteLine("[LOADER][WATCHDOG] === guest thread states ===");
+                    foreach (var s in scheduler.SnapshotThreads())
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][WATCHDOG] name='{s.Name}' state={s.State} " +
+                            $"block={s.BlockReason ?? "none"} imports={s.ImportCount} " +
+                            $"nid={s.LastImportNid ?? "none"} ret=0x{s.LastReturnRip:X16}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[LOADER][WATCHDOG] dump failed: {ex.Message}");
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmuThreadWatchdog",
+        };
+        thread.Start();
+    }
 
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
@@ -377,6 +446,40 @@ public static class GuestThreadExecution
         _pendingEntryExit = true;
         _pendingEntryExitValue = value;
         _pendingEntryExitReason = string.IsNullOrWhiteSpace(reason) ? "guest_entry_exit" : reason;
+    }
+
+    // Records a whole-process exit (exit/_exit/main-return). Unlike the per-thread entry
+    // exit, this is consulted after the guest unwinds to decide the final session result,
+    // so a clean exit(0) is not misreported as a trap based on a stale LastError or the
+    // arbitrary value the entry stub returns.
+    public static void RecordProcessExit(string reason, int status)
+    {
+        lock (_processExitGate)
+        {
+            _processExitRequested = true;
+            _processExitStatus = status;
+            _processExitReason = string.IsNullOrWhiteSpace(reason) ? "exit" : reason;
+        }
+    }
+
+    public static bool TryGetProcessExit(out int status, out string reason)
+    {
+        lock (_processExitGate)
+        {
+            status = _processExitStatus;
+            reason = _processExitReason ?? string.Empty;
+            return _processExitRequested;
+        }
+    }
+
+    public static void ResetProcessExit()
+    {
+        lock (_processExitGate)
+        {
+            _processExitRequested = false;
+            _processExitStatus = 0;
+            _processExitReason = null;
+        }
     }
 
     public static bool TryConsumeCurrentEntryExit(out ulong value, out string reason)

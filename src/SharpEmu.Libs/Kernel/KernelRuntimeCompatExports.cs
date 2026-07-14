@@ -85,29 +85,22 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceKernelNanosleep",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelNanosleep(CpuContext ctx) => NanosleepCore(ctx, posix: false);
-
-    [SysAbiExport(
-        Nid = "yS8U2TGCe1A",
-        ExportName = "nanosleep",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PosixNanosleep(CpuContext ctx) => NanosleepCore(ctx, posix: true);
-
-    private static int NanosleepCore(CpuContext ctx, bool posix)
+    public static int KernelNanosleep(CpuContext ctx)
     {
         var requestAddress = ctx[CpuRegister.Rdi];
         var remainAddress = ctx[CpuRegister.Rsi];
 
         if (requestAddress == 0)
         {
-            return NanosleepFailure(ctx, posix, Einval, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         Span<byte> timespecBuffer = stackalloc byte[16];
         if (!ctx.Memory.TryRead(requestAddress, timespecBuffer))
         {
-            return NanosleepFailure(ctx, posix, Efault, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            ctx[CpuRegister.Rax] = Efault;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         var tvSec = BinaryPrimitives.ReadInt64LittleEndian(timespecBuffer);
@@ -115,7 +108,8 @@ public static class KernelRuntimeCompatExports
 
         if (tvSec < 0 || tvNsec < 0 || tvNsec >= 1_000_000_000L)
         {
-            return NanosleepFailure(ctx, posix, Einval, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         if (tvSec == 0 && tvNsec == 0)
@@ -125,7 +119,7 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
+        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelNanosleep");
 
         // TimeSpan resolution is 100 ns ticks, so sub-100 ns requests round up to
         // a single tick rather than collapsing to a zero-length (no-op) sleep.
@@ -142,21 +136,6 @@ public static class KernelRuntimeCompatExports
         WriteRemainingTime(ctx, remainAddress, 0, 0);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static int NanosleepFailure(CpuContext ctx, bool posix, int errnoValue, OrbisGen2Result sceResult)
-    {
-        if (posix)
-        {
-            TrySetErrno(ctx, errnoValue);
-            ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
-        }
-        else
-        {
-            ctx[CpuRegister.Rax] = unchecked((ulong)errnoValue);
-        }
-
-        return (int)sceResult;
     }
 
     private static void WriteRemainingTime(CpuContext ctx, ulong remainAddress, long seconds, long nanoseconds)
@@ -181,13 +160,37 @@ public static class KernelRuntimeCompatExports
     {
         var micros = ctx[CpuRegister.Rdi];
         TraceUsleepSpin(ctx, micros);
+        return UsleepCore(ctx, micros, "sceKernelUsleep");
+    }
+
+    // POSIX usleep(useconds_t). Unlike the game's own statically-linked usleep
+    // (which just spins/sleeps without yielding to our scheduler), this pumps the
+    // guest thread scheduler so a busy-wait that backs off with usleep — e.g. UE's
+    // render heartbeat polling until the RHI thread is ready — actually lets Ready
+    // threads run instead of starving them into a deadlock. See
+    // [[dreamcore-ue-rendering]].
+    [SysAbiExport(
+        Nid = "QcteRwbsnV0",
+        ExportName = "usleep",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePosix")]
+    public static int PosixUsleep(CpuContext ctx)
+    {
+        // useconds_t is 32-bit; ignore any stale high bits of RDI.
+        var micros = ctx[CpuRegister.Rdi] & 0xFFFFFFFFUL;
+        TraceUsleepSpin(ctx, micros);
+        return UsleepCore(ctx, micros, "usleep");
+    }
+
+    private static int UsleepCore(CpuContext ctx, ulong micros, string reason)
+    {
         if (micros == 0)
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+        GuestThreadExecution.Scheduler?.Pump(ctx, reason);
 
         if (micros < 1000)
         {
@@ -212,13 +215,6 @@ public static class KernelRuntimeCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
-
-    [SysAbiExport(
-        Nid = "QcteRwbsnV0",
-        ExportName = "usleep",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int PosixUsleep(CpuContext ctx) => KernelUsleep(ctx);
 
     private static void TraceUsleepSpin(CpuContext ctx, ulong micros)
     {
@@ -429,18 +425,6 @@ public static class KernelRuntimeCompatExports
         var micros = elapsedTicks * 1_000_000L / Stopwatch.Frequency;
         ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, micros));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "HoLVWNanBBc",
-        ExportName = "getpid",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int GetProcessId(CpuContext ctx)
-    {
-        var processId = Environment.ProcessId;
-        ctx[CpuRegister.Rax] = unchecked((uint)processId);
-        return processId;
     }
 
     [SysAbiExport(
@@ -1521,6 +1505,20 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelIsNeoMode(CpuContext ctx)
     {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "tU5e3f9gSiU",
+        ExportName = "sceKernelIsTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsTrinityMode(CpuContext ctx)
+    {
+        // SharpEmu currently exposes the base PS5 hardware profile. Returning an
+        // error here is observable as true by SDK callers and incorrectly selects
+        // PS5 Pro/Trinity renderer and shader assets.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

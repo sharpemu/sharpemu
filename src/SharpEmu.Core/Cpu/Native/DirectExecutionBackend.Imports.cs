@@ -17,6 +17,8 @@ public sealed partial class DirectExecutionBackend
 {
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	private long _primaryImportDispatchCount;
+	private long _nextPrimaryStallSample = 5_000_000;
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
 	{
@@ -111,6 +113,57 @@ public sealed partial class DirectExecutionBackend
 			LastError = "Import dispatch called without active CPU context";
 			return 18446744071562199298uL;
 		}
+		// The primary guest can remain runnable indefinitely while polling through
+		// leaf pthread/TLS imports. Service the cooperative worker scheduler at a
+		// bounded cadence so expired timed waits (notably RHIFrameFlipThread) are
+		// resumed even when the primary thread never enters a blocking HLE call.
+		var primaryImportDispatchCount = !GuestThreadExecution.IsGuestThread
+			? Interlocked.Increment(ref _primaryImportDispatchCount)
+			: 0;
+		if (primaryImportDispatchCount != 0 && (primaryImportDispatchCount & 0xFF) == 0)
+		{
+			Pump(cpuContext, "import_tick");
+		}
+		if (primaryImportDispatchCount != 0 &&
+			(primaryImportDispatchCount & 0xFFF) == 0)
+		{
+		}
+		var nextPrimaryStallSample = Volatile.Read(ref _nextPrimaryStallSample);
+		if (!GuestThreadExecution.IsGuestThread &&
+			num >= nextPrimaryStallSample &&
+			string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STALL_FRAMES"), "1", StringComparison.Ordinal) &&
+			Interlocked.CompareExchange(
+				ref _nextPrimaryStallSample,
+				nextPrimaryStallSample + 5_000_000,
+				nextPrimaryStallSample) == nextPrimaryStallSample)
+		{
+			Console.Error.WriteLine($"[LOADER][TRACE] Primary guest stack sample at import#{num}");
+			TraceImportFrameChain(cpuContext, num);
+			foreach (var thread in SnapshotThreads())
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] GuestThreadSample#{num}: name='{thread.Name}' state={thread.State} " +
+					$"imports={thread.ImportCount} nid={thread.LastImportNid} ret=0x{thread.LastReturnRip:X16} " +
+					$"reason={thread.BlockReason ?? "none"}");
+			}
+			lock (_guestThreadGate)
+			{
+				foreach (var thread in _guestThreads.Values)
+				{
+					if (thread.State == GuestThreadRunState.Running ||
+						thread.Name.Contains("Foreground", StringComparison.Ordinal) ||
+						thread.Name.Contains("FAsyncLoading", StringComparison.Ordinal) ||
+						thread.Name.Contains("IOThreadPool", StringComparison.Ordinal) ||
+						thread.Name.Contains("RHIFrameFlip", StringComparison.Ordinal) ||
+						string.Equals(thread.Name, "IoDispatcher", StringComparison.Ordinal))
+					{
+						Console.Error.WriteLine(
+							$"[LOADER][TRACE] GuestFrameChain#{num}: name='{thread.Name}' state={thread.State}");
+						TraceImportFrameChain(thread.Context, num);
+					}
+				}
+			}
+		}
 		var importEntries = _importEntries;
 		if ((uint)importIndex >= (uint)importEntries.Length)
 		{
@@ -161,7 +214,7 @@ public sealed partial class DirectExecutionBackend
 				*(ulong*)(xmmSlot + 8));
 		}
 		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
-		if (importStubEntry.Kind == ImportStubKind.BootstrapBridge)
+		if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 		{
 			NormalizeKernelDynlibDlsymArguments(cpuContext, out _, out _);
 			*(ulong*)argPackPtr = cpuContext[CpuRegister.Rdi];
@@ -261,13 +314,12 @@ public sealed partial class DirectExecutionBackend
 		bool flag4 = !string.IsNullOrWhiteSpace(_importFilter);
 		bool flag5 = false;
 		ExportedFunction? matchedExport = importStubEntry.Export;
-		var traceFlags = importStubEntry.TraceFlags;
 		bool periodicTrace = num <= 128 ||
 			(num >= 240 && num <= 400) ||
 			(num >= 900 && num <= 1300) ||
 			num % 100000 == 0L ||
-			((traceFlags & ImportStubTraceFlags.PeriodicEvery1000) != 0 && (num <= 256 || num % 1000 == 0L)) ||
-			((traceFlags & ImportStubTraceFlags.PeriodicEvery128) != 0 && (num <= 256 || num % 128 == 0)) ||
+			(importStubEntry.Nid == "tsvEmnenz48" && (num <= 256 || num % 1000 == 0L)) ||
+			(importStubEntry.Nid == "rTXw65xmLIA" && (num <= 256 || num % 128 == 0)) ||
 			flag ||
 			flag2 ||
 			flag3;
@@ -328,15 +380,15 @@ public sealed partial class DirectExecutionBackend
 				cpuContext[CpuRegister.Rsi],
 				cpuContext[CpuRegister.Rdx]);
 		}
-		if ((traceFlags & ImportStubTraceFlags.Memset) != 0 && num <= 256)
+		if (importStubEntry.Nid == "8zTFvBIAIN8" && num <= 256)
 		{
 			Console.Error.WriteLine($"[LOADER][TRACE] memset#{num}: dst=0x{cpuContext[CpuRegister.Rdi]:X16} val=0x{cpuContext[CpuRegister.Rsi] & 0xFF:X2} len=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
 		}
-		if ((traceFlags & ImportStubTraceFlags.CxaAtexit) != 0 && num <= 64)
+		if (importStubEntry.Nid == "tsvEmnenz48" && num <= 64)
 		{
 			Console.Error.WriteLine($"[LOADER][TRACE] __cxa_atexit#{num}: func=0x{cpuContext[CpuRegister.Rdi]:X16} arg=0x{cpuContext[CpuRegister.Rsi]:X16} dso=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
 		}
-		if ((traceFlags & ImportStubTraceFlags.RawArgs) != 0)
+		if (importStubEntry.Nid == "bzQExy189ZI" || importStubEntry.Nid == "8G2LB+A3rzg")
 		{
 			Console.Error.WriteLine($"[LOADER][TRACE] {importStubEntry.Nid}#{num}: rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
 		}
@@ -366,7 +418,7 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.Flush();
 			}
 		}
-		if ((traceFlags & ImportStubTraceFlags.StackChkFail) != 0)
+		if (importStubEntry.Nid == "Ou3iL1abvng")
 		{
 			if (_logStackCheck)
 			{
@@ -398,7 +450,7 @@ public sealed partial class DirectExecutionBackend
 				ActiveGuestReturnSlotAddress);
 			try
 			{
-				if (importStubEntry.Kind == ImportStubKind.BootstrapBridge)
+				if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 				{
 					if (_logBootstrap)
 					{
@@ -407,11 +459,12 @@ public sealed partial class DirectExecutionBackend
 
 					orbisGen2Result = DispatchBootstrapBridge();
 				}
-				else if (importStubEntry.Kind == ImportStubKind.KernelDynlibDlsym)
+				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
+					string.Equals(importStubEntry.Nid, "LwG8g3niqwA", StringComparison.Ordinal))
 				{
 					orbisGen2Result = DispatchKernelDynlibDlsym();
 				}
-				else if (importStubEntry.Kind == ImportStubKind.Il2CppApiLookupSymbol)
+				else if (string.Equals(importStubEntry.Nid, "r8mvOaWdi28", StringComparison.Ordinal))
 				{
 					orbisGen2Result = DispatchIl2CppApiLookupSymbol();
 				}
@@ -747,13 +800,10 @@ public sealed partial class DirectExecutionBackend
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND &&
 			IsExpectedFileProbeNotFoundNid(nid);
 		var expectedTimedWaitTimeout =
-			string.Equals(nid, "27bAgiJmOh0", StringComparison.Ordinal) &&
-			unchecked((int)result) == 60;
+			(nid is "27bAgiJmOh0" or "BmMjYxmew1w") &&
+			(result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT || unchecked((int)result) == 60);
 		var expectedEqueueTimeout =
 			string.Equals(nid, "fzyMKs9kim0", StringComparison.Ordinal) &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-		var expectedEventFlagTimeout =
-			string.Equals(nid, "JTvBflhYazQ", StringComparison.Ordinal) &&
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
 		var expectedMutexTrylockBusy =
 			string.Equals(nid, "K-jXhbt2gn4", StringComparison.Ordinal) &&
@@ -767,7 +817,6 @@ public sealed partial class DirectExecutionBackend
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
-			!expectedEventFlagTimeout &&
 			!expectedMutexTrylockBusy &&
 			!expectedUserServiceNoEvent &&
 			!expectedPrivacyInvalidParameter)
@@ -830,15 +879,11 @@ public sealed partial class DirectExecutionBackend
 			return !_logUsleep;
 		}
 
-		// Mutex lock uses this block-capable leaf path. Keep it out of the no-block subset.
 		return nid is
 			"9UK1vLZQft4" or // scePthreadMutexLock
-			"7H0iTOciTLo" or // pthread_mutex_lock
 			"tn3VlD0hG60" or // scePthreadMutexUnlock
+			"7H0iTOciTLo" or // pthread_mutex_lock
 			"2Z+PpY6CaJg" or // pthread_mutex_unlock
-			"EgmLo6EWgso" or // pthread_rwlock_unlock
-			"+L98PIbGttk" or // scePthreadRwlockUnlock
-			"q1cHNfGycLI" or // scePadRead
 			"8aI7R7WaOlc" or // sceAmprCommandBufferConstructor
 			"zgXifHT9ErY" or // sceVideoOutIsFlipPending
 			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
@@ -897,7 +942,7 @@ public sealed partial class DirectExecutionBackend
 			"Q2V+iqvjgC0" or // vsnprintf
 			"j4ViWNHEgww" or // strlen
 			"5jNubw4vlAA" or // strnlen
-			"LHMrG7e8G78" or // wcsmisc
+			"LHMrG7e8G78" or // wcslen
 			"WkkeywLJcgU" or // wcslen
 			"Ovb2dSJOAuE" or // strcmp
 			"aesyjrHVWy4" or // strncmp
@@ -912,7 +957,12 @@ public sealed partial class DirectExecutionBackend
 			"6ULAa0fq4jA" or // scePthreadRwlockInit
 			"1471ajPzxh0" or // pthread_rwlock_destroy
 			"BB+kb08Tl9A" or // scePthreadRwlockDestroy
-			// rwlock rd/wr lock removed (can block); init/destroy/unlock stay.
+			"iGjsr1WAtI0" or // pthread_rwlock_rdlock
+			"Ox9i0c7L5w0" or // scePthreadRwlockRdlock
+			"sIlRvQqsN2Y" or // pthread_rwlock_wrlock
+			"mqdNorrB+gI" or // scePthreadRwlockWrlock
+			"EgmLo6EWgso" or // pthread_rwlock_unlock
+			"+L98PIbGttk" or // scePthreadRwlockUnlock
 			"aI+OeCz8xrQ" or // scePthreadSelf
 			"EotR8a3ASf4" or // pthread_self
 			"eoht7mQOCmo" or // scePthreadGetspecific
@@ -960,6 +1010,24 @@ public sealed partial class DirectExecutionBackend
 				: string.Empty;
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] ImportFrame#{dispatchIndex}.{i}: rbp=0x{frame:X16} ret=0x{returnRip:X16}{symbol} next=0x{next:X16}");
+			// Dreamcore's startup hang has repeatedly resolved through the same
+			// StaticLoadObject path.  Surface the UTF-16 object path held by its
+			// caller so the diagnostic identifies the cyclic/missing object rather
+			// than only reporting allocator frames below it.
+			if (returnRip == 0x000000080049C190 &&
+				next > 0x860 &&
+				context.TryReadUInt64(next - 0x860, out var textStart) &&
+				context.TryReadUInt64(next - 0x858, out var textEnd) &&
+				textEnd >= textStart && textEnd - textStart <= 4096)
+			{
+				var byteLength = checked((int)(textEnd - textStart));
+				var bytes = new byte[byteLength];
+				if (byteLength > 0 && context.Memory.TryRead(textStart, bytes))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][TRACE] StaticLoadObjectPath#{dispatchIndex}: '{System.Text.Encoding.Unicode.GetString(bytes)}'");
+				}
+			}
 			if (next <= frame || next - frame > 0x100000)
 			{
 				break;
@@ -1072,6 +1140,16 @@ public sealed partial class DirectExecutionBackend
 
 	private bool ShouldForceGuestExitOnImportLoop(string nid, ulong returnRip, long dispatchIndex, ulong arg0, ulong arg1)
 	{
+		// Worker threads legitimately repeat timed waits, event waits, and polling
+		// imports for the lifetime of the process.  The loop detector's history is
+		// backend-wide rather than per guest thread, so recording those imports can
+		// both produce a false positive and terminate the unrelated primary thread.
+		// Keep the watchdog scoped to the primary execution it was designed to
+		// recover; worker lifetime is governed by the cooperative scheduler.
+		if (GuestThreadExecution.IsGuestThread)
+		{
+			return false;
+		}
 		if (dispatchIndex < 1200)
 		{
 			return false;
@@ -1122,15 +1200,10 @@ public sealed partial class DirectExecutionBackend
 	}
 
 	private static bool IsImportLoopGuardBoundary(string nid) =>
-    nid switch
-    {
-        "1jfXLRVzisc" => true, // sceKernelUsleep
-        "QcteRwbsnV0" => true, // usleep
-        "n88vx3C5nW8" => true, // gettimeofday
-        "Zxa0VhQVTsk" => true, // sceKernelWaitSema
-        "T72hz6ffq08" => true, // scePthreadYield
-        _ => false
-    };
+		nid is
+			"1jfXLRVzisc" or // sceKernelUsleep
+			"27bAgiJmOh0" or // pthread_cond_timedwait
+			"BmMjYxmew1w";   // scePthreadCondTimedwait
 
 	private void ResetImportLoopPattern()
 	{

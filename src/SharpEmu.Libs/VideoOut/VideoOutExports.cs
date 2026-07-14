@@ -4,7 +4,6 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
-using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -47,18 +46,34 @@ public static class VideoOutExports
     private static readonly object _stateGate = new();
     private static readonly object _frameDumpGate = new();
     private static readonly Dictionary<int, VideoOutPortState> _ports = new();
+    private static readonly Dictionary<(int Handle, int BufferIndex, ulong Address), ulong> _lastFrameFingerprints = new();
+    private static int _nextHandle = 1;
+    private static int _frameDumpCount;
+    private static long _nextFrameDumpIndex;
+    private static string _windowTitle = "SharpEmu VideoOut";
+    private static readonly bool _logFrameRate = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly bool _logVideoOutSync = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_SYNC"),
+        "1",
+        StringComparison.Ordinal);
+    private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
+    private static long _submittedFrameCount;
+    private static long _presentedFrameCount;
+    private static long _vblankSignalCount;
+    private static long _flipSubmitCount;
 
-    // Hardware raises vblank autonomously; UE blocks its frame loop on it.
+    // Hardware raises vblank autonomously; engines that register vblank events
+    // and then block on the event queue (rather than polling GetVblankStatus)
+    // starve without a periodic edge — they stop issuing scene draws while
+    // their unpaced UI/flip path keeps running.
     private const double VblankHz = 60.0;
-    private const int VblankWaitTimeoutMilliseconds = 100;
     private static Thread? _vblankPumpThread;
     private static int _vblankPumpStarted;
     private static volatile int _vblankPumpStopRequested;
     private static volatile int _presentationWindowCloseNotified;
-
-    private static readonly object _vblankEdgeGate = new();
-    private static ulong _vblankEdgeSequence;
-    private static long _vblankMissedEdges;
 
     private static void EnsureVblankPumpStarted()
     {
@@ -93,8 +108,6 @@ public static class VideoOutExports
             var now = Stopwatch.GetTimestamp();
             if (nextEdge < now)
             {
-                var missed = (now - nextEdge) / intervalTicks + 1;
-                Interlocked.Add(ref _vblankMissedEdges, missed);
                 nextEdge = now + intervalTicks;
             }
         }
@@ -182,12 +195,6 @@ public static class VideoOutExports
 
     private static void PumpVblanks()
     {
-        lock (_vblankEdgeGate)
-        {
-            _vblankEdgeSequence++;
-            Monitor.PulseAll(_vblankEdgeGate);
-        }
-
         VideoOutPortState[] ports;
         lock (_stateGate)
         {
@@ -196,9 +203,19 @@ public static class VideoOutExports
                 return;
             }
 
-            // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one global
-            // flag. Waking an unwatched queue would hold it 60x/sec and starve guest threads.
-            ports = _ports.Values.Where(static port => port.VblankEvents.Count != 0).ToArray();
+            // Signalling reaches WakeBlockedThreads -> Pump(), which serialises on one
+            // global flag. Waking an unwatched queue would hold it 60x/sec and starve
+            // guest threads.
+            var watched = new List<VideoOutPortState>(_ports.Count);
+            foreach (var port in _ports.Values)
+            {
+                if (port.VblankEvents.Count != 0)
+                {
+                    watched.Add(port);
+                }
+            }
+
+            ports = watched.ToArray();
         }
 
         foreach (var port in ports)
@@ -206,30 +223,6 @@ public static class VideoOutExports
             SignalVblank(port);
         }
     }
-
-    private static readonly Dictionary<(int Handle, int BufferIndex, ulong Address), ulong> _lastFrameFingerprints = new();
-    private static int _nextHandle = 1;
-    private static int _frameDumpCount;
-    private static long _nextFrameDumpIndex;
-    private static string _windowTitleBase = "SharpEmu VideoOut";
-    private static string _windowTitle = "SharpEmu VideoOut";
-    private static readonly bool _logFrameRate = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
-        "1",
-        StringComparison.Ordinal);
-    private static readonly bool _logVideoOutSync = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_SYNC"),
-        "1",
-        StringComparison.Ordinal);
-    private static readonly bool _dumpVideoOut = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
-        "1",
-        StringComparison.Ordinal);
-    private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
-    private static long _submittedFrameCount;
-    private static long _presentedFrameCount;
-    private static long _vblankSignalCount;
-    private static long _flipSubmitCount;
 
     public static void ConfigureApplicationInfo(string? title, string? titleId, string? version, string? emulatorCommitSha)
     {
@@ -247,24 +240,9 @@ public static class VideoOutExports
         var application = parts.Count == 0 ? "VideoOut" : string.Join(' ', parts);
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
         var commitSuffix = string.IsNullOrWhiteSpace(emulatorCommitSha) ? string.Empty : $" \u00b7 {emulatorCommitSha.Trim()}";
-        var hardwareSuffix = $" \u00b7 {HostSystemInfo.CpuName}";
         lock (_stateGate)
         {
-            _windowTitleBase = $"SharpEmu{commitSuffix} - {application}{versionSuffix}{hardwareSuffix}";
-            _windowTitle = $"{_windowTitleBase} \u00b7 {HostSystemInfo.GpuName}";
-        }
-    }
-
-    internal static void SetSelectedGpuName(string gpuName)
-    {
-        if (string.IsNullOrWhiteSpace(gpuName))
-        {
-            return;
-        }
-
-        lock (_stateGate)
-        {
-            _windowTitle = $"{_windowTitleBase} \u00b7 {gpuName.Trim()}";
+            _windowTitle = $"SharpEmu{commitSuffix} - {application}{versionSuffix}";
         }
     }
 
@@ -503,20 +481,7 @@ public static class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        EnsureVblankPumpStarted();
-
-        lock (_vblankEdgeGate)
-        {
-            var entryEdge = _vblankEdgeSequence;
-            while (_vblankEdgeSequence == entryEdge)
-            {
-                if (!Monitor.Wait(_vblankEdgeGate, VblankWaitTimeoutMilliseconds))
-                {
-                    break;
-                }
-            }
-        }
-
+        Thread.Sleep(1);
         SignalVblank(port);
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -657,6 +622,48 @@ public static class VideoOutExports
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
 
         TraceVideoOut($"videoout.get_flip_status handle={handle} count={count} currentBuffer={currentBuffer}");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // SceVideoOutVblankStatus: count, processTime, tsc, flags/reserved.  Unreal's
+    // PS5 RHI uses this query to decide whether its flip thread may advance.  An
+    // unresolved-import error leaves that thread permanently waiting after the
+    // bootstrap flip.
+    [SysAbiExport(
+        Nid = "1FZBKy8HeNU",
+        ExportName = "sceVideoOutGetVblankStatus",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutGetVblankStatus(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var statusAddress = ctx[CpuRegister.Rsi];
+        if (statusAddress == 0)
+        {
+            return OrbisVideoOutErrorInvalidAddress;
+        }
+
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        ulong count;
+        lock (_stateGate)
+        {
+            count = ++port.VblankCount;
+        }
+
+        var timestamp = unchecked((ulong)Stopwatch.GetTimestamp());
+        var processTime = unchecked((ulong)(Stopwatch.GetElapsedTime(0, (long)timestamp).TotalMicroseconds));
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count) ||
+            !KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, processTime) ||
+            !KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, timestamp) ||
+            !KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1127,7 +1134,10 @@ public static class VideoOutExports
                 displayBuffer.PitchInPixel);
         }
 
-        if (_dumpVideoOut)
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
+                "1",
+                StringComparison.Ordinal))
         {
             _ = TryDumpFrame(ctx, port, bufferIndex, flipMode, flipArg);
         }
@@ -1187,11 +1197,9 @@ public static class VideoOutExports
         var elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
         var submitted = Interlocked.Exchange(ref _submittedFrameCount, 0);
         var presentedCount = Interlocked.Exchange(ref _presentedFrameCount, 0);
-        var missedEdges = Interlocked.Exchange(ref _vblankMissedEdges, 0);
         Console.Error.WriteLine(
             $"[LOADER][PERF] videoout submitted_fps={submitted / elapsedSeconds:F1} " +
-            $"presented_fps={presentedCount / elapsedSeconds:F1} " +
-            $"vblank_missed={missedEdges}");
+            $"presented_fps={presentedCount / elapsedSeconds:F1}");
     }
 
     private static int RegisterBufferRange(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex = -1)

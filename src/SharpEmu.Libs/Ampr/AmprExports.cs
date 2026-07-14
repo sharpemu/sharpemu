@@ -267,59 +267,16 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        ulong bytesRead = 0;
-
-        // Unregistered/missing files are zero-filled instead of failing: games queue
-        // speculative reads and only consume the bytes on success paths.
-        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath) || !File.Exists(hostPath))
-        {
-            if (destination != 0 && size > 0)
-            {
-                int chunkSize = (int)Math.Min(size, 4096);
-                Span<byte> zeros = stackalloc byte[chunkSize];
-                zeros.Clear();
-                while (bytesRead < size)
-                {
-                    int currentChunk = (int)Math.Min((ulong)chunkSize, size - bytesRead);
-                    if (!ctx.Memory.TryWrite(destination + bytesRead, zeros[..currentChunk]))
-                    {
-                        break;
-                    }
-
-                    bytesRead += (ulong)currentChunk;
-                }
-            }
-
-            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, "(missing)", (int)OrbisGen2Result.ORBIS_GEN2_OK);
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        // Offset -1 means "continue after the previous read of this file id".
-        if (fileOffset == unchecked((ulong)(long)-1))
-        {
-            fileOffset = PakDirectoryTracker.ResolveSequentialOffset(fileId, size);
-        }
-        else if (fileOffset > long.MaxValue)
-        {
-            fileOffset = 0;
-        }
-
-        var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out bytesRead);
-        if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
-        {
-            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
-            return result;
-        }
-
-        PakDirectoryTracker.OnReadCompleted(ctx, fileId, destination, fileOffset, bytesRead);
-
-        if (!AppendReadFileRecord(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead))
+        // AMPR command buffers are declarative. Do not touch the destination while
+        // the guest is still constructing the buffer: it may reuse that memory
+        // before submission. The read is executed by CompleteCommandBuffer, in
+        // record order and before its completion event/write records.
+        if (!AppendReadFileRecord(ctx, commandBuffer, fileId, destination, size, fileOffset))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+        TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, 0, "(queued)", (int)OrbisGen2Result.ORBIS_GEN2_OK);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -495,6 +452,12 @@ public static class AmprExports
             switch (recordType)
             {
                 case ReadFileRecordType:
+                    var readResult = CompleteReadFileRecord(ctx, commandBuffer, buffer + offset);
+                    if (readResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                    {
+                        return readResult;
+                    }
+
                     offset += ReadFileRecordSize;
                     break;
 
@@ -796,8 +759,7 @@ public static class AmprExports
         uint fileId,
         ulong destination,
         ulong size,
-        ulong fileOffset,
-        ulong bytesRead)
+        ulong fileOffset)
     {
         Span<byte> record = stackalloc byte[(int)ReadFileRecordSize];
         record.Clear();
@@ -806,9 +768,77 @@ public static class AmprExports
         BinaryPrimitives.WriteUInt64LittleEndian(record[0x08..], destination);
         BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], size);
         BinaryPrimitives.WriteUInt64LittleEndian(record[0x18..], fileOffset);
-        BinaryPrimitives.WriteUInt64LittleEndian(record[0x20..], bytesRead);
 
         return AppendCommandBufferRecord(ctx, commandBuffer, record);
+    }
+
+    private static int CompleteReadFileRecord(CpuContext ctx, ulong commandBuffer, ulong recordAddress)
+    {
+        if (!ctx.TryReadUInt32(recordAddress + 0x04, out var fileId) ||
+            !ctx.TryReadUInt64(recordAddress + 0x08, out var destination) ||
+            !ctx.TryReadUInt64(recordAddress + 0x10, out var size) ||
+            !ctx.TryReadUInt64(recordAddress + 0x18, out var fileOffset))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (fileOffset == unchecked((ulong)(long)-1))
+        {
+            fileOffset = PakDirectoryTracker.ResolveSequentialOffset(fileId, size);
+        }
+        else if (fileOffset > long.MaxValue)
+        {
+            fileOffset = 0;
+        }
+
+        ulong bytesRead = 0;
+        var hostPath = "(missing)";
+        var result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        if (AmprFileRegistry.TryGetHostPath(fileId, out var registeredPath) && File.Exists(registeredPath))
+        {
+            hostPath = registeredPath;
+            result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out bytesRead);
+            if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                PakDirectoryTracker.OnReadCompleted(ctx, fileId, destination, fileOffset, bytesRead);
+            }
+        }
+        else if (!TryZeroGuestMemory(ctx, destination, size, out bytesRead))
+        {
+            result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!ctx.TryWriteUInt64(recordAddress + 0x20, bytesRead))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
+        return result;
+    }
+
+    private static bool TryZeroGuestMemory(CpuContext ctx, ulong destination, ulong size, out ulong bytesWritten)
+    {
+        bytesWritten = 0;
+        if (size == 0)
+        {
+            return true;
+        }
+
+        Span<byte> zeros = stackalloc byte[4096];
+        zeros.Clear();
+        while (bytesWritten < size)
+        {
+            var currentChunk = (int)Math.Min((ulong)zeros.Length, size - bytesWritten);
+            if (!ctx.Memory.TryWrite(destination + bytesWritten, zeros[..currentChunk]))
+            {
+                return false;
+            }
+
+            bytesWritten += (ulong)currentChunk;
+        }
+
+        return true;
     }
 
     private static bool AppendKernelEventQueueRecord(

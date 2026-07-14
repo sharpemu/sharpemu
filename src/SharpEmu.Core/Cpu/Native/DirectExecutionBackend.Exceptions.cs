@@ -5,6 +5,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Numerics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -16,6 +17,7 @@ namespace SharpEmu.Core.Cpu.Native;
 public sealed partial class DirectExecutionBackend
 {
 	private const ulong LazyCommitWindowBytes = 0x0200_0000UL;
+	private const int Win64ContextXmm0Offset = 0x1A0;
 	private static int _lazyCommitTraceCount;
 
 	private unsafe void SetupExceptionHandler()
@@ -123,6 +125,11 @@ public sealed partial class DirectExecutionBackend
 			if (exceptionCode == MSVC_CPP_EXCEPTION)
 			{
 				return 0;
+			}
+			if (exceptionCode == 3221225501u &&
+				(TryEmulateSse4aInsertq(contextRecord, rip) || TryEmulateSha1Instruction(contextRecord, rip)))
+			{
+				return -1;
 			}
 
 			switch (exceptionCode)
@@ -312,6 +319,237 @@ public sealed partial class DirectExecutionBackend
 		{
 			_vectoredHandlerDepth--;
 		}
+	}
+
+	private static unsafe bool TryEmulateSse4aInsertq(void* contextRecord, ulong rip)
+	{
+		if (contextRecord == null || rip < 0x10000)
+		{
+			return false;
+		}
+
+		Span<byte> code = stackalloc byte[6];
+		try
+		{
+			for (var i = 0; i < code.Length; i++)
+			{
+				code[i] = Marshal.ReadByte((nint)(rip + (ulong)i));
+			}
+		}
+		catch
+		{
+			return false;
+		}
+
+		// AMD SSE4a INSERTQ xmm1, xmm2, imm8, imm8. PS5 binaries may
+		// legitimately contain this even when the Windows host is Intel.
+		if (code[0] != 0xF2 || code[1] != 0x0F || code[2] != 0x78 ||
+			(code[3] & 0xC0) != 0xC0)
+		{
+			return false;
+		}
+
+		var destination = (code[3] >> 3) & 7;
+		var source = code[3] & 7;
+		var length = code[4] & 0x3F;
+		var index = code[5] & 0x3F;
+		if (length == 0)
+		{
+			length = 64;
+		}
+		if (index >= 64 || length > 64 - index)
+		{
+			return false;
+		}
+
+		Span<uint> destinationWords = stackalloc uint[4];
+		Span<uint> sourceWords = stackalloc uint[4];
+		ReadContextXmm(contextRecord, destination, destinationWords);
+		ReadContextXmm(contextRecord, source, sourceWords);
+
+		var destinationLow = destinationWords[0] | ((ulong)destinationWords[1] << 32);
+		var sourceLow = sourceWords[0] | ((ulong)sourceWords[1] << 32);
+		var valueMask = length == 64 ? ulong.MaxValue : (1UL << length) - 1;
+		var destinationMask = valueMask << index;
+		destinationLow = (destinationLow & ~destinationMask) |
+			((sourceLow & valueMask) << index);
+		destinationWords[0] = unchecked((uint)destinationLow);
+		destinationWords[1] = unchecked((uint)(destinationLow >> 32));
+
+		WriteContextXmm(contextRecord, destination, destinationWords);
+		WriteCtxU64(contextRecord, 248, rip + (ulong)code.Length);
+		return true;
+	}
+
+	private static unsafe bool TryEmulateSha1Instruction(void* contextRecord, ulong rip)
+	{
+		if (contextRecord == null || rip < 0x10000)
+		{
+			return false;
+		}
+
+		Span<byte> code = stackalloc byte[6];
+		try
+		{
+			for (var i = 0; i < code.Length; i++)
+			{
+				code[i] = Marshal.ReadByte((nint)(rip + (ulong)i));
+			}
+		}
+		catch
+		{
+			return false;
+		}
+
+		var offset = 0;
+		byte rex = 0;
+		if ((code[offset] & 0xF0) == 0x40)
+		{
+			rex = code[offset++];
+		}
+
+		if (code[offset++] != 0x0F)
+		{
+			return false;
+		}
+
+		var opcodeMap = code[offset++];
+		var opcode = code[offset++];
+		var modRm = code[offset++];
+		if ((modRm & 0xC0) != 0xC0)
+		{
+			// The current direct backend only needs the register form used by
+			// the PS5 runtime. Memory operands require full effective-address
+			// decoding and are deliberately left to the normal fault path.
+			return false;
+		}
+
+		var destination = ((modRm >> 3) & 7) | ((rex & 4) != 0 ? 8 : 0);
+		var source = (modRm & 7) | ((rex & 1) != 0 ? 8 : 0);
+		Span<uint> destinationWords = stackalloc uint[4];
+		Span<uint> sourceWords = stackalloc uint[4];
+		ReadContextXmm(contextRecord, destination, destinationWords);
+		ReadContextXmm(contextRecord, source, sourceWords);
+
+		var instructionLength = offset;
+		if (opcodeMap == 0x38)
+		{
+			switch (opcode)
+			{
+				case 0xC8: // SHA1NEXTE
+					Sha1NextE(destinationWords, sourceWords);
+					break;
+				case 0xC9: // SHA1MSG1
+					Sha1Message1(destinationWords, sourceWords);
+					break;
+				case 0xCA: // SHA1MSG2
+					Sha1Message2(destinationWords, sourceWords);
+					break;
+				default:
+					return false;
+			}
+		}
+		else if (opcodeMap == 0x3A && opcode == 0xCC) // SHA1RNDS4
+		{
+			var function = code[offset++] & 3;
+			instructionLength = offset;
+			Sha1Rounds4(destinationWords, sourceWords, function);
+		}
+		else
+		{
+			return false;
+		}
+
+		WriteContextXmm(contextRecord, destination, destinationWords);
+		WriteCtxU64(contextRecord, 248, rip + (ulong)instructionLength);
+		return true;
+	}
+
+	private static unsafe void ReadContextXmm(void* contextRecord, int register, Span<uint> words)
+	{
+		var registerOffset = Win64ContextXmm0Offset + register * 16;
+		for (var i = 0; i < 4; i++)
+		{
+			words[i] = ReadCtxU32(contextRecord, registerOffset + i * sizeof(uint));
+		}
+	}
+
+	private static unsafe void WriteContextXmm(void* contextRecord, int register, ReadOnlySpan<uint> words)
+	{
+		var registerOffset = Win64ContextXmm0Offset + register * 16;
+		for (var i = 0; i < 4; i++)
+		{
+			WriteCtxU32(contextRecord, registerOffset + i * sizeof(uint), words[i]);
+		}
+	}
+
+	private static void Sha1Message1(Span<uint> destination, ReadOnlySpan<uint> source)
+	{
+		var d0 = destination[0];
+		var d1 = destination[1];
+		var d2 = destination[2];
+		var d3 = destination[3];
+		destination[0] = d0 ^ source[2];
+		destination[1] = d1 ^ source[3];
+		destination[2] = d2 ^ d0;
+		destination[3] = d3 ^ d1;
+	}
+
+	private static void Sha1Message2(Span<uint> destination, ReadOnlySpan<uint> source)
+	{
+		var w16 = BitOperations.RotateLeft(destination[3] ^ source[2], 1);
+		var w17 = BitOperations.RotateLeft(destination[2] ^ source[1], 1);
+		var w18 = BitOperations.RotateLeft(destination[1] ^ source[0], 1);
+		var w19 = BitOperations.RotateLeft(destination[0] ^ w16, 1);
+		destination[0] = w19;
+		destination[1] = w18;
+		destination[2] = w17;
+		destination[3] = w16;
+	}
+
+	private static void Sha1NextE(Span<uint> destination, ReadOnlySpan<uint> source)
+	{
+		var previousE = destination[3];
+		source.CopyTo(destination);
+		destination[3] = unchecked(BitOperations.RotateLeft(previousE, 30) + source[3]);
+	}
+
+	private static void Sha1Rounds4(Span<uint> destination, ReadOnlySpan<uint> source, int function)
+	{
+		var a = destination[3];
+		var b = destination[2];
+		var c = destination[1];
+		var d = destination[0];
+		var e = 0u;
+		var constant = function switch
+		{
+			0 => 0x5A827999u,
+			1 => 0x6ED9EBA1u,
+			2 => 0x8F1BBCDCu,
+			_ => 0xCA62C1D6u,
+		};
+
+		for (var round = 0; round < 4; round++)
+		{
+			var f = function switch
+			{
+				0 => (b & c) ^ (~b & d),
+				1 or 3 => b ^ c ^ d,
+				_ => (b & c) ^ (b & d) ^ (c & d),
+			};
+			var messageAndE = round == 0 ? source[3] : unchecked(source[3 - round] + e);
+			var nextA = unchecked(BitOperations.RotateLeft(a, 5) + f + messageAndE + constant);
+			e = d;
+			d = c;
+			c = BitOperations.RotateLeft(b, 30);
+			b = a;
+			a = nextA;
+		}
+
+		destination[0] = d;
+		destination[1] = c;
+		destination[2] = b;
+		destination[3] = a;
 	}
 
 	private static bool IsBenignHostDebugException(uint exceptionCode)

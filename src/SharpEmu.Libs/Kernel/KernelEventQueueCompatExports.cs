@@ -11,9 +11,9 @@ public static class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
     public const short KernelEventFilterGraphics = -14;
-    public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -16;
     public const short KernelEventFilterAmprSystem = -17;
+    public const short KernelEventFilterUser = -11;
 
     private static readonly object _eventQueueGate = new();
     private static readonly HashSet<ulong> _eventQueues = new();
@@ -93,9 +93,9 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var registered = RegisterEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            unchecked((uint)ctx[CpuRegister.Rsi]),
             KernelEventFilterUser,
-            0);
+            ctx[CpuRegister.Rdx]);
         TraceEventQueue(ctx, "add_user_edge", handle);
         return registered
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
@@ -112,9 +112,9 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var registered = RegisterEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            unchecked((uint)ctx[CpuRegister.Rsi]),
             KernelEventFilterUser,
-            0);
+            ctx[CpuRegister.Rdx]);
         TraceEventQueue(ctx, "add_user", handle);
         return registered
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
@@ -131,7 +131,7 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var deleted = DeleteRegisteredEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            unchecked((uint)ctx[CpuRegister.Rsi]),
             KernelEventFilterUser);
         TraceEventQueue(ctx, "delete_user", handle);
         return deleted
@@ -149,11 +149,9 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var triggered = TriggerRegisteredEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            unchecked((uint)ctx[CpuRegister.Rsi]),
             KernelEventFilterUser,
-            flags: 0x21,
-            fflags: 0,
-            data: ctx[CpuRegister.Rdx]);
+            ctx[CpuRegister.Rdx]);
         TraceEventQueue(ctx, "trigger_user", handle);
         return triggered
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
@@ -513,8 +511,6 @@ public static class KernelEventQueueCompatExports
         ulong handle,
         ulong ident,
         short filter,
-        ushort flags,
-        uint fflags,
         ulong data)
     {
         lock (_eventQueueGate)
@@ -536,10 +532,11 @@ public static class KernelEventQueueCompatExports
                 new KernelQueuedEvent(
                     registration.Ident,
                     registration.Filter,
-                    flags,
-                    fflags,
+                    0x20,
+                    0,
                     data,
                     registration.UserData));
+            Monitor.PulseAll(_eventQueueGate);
         }
 
         WakeEventQueue(handle);
@@ -727,6 +724,6 @@ public static class KernelEventQueueCompatExports
 
         _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out ulong returnRip);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] equeue.{operation}: thread=0x{KernelPthreadState.GetCurrentThreadHandle():X16} handle=0x{handle:X16} rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} ret=0x{returnRip:X16}");
+            $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} ret=0x{returnRip:X16}");
     }
 }
