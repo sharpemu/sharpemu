@@ -32,6 +32,10 @@ public sealed class SysAbiExportGeneratorTests
             // All four integer kinds across all six argument registers.
             [SysAbiExport(Nid = "4DM06U2BNEY", ExportName = "sceKernelCancelSema")]
             public static int CancelSema(CpuContext ctx, uint a, int b, ulong c, long d, uint e, int f) => 0;
+
+            // Guest string marshalling: the thunk reads the pointer before the handler.
+            [SysAbiExport(Nid = "1G3lF1Gg1k8", ExportName = "sceKernelOpen")]
+            public static int KernelOpen(CpuContext ctx, [GuestCString(4096)] string path, int flags) => 0;
         }
         """;
 
@@ -82,6 +86,28 @@ public sealed class SysAbiExportGeneratorTests
             "unchecked((long)ctx[global::SharpEmu.HLE.CpuRegister.Rcx]), " +
             "unchecked((uint)ctx[global::SharpEmu.HLE.CpuRegister.R8]), " +
             "unchecked((int)ctx[global::SharpEmu.HLE.CpuRegister.R9]))",
+            generated,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuestCStringParametersAreMarshalledWithAFaultPath()
+    {
+        var (_, generated) = RoslynTestHost.RunGenerator(RoslynTestHost.Compile(HandlerSource));
+
+        // The string is read from the pointer in RDI before the handler runs, and a
+        // failed read returns MEMORY_FAULT to the guest without invoking the handler.
+        Assert.Contains(
+            "if (!ctx.TryReadNullTerminatedUtf8(ctx[global::SharpEmu.HLE.CpuRegister.Rdi], 4096, out var guestString0))",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "return ctx.SetReturn(global::SharpEmu.HLE.OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "return global::TestExports.SampleExports.KernelOpen(ctx, guestString0, " +
+            "unchecked((int)ctx[global::SharpEmu.HLE.CpuRegister.Rsi]));",
             generated,
             StringComparison.Ordinal);
     }

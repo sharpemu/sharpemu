@@ -29,6 +29,7 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
         SysAbiDiagnostics.UnresolvableExport,
         SysAbiDiagnostics.NameNotInCatalog,
         SysAbiDiagnostics.HandlerNotAccessible,
+        SysAbiDiagnostics.InvalidGuestCString,
     ];
 
     public override void Initialize(AnalysisContext context)
@@ -103,10 +104,12 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
         var location = method.Locations.Length != 0 ? method.Locations[0] : Location.None;
         var methodDisplay = $"{method.ContainingType.ToDisplayString()}.{method.Name}";
 
-        if (!SysAbiExportShape.IsValidHandler(method))
+        if (SysAbiExportShape.Classify(method, out _, out var invalidGuestCString) == SysAbiExportShape.HandlerShape.Invalid)
         {
             context.ReportDiagnostic(Diagnostic.Create(
-                SysAbiDiagnostics.InvalidHandlerSignature, location, methodDisplay));
+                invalidGuestCString ? SysAbiDiagnostics.InvalidGuestCString : SysAbiDiagnostics.InvalidHandlerSignature,
+                location,
+                methodDisplay));
             return;
         }
 

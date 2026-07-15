@@ -33,7 +33,7 @@ public static class SysAbiDiagnostics
     public static readonly DiagnosticDescriptor InvalidHandlerSignature = new(
         "SHEM003",
         "Invalid SysAbi handler signature",
-        "Method '{0}' must be a static, non-generic method returning int and taking no parameters, a single CpuContext parameter, or a CpuContext followed by up to six int/uint/long/ulong parameters",
+        "Method '{0}' must be a static, non-generic method returning int and taking no parameters, a single CpuContext parameter, or a CpuContext followed by up to six int/uint/long/ulong or [GuestCString] string parameters",
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
@@ -66,6 +66,14 @@ public static class SysAbiDiagnostics
         "SHEM007",
         "SysAbi handler not accessible to generated registration",
         "Method '{0}' (or its containing type) must be at least internal so the generated registry can reference it",
+        Category,
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidGuestCString = new(
+        "SHEM008",
+        "Invalid [GuestCString] usage",
+        "Method '{0}' misuses [GuestCString]: it applies only to string parameters and requires a positive MaxLength",
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);

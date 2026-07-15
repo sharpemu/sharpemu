@@ -211,23 +211,48 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
     /// <summary>
     /// SysV integer-register unmarshalling: parameter i reads argument register i as a
     /// raw ulong and reinterprets it with an unchecked cast, exactly the idiom
-    /// hand-written handlers use today.
+    /// hand-written handlers use today. [GuestCString] parameters read the register as
+    /// a guest pointer and marshal the null-terminated UTF-8 string up front, failing
+    /// the call with ORBIS_GEN2_ERROR_MEMORY_FAULT before the handler runs.
     /// </summary>
     private static string TypedThunk(ExportModel export)
     {
         var kinds = export.TypedParameterKinds.Split(',');
-        var builder = new StringBuilder();
-        builder.Append("static ctx => ").Append(export.ContainingType).Append('.').Append(export.MethodName).Append("(ctx");
+        var arguments = new string[kinds.Length];
+        var reads = new StringBuilder();
         for (var index = 0; index < kinds.Length; index++)
         {
             var register = "ctx[global::SharpEmu.HLE.CpuRegister." + SysAbiExportShape.ArgumentRegisters[index] + "]";
-            builder.Append(", ");
-            builder.Append(kinds[index] == "ulong"
+            if (kinds[index].StartsWith("cstring:", StringComparison.Ordinal))
+            {
+                var maxLength = kinds[index].Substring("cstring:".Length);
+                var variable = "guestString" + index;
+                reads.AppendLine($"            if (!ctx.TryReadNullTerminatedUtf8({register}, {maxLength}, out var {variable}))");
+                reads.AppendLine("            {");
+                reads.AppendLine("                return ctx.SetReturn(global::SharpEmu.HLE.OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);");
+                reads.AppendLine("            }");
+                reads.AppendLine();
+                arguments[index] = variable;
+                continue;
+            }
+
+            arguments[index] = kinds[index] == "ulong"
                 ? register
-                : "unchecked((" + kinds[index] + ")" + register + ")");
+                : "unchecked((" + kinds[index] + ")" + register + ")";
         }
 
-        builder.Append(')');
+        var invocation = export.ContainingType + "." + export.MethodName + "(ctx, " + string.Join(", ", arguments) + ")";
+        if (reads.Length == 0)
+        {
+            return "static ctx => " + invocation;
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine("static ctx =>");
+        builder.AppendLine("        {");
+        builder.Append(reads);
+        builder.AppendLine("            return " + invocation + ";");
+        builder.Append("        }");
         return builder.ToString();
     }
 

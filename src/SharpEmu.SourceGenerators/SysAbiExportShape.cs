@@ -46,10 +46,21 @@ public static class SysAbiExportShape
         Typed,
     }
 
+    private const string GuestCStringAttributeName = "SharpEmu.HLE.GuestCStringAttribute";
+
     /// <summary>Static, non-generic, returns int, takes one of the supported shapes.</summary>
-    public static HandlerShape Classify(IMethodSymbol method, out string typedParameterKinds)
+    public static HandlerShape Classify(IMethodSymbol method, out string typedParameterKinds) =>
+        Classify(method, out typedParameterKinds, out _);
+
+    /// <summary>
+    /// <paramref name="invalidGuestCString"/> distinguishes a misused [GuestCString]
+    /// (wrong parameter type, non-positive MaxLength) from a plain signature mismatch,
+    /// so the analyzer can point at the marshalling attribute instead of the shape.
+    /// </summary>
+    public static HandlerShape Classify(IMethodSymbol method, out string typedParameterKinds, out bool invalidGuestCString)
     {
         typedParameterKinds = string.Empty;
+        invalidGuestCString = false;
         if (!method.IsStatic ||
             method.IsGenericMethod ||
             method.ReturnType.SpecialType != SpecialType.System_Int32)
@@ -87,6 +98,32 @@ public static class SysAbiExportShape
                 return HandlerShape.Invalid;
             }
 
+            var hasGuestCString = TryGetGuestCStringMaxLength(parameter, out var maxLength);
+            if (parameter.Type.SpecialType == SpecialType.System_String)
+            {
+                if (!hasGuestCString)
+                {
+                    // A bare string has no register representation; the guest pointer
+                    // must be marshalled explicitly via [GuestCString].
+                    return HandlerShape.Invalid;
+                }
+
+                if (maxLength <= 0)
+                {
+                    invalidGuestCString = true;
+                    return HandlerShape.Invalid;
+                }
+
+                kinds[index - 1] = "cstring:" + maxLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                continue;
+            }
+
+            if (hasGuestCString)
+            {
+                invalidGuestCString = true;
+                return HandlerShape.Invalid;
+            }
+
             kinds[index - 1] = parameter.Type.SpecialType switch
             {
                 SpecialType.System_Int32 => "int",
@@ -103,6 +140,28 @@ public static class SysAbiExportShape
 
         typedParameterKinds = string.Join(",", kinds);
         return HandlerShape.Typed;
+    }
+
+    private static bool TryGetGuestCStringMaxLength(IParameterSymbol parameter, out int maxLength)
+    {
+        maxLength = 0;
+        foreach (var attribute in parameter.GetAttributes())
+        {
+            if (attribute.AttributeClass?.ToDisplayString() != GuestCStringAttributeName)
+            {
+                continue;
+            }
+
+            if (attribute.ConstructorArguments.Length == 1 &&
+                attribute.ConstructorArguments[0].Value is int value)
+            {
+                maxLength = value;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     public static bool IsValidHandler(IMethodSymbol method) =>

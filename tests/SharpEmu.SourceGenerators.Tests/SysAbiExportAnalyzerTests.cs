@@ -128,6 +128,45 @@ public sealed class SysAbiExportAnalyzerTests
     }
 
     [Fact]
+    public void GuestCStringParameterIsAccepted()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                [SysAbiExport(Nid = "1G3lF1Gg1k8", ExportName = "sceKernelOpen")]
+                public static int KernelOpen(CpuContext ctx, [GuestCString(4096)] string path, int flags) => 0;
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public void MisusedGuestCStringIsReported()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                // On a non-string parameter the attribute is meaningless.
+                [SysAbiExport(Nid = "1G3lF1Gg1k8", ExportName = "sceKernelOpen")]
+                public static int OnInt(CpuContext ctx, [GuestCString(4096)] int flags) => 0;
+
+                // A read bounded at zero bytes can never succeed.
+                [SysAbiExport(Nid = "6c3rCVE-fTU", ExportName = "_open")]
+                public static int ZeroLength(CpuContext ctx, [GuestCString(0)] string path) => 0;
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Count);
+        Assert.Equal("SHEM008", diagnostics[0].Id);
+        Assert.Equal("SHEM008", diagnostics[1].Id);
+    }
+
+    [Fact]
     public void NidContradictingExportNameIsReported()
     {
         var diagnostics = Analyze("""
