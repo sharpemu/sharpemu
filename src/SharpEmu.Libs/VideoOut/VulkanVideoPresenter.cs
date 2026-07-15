@@ -124,6 +124,7 @@ internal static unsafe class VulkanVideoPresenter
     // stays tighter than the drain budget because queued draws pin their
     // pooled guest-data arrays until the render thread uploads them.
     private const int MaxPendingGuestWork = 64;
+    private const ulong MaximumCachedHostBufferBytes = 128UL * 1024 * 1024;
     // A captured 4K flip can consume tens of MiB of device-local memory.
     // Retain only a short presentation queue while always preserving the
     // newest generation; older immutable versions are retired immediately.
@@ -2357,9 +2358,7 @@ internal static unsafe class VulkanVideoPresenter
             new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<DescriptorLayoutKey, DescriptorLayoutBundle>
             _descriptorLayouts = new();
-        private readonly Dictionary<HostBufferPoolKey, Stack<HostBufferAllocation>>
-            _hostBufferPool = new();
-        private readonly Dictionary<ulong, HostBufferAllocation> _hostBufferAllocations = new();
+        private readonly VulkanHostBufferPool _hostBufferPool;
         private readonly List<GuestBufferAllocation> _guestBufferAllocations = [];
         private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
@@ -2381,10 +2380,6 @@ internal static unsafe class VulkanVideoPresenter
             GuestRasterState Raster,
             GuestDepthState Depth);
 
-        private readonly record struct HostBufferPoolKey(
-            BufferUsageFlags Usage,
-            ulong Capacity);
-
         private readonly record struct DescriptorLayoutKey(
             ShaderStageFlags Stages,
             string Resources);
@@ -2396,12 +2391,6 @@ internal static unsafe class VulkanVideoPresenter
         private sealed record DescriptorLayoutBundle(
             DescriptorSetLayout DescriptorSetLayout,
             PipelineLayout PipelineLayout);
-
-        private sealed record HostBufferAllocation(
-            VkBuffer Buffer,
-            DeviceMemory Memory,
-            HostBufferPoolKey Key,
-            nint Mapped);
 
         private readonly record struct DirtyGuestBufferRange(ulong Offset, ulong Length);
 
@@ -2592,6 +2581,9 @@ internal static unsafe class VulkanVideoPresenter
 
         public Presenter(uint width, uint height)
         {
+            _hostBufferPool = new VulkanHostBufferPool(
+                MaximumCachedHostBufferBytes,
+                DestroyHostBufferAllocation);
             var options = WindowOptions.DefaultVulkan;
             options.Size = new Vector2D<int>((int)DefaultWindowWidth, (int)DefaultWindowHeight);
             options.Title = VideoOutExports.GetWindowTitle();
@@ -5316,7 +5308,8 @@ internal static unsafe class VulkanVideoPresenter
                     resources.IndexBuffer = CreateHostBuffer(
                         indexBuffer.Data.AsSpan(0, indexBuffer.Length),
                         BufferUsageFlags.IndexBufferBit,
-                        out resources.IndexMemory);
+                        out resources.IndexMemory,
+                        out _);
                     resources.Index32Bit = indexBuffer.Is32Bit;
                     if (indexBuffer.Pooled)
                     {
@@ -7612,8 +7605,8 @@ internal static unsafe class VulkanVideoPresenter
             var buffer = CreateHostBuffer(
                 guestBuffer.Data.AsSpan(0, guestBuffer.Length),
                 BufferUsageFlags.StorageBufferBit,
-                out var memory);
-            var allocation = _hostBufferAllocations[buffer.Handle];
+                out var memory,
+                out var mapped);
             if (guestBuffer.Pooled)
             {
                 GuestDataPool.Return(guestBuffer.Data);
@@ -7626,7 +7619,7 @@ internal static unsafe class VulkanVideoPresenter
                 WriteBackToGuest = false,
                 Buffer = buffer,
                 Memory = memory,
-                Mapped = allocation.Mapped,
+                Mapped = mapped,
                 Offset = 0,
                 Size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint)),
                 GuestOffset = 0,
@@ -7846,7 +7839,8 @@ internal static unsafe class VulkanVideoPresenter
             var buffer = CreateHostBuffer(
                 source,
                 BufferUsageFlags.VertexBufferBit,
-                out var memory);
+                out var memory,
+                out _);
             var size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint));
             if (_setDebugUtilsObjectName is not null)
             {
@@ -7915,19 +7909,15 @@ internal static unsafe class VulkanVideoPresenter
         private VkBuffer CreateHostBuffer(
             ReadOnlySpan<byte> data,
             BufferUsageFlags usage,
-            out DeviceMemory memory)
+            out DeviceMemory memory,
+            out nint mapped)
         {
             var size = (ulong)Math.Max(data.Length, sizeof(uint));
             var capacity = BitOperations.RoundUpToPowerOf2(size);
-            var key = new HostBufferPoolKey(usage, capacity);
-            if (!_hostBufferPool.TryGetValue(key, out var available))
-            {
-                available = new Stack<HostBufferAllocation>();
-                _hostBufferPool.Add(key, available);
-            }
+            var key = new VulkanHostBufferPoolKey(usage, capacity);
 
-            HostBufferAllocation allocation;
-            if (available.TryPop(out var pooled))
+            VulkanHostBufferAllocation allocation;
+            if (_hostBufferPool.TryRent(key, out var pooled))
             {
                 allocation = pooled;
             }
@@ -7945,15 +7935,16 @@ internal static unsafe class VulkanVideoPresenter
                 Check(
                     _vk.MapMemory(_device, allocatedMemory, 0, capacity, 0, &persistentMapping),
                     "vkMapMemory(host persistent)");
-                allocation = new HostBufferAllocation(
+                allocation = new VulkanHostBufferAllocation(
                     buffer,
                     allocatedMemory,
                     key,
                     (nint)persistentMapping);
-                _hostBufferAllocations.Add(buffer.Handle, allocation);
+                _hostBufferPool.Register(allocation);
             }
 
             memory = allocation.Memory;
+            mapped = allocation.Mapped;
             fixed (byte* source = data)
             {
                 System.Buffer.MemoryCopy(
@@ -7973,10 +7964,8 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
-            if (_hostBufferAllocations.TryGetValue(buffer.Handle, out var allocation) &&
-                allocation.Memory.Handle == memory.Handle)
+            if (_hostBufferPool.Return(buffer, memory))
             {
-                _hostBufferPool[allocation.Key].Push(allocation);
                 return;
             }
 
@@ -7985,6 +7974,13 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _vk.FreeMemory(_device, memory, null);
             }
+        }
+
+        private void DestroyHostBufferAllocation(VulkanHostBufferAllocation allocation)
+        {
+            _vk.UnmapMemory(_device, allocation.Memory);
+            _vk.DestroyBuffer(_device, allocation.Buffer, null);
+            _vk.FreeMemory(_device, allocation.Memory, null);
         }
 
         private static PrimitiveTopology GetPrimitiveTopology(uint primitiveType) =>
@@ -13700,13 +13696,7 @@ internal static unsafe class VulkanVideoPresenter
                 DestroyGuestBufferAllocation(allocation);
             }
             _guestBufferAllocations.Clear();
-            foreach (var allocation in _hostBufferAllocations.Values)
-            {
-                _vk.DestroyBuffer(_device, allocation.Buffer, null);
-                _vk.FreeMemory(_device, allocation.Memory, null);
-            }
-            _hostBufferAllocations.Clear();
-            _hostBufferPool.Clear();
+            _hostBufferPool.Dispose();
             foreach (var guestImage in _guestImages.Values)
             {
                 DestroyGuestImage(guestImage);
