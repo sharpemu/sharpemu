@@ -5305,7 +5305,11 @@ internal static unsafe class VulkanVideoPresenter
                 for (var index = 0; index < dispatch.Textures.Count; index++)
                 {
                     var texture = dispatch.Textures[index];
-                    if (texture.IsStorage)
+                    // Address-zero storage descriptors are valid scratch bindings.
+                    // ResolveTextureResource creates their transient image below;
+                    // pre-resolving them as guest-backed images throws and drops
+                    // the entire compute dispatch before that path can run.
+                    if (texture.IsStorage && texture.Address != 0)
                     {
                         if (traceResources)
                         {
