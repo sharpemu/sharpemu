@@ -1418,6 +1418,17 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "mljzuGDZRQ4",
+        ExportName = "sceAgcDcbSetIndexCountGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetIndexCountGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 7u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "tSBxhAPyytQ",
         ExportName = "sceAgcDcbSetNumInstances",
         Target = Generation.Gen5,
@@ -1549,6 +1560,17 @@ public static partial class AgcExports
             $"agc.dcb_draw_index_indirect buf=0x{commandBufferAddress:X16} " +
             $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "mStuvI0zOtc",
+        ExportName = "sceAgcDcbDrawIndexIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndexIndirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
     }
 
     [SysAbiExport(
@@ -1831,6 +1853,45 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "u2T2DiA5hRI",
+        ExportName = "sceAgcDcbStallCommandBufferParser",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbStallCommandBufferParser(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var size = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
+        var address = ctx[CpuRegister.Rdx];
+        var reference = ctx[CpuRegister.Rcx];
+        if (commandBufferAddress == 0 || size > 1 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RZero)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, 0))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        // Direct execution submits work synchronously, so there is no independent
+        // hardware command processor to stall. Keep a well-formed no-op in the DCB
+        // so packet addresses and the command-buffer cursor remain coherent.
+        TraceAgc(
+            $"agc.dcb_stall_parser buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"size={size} addr=0x{address:X16} reference=0x{reference:X16}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "+u6dKSLWM2o",
+        ExportName = "sceAgcDcbStallCommandBufferParserGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbStallCommandBufferParserGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "WmAc2MEj6Io",
         ExportName = "sceAgcDcbDmaData",
         Target = Generation.Gen5,
@@ -1891,6 +1952,17 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "2ccJz9LQI+w",
+        ExportName = "sceAgcDcbDmaDataGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDmaDataGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "-RnpfpxIhec",
         ExportName = "sceAgcAcbDmaData",
         Target = Generation.Gen5,
@@ -1921,6 +1993,17 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "M0ttm8h7SKA",
+        ExportName = "sceAgcAcbDmaDataGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbDmaDataGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
     }
 
     [SysAbiExport(
@@ -2100,6 +2183,22 @@ public static partial class AgcExports
             ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
             : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
+
+    [SysAbiExport(
+        Nid = "eAy8eGNsCuU",
+        ExportName = "sceAgcWriteDataPatchSetCachePolicy",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int WriteDataPatchSetCachePolicy(CpuContext ctx) =>
+        PatchWriteDataControlByte(ctx, byteIndex: 1);
+
+    [SysAbiExport(
+        Nid = "tmy-+rBpspY",
+        ExportName = "sceAgcWriteDataPatchSetDst",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int WriteDataPatchSetDst(CpuContext ctx) =>
+        PatchWriteDataControlByte(ctx, byteIndex: 0);
 
     [SysAbiExport(
         Nid = "fPSCdQxgpSw",
@@ -9950,6 +10049,62 @@ public static partial class AgcExports
         TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int PatchWriteDataControlByte(CpuContext ctx, int byteIndex)
+    {
+        if (!TryResolveWriteDataPatchArguments(
+                ctx,
+                ctx[CpuRegister.Rdi],
+                ctx[CpuRegister.Rsi],
+                out var commandAddress,
+                out var value) ||
+            !TryReadUInt32(ctx, commandAddress + 4, out var control))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var shift = byteIndex * 8;
+        var patchedControl = (control & ~(0xFFu << shift)) | (((uint)value & 0xFFu) << shift);
+        return TryWriteUInt32(ctx, commandAddress + 4, patchedControl)
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    private static bool TryResolveWriteDataPatchArguments(
+        CpuContext ctx,
+        ulong first,
+        ulong second,
+        out ulong commandAddress,
+        out ulong value)
+    {
+        if (IsWriteDataPacket(ctx, first))
+        {
+            commandAddress = first;
+            value = second;
+            return true;
+        }
+
+        if (IsWriteDataPacket(ctx, second))
+        {
+            commandAddress = second;
+            value = first;
+            return true;
+        }
+
+        commandAddress = 0;
+        value = 0;
+        return false;
+    }
+
+    private static bool IsWriteDataPacket(CpuContext ctx, ulong commandAddress)
+    {
+        if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register))
+        {
+            return false;
+        }
+
+        return op == ItWriteData || (op == ItNop && register == RWriteData);
     }
 
     private static int AddIndirectPatchRegisters(CpuContext ctx, string registerSpace)
