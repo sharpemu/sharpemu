@@ -33,7 +33,7 @@ public static class SysAbiDiagnostics
     public static readonly DiagnosticDescriptor InvalidHandlerSignature = new(
         "SHEM003",
         "Invalid SysAbi handler signature",
-        "Method '{0}' must be a static, non-generic method returning int and taking either a single CpuContext parameter or no parameters",
+        "Method '{0}' must be a static, non-generic method returning int and taking no parameters, a single CpuContext parameter, or a CpuContext followed by up to six int/uint/long/ulong parameters",
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);

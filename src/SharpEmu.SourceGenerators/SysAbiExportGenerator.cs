@@ -11,11 +11,11 @@ namespace SharpEmu.SourceGenerators;
 
 /// <summary>
 /// Emits the SysAbi export registry at compile time: one static class per assembly whose
-/// CreateExports(Generation) reproduces ModuleManager.RegisterFromAssembly's reflection
-/// scan — same generation filtering, same name fallback, same library default — as plain
-/// method-group registrations. NIDs omitted from attributes are derived from the export
-/// name with the PS NID algorithm (the same computation the runtime symbol catalog was
-/// built from).
+/// CreateExports(Generation) lists every [SysAbiExport] handler — generation filtering,
+/// name fallback, and library default preserved from the retired reflection scan. NIDs
+/// omitted from attributes are derived from the export name with the PS NID algorithm
+/// (the same computation the runtime symbol catalog was built from). Handlers written
+/// with typed signatures get a SysV register-unmarshalling thunk emitted here.
 ///
 /// Invalid declarations are skipped here and rejected by SysAbiExportAnalyzer as build
 /// errors, so nothing can be silently dropped.
@@ -27,11 +27,12 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
 
     private sealed class ExportModel : IEquatable<ExportModel>
     {
-        public ExportModel(string containingType, string methodName, bool hasContextParameter, string libraryName, string nid, string exportName, int target)
+        public ExportModel(string containingType, string methodName, SysAbiExportShape.HandlerShape shape, string typedParameterKinds, string libraryName, string nid, string exportName, int target)
         {
             ContainingType = containingType;
             MethodName = methodName;
-            HasContextParameter = hasContextParameter;
+            Shape = shape;
+            TypedParameterKinds = typedParameterKinds;
             LibraryName = libraryName;
             Nid = nid;
             ExportName = exportName;
@@ -40,7 +41,8 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
 
         public string ContainingType { get; }
         public string MethodName { get; }
-        public bool HasContextParameter { get; }
+        public SysAbiExportShape.HandlerShape Shape { get; }
+        public string TypedParameterKinds { get; }
         public string LibraryName { get; }
         public string Nid { get; }
         public string ExportName { get; }
@@ -50,7 +52,8 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
             other is not null &&
             ContainingType == other.ContainingType &&
             MethodName == other.MethodName &&
-            HasContextParameter == other.HasContextParameter &&
+            Shape == other.Shape &&
+            TypedParameterKinds == other.TypedParameterKinds &&
             LibraryName == other.LibraryName &&
             Nid == other.Nid &&
             ExportName == other.ExportName &&
@@ -92,8 +95,13 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
     private static ExportModel? CreateModel(GeneratorAttributeSyntaxContext context)
     {
         if (context.TargetSymbol is not IMethodSymbol method ||
-            !SysAbiExportShape.IsValidHandler(method) ||
             !SysAbiExportShape.IsAccessibleFromGeneratedCode(method))
+        {
+            return null;
+        }
+
+        var shape = SysAbiExportShape.Classify(method, out var typedParameterKinds);
+        if (shape == SysAbiExportShape.HandlerShape.Invalid)
         {
             return null;
         }
@@ -125,7 +133,8 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         return new ExportModel(
             method.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
             method.Name,
-            method.Parameters.Length == 1,
+            shape,
+            typedParameterKinds,
             libraryName,
             nid!,
             exportName!,
@@ -163,9 +172,12 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
                 continue;
             }
 
-            var function = export.HasContextParameter
-                ? $"{export.ContainingType}.{export.MethodName}"
-                : $"static _ => {export.ContainingType}.{export.MethodName}()";
+            var function = export.Shape switch
+            {
+                SysAbiExportShape.HandlerShape.ContextOnly => $"{export.ContainingType}.{export.MethodName}",
+                SysAbiExportShape.HandlerShape.Parameterless => $"static _ => {export.ContainingType}.{export.MethodName}()",
+                _ => TypedThunk(export),
+            };
             builder.AppendLine(
                 $"        Add(exports, registrationGeneration, {Literal(export.LibraryName)}, {Literal(export.Nid)}, " +
                 $"{Literal(export.ExportName)}, (global::SharpEmu.HLE.Generation){export.Target}, {function});");
@@ -194,6 +206,29 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         builder.AppendLine("}");
 
         context.AddSource("SysAbiExportRegistry.g.cs", SourceText.From(builder.ToString(), Encoding.UTF8));
+    }
+
+    /// <summary>
+    /// SysV integer-register unmarshalling: parameter i reads argument register i as a
+    /// raw ulong and reinterprets it with an unchecked cast, exactly the idiom
+    /// hand-written handlers use today.
+    /// </summary>
+    private static string TypedThunk(ExportModel export)
+    {
+        var kinds = export.TypedParameterKinds.Split(',');
+        var builder = new StringBuilder();
+        builder.Append("static ctx => ").Append(export.ContainingType).Append('.').Append(export.MethodName).Append("(ctx");
+        for (var index = 0; index < kinds.Length; index++)
+        {
+            var register = "ctx[global::SharpEmu.HLE.CpuRegister." + SysAbiExportShape.ArgumentRegisters[index] + "]";
+            builder.Append(", ");
+            builder.Append(kinds[index] == "ulong"
+                ? register
+                : "unchecked((" + kinds[index] + ")" + register + ")");
+        }
+
+        builder.Append(')');
+        return builder.ToString();
     }
 
     private static string Literal(string value) =>

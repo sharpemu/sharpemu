@@ -86,6 +86,48 @@ public sealed class SysAbiExportAnalyzerTests
     }
 
     [Fact]
+    public void TypedHandlerShapeIsAccepted()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                [SysAbiExport(Nid = "12wOHk8ywb0", ExportName = "sceKernelPollSema")]
+                public static int PollSema(CpuContext ctx, uint handle, int needCount) => 0;
+
+                [SysAbiExport(Nid = "4DM06U2BNEY", ExportName = "sceKernelCancelSema")]
+                public static int CancelSema(CpuContext ctx, uint a, int b, ulong c, long d, uint e, int f) => 0;
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public void TypedHandlerBeyondRegisterArgsOrWithUnsupportedTypeIsReported()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                // Seven args exceed the six SysV integer registers.
+                [SysAbiExport(Nid = "12wOHk8ywb0", ExportName = "sceKernelPollSema")]
+                public static int TooMany(CpuContext ctx, uint a, int b, ulong c, long d, uint e, int f, int g) => 0;
+
+                // string is not register-representable (that is phase 3's marshalling).
+                [SysAbiExport(Nid = "4czppHBiriw", ExportName = "sceKernelSignalSema")]
+                public static int WrongKind(CpuContext ctx, string name) => 0;
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Count);
+        Assert.Equal("SHEM003", diagnostics[0].Id);
+        Assert.Equal("SHEM003", diagnostics[1].Id);
+    }
+
+    [Fact]
     public void NidContradictingExportNameIsReported()
     {
         var diagnostics = Analyze("""

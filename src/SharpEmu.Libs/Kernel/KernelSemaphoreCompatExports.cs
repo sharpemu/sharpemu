@@ -259,11 +259,8 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sceKernelPollSema",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelPollSema(CpuContext ctx)
+    public static int KernelPollSema(CpuContext ctx, uint handle, int needCount)
     {
-        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
-        var needCount = unchecked((int)ctx[CpuRegister.Rsi]);
-
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
@@ -299,11 +296,8 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sceKernelSignalSema",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelSignalSema(CpuContext ctx)
+    public static int KernelSignalSema(CpuContext ctx, uint handle, int signalCount)
     {
-        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
-        var signalCount = unchecked((int)ctx[CpuRegister.Rsi]);
-
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
@@ -341,12 +335,8 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sceKernelCancelSema",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelCancelSema(CpuContext ctx)
+    public static int KernelCancelSema(CpuContext ctx, uint handle, int setCount, ulong waitingThreadsAddress)
     {
-        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
-        var setCount = unchecked((int)ctx[CpuRegister.Rsi]);
-        var waitingThreadsAddress = ctx[CpuRegister.Rdx];
-
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);

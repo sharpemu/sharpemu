@@ -84,8 +84,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
         };
         var moduleManager = new ModuleManager();
-        // The compile-time generated registry (SharpEmu.SourceGenerators) replaces the
-        // reflection scan; a parity test in SharpEmu.Libs.Tests pins the two equal.
+        // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
+        // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
         moduleManager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
         moduleManager.Freeze();
 

@@ -24,6 +24,14 @@ public sealed class SysAbiExportGeneratorTests
             // Parameterless handler shape: must be wrapped to the SysAbiFunction contract.
             [SysAbiExport(Nid = "ekNvsT22rsY", ExportName = "sceAudioOutOpen")]
             public static int Open() => 0;
+
+            // Typed handler shape: the generator emits the SysV register thunk.
+            [SysAbiExport(Nid = "12wOHk8ywb0", ExportName = "sceKernelPollSema")]
+            public static int PollSema(CpuContext ctx, uint handle, int needCount) => 0;
+
+            // All four integer kinds across all six argument registers.
+            [SysAbiExport(Nid = "4DM06U2BNEY", ExportName = "sceKernelCancelSema")]
+            public static int CancelSema(CpuContext ctx, uint a, int b, ulong c, long d, uint e, int f) => 0;
         }
         """;
 
@@ -51,6 +59,31 @@ public sealed class SysAbiExportGeneratorTests
 
         // Parameterless handlers are adapted to the SysAbiFunction shape.
         Assert.Contains("static _ => global::TestExports.SampleExports.Open()", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TypedHandlersGetSysVRegisterThunks()
+    {
+        var (_, generated) = RoslynTestHost.RunGenerator(RoslynTestHost.Compile(HandlerSource));
+
+        // Parameters map positionally to RDI/RSI/... with the same unchecked-cast idiom
+        // hand-written handlers use; ulong reads the register raw.
+        Assert.Contains(
+            "static ctx => global::TestExports.SampleExports.PollSema(ctx, " +
+            "unchecked((uint)ctx[global::SharpEmu.HLE.CpuRegister.Rdi]), " +
+            "unchecked((int)ctx[global::SharpEmu.HLE.CpuRegister.Rsi]))",
+            generated,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "static ctx => global::TestExports.SampleExports.CancelSema(ctx, " +
+            "unchecked((uint)ctx[global::SharpEmu.HLE.CpuRegister.Rdi]), " +
+            "unchecked((int)ctx[global::SharpEmu.HLE.CpuRegister.Rsi]), " +
+            "ctx[global::SharpEmu.HLE.CpuRegister.Rdx], " +
+            "unchecked((long)ctx[global::SharpEmu.HLE.CpuRegister.Rcx]), " +
+            "unchecked((uint)ctx[global::SharpEmu.HLE.CpuRegister.R8]), " +
+            "unchecked((int)ctx[global::SharpEmu.HLE.CpuRegister.R9]))",
+            generated,
+            StringComparison.Ordinal);
     }
 
     [Fact]
