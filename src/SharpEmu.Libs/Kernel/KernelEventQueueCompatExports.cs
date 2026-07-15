@@ -589,6 +589,58 @@ public static class KernelEventQueueCompatExports
         return triggeredCount;
     }
 
+    /// <summary>
+    /// Wake every registration with the given filter, regardless of identifier.
+    /// This is a stopgap for command-buffer EVENT_WRITE packets where the PM4
+    /// EVENT_TYPE does not match the application-registered eventId.
+    /// </summary>
+    public static int TriggerAllRegisteredEvents(short filter, ulong data)
+    {
+        List<ulong>? wakeHandles = null;
+        var triggeredCount = 0;
+        lock (_eventQueueGate)
+        {
+            foreach (var (handle, registrations) in _registeredEvents)
+            {
+                foreach (var registration in registrations.Values)
+                {
+                    if (registration.Filter != filter)
+                    {
+                        continue;
+                    }
+
+                    if (!_pendingEvents.TryGetValue(handle, out var queue))
+                    {
+                        queue = new KernelEventDeque();
+                        _pendingEvents[handle] = queue;
+                    }
+
+                    QueueOrUpdateEvent(
+                        queue,
+                        new KernelQueuedEvent(
+                            registration.Ident,
+                            registration.Filter,
+                            0,
+                            1,
+                            data,
+                            registration.UserData));
+                    (wakeHandles ??= new List<ulong>()).Add(handle);
+                    triggeredCount++;
+                }
+            }
+        }
+
+        if (wakeHandles is not null)
+        {
+            foreach (var handle in wakeHandles)
+            {
+                WakeEventQueue(handle);
+            }
+        }
+
+        return triggeredCount;
+    }
+
     private static bool TriggerRegisteredEvent(
         ulong handle,
         ulong ident,

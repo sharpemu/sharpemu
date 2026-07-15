@@ -2723,6 +2723,18 @@ public static class AgcExports
                     eventType,
                     KernelEventQueueCompatExports.KernelEventFilterGraphics,
                     eventType);
+
+                // Stopgap: real PS5 command buffers use EVENT_TYPE values that don't
+                // line up with the eventId games register via sceAgcDriverAddEqEvent.
+                // If the exact match doesn't wake anything, fire all registered graphics
+                // events so completion waiters can proceed.
+                if (triggered == 0)
+                {
+                    triggered = KernelEventQueueCompatExports.TriggerAllRegisteredEvents(
+                        KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                        eventType);
+                }
+
                 if (tracePackets)
                 {
                     TraceAgc($"agc.dcb.event type=0x{eventType:X2} queues={triggered}");
