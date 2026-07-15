@@ -197,7 +197,13 @@ internal static partial class Program
             return childExitCode;
         }
 
-        if (!TryParseArguments(args, out var ebootPath, out var runtimeOptions, out var logLevel, out var logFilePath))
+        if (!TryParseArguments(
+                args,
+                out var ebootPath,
+                out var runtimeOptions,
+                out var logLevel,
+                out var logFilePath,
+                out var diagnosticReportPath))
         {
             PrintUsage();
             return 1;
@@ -245,6 +251,17 @@ internal static partial class Program
         {
             Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
             Log.Error("SharpEmu failed to run.", ex);
+
+            if (!string.IsNullOrWhiteSpace(diagnosticReportPath))
+            {
+                TryWriteDiagnosticReport(
+                    diagnosticReportPath,
+                    ebootPath,
+                    result: null,
+                    runtime: runtime,
+                    exception: ex);
+            }
+
             return 3;
         }
         finally
@@ -283,7 +300,116 @@ internal static partial class Program
             Log.Info(runtime.LastExecutionTrace);
         }
 
+        if (!string.IsNullOrWhiteSpace(diagnosticReportPath))
+        {
+            TryWriteDiagnosticReport(
+                diagnosticReportPath,
+                ebootPath,
+                result,
+                runtime);
+        }
+
         return result == OrbisGen2Result.ORBIS_GEN2_OK ? 0 : 4;
+    }
+
+    private static void TryWriteDiagnosticReport(
+        string reportPath,
+        string ebootPath,
+        OrbisGen2Result? result,
+        ISharpEmuRuntime runtime,
+        Exception? exception = null)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(reportPath);
+            var directory = Path.GetDirectoryName(fullPath);
+
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var builder = new StringBuilder(4096);
+
+            builder.AppendLine("SharpEmu Diagnostic Report");
+            builder.AppendLine("==========================");
+            builder.AppendLine($"Generated UTC: {DateTime.UtcNow:O}");
+            builder.AppendLine($"Build: {BuildInfo.Banner}");
+            builder.AppendLine($"Executable: {ebootPath}");
+            if (result.HasValue)
+            {
+                var resultValue = result.Value;
+                builder.AppendLine(
+                    $"Result: {resultValue} (0x{(int)resultValue:X8})");
+            }
+            else
+            {
+                builder.AppendLine("Result: unhandled exception");
+            }
+
+            if (exception is not null)
+            {
+                AppendDiagnosticSection(
+                    builder,
+                    "Unhandled Exception",
+                    exception.ToString());
+            }
+
+            AppendDiagnosticSection(
+                builder,
+                "Session Summary",
+                runtime.LastSessionSummary);
+
+            AppendDiagnosticSection(
+                builder,
+                "Execution Diagnostics",
+                runtime.LastExecutionDiagnostics);
+
+            AppendDiagnosticSection(
+                builder,
+                "Milestones",
+                runtime.LastMilestoneLog);
+
+            AppendDiagnosticSection(
+                builder,
+                "Basic Block Trace",
+                runtime.LastBasicBlockTrace);
+
+            AppendDiagnosticSection(
+                builder,
+                "Import Trace",
+                runtime.LastExecutionTrace);
+
+            File.WriteAllText(
+                fullPath,
+                builder.ToString(),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            Log.Info($"Diagnostic report written: {fullPath}");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn(
+                $"Failed to write diagnostic report '{reportPath}': " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void AppendDiagnosticSection(
+        StringBuilder builder,
+        string title,
+        string? content)
+    {
+        builder.AppendLine();
+        builder.AppendLine($"=== {title} ===");
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            builder.AppendLine("(not available)");
+            return;
+        }
+
+        builder.AppendLine(content.TrimEnd());
     }
 
     private static void EnsureCliConsole()
@@ -613,6 +739,25 @@ internal static partial class Program
         return Path.Combine(logsDirectory, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
     }
 
+    private static string BuildDefaultDiagnosticReportPath(string? ebootPath)
+    {
+        var reportsDirectory = Path.Combine(
+            AppContext.BaseDirectory,
+            "user",
+            "reports");
+
+        var name = TryReadTitleId(ebootPath) ?? "UNKNOWN";
+
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            name = name.Replace(invalid, '_');
+        }
+
+        return Path.Combine(
+            reportsDirectory,
+            $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.diagnostic.txt");
+    }
+
     private static string? TryReadTitleId(string? ebootPath)
     {
         if (string.IsNullOrWhiteSpace(ebootPath))
@@ -900,8 +1045,17 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] <path-to-eboot.bin>");
-        Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
+        Log.Info(
+            "Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] " +
+            "[--cpu-engine=<native>] [--log-level=<level>] " +
+            "[--log-file[=<path>]] [--diagnostic-report[=<path>]] " +
+            "<path-to-eboot.bin>");
+
+        Log.Info(
+            @"Example: SharpEmu.CLI --cpu-engine=native " +
+            @"--trace-imports=64 --log-level=debug " +
+            @"--diagnostic-report=""E:\Reports\sharpemu-diagnostic.txt"" " +
+            @"""E:\Games\...\eboot.bin""");
     }
 
     private static bool TryParseArguments(
@@ -909,8 +1063,11 @@ internal static partial class Program
         out string ebootPath,
         out SharpEmuRuntimeOptions runtimeOptions,
         out LogLevel logLevel,
-        out string? logFilePath)
+        out string? logFilePath,
+        out string? diagnosticReportPath)
     {
+        diagnosticReportPath = null;
+
         if (args.Length == 0)
         {
             ebootPath = string.Empty;
@@ -972,6 +1129,15 @@ internal static partial class Program
                 }
 
                 i++;
+                continue;
+            }
+
+            if (string.Equals(
+                    argument,
+                    "--diagnostic-report",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                diagnosticReportPath = string.Empty;
                 continue;
             }
 
@@ -1053,6 +1219,27 @@ internal static partial class Program
                 continue;
             }
 
+            const string diagnosticReportPrefix = "--diagnostic-report=";
+            if (argument.StartsWith(
+                    diagnosticReportPrefix,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                diagnosticReportPath =
+                    argument[diagnosticReportPrefix.Length..];
+
+                if (string.IsNullOrWhiteSpace(diagnosticReportPath))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logLevel = SharpEmuLog.MinimumLevel;
+                    logFilePath = null;
+                    diagnosticReportPath = null;
+                    return false;
+                }
+
+                continue;
+            }
+
             if (argument.StartsWith("--", StringComparison.Ordinal))
             {
                 ebootPath = string.Empty;
@@ -1075,6 +1262,14 @@ internal static partial class Program
         }
 
         ebootPath = string.Join(' ', pathTokens);
+
+        if (diagnosticReportPath is not null &&
+            string.IsNullOrWhiteSpace(diagnosticReportPath))
+        {
+            diagnosticReportPath =
+                BuildDefaultDiagnosticReportPath(ebootPath);
+        }
+
         runtimeOptions = new SharpEmuRuntimeOptions
         {
             CpuEngine = cpuEngine,
