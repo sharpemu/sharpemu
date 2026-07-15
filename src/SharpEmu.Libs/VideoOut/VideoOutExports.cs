@@ -221,6 +221,12 @@ public static class VideoOutExports
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_SYNC"),
         "1",
         StringComparison.Ordinal);
+    // Call sites must check this before building the interpolated message; the trace
+    // strings would otherwise be allocated on the per-frame flip path even with tracing off.
+    private static readonly bool _logVideoOut = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT"),
+        "1",
+        StringComparison.Ordinal);
     private static readonly bool _dumpVideoOut = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
         "1",
@@ -558,7 +564,10 @@ public static class VideoOutExports
         // Some engines wait on this queue before issuing their first flip. Provide a first
         // edge now; later calls to WaitVblank advance the same notification sequence.
         SignalVblank(port);
-        TraceVideoOut($"videoout.add_vblank_event eq=0x{equeue:X16} handle={handle} udata=0x{userData:X16}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.add_vblank_event eq=0x{equeue:X16} handle={handle} udata=0x{userData:X16}");
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -595,7 +604,10 @@ public static class VideoOutExports
             }
         }
 
-        TraceVideoOut($"videoout.add_flip_event eq=0x{equeue:X16} handle={handle} udata=0x{userData:X16}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.add_flip_event eq=0x{equeue:X16} handle={handle} udata=0x{userData:X16}");
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -656,7 +668,10 @@ public static class VideoOutExports
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, unchecked((ulong)flipArg));
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
 
-        TraceVideoOut($"videoout.get_flip_status handle={handle} count={count} currentBuffer={currentBuffer}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.get_flip_status handle={handle} count={count} currentBuffer={currentBuffer}");
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1151,7 +1166,10 @@ public static class VideoOutExports
                 $"flipQueues={flipEvents.Count}");
         }
 
-        TraceVideoOut($"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} arg={flipArg} events={flipEvents.Count}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} arg={flipArg} events={flipEvents.Count}");
+        }
         ReportFrameRate(presented: false);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1233,8 +1251,11 @@ public static class VideoOutExports
                 slot.AddressRight = 0;
             }
 
-            TraceVideoOut(
-                $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} fmt=0x{attribute.PixelFormat:X} tile={attribute.TilingMode} {attribute.Width}x{attribute.Height} pitch={attribute.PitchInPixel}");
+            if (_logVideoOut)
+            {
+                TraceVideoOut(
+                    $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} fmt=0x{attribute.PixelFormat:X} tile={attribute.TilingMode} {attribute.Width}x{attribute.Height} pitch={attribute.PitchInPixel}");
+            }
             VulkanVideoPresenter.EnsureStarted(attribute.Width, attribute.Height);
 
             var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
@@ -1400,7 +1421,10 @@ public static class VideoOutExports
         var basePath = GetFrameDumpBasePath(frameIndex, port.Handle, bufferIndex);
         WriteBmp(basePath + ".bmp", attribute.Width, attribute.Height, rgb);
         WriteFrameMetadata(basePath + ".txt", slot.AddressLeft, attribute, bufferIndex, flipMode, flipArg, "bmp-linear-read", fingerprint);
-        TraceVideoOut($"videoout.dump_frame path={basePath}.bmp addr=0x{slot.AddressLeft:X16} {attribute.Width}x{attribute.Height} fmt=0x{attribute.PixelFormat:X} fingerprint=0x{fingerprint:X16}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.dump_frame path={basePath}.bmp addr=0x{slot.AddressLeft:X16} {attribute.Width}x{attribute.Height} fmt=0x{attribute.PixelFormat:X} fingerprint=0x{fingerprint:X16}");
+        }
         return true;
     }
 
@@ -1439,7 +1463,10 @@ public static class VideoOutExports
         var basePath = GetFrameDumpBasePath(frameIndex, handle, bufferIndex);
         File.WriteAllBytes(basePath + ".raw", bytes);
         WriteFrameMetadata(basePath + ".txt", address, attribute, bufferIndex, flipMode, flipArg, reason, fingerprint);
-        TraceVideoOut($"videoout.dump_frame path={basePath}.raw addr=0x{address:X16} bytes={byteCount} reason={reason} fingerprint=0x{fingerprint:X16}");
+        if (_logVideoOut)
+        {
+            TraceVideoOut($"videoout.dump_frame path={basePath}.raw addr=0x{address:X16} bytes={byteCount} reason={reason} fingerprint=0x{fingerprint:X16}");
+        }
         return true;
     }
 
@@ -1666,11 +1693,6 @@ public static class VideoOutExports
 
     private static void TraceVideoOut(string message)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT"), "1", StringComparison.Ordinal))
-        {
-            return;
-        }
-
         Console.Error.WriteLine($"[LOADER][TRACE] {message}");
     }
 }
