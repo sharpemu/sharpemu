@@ -14,9 +14,10 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static class GuestTlsTemplate
 {
-    // Must match CpuDispatcher/DirectExecutionBackend's mapped prefix.
-    private static readonly ulong _startupStaticTlsReservation =
-        OperatingSystem.IsWindows() ? 0x1000UL : 0x10000UL;
+    // Must match CpuDispatcher/DirectExecutionBackend's mapped prefix. PS5
+    // modules can require more than one host page of Variant II static TLS;
+    // Dreaming Sarah's startup image, for example, reaches 0x1870 bytes.
+    public const ulong StartupStaticTlsReservation = 0x10000UL;
     private static readonly object _gate = new();
     private static readonly SortedDictionary<ulong, ModuleTemplate> _modules = new();
     private static readonly Dictionary<ulong, ThreadDtv> _threadDtvs = new();
@@ -170,11 +171,11 @@ public static class GuestTlsTemplate
                 memorySize,
                 normalizedAlignment,
                 alignmentBias);
-            if (staticOffset > _startupStaticTlsReservation)
+            if (staticOffset > StartupStaticTlsReservation)
             {
                 throw new InvalidOperationException(
                     $"Static TLS requires 0x{staticOffset:X} bytes, but startup maps only " +
-                    $"0x{_startupStaticTlsReservation:X} bytes below the thread pointer.");
+                    $"0x{StartupStaticTlsReservation:X} bytes below the thread pointer.");
             }
             _modules.Add(moduleId, new ModuleTemplate
             {
