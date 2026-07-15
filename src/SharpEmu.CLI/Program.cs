@@ -63,6 +63,11 @@ internal static partial class Program
 
     private static int Run(string[] args)
     {
+        if (Updater.TryApply(args, out var updateExitCode))
+        {
+            return updateExitCode;
+        }
+
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
         if (args.Length == 0 && !isMitigatedChild)
         {

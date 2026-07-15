@@ -142,5 +142,20 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Join the community, get support and follow development.",
   "About.GithubButton": "Contribute in GitHub!",
-  "About.DiscordButton": "Join our Discord!"
+  "About.DiscordButton": "Join our Discord!",
+
+  "Updater.Auto.Label": "Check for updates on startup",
+  "Updater.Auto.Desc": "Checks GitHub without delaying startup.",
+  "Updater.Label": "Updates",
+  "Updater.Check": "Check for updates",
+  "Updater.DownloadRestart": "Download and restart",
+  "Updater.Status.Ready": "Current build: {0}",
+  "Updater.Status.Checking": "Checking for updates…",
+  "Updater.Status.Current": "You are up to date ({0}).",
+  "Updater.Status.Available": "A new build is available: {0}",
+  "Updater.Status.Downloading": "Downloading update… {0}%",
+  "Updater.Status.Installing": "Installing update…",
+  "Updater.Status.Timeout": "Update check timed out after 10 seconds.",
+  "Updater.Status.Failed": "Could not check for updates.",
+  "Updater.Status.Unsupported": "Automatic updating requires a Windows, Linux or macOS x64 build."
 }

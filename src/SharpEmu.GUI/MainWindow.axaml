@@ -315,6 +315,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch Grid.Column="1" x:Name="DiscordToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="AutoUpdateLabel" Text="Check for updates on startup" FontSize="13" />
+                          <TextBlock x:Name="AutoUpdateDesc" Text="Checks GitHub without delaying startup."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off"
+                                      IsChecked="True" VerticalAlignment="Center" />
+                      </Grid>
                     </StackPanel>
                   </Border>
                   <Border Classes="card">
@@ -322,6 +332,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <TextBlock x:Name="AboutSectionTitle"
                                 Classes="sectionTitle"
                                 Text="ABOUT" />
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                          <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
+                          <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
+                                     Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1" x:Name="UpdateButton" Classes="ghost"
+                                Content="Check for updates" VerticalAlignment="Center" />
+                      </Grid>
                       
                       <!--Github-->
                       <Grid ColumnDefinitions="*,Auto">

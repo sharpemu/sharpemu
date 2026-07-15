@@ -125,5 +125,20 @@
   "Dialog.PsExecutables": "PS çalıştırılabilirleri",
   "Dialog.SaveLogFile": "Günlük dosyasının kaydedileceği yeri seçin",
   "Dialog.PlainTextFiles": "Düz Metin Dosyaları",
-  "Dialog.LogFiles": "Günlük Dosyaları"
+  "Dialog.LogFiles": "Günlük Dosyaları",
+
+  "Updater.Auto.Label": "Açılışta güncellemeleri denetle",
+  "Updater.Auto.Desc": "Açılışı geciktirmeden GitHub'ı denetler.",
+  "Updater.Label": "Güncellemeler",
+  "Updater.Check": "Güncellemeleri denetle",
+  "Updater.DownloadRestart": "İndir ve yeniden başlat",
+  "Updater.Status.Ready": "Mevcut build: {0}",
+  "Updater.Status.Checking": "Güncellemeler denetleniyor…",
+  "Updater.Status.Current": "Güncelsiniz ({0}).",
+  "Updater.Status.Available": "Yeni build mevcut: {0}",
+  "Updater.Status.Downloading": "Güncelleme indiriliyor… %{0}",
+  "Updater.Status.Installing": "Güncelleme kuruluyor…",
+  "Updater.Status.Timeout": "Güncelleme denetimi 10 saniye sonra zaman aşımına uğradı.",
+  "Updater.Status.Failed": "Güncellemeler denetlenemedi.",
+  "Updater.Status.Unsupported": "Otomatik güncelleme Windows, Linux veya macOS x64 build'i gerektirir."
 }
