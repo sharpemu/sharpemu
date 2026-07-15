@@ -3606,12 +3606,15 @@ public static class AgcExports
 
         if (compiled.Vertex is null || compiled.Pixel is null)
         {
-            var pixelOutputs = renderTargets
-                .Select((target, location) => new Gen5PixelOutputBinding(
-                    target.Slot,
+            var pixelOutputs = new Gen5PixelOutputBinding[renderTargets.Length];
+            for (var location = 0; location < renderTargets.Length; location++)
+            {
+                pixelOutputs[location] = new Gen5PixelOutputBinding(
+                    renderTargets[location].Slot,
                     (uint)location,
-                    renderTargetOutputKinds[location]))
-                .ToArray();
+                    renderTargetOutputKinds[location]);
+            }
+
             if (!GuestGpu.Current.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
@@ -3685,6 +3688,17 @@ public static class AgcExports
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
             exportEvaluation.VertexInputs ?? [];
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
+        var guestTargets = new GuestRenderTarget[renderTargets.Length];
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            guestTargets[index] = new GuestRenderTarget(
+                renderTargets[index].Address,
+                renderTargets[index].Width,
+                renderTargets[index].Height,
+                renderTargets[index].Format,
+                renderTargets[index].NumberType);
+        }
+
         draw = new TranslatedGuestDraw(
             exportShaderAddress,
             pixelShaderAddress,
@@ -3699,13 +3713,7 @@ public static class AgcExports
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
-            renderTargets.Select(target =>
-                new GuestRenderTarget(
-                    target.Address,
-                    target.Width,
-                    target.Height,
-                    target.Format,
-                    target.NumberType)).ToArray(),
+            guestTargets,
             ApplyTransparentPremultipliedFillClear(
                 CreateRenderState(state.CxRegisters, renderTargets, pixelState),
                 textures,

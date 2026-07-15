@@ -179,15 +179,19 @@ foreach (var (name, expectTranslate, words) in testPrograms)
 
     // Buffer stores need a global-memory binding; the emitter resolves them by
     // instruction PC, so collect store PCs from the decoded program itself.
-    var storePcs = program!.Instructions
-        .Where(instruction => instruction.Opcode.StartsWith("BufferStore", StringComparison.Ordinal))
-        .Select(instruction => instruction.Pc)
-        .ToArray();
+    var storePcs = new List<uint>();
+    foreach (var instruction in program!.Instructions)
+    {
+        if (instruction.Opcode.StartsWith("BufferStore", StringComparison.Ordinal))
+        {
+            storePcs.Add(instruction.Pc);
+        }
+    }
 
     // The binding's scalar base (8 -> s[8:11]) must match the srsrc field of
     // the hand-assembled buffer_store words, and the 64-byte backing store
     // must cover every hand-assembled store offset.
-    var globalBindings = storePcs.Length > 0
+    var globalBindings = storePcs.Count > 0
         ? new[] { new Gen5GlobalMemoryBinding(8u, 0UL, storePcs, new byte[64]) }
         : Array.Empty<Gen5GlobalMemoryBinding>();
 
@@ -238,9 +242,17 @@ foreach (var (name, expectTranslate, words) in testPrograms)
                 new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
                 new Gen5PixelOutputBinding(1, 1, Gen5PixelOutputKind.Float),
             ],
-            "mrt8" => Enumerable.Range(0, 8)
-                .Select(index => new Gen5PixelOutputBinding((uint)index, (uint)index, Gen5PixelOutputKind.Float))
-                .ToArray(),
+            "mrt8" =>
+            [
+                new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(1, 1, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(2, 2, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(3, 3, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(4, 4, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(5, 5, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(6, 6, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(7, 7, Gen5PixelOutputKind.Float),
+            ],
             _ => [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
         };
 
