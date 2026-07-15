@@ -147,6 +147,13 @@ public static class NetCtlExports
     }
 
     [SysAbiExport(
+        Nid = "1NE9OWdBIww",
+        ExportName = "sceNetCtlRegisterCallbackV6",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNetCtl")]
+    public static int NetCtlRegisterCallbackV6(CpuContext ctx) => NetCtlRegisterCallback(ctx);
+
+    [SysAbiExport(
         Nid = "obuxdTiwkF8",
         ExportName = "sceNetCtlGetInfo",
         Target = Generation.Gen4 | Generation.Gen5,

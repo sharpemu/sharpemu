@@ -48,6 +48,9 @@ public sealed class GuiSettings
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
     public bool DiscordRichPresence { get; set; } = true;
 
+    /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
+    public List<string> EnvironmentToggles { get; set; } = new();
+
     /// <summary>
     /// Discord application ID used for Rich Presence; the default is the
     /// SharpEmu application. Override to rebrand what Discord shows as

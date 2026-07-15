@@ -48,7 +48,18 @@ public static class PadExports
         ExportName = "scePadOpen",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePad")]
-    public static int PadOpen(CpuContext ctx)
+    public static int PadOpen(CpuContext ctx) => PadOpenCore(ctx, extended: false);
+
+    [SysAbiExport(
+        Nid = "WFIiSfXGUq8",
+        ExportName = "scePadOpenExt",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadOpenExt(CpuContext ctx) => PadOpenCore(ctx, extended: true);
+
+    // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
+    // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
+    private static int PadOpenCore(CpuContext ctx, bool extended)
     {
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var type = unchecked((int)ctx[CpuRegister.Rsi]);
@@ -64,7 +75,8 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
         }
 
-        if (userId != PrimaryUserId || type != StandardPortType || index != 0 || parameterAddress != 0)
+        var typeAccepted = extended ? type is 0 or 1 or 2 : type == StandardPortType;
+        if (userId != PrimaryUserId || !typeAccepted || index != 0 || (!extended && parameterAddress != 0))
         {
             return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
@@ -81,6 +93,19 @@ public static class PadExports
         }
 
         return ctx.SetReturn(PrimaryPadHandle);
+    }
+
+    [SysAbiExport(
+        Nid = "6ncge5+l5Qs",
+        ExportName = "scePadClose",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadClose(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return handle == PrimaryPadHandle
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
 
     [SysAbiExport(
@@ -125,6 +150,47 @@ public static class PadExports
         information[0x0B] = 1;
         information[0x0C] = 1;
         BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
+
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "hGbf2QTBmqc",
+        ExportName = "scePadGetExtControllerInformation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetExtControllerInformation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var informationAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (informationAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Base ScePadControllerInformation + device-class/connection fields: report a connected
+        // DualSense so the guest's open -> get-ext-info -> close probe loop resolves.
+        Span<byte> information = stackalloc byte[0x40];
+        information.Clear();
+        BinaryPrimitives.WriteSingleLittleEndian(information[0x00..], 44.86f);
+        BinaryPrimitives.WriteUInt16LittleEndian(information[0x04..], 1920);
+        BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
+        information[0x08] = 30;
+        information[0x09] = 30;
+        information[0x0A] = StandardPortType;
+        information[0x0B] = 1;   // connected count
+        information[0x0C] = 1;   // connected
+        BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
+        information[0x1C] = 0;   // deviceClass: 0 = standard controller / DualSense
+        information[0x1D] = 1;   // connected (ext)
+        information[0x1E] = 0;   // connectionType: local
 
         return ctx.Memory.TryWrite(informationAddress, information)
             ? ctx.SetReturn(0)

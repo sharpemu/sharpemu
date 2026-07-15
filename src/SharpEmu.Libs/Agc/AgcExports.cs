@@ -29,6 +29,7 @@ public static class AgcExports
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
     private const uint ItWaitRegMem = 0x3C;
+    private const uint ItIndirectBuffer = 0x3F;
     private const uint ItEventWrite = 0x46;
     private const uint ItDmaData = 0x50;
     private const uint ItSetContextReg = 0x69;
@@ -1941,6 +1942,96 @@ public static class AgcExports
 
         TraceAgc($"agc.dcb_set_flip buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} handle={videoOutHandle} index={displayBufferIndex} mode={flipMode} arg=0x{flipArg:X16}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // Guest draw-command builders: emit valid (skippable) packets and return a live
+    // command pointer so the guest's command-buffer build succeeds; full draw processing is TODO.
+    [SysAbiExport(
+        Nid = "8N2tmT3jmC8",
+        ExportName = "sceAgcDcbSetIndexCount",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetIndexCount(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var indexCount = (uint)ctx[CpuRegister.Rsi];
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 2, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(2, ItNop, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, indexCount))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
+    [SysAbiExport(
+        Nid = "xSAR0LTcRKM",
+        ExportName = "sceAgcDcbJump",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbJump(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var target = ctx[CpuRegister.Rsi];
+        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 4, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 12, sizeDwords & 0xFFFFF))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
+    [SysAbiExport(
+        Nid = "bbFueFP+J4k",
+        ExportName = "sceAgcDcbSetPredication",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetPredication(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 3, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(3, ItNop, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(address & 0xFFFF_FFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)(address >> 32)))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
+    [SysAbiExport(
+        Nid = "w6Dj1VJt5qY",
+        ExportName = "sceAgcSetPacketPredication",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetPacketPredication(CpuContext ctx)
+    {
+        // Global predication toggle on a packet; a no-op is safe for rendering.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(

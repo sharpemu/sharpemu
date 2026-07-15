@@ -387,6 +387,88 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </ScrollViewer>
             </TabItem>
+            <TabItem x:Name="EnvTabItem" Header="Environment" FontSize="15">
+              <ScrollViewer>
+                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle" Text="ENVIRONMENT VARIABLES" />
+                      <TextBlock x:Name="EnvDesc"
+                                 Text="Switches passed to the emulator as environment variables at launch."
+                                 FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_BTHID_UNAVAILABLE" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvBthidDesc"
+                                     Text="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvBthidToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvLoopGuardDesc"
+                                     Text="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_VK_VALIDATION" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvVkValidationDesc"
+                                     Text="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_DUMP_SPIRV" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvDumpSpirvDesc"
+                                     Text="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_LOG_DIRECT_MEMORY" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvLogDirectMemoryDesc"
+                                     Text="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_LOG_NP" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvLogNpDesc"
+                                     Text="Log NP (PlayStation Network) library calls to the console."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                </StackPanel>
+              </ScrollViewer>
+            </TabItem>
           </TabControl>
         </Grid>
       </Panel>

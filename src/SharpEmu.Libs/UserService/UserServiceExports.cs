@@ -185,6 +185,31 @@ public static class UserServiceExports
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
+    [SysAbiExport(
+        Nid = "woNpu+45RLk",
+        ExportName = "sceUserServiceGetAgeLevel",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetAgeLevel(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var ageLevelAddress = ctx[CpuRegister.Rsi];
+        if (userId != 1000)
+        {
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidParameter);
+        }
+
+        if (ageLevelAddress == 0)
+        {
+            return ctx.SetReturn(OrbisUserServiceErrorInvalidArgument);
+        }
+
+        // Report an adult account so titles skip parental-restriction paths.
+        return ctx.TryWriteInt32(ageLevelAddress, 21)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
     private static void TraceUserService(string message)
     {
         if (_traceUserService)

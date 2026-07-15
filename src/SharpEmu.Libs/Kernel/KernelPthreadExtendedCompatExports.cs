@@ -383,6 +383,47 @@ public static class KernelPthreadExtendedCompatExports
     }
 
     [SysAbiExport(
+        Nid = "oIRFTjoILbg",
+        ExportName = "scePthreadSetschedparam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSetschedparam(CpuContext ctx) => PosixPthreadSetschedparam(ctx);
+
+    [SysAbiExport(
+        Nid = "P41kTWUS3EI",
+        ExportName = "scePthreadGetschedparam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadGetschedparam(CpuContext ctx)
+    {
+        var thread = ctx[CpuRegister.Rdi];
+        var outPolicyAddress = ctx[CpuRegister.Rsi];
+        var outSchedParamAddress = ctx[CpuRegister.Rdx];
+        if (thread == 0 || outPolicyAddress == 0 || outSchedParamAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        int policy;
+        int priority;
+        lock (_stateGate)
+        {
+            var state = GetOrCreateThreadStateLocked(thread);
+            policy = state.Attributes.SchedPolicy;
+            priority = state.Priority;
+        }
+
+        if (!ctx.TryWriteInt32(outPolicyAddress, policy) ||
+            !ctx.TryWriteInt32(outSchedParamAddress, priority))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "nsYoNRywwNg",
         ExportName = "scePthreadAttrInit",
         Target = Generation.Gen4 | Generation.Gen5,

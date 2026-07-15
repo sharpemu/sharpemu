@@ -349,6 +349,18 @@ public static class AmprExports
     }
 
     [SysAbiExport(
+        Nid = "Zi3dBUjgyXI",
+        ExportName = "sceAmprMeasureCommandSizeWriteKernelEventQueueOnCompletion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureCommandSizeWriteKernelEventQueueOnCompletion(CpuContext ctx)
+    {
+        TraceAmpr(ctx, "measure_write_equeue_complete", 0, KernelEventQueueRecordSize, 0);
+        ctx[CpuRegister.Rax] = KernelEventQueueRecordSize;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "C+IEj+BsAFM",
         ExportName = "sceAmprMeasureCommandSizeWriteAddressOnCompletion",
         Target = Generation.Gen5,
@@ -436,6 +448,40 @@ public static class AmprExports
         }
 
         TraceAmpr(ctx, "write_equeue", commandBuffer, ident, completionToken);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "o67gODLFpls",
+        ExportName = "sceAmprCommandBufferWriteKernelEventQueueOnCompletion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferWriteKernelEventQueueOnCompletion(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var equeue = ctx[CpuRegister.Rsi];
+        var ident = ctx[CpuRegister.Rdx];
+        var completionToken = ctx[CpuRegister.Rcx];
+        var userData = ctx[CpuRegister.R8];
+
+        if (commandBuffer == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!AppendKernelEventQueueRecord(
+                ctx,
+                commandBuffer,
+                equeue,
+                ident,
+                completionToken,
+                userData))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        TraceAmpr(ctx, "write_equeue_complete", commandBuffer, ident, completionToken);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
