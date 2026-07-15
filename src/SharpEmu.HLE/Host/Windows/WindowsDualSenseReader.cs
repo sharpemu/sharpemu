@@ -3,21 +3,21 @@
 
 using Microsoft.Win32.SafeHandles;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.HLE.Host.Windows;
 
 /// <summary>
 /// Reads a DualSense controller over raw HID on a background thread.
 /// Supports USB (input report 0x01) and Bluetooth (extended report 0x31,
 /// activated by requesting feature report 0x05), with hot-plug retry.
 /// </summary>
-internal static class DualSenseReader
+internal static class WindowsDualSenseReader
 {
     private const ushort SonyVendorId = 0x054C;
     private const ushort DualSenseProductId = 0x0CE6;
     private const ushort DualSenseEdgeProductId = 0x0DF2;
 
     private static readonly object Gate = new();
-    private static PadState _state;
+    private static HostGamepadState _state;
     private static bool _started;
 
     // Output (rumble/lightbar) state, all guarded by Gate.
@@ -37,6 +37,8 @@ internal static class DualSenseReader
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
     internal static void EnsureStarted()
     {
+        // The GUI source-links this reader and calls it directly, without the
+        // host-platform resolution that otherwise guarantees Windows.
         if (!OperatingSystem.IsWindows())
         {
             return;
@@ -59,7 +61,7 @@ internal static class DualSenseReader
         }
     }
 
-    internal static bool TryGetState(out PadState state)
+    internal static bool TryGetState(out HostGamepadState state)
     {
         lock (Gate)
         {
@@ -69,7 +71,7 @@ internal static class DualSenseReader
         return state.Connected;
     }
 
-    private static void SetState(in PadState state)
+    private static void SetState(in HostGamepadState state)
     {
         lock (Gate)
         {
@@ -148,11 +150,11 @@ internal static class DualSenseReader
         {
             if (_outputStream is null)
             {
-                var handle = HidNative.CreateFile(
+                var handle = WindowsHidNative.CreateFile(
                     _devicePath,
-                    HidNative.GenericRead | HidNative.GenericWrite,
-                    HidNative.FileShareRead | HidNative.FileShareWrite,
-                    0, HidNative.OpenExisting, 0, 0);
+                    WindowsHidNative.GenericRead | WindowsHidNative.GenericWrite,
+                    WindowsHidNative.FileShareRead | WindowsHidNative.FileShareWrite,
+                    0, WindowsHidNative.OpenExisting, 0, 0);
                 if (handle.IsInvalid)
                 {
                     handle.Dispose();
@@ -262,7 +264,7 @@ internal static class DualSenseReader
                 // to the full 0x31 input report. Harmless over USB.
                 var feature = new byte[41];
                 feature[0] = 0x05;
-                _ = HidNative.HidD_GetFeature(handle, feature, feature.Length);
+                _ = WindowsHidNative.HidD_GetFeature(handle, feature, feature.Length);
 
                 if (!announcedConnect)
                 {
@@ -320,18 +322,18 @@ internal static class DualSenseReader
     private static SafeFileHandle? OpenDualSense(out string? devicePath)
     {
         devicePath = null;
-        foreach (var path in HidNative.EnumerateHidDevicePaths())
+        foreach (var path in WindowsHidNative.EnumerateHidDevicePaths())
         {
             // Open without access rights just to query VID/PID.
-            using var probe = HidNative.CreateFile(
-                path, 0, HidNative.FileShareRead | HidNative.FileShareWrite, 0, HidNative.OpenExisting, 0, 0);
+            using var probe = WindowsHidNative.CreateFile(
+                path, 0, WindowsHidNative.FileShareRead | WindowsHidNative.FileShareWrite, 0, WindowsHidNative.OpenExisting, 0, 0);
             if (probe.IsInvalid)
             {
                 continue;
             }
 
-            var attributes = new HidNative.HiddAttributes { Size = 12 };
-            if (!HidNative.HidD_GetAttributes(probe, ref attributes) ||
+            var attributes = new WindowsHidNative.HiddAttributes { Size = 12 };
+            if (!WindowsHidNative.HidD_GetAttributes(probe, ref attributes) ||
                 attributes.VendorId != SonyVendorId ||
                 (attributes.ProductId != DualSenseProductId && attributes.ProductId != DualSenseEdgeProductId))
             {
@@ -339,19 +341,19 @@ internal static class DualSenseReader
             }
 
             // Read+write so feature reports work; fall back to read-only.
-            var handle = HidNative.CreateFile(
+            var handle = WindowsHidNative.CreateFile(
                 path,
-                HidNative.GenericRead | HidNative.GenericWrite,
-                HidNative.FileShareRead | HidNative.FileShareWrite,
-                0, HidNative.OpenExisting, 0, 0);
+                WindowsHidNative.GenericRead | WindowsHidNative.GenericWrite,
+                WindowsHidNative.FileShareRead | WindowsHidNative.FileShareWrite,
+                0, WindowsHidNative.OpenExisting, 0, 0);
             if (handle.IsInvalid)
             {
                 handle.Dispose();
-                handle = HidNative.CreateFile(
+                handle = WindowsHidNative.CreateFile(
                     path,
-                    HidNative.GenericRead,
-                    HidNative.FileShareRead | HidNative.FileShareWrite,
-                    0, HidNative.OpenExisting, 0, 0);
+                    WindowsHidNative.GenericRead,
+                    WindowsHidNative.FileShareRead | WindowsHidNative.FileShareWrite,
+                    0, WindowsHidNative.OpenExisting, 0, 0);
             }
 
             if (!handle.IsInvalid)
@@ -366,7 +368,7 @@ internal static class DualSenseReader
         return null;
     }
 
-    private static bool TryParseReport(ReadOnlySpan<byte> report, out PadState state)
+    private static bool TryParseReport(ReadOnlySpan<byte> report, out HostGamepadState state)
     {
         // USB: report id 0x01, payload starts at [1].
         // Bluetooth extended: report id 0x31, sequence byte at [1], payload at [2].
@@ -395,43 +397,43 @@ internal static class DualSenseReader
         var buttons1 = report[offset + 8];
         var buttons2 = report[offset + 9];
 
-        uint buttons = 0;
-        buttons |= (buttons0 & 0x10) != 0 ? OrbisPadButton.Square : 0;
-        buttons |= (buttons0 & 0x20) != 0 ? OrbisPadButton.Cross : 0;
-        buttons |= (buttons0 & 0x40) != 0 ? OrbisPadButton.Circle : 0;
-        buttons |= (buttons0 & 0x80) != 0 ? OrbisPadButton.Triangle : 0;
+        var buttons = HostGamepadButtons.None;
+        buttons |= (buttons0 & 0x10) != 0 ? HostGamepadButtons.Square : 0;
+        buttons |= (buttons0 & 0x20) != 0 ? HostGamepadButtons.Cross : 0;
+        buttons |= (buttons0 & 0x40) != 0 ? HostGamepadButtons.Circle : 0;
+        buttons |= (buttons0 & 0x80) != 0 ? HostGamepadButtons.Triangle : 0;
         buttons |= HatToButtons(buttons0 & 0x0F);
-        buttons |= (buttons1 & 0x01) != 0 ? OrbisPadButton.L1 : 0;
-        buttons |= (buttons1 & 0x02) != 0 ? OrbisPadButton.R1 : 0;
-        buttons |= (buttons1 & 0x04) != 0 ? OrbisPadButton.L2 : 0;
-        buttons |= (buttons1 & 0x08) != 0 ? OrbisPadButton.R2 : 0;
-        buttons |= (buttons1 & 0x20) != 0 ? OrbisPadButton.Options : 0;
-        buttons |= (buttons1 & 0x40) != 0 ? OrbisPadButton.L3 : 0;
-        buttons |= (buttons1 & 0x80) != 0 ? OrbisPadButton.R3 : 0;
-        buttons |= (buttons2 & 0x02) != 0 ? OrbisPadButton.TouchPad : 0;
+        buttons |= (buttons1 & 0x01) != 0 ? HostGamepadButtons.L1 : 0;
+        buttons |= (buttons1 & 0x02) != 0 ? HostGamepadButtons.R1 : 0;
+        buttons |= (buttons1 & 0x04) != 0 ? HostGamepadButtons.L2 : 0;
+        buttons |= (buttons1 & 0x08) != 0 ? HostGamepadButtons.R2 : 0;
+        buttons |= (buttons1 & 0x20) != 0 ? HostGamepadButtons.Options : 0;
+        buttons |= (buttons1 & 0x40) != 0 ? HostGamepadButtons.L3 : 0;
+        buttons |= (buttons1 & 0x80) != 0 ? HostGamepadButtons.R3 : 0;
+        buttons |= (buttons2 & 0x02) != 0 ? HostGamepadButtons.TouchPad : 0;
 
-        state = new PadState(
+        state = new HostGamepadState(
             Connected: true,
             Buttons: buttons,
             LeftX: leftX,
             LeftY: leftY,
             RightX: rightX,
             RightY: rightY,
-            L2: l2,
-            R2: r2);
+            LeftTrigger: l2,
+            RightTrigger: r2);
         return true;
     }
 
-    private static uint HatToButtons(int hat) => hat switch
+    private static HostGamepadButtons HatToButtons(int hat) => hat switch
     {
-        0 => OrbisPadButton.Up,
-        1 => OrbisPadButton.Up | OrbisPadButton.Right,
-        2 => OrbisPadButton.Right,
-        3 => OrbisPadButton.Right | OrbisPadButton.Down,
-        4 => OrbisPadButton.Down,
-        5 => OrbisPadButton.Down | OrbisPadButton.Left,
-        6 => OrbisPadButton.Left,
-        7 => OrbisPadButton.Left | OrbisPadButton.Up,
+        0 => HostGamepadButtons.Up,
+        1 => HostGamepadButtons.Up | HostGamepadButtons.Right,
+        2 => HostGamepadButtons.Right,
+        3 => HostGamepadButtons.Right | HostGamepadButtons.Down,
+        4 => HostGamepadButtons.Down,
+        5 => HostGamepadButtons.Down | HostGamepadButtons.Left,
+        6 => HostGamepadButtons.Left,
+        7 => HostGamepadButtons.Left | HostGamepadButtons.Up,
         _ => 0,
     };
 }

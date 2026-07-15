@@ -10,6 +10,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Version>0.0.1</Version>
+    <!-- Required by the source-generated LibraryImport stubs in the linked
+         controller readers below. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <!-- Dependency-free; provides the BuildInfo provenance shown in the
@@ -41,14 +44,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 
   <!-- The controller readers (DualSense raw HID + Xbox XInput) are shared
-       with the emulator's pad HLE. They are dependency-free, so they are
-       compiled in directly rather than pulling a reference to all of
-       SharpEmu.Libs into the launcher. -->
+       with the emulator's host input backend. They are dependency-free, so
+       they are compiled in directly rather than pulling a reference to all
+       of SharpEmu.HLE into the launcher. -->
   <ItemGroup>
-    <Compile Include="..\SharpEmu.Libs\Pad\PadState.cs" Link="Input/PadState.cs" />
-    <Compile Include="..\SharpEmu.Libs\Pad\HidNative.cs" Link="Input/HidNative.cs" />
-    <Compile Include="..\SharpEmu.Libs\Pad\DualSenseReader.cs" Link="Input/DualSenseReader.cs" />
-    <Compile Include="..\SharpEmu.Libs\Pad\XInputReader.cs" Link="Input/XInputReader.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\HostGamepadState.cs" Link="Input/HostGamepadState.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsHidNative.cs" Link="Input/WindowsHidNative.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsDualSenseReader.cs" Link="Input/WindowsDualSenseReader.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsXInputReader.cs" Link="Input/WindowsXInputReader.cs" />
   </ItemGroup>
 
 </Project>

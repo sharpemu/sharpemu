@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Pad;
 
@@ -38,8 +38,7 @@ public static class PadExports
     public static int PadInit(CpuContext ctx)
     {
         _initialized = true;
-        DualSenseReader.EnsureStarted();
-        XInputReader.EnsureStarted();
+        HostPlatform.Current.Input.EnsureStarted();
         return ctx.SetReturn(0);
     }
 
@@ -69,15 +68,13 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
-        DualSenseReader.EnsureStarted();
-        XInputReader.EnsureStarted();
+        var input = HostPlatform.Current.Input;
+        input.EnsureStarted();
         if (Interlocked.Exchange(ref _controlsAnnouncementLogged, 1) == 0)
         {
-            Console.Error.WriteLine(DualSenseReader.TryGetState(out _)
-                ? "[LOADER][INFO] Controls: DualSense connected (keyboard fallback also active)."
-                : XInputReader.TryGetState(out _)
-                    ? "[LOADER][INFO] Controls: Xbox controller connected (keyboard fallback also active)."
-                    : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense or Xbox controller will be used automatically when plugged in.");
+            Console.Error.WriteLine(input.DescribeConnectedGamepad() is { } gamepadName
+                ? $"[LOADER][INFO] Controls: {gamepadName} connected (keyboard fallback also active)."
+                : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense or Xbox controller will be used automatically when plugged in.");
         }
 
         return ctx.SetReturn(PrimaryPadHandle);
@@ -216,7 +213,7 @@ public static class PadExports
         }
 
         var triggerMask = parameter[0];
-        XInputReader.SetTriggerRumble(
+        HostPlatform.Current.Input.SetTriggerRumble(
             (triggerMask & 0x01) != 0 ? DecodeTriggerVibration(parameter[8..64]) : null,
             (triggerMask & 0x02) != 0 ? DecodeTriggerVibration(parameter[64..120]) : null);
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -260,8 +257,7 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        DualSenseReader.SetRumble(parameter[0], parameter[1]);
-        XInputReader.SetRumble(parameter[0], parameter[1]);
+        HostPlatform.Current.Input.SetRumble(parameter[0], parameter[1]);
         return ctx.SetReturn(0);
     }
 
@@ -291,7 +287,7 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        DualSenseReader.SetLightbar(color[0], color[1], color[2]);
+        HostPlatform.Current.Input.SetLightbar(color[0], color[1], color[2]);
         return ctx.SetReturn(0);
     }
 
@@ -308,7 +304,7 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
-        DualSenseReader.ResetLightbar();
+        HostPlatform.Current.Input.ResetLightbar();
         return ctx.SetReturn(0);
     }
 
@@ -354,37 +350,30 @@ public static class PadExports
             return _cachedInputState;
         }
 
-        var acceptsKeyboardInput = IsEmulatorWindowFocused();
-        var buttons = acceptsKeyboardInput ? ReadKeyboardButtons() : 0;
-        var leftX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x41), IsKeyDown(0x44)) : (byte)128;
-        var leftY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x57), IsKeyDown(0x53)) : (byte)128;
-        var rightX = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x4A), IsKeyDown(0x4C)) : (byte)128;
-        var rightY = acceptsKeyboardInput ? ReadAnalogStick(IsKeyDown(0x49), IsKeyDown(0x4B)) : (byte)128;
-        var l2 = acceptsKeyboardInput && IsKeyDown(0x52) ? (byte)255 : (byte)0;
-        var r2 = acceptsKeyboardInput && IsKeyDown(0x46) ? (byte)255 : (byte)0;
+        var input = HostPlatform.Current.Input;
+        var acceptsKeyboardInput = input.IsHostWindowFocused();
+        var buttons = acceptsKeyboardInput ? ReadKeyboardButtons(input) : 0;
+        var leftX = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x41), input.IsKeyDown(0x44)) : (byte)128;
+        var leftY = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x57), input.IsKeyDown(0x53)) : (byte)128;
+        var rightX = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x4A), input.IsKeyDown(0x4C)) : (byte)128;
+        var rightY = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x49), input.IsKeyDown(0x4B)) : (byte)128;
+        var l2 = acceptsKeyboardInput && input.IsKeyDown(0x52) ? (byte)255 : (byte)0;
+        var r2 = acceptsKeyboardInput && input.IsKeyDown(0x46) ? (byte)255 : (byte)0;
 
-        if (DualSenseReader.TryGetState(out var pad))
+        Span<HostGamepadState> gamepads = stackalloc HostGamepadState[2];
+        var gamepadCount = input.GetGamepadStates(gamepads);
+        for (var index = 0; index < gamepadCount; index++)
         {
-            buttons |= pad.Buttons;
+            var pad = gamepads[index];
+            buttons |= ToOrbisButtons(pad.Buttons);
             // The controller stick wins whenever it is deflected past a
             // small deadzone; otherwise any keyboard value stays.
             leftX = MergeAxis(pad.LeftX, leftX);
             leftY = MergeAxis(pad.LeftY, leftY);
             rightX = MergeAxis(pad.RightX, rightX);
             rightY = MergeAxis(pad.RightY, rightY);
-            l2 = Math.Max(l2, pad.L2);
-            r2 = Math.Max(r2, pad.R2);
-        }
-
-        if (XInputReader.TryGetState(out var xpad))
-        {
-            buttons |= xpad.Buttons;
-            leftX = MergeAxis(xpad.LeftX, leftX);
-            leftY = MergeAxis(xpad.LeftY, leftY);
-            rightX = MergeAxis(xpad.RightX, rightX);
-            rightY = MergeAxis(xpad.RightY, rightY);
-            l2 = Math.Max(l2, xpad.L2);
-            r2 = Math.Max(r2, xpad.R2);
+            l2 = Math.Max(l2, pad.LeftTrigger);
+            r2 = Math.Max(r2, pad.RightTrigger);
         }
 
         _cachedInputState = new PadState(
@@ -400,50 +389,49 @@ public static class PadExports
         return _cachedInputState;
     }
 
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
-
-    private static bool IsKeyDown(int vk) =>
-        (GetAsyncKeyState(vk) & 0x8000) != 0;
-
-    private static bool IsEmulatorWindowFocused()
+    /// <summary>Maps the host seam's neutral button flags onto SCE_PAD_BUTTON bits.</summary>
+    private static uint ToOrbisButtons(HostGamepadButtons buttons)
     {
-        var foregroundWindow = GetForegroundWindow();
-        if (foregroundWindow == 0)
-        {
-            return false;
-        }
-
-        GetWindowThreadProcessId(foregroundWindow, out var processId);
-        return processId == (uint)Environment.ProcessId;
+        uint result = 0;
+        if ((buttons & HostGamepadButtons.Up) != 0) result |= OrbisPadButton.Up;
+        if ((buttons & HostGamepadButtons.Down) != 0) result |= OrbisPadButton.Down;
+        if ((buttons & HostGamepadButtons.Left) != 0) result |= OrbisPadButton.Left;
+        if ((buttons & HostGamepadButtons.Right) != 0) result |= OrbisPadButton.Right;
+        if ((buttons & HostGamepadButtons.Cross) != 0) result |= OrbisPadButton.Cross;
+        if ((buttons & HostGamepadButtons.Circle) != 0) result |= OrbisPadButton.Circle;
+        if ((buttons & HostGamepadButtons.Square) != 0) result |= OrbisPadButton.Square;
+        if ((buttons & HostGamepadButtons.Triangle) != 0) result |= OrbisPadButton.Triangle;
+        if ((buttons & HostGamepadButtons.L1) != 0) result |= OrbisPadButton.L1;
+        if ((buttons & HostGamepadButtons.R1) != 0) result |= OrbisPadButton.R1;
+        if ((buttons & HostGamepadButtons.L2) != 0) result |= OrbisPadButton.L2;
+        if ((buttons & HostGamepadButtons.R2) != 0) result |= OrbisPadButton.R2;
+        if ((buttons & HostGamepadButtons.L3) != 0) result |= OrbisPadButton.L3;
+        if ((buttons & HostGamepadButtons.R3) != 0) result |= OrbisPadButton.R3;
+        if ((buttons & HostGamepadButtons.Options) != 0) result |= OrbisPadButton.Options;
+        if ((buttons & HostGamepadButtons.TouchPad) != 0) result |= OrbisPadButton.TouchPad;
+        return result;
     }
 
-    private static uint ReadKeyboardButtons()
+    private static uint ReadKeyboardButtons(IHostInput input)
     {
         uint buttons = 0;
         // D-pad
-        if (IsKeyDown(0x25)) buttons |= 0x0080; // Left
-        if (IsKeyDown(0x27)) buttons |= 0x0020; // Right
-        if (IsKeyDown(0x26)) buttons |= 0x0010; // Up
-        if (IsKeyDown(0x28)) buttons |= 0x0040; // Down
+        if (input.IsKeyDown(0x25)) buttons |= OrbisPadButton.Left;
+        if (input.IsKeyDown(0x27)) buttons |= OrbisPadButton.Right;
+        if (input.IsKeyDown(0x26)) buttons |= OrbisPadButton.Up;
+        if (input.IsKeyDown(0x28)) buttons |= OrbisPadButton.Down;
         // Face buttons
-        if (IsKeyDown(0x5A) || IsKeyDown(0x0D)) buttons |= 0x4000; // Z / Enter = Cross
-        if (IsKeyDown(0x58) || IsKeyDown(0x1B)) buttons |= 0x2000; // X / Escape = Circle
-        if (IsKeyDown(0x43)) buttons |= 0x8000; // C = Square
-        if (IsKeyDown(0x56)) buttons |= 0x1000; // V = Triangle
+        if (input.IsKeyDown(0x5A) || input.IsKeyDown(0x0D)) buttons |= OrbisPadButton.Cross;    // Z / Enter
+        if (input.IsKeyDown(0x58) || input.IsKeyDown(0x1B)) buttons |= OrbisPadButton.Circle;   // X / Escape
+        if (input.IsKeyDown(0x43)) buttons |= OrbisPadButton.Square;                            // C
+        if (input.IsKeyDown(0x56)) buttons |= OrbisPadButton.Triangle;                          // V
         // Shoulder buttons
-        if (IsKeyDown(0x51)) buttons |= 0x0400; // Q = L1
-        if (IsKeyDown(0x45)) buttons |= 0x0800; // E = R1
-        if (IsKeyDown(0x52)) buttons |= 0x0100; // R = L2 (digital)
-        if (IsKeyDown(0x46)) buttons |= 0x0200; // F = R2 (digital)
+        if (input.IsKeyDown(0x51)) buttons |= OrbisPadButton.L1;                                // Q
+        if (input.IsKeyDown(0x45)) buttons |= OrbisPadButton.R1;                                // E
+        if (input.IsKeyDown(0x52)) buttons |= OrbisPadButton.L2;                                // R (digital)
+        if (input.IsKeyDown(0x46)) buttons |= OrbisPadButton.R2;                                // F (digital)
         // Options (Start)
-        if (IsKeyDown(0x09) || IsKeyDown(0x08)) buttons |= 0x0008; // Tab / Backspace = Options
+        if (input.IsKeyDown(0x09) || input.IsKeyDown(0x08)) buttons |= OrbisPadButton.Options;  // Tab / Backspace
         return buttons;
     }
 

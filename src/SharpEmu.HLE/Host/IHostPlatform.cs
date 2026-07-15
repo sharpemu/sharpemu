@@ -18,4 +18,6 @@ public interface IHostPlatform
     IHostSymbolResolver Symbols { get; }
 
     IHostAudioOutput Audio { get; }
+
+    IHostInput Input { get; }
 }

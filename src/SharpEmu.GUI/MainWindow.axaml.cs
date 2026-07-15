@@ -12,7 +12,8 @@ using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
-using SharpEmu.Libs.Pad;
+using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Logging;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
@@ -62,7 +63,7 @@ public partial class MainWindow : Window
 
     // Controller navigation state.
     private readonly DispatcherTimer _gamepadTimer;
-    private uint _previousPadButtons;
+    private HostGamepadButtons _previousPadButtons;
     private long _navLeftNextAt;
     private long _navRightNextAt;
     private long _navUpNextAt;
@@ -139,8 +140,8 @@ public partial class MainWindow : Window
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
 
-        DualSenseReader.EnsureStarted();
-        XInputReader.EnsureStarted();
+        WindowsDualSenseReader.EnsureStarted();
+        WindowsXInputReader.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -212,9 +213,9 @@ public partial class MainWindow : Window
     private void PollGamepad()
     {
         // DualSense wins when both are connected; XInput covers Xbox pads.
-        if (!DualSenseReader.TryGetState(out var pad) && !XInputReader.TryGetState(out pad))
+        if (!WindowsDualSenseReader.TryGetState(out var pad) && !WindowsXInputReader.TryGetState(out pad))
         {
-            _previousPadButtons = 0;
+            _previousPadButtons = HostGamepadButtons.None;
             return;
         }
 
@@ -227,12 +228,12 @@ public partial class MainWindow : Window
         }
 
         var shoulderPressed = pad.Buttons & ~_previousPadButtons;
-        if ((shoulderPressed & OrbisPadButton.L1) != 0)
+        if ((shoulderPressed & HostGamepadButtons.L1) != 0)
         {
             SetActivePage(0);
         }
 
-        if ((shoulderPressed & OrbisPadButton.R1) != 0)
+        if ((shoulderPressed & HostGamepadButtons.R1) != 0)
         {
             SetActivePage(1);
         }
@@ -244,10 +245,10 @@ public partial class MainWindow : Window
         }
 
         var now = Environment.TickCount64;
-        var left = (pad.Buttons & 0x0080) != 0 || pad.LeftX < 64;
-        var right = (pad.Buttons & 0x0020) != 0 || pad.LeftX > 192;
-        var up = (pad.Buttons & 0x0010) != 0 || pad.LeftY < 64;
-        var down = (pad.Buttons & 0x0040) != 0 || pad.LeftY > 192;
+        var left = (pad.Buttons & HostGamepadButtons.Left) != 0 || pad.LeftX < 64;
+        var right = (pad.Buttons & HostGamepadButtons.Right) != 0 || pad.LeftX > 192;
+        var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
+        var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
@@ -270,12 +271,12 @@ public partial class MainWindow : Window
         }
 
         var pressed = pad.Buttons & ~_previousPadButtons;
-        if ((pressed & 0x4000) != 0) // Cross
+        if ((pressed & HostGamepadButtons.Cross) != 0)
         {
             LaunchSelected();
         }
 
-        if ((pressed & 0x2000) != 0) // Circle
+        if ((pressed & HostGamepadButtons.Circle) != 0)
         {
             StopEmulator();
         }

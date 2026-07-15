@@ -4,13 +4,13 @@
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.HLE.Host.Windows;
 
 /// <summary>
 /// Minimal Win32 HID interop used to talk to a DualSense controller
 /// directly, without any external input library.
 /// </summary>
-internal static partial class HidNative
+internal static partial class WindowsHidNative
 {
     internal const int DigcfPresent = 0x02;
     internal const int DigcfDeviceInterface = 0x10;
@@ -38,28 +38,32 @@ internal static partial class HidNative
         public ushort VersionNumber;
     }
 
-    [DllImport("hid.dll")]
-    internal static extern void HidD_GetHidGuid(out Guid hidGuid);
+    [LibraryImport("hid.dll")]
+    internal static partial void HidD_GetHidGuid(out Guid hidGuid);
 
-    [DllImport("hid.dll")]
-    internal static extern bool HidD_GetAttributes(SafeFileHandle hidDeviceObject, ref HiddAttributes attributes);
+    [LibraryImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool HidD_GetAttributes(SafeFileHandle hidDeviceObject, ref HiddAttributes attributes);
 
-    [DllImport("hid.dll")]
-    internal static extern bool HidD_GetFeature(SafeFileHandle hidDeviceObject, byte[] reportBuffer, int reportBufferLength);
+    [LibraryImport("hid.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool HidD_GetFeature(SafeFileHandle hidDeviceObject, [In, Out] byte[] reportBuffer, int reportBufferLength);
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode)]
-    internal static extern nint SetupDiGetClassDevs(ref Guid classGuid, nint enumerator, nint hwndParent, int flags);
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupDiGetClassDevsW")]
+    internal static partial nint SetupDiGetClassDevs(ref Guid classGuid, nint enumerator, nint hwndParent, int flags);
 
-    [DllImport("setupapi.dll")]
-    internal static extern bool SetupDiEnumDeviceInterfaces(
+    [LibraryImport("setupapi.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetupDiEnumDeviceInterfaces(
         nint deviceInfoSet,
         nint deviceInfoData,
         ref Guid interfaceClassGuid,
         int memberIndex,
         ref SpDeviceInterfaceData deviceInterfaceData);
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode)]
-    internal static extern bool SetupDiGetDeviceInterfaceDetail(
+    [LibraryImport("setupapi.dll", EntryPoint = "SetupDiGetDeviceInterfaceDetailW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetupDiGetDeviceInterfaceDetail(
         nint deviceInfoSet,
         ref SpDeviceInterfaceData deviceInterfaceData,
         nint deviceInterfaceDetailData,
@@ -67,11 +71,12 @@ internal static partial class HidNative
         out int requiredSize,
         nint deviceInfoData);
 
-    [DllImport("setupapi.dll")]
-    internal static extern bool SetupDiDestroyDeviceInfoList(nint deviceInfoSet);
+    [LibraryImport("setupapi.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetupDiDestroyDeviceInfoList(nint deviceInfoSet);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    internal static extern SafeFileHandle CreateFile(
+    [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    internal static partial SafeFileHandle CreateFile(
         string fileName,
         uint desiredAccess,
         uint shareMode,

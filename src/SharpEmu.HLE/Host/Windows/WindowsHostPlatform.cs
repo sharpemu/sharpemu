@@ -12,4 +12,6 @@ internal sealed class WindowsHostPlatform : IHostPlatform
     public IHostSymbolResolver Symbols { get; } = new WindowsHostSymbolResolver();
 
     public IHostAudioOutput Audio { get; } = new WindowsWaveOutAudio();
+
+    public IHostInput Input { get; } = new WindowsHostInput();
 }

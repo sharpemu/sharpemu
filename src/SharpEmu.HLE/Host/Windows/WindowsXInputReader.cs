@@ -3,15 +3,15 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Libs.Pad;
+namespace SharpEmu.HLE.Host.Windows;
 
 /// <summary>
 /// Reads Xbox 360 / Xbox One (and other XInput-compatible) controllers via
-/// the Windows XInput API on a background thread, translated to the same
-/// ORBIS pad conventions as <see cref="DualSenseReader"/>. Supports rumble
-/// and hot-plug retry; the first connected slot (of four) is used.
+/// the Windows XInput API on a background thread, translated to
+/// <see cref="HostGamepadState"/> conventions. Supports rumble and hot-plug
+/// retry; the first connected slot (of four) is used.
 /// </summary>
-internal static class XInputReader
+internal static partial class WindowsXInputReader
 {
     private const uint ErrorSuccess = 0;
     private const int SlotCount = 4;
@@ -34,7 +34,7 @@ internal static class XInputReader
     private const ushort XinputY = 0x8000;
 
     private static readonly object Gate = new();
-    private static PadState _state;
+    private static HostGamepadState _state;
     private static bool _started;
     private static int _slot = -1; // connected XInput user index, -1 when none
     private static byte _motorLeft;
@@ -45,6 +45,8 @@ internal static class XInputReader
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
     internal static void EnsureStarted()
     {
+        // The GUI source-links this reader and calls it directly, without the
+        // host-platform resolution that otherwise guarantees Windows.
         if (!OperatingSystem.IsWindows())
         {
             return;
@@ -67,7 +69,7 @@ internal static class XInputReader
         }
     }
 
-    internal static bool TryGetState(out PadState state)
+    internal static bool TryGetState(out HostGamepadState state)
     {
         lock (Gate)
         {
@@ -77,7 +79,7 @@ internal static class XInputReader
         return state.Connected;
     }
 
-    private static void SetState(in PadState state)
+    private static void SetState(in HostGamepadState state)
     {
         lock (Gate)
         {
@@ -204,40 +206,40 @@ internal static class XInputReader
         return -1;
     }
 
-    private static PadState Translate(in XInputGamepad pad)
+    private static HostGamepadState Translate(in XInputGamepad pad)
     {
-        uint buttons = 0;
-        buttons |= (pad.Buttons & XinputDpadUp) != 0 ? OrbisPadButton.Up : 0;
-        buttons |= (pad.Buttons & XinputDpadDown) != 0 ? OrbisPadButton.Down : 0;
-        buttons |= (pad.Buttons & XinputDpadLeft) != 0 ? OrbisPadButton.Left : 0;
-        buttons |= (pad.Buttons & XinputDpadRight) != 0 ? OrbisPadButton.Right : 0;
-        buttons |= (pad.Buttons & XinputStart) != 0 ? OrbisPadButton.Options : 0;
-        buttons |= (pad.Buttons & XinputBack) != 0 ? OrbisPadButton.TouchPad : 0;
-        buttons |= (pad.Buttons & XinputLeftThumb) != 0 ? OrbisPadButton.L3 : 0;
-        buttons |= (pad.Buttons & XinputRightThumb) != 0 ? OrbisPadButton.R3 : 0;
-        buttons |= (pad.Buttons & XinputLeftShoulder) != 0 ? OrbisPadButton.L1 : 0;
-        buttons |= (pad.Buttons & XinputRightShoulder) != 0 ? OrbisPadButton.R1 : 0;
-        buttons |= (pad.Buttons & XinputA) != 0 ? OrbisPadButton.Cross : 0;
-        buttons |= (pad.Buttons & XinputB) != 0 ? OrbisPadButton.Circle : 0;
-        buttons |= (pad.Buttons & XinputX) != 0 ? OrbisPadButton.Square : 0;
-        buttons |= (pad.Buttons & XinputY) != 0 ? OrbisPadButton.Triangle : 0;
-        buttons |= pad.LeftTrigger > TriggerThreshold ? OrbisPadButton.L2 : 0;
-        buttons |= pad.RightTrigger > TriggerThreshold ? OrbisPadButton.R2 : 0;
+        var buttons = HostGamepadButtons.None;
+        buttons |= (pad.Buttons & XinputDpadUp) != 0 ? HostGamepadButtons.Up : 0;
+        buttons |= (pad.Buttons & XinputDpadDown) != 0 ? HostGamepadButtons.Down : 0;
+        buttons |= (pad.Buttons & XinputDpadLeft) != 0 ? HostGamepadButtons.Left : 0;
+        buttons |= (pad.Buttons & XinputDpadRight) != 0 ? HostGamepadButtons.Right : 0;
+        buttons |= (pad.Buttons & XinputStart) != 0 ? HostGamepadButtons.Options : 0;
+        buttons |= (pad.Buttons & XinputBack) != 0 ? HostGamepadButtons.TouchPad : 0;
+        buttons |= (pad.Buttons & XinputLeftThumb) != 0 ? HostGamepadButtons.L3 : 0;
+        buttons |= (pad.Buttons & XinputRightThumb) != 0 ? HostGamepadButtons.R3 : 0;
+        buttons |= (pad.Buttons & XinputLeftShoulder) != 0 ? HostGamepadButtons.L1 : 0;
+        buttons |= (pad.Buttons & XinputRightShoulder) != 0 ? HostGamepadButtons.R1 : 0;
+        buttons |= (pad.Buttons & XinputA) != 0 ? HostGamepadButtons.Cross : 0;
+        buttons |= (pad.Buttons & XinputB) != 0 ? HostGamepadButtons.Circle : 0;
+        buttons |= (pad.Buttons & XinputX) != 0 ? HostGamepadButtons.Square : 0;
+        buttons |= (pad.Buttons & XinputY) != 0 ? HostGamepadButtons.Triangle : 0;
+        buttons |= pad.LeftTrigger > TriggerThreshold ? HostGamepadButtons.L2 : 0;
+        buttons |= pad.RightTrigger > TriggerThreshold ? HostGamepadButtons.R2 : 0;
 
-        return new PadState(
+        return new HostGamepadState(
             Connected: true,
             Buttons: buttons,
             LeftX: AxisToByte(pad.ThumbLX),
             LeftY: AxisToByteInverted(pad.ThumbLY),
             RightX: AxisToByte(pad.ThumbRX),
             RightY: AxisToByteInverted(pad.ThumbRY),
-            L2: pad.LeftTrigger,
-            R2: pad.RightTrigger);
+            LeftTrigger: pad.LeftTrigger,
+            RightTrigger: pad.RightTrigger);
     }
 
     private static byte AxisToByte(short value) => (byte)((value + 32768) >> 8);
 
-    // XInput Y grows upward, ORBIS pads report Y growing downward.
+    // XInput Y grows upward, host pad conventions report Y growing downward.
     private static byte AxisToByteInverted(short value) => (byte)(255 - ((value + 32768) >> 8));
 
     [StructLayout(LayoutKind.Sequential)]
@@ -267,9 +269,9 @@ internal static class XInputReader
     }
 
     // xinput1_4.dll ships with Windows 8 and later.
-    [DllImport("xinput1_4.dll")]
-    private static extern uint XInputGetState(uint userIndex, out XInputState state);
+    [LibraryImport("xinput1_4.dll")]
+    private static partial uint XInputGetState(uint userIndex, out XInputState state);
 
-    [DllImport("xinput1_4.dll")]
-    private static extern uint XInputSetState(uint userIndex, ref XInputVibration vibration);
+    [LibraryImport("xinput1_4.dll")]
+    private static partial uint XInputSetState(uint userIndex, ref XInputVibration vibration);
 }
