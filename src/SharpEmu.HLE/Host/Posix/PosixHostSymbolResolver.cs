@@ -11,11 +11,9 @@ internal sealed class PosixHostSymbolResolver : IHostSymbolResolver
         HostRuntimeFunction.QueryPerformanceCounter => PosixHostStubs.QueryPerformanceCounterStubAddress,
         HostRuntimeFunction.SwitchToThread => PosixHostStubs.SwitchToThreadStubAddress,
         HostRuntimeFunction.Sleep => PosixHostStubs.SleepStubAddress,
-        // Native guest workers are currently Windows-only, so their wait-loop
-        // exports deliberately remain unavailable on POSIX.
-        HostRuntimeFunction.WaitForSingleObject => 0,
-        HostRuntimeFunction.SetEvent => 0,
-        HostRuntimeFunction.ExitThread => 0,
+        HostRuntimeFunction.WaitForSingleObject => PosixHostStubs.WaitForSingleObjectStubAddress,
+        HostRuntimeFunction.SetEvent => PosixHostStubs.SetEventStubAddress,
+        HostRuntimeFunction.ExitThread => PosixHostStubs.ExitThreadStubAddress,
         _ => throw new ArgumentOutOfRangeException(nameof(function), function, null),
     };
 }

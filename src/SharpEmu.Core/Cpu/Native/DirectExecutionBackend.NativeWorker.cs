@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Posix;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -79,10 +80,7 @@ public sealed partial class DirectExecutionBackend
 
 	private NativeGuestExecutor? RentNativeGuestExecutor()
 	{
-		// NativeGuestExecutor emits a Win32 wait loop and creates it with
-		// kernel32!CreateThread. POSIX hosts use the established inline entry
-		// path until the worker loop has a pthread/eventfd implementation.
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
+		if (NativeGuestWorkersDisabled)
 		{
 			return null;
 		}
@@ -175,8 +173,20 @@ public sealed partial class DirectExecutionBackend
 		private static nint _exitThreadAddress;
 
 		private readonly DirectExecutionBackend _backend;
-		private readonly AutoResetEvent _workAvailable = new(false);
-		private readonly AutoResetEvent _workCompleted = new(false);
+		// Windows uses AutoResetEvent (its SafeWaitHandle is a real kernel
+		// event the emitted loop can wait on); POSIX uses worker-event
+		// semaphores shared the same way via PosixHostStubs.
+		private readonly AutoResetEvent? _workAvailable;
+		private readonly AutoResetEvent? _workCompleted;
+		private nint _workSemaphore;
+		private nint _doneSemaphore;
+
+		// RunPrologue/RunEpilogue compile to the host ABI (SysV on POSIX); the
+		// emitted loop calls them with Win64 registers, so POSIX routes the
+		// calls through register-shuffling thunks (shared by all workers).
+		private static nint _posixPrologueThunk;
+		private static nint _posixEpilogueThunk;
+		private static readonly object PosixThunkGate = new();
 		private GCHandle _selfHandle;
 		private void* _controlBlock;
 		private void* _loopStub;
@@ -215,6 +225,11 @@ public sealed partial class DirectExecutionBackend
 		private NativeGuestExecutor(DirectExecutionBackend backend)
 		{
 			_backend = backend;
+			if (OperatingSystem.IsWindows())
+			{
+				_workAvailable = new AutoResetEvent(false);
+				_workCompleted = new AutoResetEvent(false);
+			}
 		}
 
 		public static NativeGuestExecutor? TryCreate(DirectExecutionBackend backend)
@@ -261,8 +276,34 @@ public sealed partial class DirectExecutionBackend
 			var prologuePtr = (nint)(delegate* unmanaged<nint, nint>)&RunPrologue;
 			var epiloguePtr = (nint)(delegate* unmanaged<nint, int, void>)&RunEpilogue;
 			var executorHandle = GCHandle.ToIntPtr(_selfHandle);
-			var workHandle = _workAvailable.SafeWaitHandle.DangerousGetHandle();
-			var doneHandle = _workCompleted.SafeWaitHandle.DangerousGetHandle();
+			nint workHandle;
+			nint doneHandle;
+			if (OperatingSystem.IsWindows())
+			{
+				workHandle = _workAvailable!.SafeWaitHandle.DangerousGetHandle();
+				doneHandle = _workCompleted!.SafeWaitHandle.DangerousGetHandle();
+			}
+			else
+			{
+				lock (PosixThunkGate)
+				{
+					if (_posixPrologueThunk == 0)
+					{
+						_posixPrologueThunk = PosixHostStubs.CreateWin64ToSysVThunk(prologuePtr);
+						_posixEpilogueThunk = PosixHostStubs.CreateWin64ToSysVThunk(epiloguePtr);
+					}
+				}
+				prologuePtr = _posixPrologueThunk;
+				epiloguePtr = _posixEpilogueThunk;
+				_workSemaphore = PosixHostStubs.CreateWorkerEvent();
+				_doneSemaphore = PosixHostStubs.CreateWorkerEvent();
+				if (_workSemaphore == 0 || _doneSemaphore == 0)
+				{
+					return false;
+				}
+				workHandle = _workSemaphore;
+				doneHandle = _doneSemaphore;
+			}
 
 			byte* code = (byte*)_loopStub;
 			int offset = 0;
@@ -380,8 +421,8 @@ public sealed partial class DirectExecutionBackend
 			_runYieldRequested = false;
 			_runYieldReason = null;
 			_runForcedExit = false;
-			_workAvailable.Set();
-			_workCompleted.WaitOne();
+			SignalWorkAvailable();
+			WaitWorkCompleted();
 			_runContext = null;
 			_runState = null;
 			yieldRequested = _runYieldRequested;
@@ -392,6 +433,28 @@ public sealed partial class DirectExecutionBackend
 				throw new InvalidOperationException("Native guest worker failed to bind the run ambient (prologue fault)");
 			}
 			return _runNativeResult;
+		}
+
+		private void SignalWorkAvailable()
+		{
+			if (_workAvailable is not null)
+			{
+				_workAvailable.Set();
+				return;
+			}
+
+			_ = PosixHostStubs.SignalWorkerEvent(_workSemaphore);
+		}
+
+		private void WaitWorkCompleted()
+		{
+			if (_workCompleted is not null)
+			{
+				_workCompleted.WaitOne();
+				return;
+			}
+
+			_ = PosixHostStubs.WaitWorkerEvent(_doneSemaphore, -1);
 		}
 
 		[UnmanagedCallersOnly]
@@ -523,7 +586,7 @@ public sealed partial class DirectExecutionBackend
 			}
 			try
 			{
-				_workAvailable.Set();
+				SignalWorkAvailable();
 			}
 			catch (ObjectDisposedException)
 			{
@@ -558,8 +621,18 @@ public sealed partial class DirectExecutionBackend
 			{
 				_selfHandle.Free();
 			}
-			_workAvailable.Dispose();
-			_workCompleted.Dispose();
+			_workAvailable?.Dispose();
+			_workCompleted?.Dispose();
+			if (_workSemaphore != 0)
+			{
+				PosixHostStubs.DestroyWorkerEvent(_workSemaphore);
+				_workSemaphore = 0;
+			}
+			if (_doneSemaphore != 0)
+			{
+				PosixHostStubs.DestroyWorkerEvent(_doneSemaphore);
+				_doneSemaphore = 0;
+			}
 		}
 	}
 }

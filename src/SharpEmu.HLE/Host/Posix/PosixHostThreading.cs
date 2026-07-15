@@ -15,9 +15,8 @@ internal sealed class PosixHostThreading : IHostThreading
 
     public uint CurrentThreadId => PosixHostStubs.GetCurrentThreadId();
 
-    // Native guest workers currently emit a Win32 event loop and are disabled
-    // on POSIX. These members keep the platform contract explicit until that
-    // loop has a pthread/eventfd implementation.
+    // Thread affinity is advisory on POSIX hosts (macOS offers no
+    // pthread-level affinity API); callers treat false as "not applied".
     public bool TrySetCurrentThreadAffinity(nuint affinityMask)
     {
         _ = affinityMask;
@@ -30,23 +29,17 @@ internal sealed class PosixHostThreading : IHostThreading
         nuint stackReserveBytes,
         out uint threadId)
     {
-        _ = entry;
-        _ = parameter;
-        _ = stackReserveBytes;
-        threadId = 0;
-        return 0;
+        return PosixHostStubs.CreateWorkerThread(entry, parameter, stackReserveBytes, out threadId);
     }
 
     public bool WaitForThreadExit(nint threadHandle, uint timeoutMilliseconds)
     {
-        _ = threadHandle;
-        _ = timeoutMilliseconds;
-        return false;
+        return PosixHostStubs.WaitForWorkerThreadExit(threadHandle, timeoutMilliseconds);
     }
 
     public void CloseThreadHandle(nint threadHandle)
     {
-        _ = threadHandle;
+        PosixHostStubs.CloseWorkerThreadHandle(threadHandle);
     }
 
     public bool TryCaptureThreadRegisters(uint threadId, out HostCapturedRegisters registers)
