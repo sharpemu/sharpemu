@@ -213,6 +213,25 @@ public static class KernelPthreadExtendedCompatExports
     }
 
     [SysAbiExport(
+        Nid = "+U1R4WtXvoc",
+        ExportName = "pthread_detach",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadDetach(CpuContext ctx)
+    {
+        // POSIX flavor: returns the errno value directly instead of an SCE code.
+        var thread = ctx[CpuRegister.Rdi];
+        if (thread == 0)
+        {
+            const int Esrch = 3;
+            ctx[CpuRegister.Rax] = Esrch;
+            return Esrch;
+        }
+
+        return PthreadDetach(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "How7B8Oet6k",
         ExportName = "scePthreadGetname",
         Target = Generation.Gen4 | Generation.Gen5,

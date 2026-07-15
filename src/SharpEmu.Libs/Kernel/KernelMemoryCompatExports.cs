@@ -13,7 +13,7 @@ using System.Globalization;
 
 namespace SharpEmu.Libs.Kernel;
 
-public static class KernelMemoryCompatExports
+public static partial class KernelMemoryCompatExports
 {
     private const int MaxGuestStringLength = 4096;
     private const int WideCharSize = sizeof(ushort);
