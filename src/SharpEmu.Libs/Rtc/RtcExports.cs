@@ -84,6 +84,12 @@ public static class RtcExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // TryConvertTickToDateTime yields a Utc-kind DateTime, but here the tick is a local
+        // wall-clock time. ConvertTimeToUtc throws ArgumentException when a Utc-kind value is
+        // paired with a non-UTC source zone, so on any host not set to UTC this would always
+        // fail. Re-tag as Unspecified so the value is interpreted as local time and converted.
+        localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified);
+
         DateTime utcDateTime;
         try
         {
