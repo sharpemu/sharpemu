@@ -48,9 +48,9 @@ public static class DiscMapExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-        // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
+    // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
     #pragma warning disable SHEM006
-[SysAbiExport(
+    [SysAbiExport(
         Nid = "fJgP+wqifno",
         ExportName = "sceDiscMapUnknownFJgP",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -58,9 +58,9 @@ public static class DiscMapExports
     public static int DiscMapUnknownFJgP(CpuContext ctx) => WriteMappingTriple(ctx, "sceDiscMapUnknownFJgP");
     #pragma warning restore SHEM006
 
-        // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
+    // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
     #pragma warning disable SHEM006
-[SysAbiExport(
+    [SysAbiExport(
         Nid = "ioKMruft1ek",
         ExportName = "sceDiscMapUnknownIoKM",
         Target = Generation.Gen4 | Generation.Gen5,

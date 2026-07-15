@@ -161,15 +161,14 @@ public static class UserServiceExports
         return ctx.SetReturn(0);
     }
 
-        // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
+    // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
     #pragma warning disable SHEM006
-[SysAbiExport(
+    [SysAbiExport(
         Nid = "D-CzAxQL0XI",
         ExportName = "sceUserServiceGetPlatformPrivacySetting",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceUserService")]
     public static int UserServiceGetPlatformPrivacySetting(CpuContext ctx)
-    #pragma warning restore SHEM006
     {
         var parameterId = unchecked((int)ctx[CpuRegister.Rdi]);
         var valueAddress = ctx[CpuRegister.Rsi];
@@ -187,6 +186,7 @@ public static class UserServiceExports
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
+    #pragma warning restore SHEM006
 
     [SysAbiExport(
         Nid = "woNpu+45RLk",

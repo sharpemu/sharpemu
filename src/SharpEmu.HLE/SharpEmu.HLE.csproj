@@ -14,8 +14,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Core" />
-    <!-- Parity testing between the generated export registry and the reflection scan. -->
-    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 
   <ItemGroup>
@@ -33,18 +31,26 @@ SPDX-License-Identifier: GPL-2.0-or-later
        from scripts/ps5_names.txt via the same Ps5Nid implementation the analyzers use,
        embedded from the intermediate directory, and never committed. Replaces
        scripts/generate_aerolib_binary.py. -->
+  <PropertyGroup>
+    <SharpEmuAerolibNamesFile>$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt</SharpEmuAerolibNamesFile>
+    <SharpEmuAerolibTaskAssembly>$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
+  </PropertyGroup>
+
   <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
              TaskFactory="TaskHostFactory"
-             AssemblyFile="$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll" />
+             AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
 
   <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
-       resource processing embeds the output. -->
+       resource processing embeds the output. Skipped for design-time builds: the IDE
+       resolves project references without compiling them, so on a fresh clone the task
+       assembly does not exist yet and loading it would break the design-time build. -->
   <Target Name="GenerateAerolibBinary"
           BeforeTargets="PrepareResources"
           DependsOnTargets="ResolveProjectReferences"
-          Inputs="$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt;$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll"
+          Condition="'$(DesignTimeBuild)' != 'true'"
+          Inputs="$(SharpEmuAerolibNamesFile);$(SharpEmuAerolibTaskAssembly)"
           Outputs="$(IntermediateOutputPath)aerolib.bin">
-    <GenerateAerolibBinaryTask NamesFile="$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt"
+    <GenerateAerolibBinaryTask NamesFile="$(SharpEmuAerolibNamesFile)"
                                OutputFile="$(IntermediateOutputPath)aerolib.bin" />
   </Target>
 

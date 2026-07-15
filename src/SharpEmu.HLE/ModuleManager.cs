@@ -16,9 +16,6 @@ public sealed class ModuleManager : IModuleManager
     private readonly HashSet<Assembly> _warmupAssemblies = new();
     private bool _isFrozen;
 
-    // Content tests over the generated registry inspect the frozen table through this.
-    internal IReadOnlyDictionary<string, ExportedFunction> ExportsForTesting => _exportTable;
-
     public int RegisterExports(IReadOnlyList<ExportedFunction> exports)
     {
         ArgumentNullException.ThrowIfNull(exports);

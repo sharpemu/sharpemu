@@ -124,6 +124,22 @@ public sealed class SysAbiExportGeneratorTests
     }
 
     [Fact]
+    public void AssemblyWithoutExportsEmitsNoRegistry()
+    {
+        // Referencing the analyzer must not mint a colliding
+        // SharpEmu.Generated.SysAbiExportRegistry type in export-free assemblies.
+        const string noExports = """
+            public static class PlainCode
+            {
+                public static int Nothing() => 0;
+            }
+            """;
+        var (_, generated) = RoslynTestHost.RunGenerator(RoslynTestHost.Compile(noExports));
+
+        Assert.Equal(string.Empty, generated);
+    }
+
+    [Fact]
     public void InvalidHandlersAreSkippedNotEmitted()
     {
         const string invalid = """

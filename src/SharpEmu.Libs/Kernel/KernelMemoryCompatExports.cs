@@ -15,7 +15,7 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelMemoryCompatExports
 {
-    internal const int MaxGuestStringLength = 4096;
+    private const int MaxGuestStringLength = 4096;
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
     private const int MemcpyChunkSize = 256 * 1024;
@@ -1812,8 +1812,17 @@ public static class KernelMemoryCompatExports
         ExportName = "_open",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelOpenUnderscore(CpuContext ctx, [GuestCString(MaxGuestStringLength)] string guestPath, int flags)
+    public static int KernelOpenUnderscore(CpuContext ctx)
     {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        // Not migratable to [GuestCString]: the local reader's TryReadCompat host-memory
+        // fallback recovers paths in loader-mapped regions that ctx.Memory cannot see.
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);

@@ -12,6 +12,10 @@ namespace SharpEmu.SourceGenerators;
 /// </summary>
 public static class SysAbiExportShape
 {
+    /// <summary>Single source of truth so the generator and analyzer can never
+    /// disagree about which attribute marks an export.</summary>
+    public const string SysAbiExportAttributeName = "SharpEmu.HLE.SysAbiExportAttribute";
+
     public readonly struct Arguments
     {
         public Arguments(string libraryName, string nid, string exportName, int target)

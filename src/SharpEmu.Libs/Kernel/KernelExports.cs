@@ -369,16 +369,14 @@ public static class KernelExports
         ExportName = "open",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int Open(CpuContext ctx, [GuestCString(KernelMemoryCompatExports.MaxGuestStringLength)] string guestPath, int flags) =>
-        KernelMemoryCompatExports.KernelOpenUnderscore(ctx, guestPath, flags);
+    public static int Open(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
 
     [SysAbiExport(
         Nid = "1G3lF1Gg1k8",
         ExportName = "sceKernelOpen",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelOpen(CpuContext ctx, [GuestCString(KernelMemoryCompatExports.MaxGuestStringLength)] string guestPath, int flags) =>
-        KernelMemoryCompatExports.KernelOpenUnderscore(ctx, guestPath, flags);
+    public static int KernelOpen(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
 
     [SysAbiExport(
         Nid = "mqQMh1zPPT8",

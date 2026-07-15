@@ -22,16 +22,22 @@ public static class Ps5Nid
 
     public static string Compute(string symbolName)
     {
+        using var sha1 = SHA1.Create();
+        return Compute(symbolName, sha1);
+    }
+
+    /// <summary>
+    /// Bulk-callable overload: the aerolib build task hashes every catalog name
+    /// (~150k), so the caller owns one SHA1 instance instead of churning one per name.
+    /// </summary>
+    public static string Compute(string symbolName, SHA1 sha1)
+    {
         var nameBytes = Encoding.UTF8.GetBytes(symbolName);
         var input = new byte[nameBytes.Length + Suffix.Length];
         nameBytes.CopyTo(input, 0);
         Suffix.CopyTo(input, nameBytes.Length);
 
-        byte[] hash;
-        using (var sha1 = SHA1.Create())
-        {
-            hash = sha1.ComputeHash(input);
-        }
+        var hash = sha1.ComputeHash(input);
 
         // The script reads the first eight bytes as a little-endian integer and
         // formats it big-endian before encoding — a byte reversal.

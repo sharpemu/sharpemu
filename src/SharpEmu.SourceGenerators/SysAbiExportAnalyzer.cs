@@ -17,8 +17,20 @@ namespace SharpEmu.SourceGenerators;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
 {
-    private const string AttributeFullName = "SharpEmu.HLE.SysAbiExportAttribute";
+    private const string AttributeFullName = SysAbiExportShape.SysAbiExportAttributeName;
     private const string CatalogFileName = "ps5_names.txt";
+
+    // The catalog is ~150k lines; parse it once per file snapshot instead of on every
+    // compilation start (the IDE creates one per keystroke). A changed file arrives as
+    // a fresh AdditionalText instance, which naturally misses the cache.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AdditionalText, CatalogHolder> _catalogCache = new();
+
+    private sealed class CatalogHolder
+    {
+        public CatalogHolder(HashSet<string>? names) => Names = names;
+
+        public HashSet<string>? Names { get; }
+    }
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
     [
@@ -58,26 +70,31 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var text = file.GetText(cancellationToken);
-            if (text is null)
-            {
-                return null;
-            }
-
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var line in text.Lines)
-            {
-                var name = line.ToString().Trim();
-                if (name.Length != 0)
-                {
-                    names.Add(name);
-                }
-            }
-
-            return names;
+            return _catalogCache.GetValue(file, static f => new CatalogHolder(ParseCatalog(f))).Names;
         }
 
         return null;
+    }
+
+    private static HashSet<string>? ParseCatalog(AdditionalText file)
+    {
+        var text = file.GetText();
+        if (text is null)
+        {
+            return null;
+        }
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in text.Lines)
+        {
+            var name = line.ToString().Trim();
+            if (name.Length != 0)
+            {
+                names.Add(name);
+            }
+        }
+
+        return names;
     }
 
     private static void AnalyzeMethod(
@@ -142,11 +159,14 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
         {
             var computed = Ps5Nid.Compute(arguments.ExportName);
 
+            var nameInCatalog = catalogNames is not null && catalogNames.Contains(arguments.ExportName);
+
             // A declared NID that contradicts its name is only provably wrong when the
             // name is a real catalog symbol. Names outside the catalog are synthetic
             // labels for NIDs whose true symbol is unknown (the "sceAgcUnknown..."
             // convention) — for those the NID is authoritative and only SHEM006 applies.
-            var nameIsKnown = catalogNames is null || catalogNames.Contains(arguments.ExportName);
+            // With no catalog wired, every name is validated (fail closed).
+            var nameIsKnown = catalogNames is null || nameInCatalog;
             if (hasNid && nameIsKnown && !string.Equals(computed, arguments.Nid, StringComparison.Ordinal))
             {
                 context.ReportDiagnostic(Diagnostic.Create(
@@ -162,7 +182,7 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
                 effectiveNid = computed;
             }
 
-            if (catalogNames is not null && !catalogNames.Contains(arguments.ExportName))
+            if (catalogNames is not null && !nameInCatalog)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     SysAbiDiagnostics.NameNotInCatalog, location, arguments.ExportName));

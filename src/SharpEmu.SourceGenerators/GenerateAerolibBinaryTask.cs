@@ -44,13 +44,14 @@ public sealed class GenerateAerolibBinaryTask : ITask
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(OutputFile)!);
+            using (var sha1 = System.Security.Cryptography.SHA1.Create())
             using (var stream = File.Create(OutputFile))
             using (var writer = new BinaryWriter(stream))
             {
                 writer.Write((uint)names.Count);
                 foreach (var name in names)
                 {
-                    var nidBytes = Encoding.UTF8.GetBytes(Ps5Nid.Compute(name));
+                    var nidBytes = Encoding.UTF8.GetBytes(Ps5Nid.Compute(name, sha1));
                     var nameBytes = Encoding.UTF8.GetBytes(name);
                     writer.Write((byte)nidBytes.Length);
                     writer.Write(nidBytes);
