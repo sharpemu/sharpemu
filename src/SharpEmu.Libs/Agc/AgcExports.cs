@@ -5340,7 +5340,7 @@ public static partial class AgcExports
                     translatedDraw.Textures,
                     out _);
                 var sharedGlobalMemoryBuffers =
-                    CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                    CreateTranslatedDrawGlobalBuffers(translatedDraw);
                 var sharedVertexBuffers =
                     CreateGuestVertexBuffers(translatedDraw.VertexInputs);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
@@ -5383,7 +5383,7 @@ public static partial class AgcExports
                         translatedDraw.Textures,
                         out _);
                     var globalMemoryBuffers =
-                        CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                        CreateTranslatedDrawGlobalBuffers(translatedDraw);
                     var vertexBuffers =
                         CreateGuestVertexBuffers(translatedDraw.VertexInputs);
                     var renderState = translatedDraw.RenderState;
@@ -5426,7 +5426,7 @@ public static partial class AgcExports
                             translatedDraw.Textures,
                             out _);
                         var globalMemoryBuffers =
-                            CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                            CreateTranslatedDrawGlobalBuffers(translatedDraw);
                         TraceDrawCompact(drawSequence, translatedDraw, textures, []);
                         GuestGpu.Current.SubmitStorageTranslatedDraw(
                             translatedDraw.PixelShader,
