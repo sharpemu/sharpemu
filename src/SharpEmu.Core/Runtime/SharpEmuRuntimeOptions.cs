@@ -12,4 +12,6 @@ public readonly struct SharpEmuRuntimeOptions
     public bool StrictDynlibResolution { get; init; }
 
     public int ImportTraceLimit { get; init; }
+
+    public IReadOnlyList<int>? PreferredLanguages { get; init; }
 }

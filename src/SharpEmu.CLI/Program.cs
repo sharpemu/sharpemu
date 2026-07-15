@@ -768,8 +768,13 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
+<<<<<<< ours
         Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
+=======
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--languages=<codes>] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] <path-to-eboot.bin>");
+        Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug ""E:\Games\...\eboot.bin""");
+>>>>>>> theirs
     }
 
     private static bool TryParseArguments(
@@ -789,6 +794,7 @@ internal static partial class Program
         }
 
         var strictDynlibResolution = false;
+        IReadOnlyList<int>? preferredLanguages = null;
         var importTraceLimit = 0;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
         logFilePath = null;
@@ -803,6 +809,19 @@ internal static partial class Program
                 continue;
             }
 
+            if (string.Equals(argument, "--languages", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= args.Length || !PreferredLanguages.TryParse(args[++i], out preferredLanguages))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logLevel = SharpEmuLog.MinimumLevel;
+                    return false;
+                }
+
+                continue;
+            }
+
             if (string.Equals(argument, "--trace-imports", StringComparison.OrdinalIgnoreCase))
             {
                 importTraceLimit = DefaultImportTraceLimit;
@@ -810,6 +829,20 @@ internal static partial class Program
                 {
                     importTraceLimit = Math.Max(0, explicitLimit);
                     i++;
+                }
+
+                continue;
+            }
+
+            const string languagesPrefix = "--languages=";
+            if (argument.StartsWith(languagesPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!PreferredLanguages.TryParse(argument[languagesPrefix.Length..], out preferredLanguages))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logLevel = SharpEmuLog.MinimumLevel;
+                    return false;
                 }
 
                 continue;
@@ -948,6 +981,7 @@ internal static partial class Program
             CpuEngine = cpuEngine,
             StrictDynlibResolution = strictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
+            PreferredLanguages = preferredLanguages,
         };
         return true;
     }

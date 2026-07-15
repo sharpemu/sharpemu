@@ -6670,6 +6670,42 @@ public static class KernelMemoryCompatExports
     public static int KernelMapMemory(CpuContext ctx)
     {
         ctx[CpuRegister.Rax] = 0;
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "smbQukfxYJM",
+        ExportName = "getenv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int GetEnvironment(CpuContext ctx)
+    {
+        var nameAddress = ctx[CpuRegister.Rdi];
+        if (nameAddress == 0 || !TryReadNullTerminatedUtf8(ctx, nameAddress, 256, out var name))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var value = name.Equals("SYSLANGCC", StringComparison.Ordinal)
+            ? PreferredLanguages.ToLanguageTag(PreferredLanguages.GetPrimaryLanguage())
+            : null;
+        if (value is null)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(value + "\0");
+        if (!TryAllocateLibcHeap((ulong)bytes.Length, DefaultLibcHeapAlignment, zeroFill: false, out var address) ||
+            !ctx.Memory.TryWrite(address, bytes))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        ctx[CpuRegister.Rax] = address;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }

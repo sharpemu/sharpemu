@@ -29,10 +29,16 @@ public static class SystemServiceExports
 
         var value = parameterId switch
         {
-            1 or 2 or 3 or 1000 => 1,
+            1 => PreferredLanguages.GetPrimaryLanguage(),
+            2 or 3 or 1000 => 1,
             4 => 180,
             _ => 0,
         };
+
+        if (parameterId == 1)
+        {
+            Console.Error.WriteLine($"[SYSTEM][LANG] Returning PS5 console language {value} ({PreferredLanguages.ToLanguageTag(value)})");
+        }
 
         Span<byte> valueBytes = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
