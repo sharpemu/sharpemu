@@ -77,7 +77,7 @@ public sealed class GenerateAerolibBinaryTask : ITask
                 columnNumber: 0,
                 endLineNumber: 0,
                 endColumnNumber: 0,
-                message: exception.Message,
+                message: exception.ToString(),
                 helpKeyword: null,
                 senderName: nameof(GenerateAerolibBinaryTask)));
             return false;

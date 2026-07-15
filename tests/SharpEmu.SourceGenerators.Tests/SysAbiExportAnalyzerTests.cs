@@ -122,9 +122,9 @@ public sealed class SysAbiExportAnalyzerTests
             }
             """);
 
+        // Order-insensitive: analyzers run concurrently and diagnostic order is unstable.
         Assert.Equal(2, diagnostics.Count);
-        Assert.Equal("SHEM003", diagnostics[0].Id);
-        Assert.Equal("SHEM003", diagnostics[1].Id);
+        Assert.All(diagnostics, diagnostic => Assert.Equal("SHEM003", diagnostic.Id));
     }
 
     [Fact]
@@ -161,9 +161,9 @@ public sealed class SysAbiExportAnalyzerTests
             }
             """);
 
+        // Order-insensitive: analyzers run concurrently and diagnostic order is unstable.
         Assert.Equal(2, diagnostics.Count);
-        Assert.Equal("SHEM008", diagnostics[0].Id);
-        Assert.Equal("SHEM008", diagnostics[1].Id);
+        Assert.All(diagnostics, diagnostic => Assert.Equal("SHEM008", diagnostic.Id));
     }
 
     [Fact]
