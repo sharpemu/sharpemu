@@ -1,0 +1,174 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Collections.Concurrent;
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
+
+namespace SharpEmu.SourceGenerators;
+
+/// <summary>
+/// Build-time enforcement for [SysAbiExport] declarations: duplicate NIDs, malformed
+/// NIDs, NIDs that contradict their export name (checked with the PS NID computation),
+/// handler signatures the dispatcher cannot call, and — when scripts/ps5_names.txt is
+/// wired up as an AdditionalFile — export names unknown to the symbol catalog.
+/// </summary>
+[DiagnosticAnalyzer(LanguageNames.CSharp)]
+public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
+{
+    private const string AttributeFullName = "SharpEmu.HLE.SysAbiExportAttribute";
+    private const string CatalogFileName = "ps5_names.txt";
+
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
+    [
+        SysAbiDiagnostics.DuplicateNid,
+        SysAbiDiagnostics.InvalidNidFormat,
+        SysAbiDiagnostics.InvalidHandlerSignature,
+        SysAbiDiagnostics.NidNameMismatch,
+        SysAbiDiagnostics.UnresolvableExport,
+        SysAbiDiagnostics.NameNotInCatalog,
+        SysAbiDiagnostics.HandlerNotAccessible,
+    ];
+
+    public override void Initialize(AnalysisContext context)
+    {
+        context.EnableConcurrentExecution();
+        context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
+        context.RegisterCompilationStartAction(static startContext =>
+        {
+            var catalogNames = LoadCatalog(startContext.Options.AdditionalFiles, startContext.CancellationToken);
+            var exportsByNid = new ConcurrentDictionary<string, IMethodSymbol>();
+
+            startContext.RegisterSymbolAction(
+                symbolContext => AnalyzeMethod(symbolContext, catalogNames, exportsByNid),
+                SymbolKind.Method);
+        });
+    }
+
+    private static HashSet<string>? LoadCatalog(
+        ImmutableArray<AdditionalText> additionalFiles,
+        System.Threading.CancellationToken cancellationToken)
+    {
+        foreach (var file in additionalFiles)
+        {
+            if (!file.Path.EndsWith(CatalogFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = file.GetText(cancellationToken);
+            if (text is null)
+            {
+                return null;
+            }
+
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var line in text.Lines)
+            {
+                var name = line.ToString().Trim();
+                if (name.Length != 0)
+                {
+                    names.Add(name);
+                }
+            }
+
+            return names;
+        }
+
+        return null;
+    }
+
+    private static void AnalyzeMethod(
+        SymbolAnalysisContext context,
+        HashSet<string>? catalogNames,
+        ConcurrentDictionary<string, IMethodSymbol> exportsByNid)
+    {
+        var method = (IMethodSymbol)context.Symbol;
+        AttributeData? exportAttribute = null;
+        foreach (var attribute in method.GetAttributes())
+        {
+            if (attribute.AttributeClass?.ToDisplayString() == AttributeFullName)
+            {
+                exportAttribute = attribute;
+                break;
+            }
+        }
+
+        if (exportAttribute is null)
+        {
+            return;
+        }
+
+        var location = method.Locations.Length != 0 ? method.Locations[0] : Location.None;
+        var methodDisplay = $"{method.ContainingType.ToDisplayString()}.{method.Name}";
+
+        if (!SysAbiExportShape.IsValidHandler(method))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                SysAbiDiagnostics.InvalidHandlerSignature, location, methodDisplay));
+            return;
+        }
+
+        if (!SysAbiExportShape.IsAccessibleFromGeneratedCode(method))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                SysAbiDiagnostics.HandlerNotAccessible, location, methodDisplay));
+        }
+
+        var arguments = SysAbiExportShape.ReadArguments(exportAttribute);
+        var hasNid = !string.IsNullOrWhiteSpace(arguments.Nid);
+        var hasName = !string.IsNullOrWhiteSpace(arguments.ExportName);
+
+        if (!hasNid && !hasName)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                SysAbiDiagnostics.UnresolvableExport, location, methodDisplay));
+            return;
+        }
+
+        if (hasNid && !Ps5Nid.IsValidFormat(arguments.Nid))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                SysAbiDiagnostics.InvalidNidFormat, location, arguments.Nid));
+            return;
+        }
+
+        var effectiveNid = arguments.Nid;
+        if (hasName)
+        {
+            var computed = Ps5Nid.Compute(arguments.ExportName);
+            if (hasNid && !string.Equals(computed, arguments.Nid, StringComparison.Ordinal))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    SysAbiDiagnostics.NidNameMismatch,
+                    location,
+                    arguments.Nid,
+                    arguments.ExportName,
+                    computed));
+            }
+
+            if (!hasNid)
+            {
+                effectiveNid = computed;
+            }
+
+            if (catalogNames is not null && !catalogNames.Contains(arguments.ExportName))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    SysAbiDiagnostics.NameNotInCatalog, location, arguments.ExportName));
+            }
+        }
+
+        var existing = exportsByNid.GetOrAdd(effectiveNid, method);
+        if (!SymbolEqualityComparer.Default.Equals(existing, method))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                SysAbiDiagnostics.DuplicateNid,
+                location,
+                effectiveNid,
+                $"{existing.ContainingType.ToDisplayString()}.{existing.Name}",
+                methodDisplay));
+        }
+    }
+}

@@ -1,0 +1,28 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- Self-contained (the repo's test-project convention): drives the generator and
+       analyzer in-process with a Roslyn compilation built from inline sources, and
+       references SharpEmu.HLE only to supply the real attribute/registry metadata the
+       generated code compiles against. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+</Project>
