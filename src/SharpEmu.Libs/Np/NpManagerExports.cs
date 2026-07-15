@@ -10,6 +10,7 @@ public static class NpManagerExports
 {
     private const int NpTitleIdSize = 16;
     private const int NpTitleSecretSize = 128;
+    private const int NpReachabilityStateUnavailable = 0;
 
     [SysAbiExport(
         Nid = "3Zl8BePTh9Y",
@@ -75,8 +76,15 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpGetNpReachabilityState(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var stateAddress = ctx[CpuRegister.Rsi];
+        if (stateAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        return ctx.TryWriteInt32(stateAddress, NpReachabilityStateUnavailable)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
