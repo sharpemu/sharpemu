@@ -5,7 +5,6 @@ path = [
     "REUSE.toml",
     "nuget.config",
     "global.json",
-    "**/packages.lock.json",
     "scripts/ps5_names.txt",
     "src/SharpEmu.GUI/Languages/**",
     "_logs/**",

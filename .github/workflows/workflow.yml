@@ -94,11 +94,10 @@ jobs:
           cache: true
           cache-dependency-path: |
             Directory.Packages.props
-            src/**/packages.lock.json
-            tests/**/packages.lock.json
+            Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx --locked-mode
+        run: dotnet restore SharpEmu.slnx
 
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
@@ -164,11 +163,10 @@ jobs:
           cache: true
           cache-dependency-path: |
             Directory.Packages.props
-            src/**/packages.lock.json
-            tests/**/packages.lock.json
+            Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx --locked-mode
+        run: dotnet restore SharpEmu.slnx
 
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
