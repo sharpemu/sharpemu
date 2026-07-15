@@ -23,6 +23,34 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Aerolib\aerolib.bin" />
+    <!-- Forces build ordering for the aerolib task below; loaded as a build component,
+         never a runtime dependency. -->
+    <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- aerolib.bin (the runtime NID -> name catalog) is derived data: generated here
+       from scripts/ps5_names.txt via the same Ps5Nid implementation the analyzers use,
+       embedded from the intermediate directory, and never committed. Replaces
+       scripts/generate_aerolib_binary.py. -->
+  <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
+             TaskFactory="TaskHostFactory"
+             AssemblyFile="$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll" />
+
+  <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
+       resource processing embeds the output. -->
+  <Target Name="GenerateAerolibBinary"
+          BeforeTargets="PrepareResources"
+          DependsOnTargets="ResolveProjectReferences"
+          Inputs="$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt;$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll"
+          Outputs="$(IntermediateOutputPath)aerolib.bin">
+    <GenerateAerolibBinaryTask NamesFile="$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt"
+                               OutputFile="$(IntermediateOutputPath)aerolib.bin" />
+  </Target>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(IntermediateOutputPath)aerolib.bin"
+                      LogicalName="SharpEmu.HLE.Aerolib.aerolib.bin"
+                      Visible="false" />
   </ItemGroup>
 </Project>
