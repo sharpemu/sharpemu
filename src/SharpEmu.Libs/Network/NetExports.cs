@@ -103,8 +103,10 @@ public static class NetExports
     public static int NetHtonl(CpuContext ctx)
     {
         var value = unchecked((uint)ctx[CpuRegister.Rdi]);
+        // The byte-swapped result is the return value and already lives in Rax; return OK as the
+        // dispatch status without going through SetReturn, which would overwrite Rax with 0.
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -115,8 +117,10 @@ public static class NetExports
     public static int NetHtons(CpuContext ctx)
     {
         var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
+        // The byte-swapped result is the return value and already lives in Rax; return OK as the
+        // dispatch status without going through SetReturn, which would overwrite Rax with 0.
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -127,8 +131,10 @@ public static class NetExports
     public static int NetNtohl(CpuContext ctx)
     {
         var value = unchecked((uint)ctx[CpuRegister.Rdi]);
+        // The byte-swapped result is the return value and already lives in Rax; return OK as the
+        // dispatch status without going through SetReturn, which would overwrite Rax with 0.
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -139,8 +145,10 @@ public static class NetExports
     public static int NetNtohs(CpuContext ctx)
     {
         var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
+        // The byte-swapped result is the return value and already lives in Rax; return OK as the
+        // dispatch status without going through SetReturn, which would overwrite Rax with 0.
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
