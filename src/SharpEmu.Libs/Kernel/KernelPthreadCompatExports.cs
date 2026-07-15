@@ -99,20 +99,6 @@ public static class KernelPthreadCompatExports
 
         // See PthreadMutexState.WakeKey.
         public string WakeKey { get; } = "pthread_cond#" + Interlocked.Increment(ref _nextCondWakeId).ToString("X");
-
-        // A signal with no waiter stays pending; the guest often signals before the wait.
-        public int PendingSignals { get; set; }
-
-        public bool TryConsumePendingSignal()
-        {
-            if (PendingSignals <= 0)
-            {
-                return false;
-            }
-
-            PendingSignals--;
-            return true;
-        }
     }
 
     private readonly record struct PthreadMutexAttrState(int Type, int Protocol);
@@ -1375,9 +1361,8 @@ public static class KernelPthreadCompatExports
         {
             state.Waiters++;
             var observedEpoch = state.SignalEpoch;
-            var consumedPendingSignal = state.TryConsumePendingSignal();
             TracePthreadCond(
-                consumedPendingSignal ? "wait-enter-pending" : "wait-enter",
+                "wait-enter",
                 condAddress,
                 mutexAddress,
                 state,
@@ -1390,25 +1375,6 @@ public static class KernelPthreadCompatExports
                 state.Waiters--;
                 TracePthreadCond("wait-unlock-fail", condAddress, mutexAddress, state, timed, unlockResult);
                 return unlockResult;
-            }
-
-            if (consumedPendingSignal)
-            {
-                state.Waiters = Math.Max(0, state.Waiters - 1);
-                TracePthreadCond("wait-wake-pending", condAddress, mutexAddress, state, timed, waitResult);
-
-                // Relock outside SyncRoot to preserve lock ordering.
-                Monitor.Exit(state.SyncRoot);
-                try
-                {
-                    var pendingLockResult = PthreadMutexRelockForCondWait(ctx, mutexAddress, releasedRecursion);
-                    return pendingLockResult != (int)OrbisGen2Result.ORBIS_GEN2_OK ? pendingLockResult : waitResult;
-                }
-                finally
-                {
-                    // Balance the surrounding lock statement.
-                    Monitor.Enter(state.SyncRoot);
-                }
             }
 
             var scheduler = GuestThreadExecution.Scheduler;
@@ -1541,10 +1507,6 @@ public static class KernelPthreadCompatExports
                 {
                     Monitor.Pulse(state.SyncRoot);
                 }
-            }
-            else
-            {
-                state.PendingSignals++;
             }
 
             TracePthreadCond(broadcast ? "broadcast" : "signal", condAddress, mutexAddress: 0, state, timed: false, (int)OrbisGen2Result.ORBIS_GEN2_OK);
