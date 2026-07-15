@@ -39,21 +39,36 @@ jobs:
             const run = context.payload.workflow_run;
             const { owner, repo } = context.repo;
 
-            // Fork PRs leave workflow_run.pull_requests empty, so fall back to
-            // resolving the PR from the build's head commit.
+            // Resolve the PR. Same-repo PRs are in workflow_run.pull_requests, but
+            // fork PRs leave it empty AND their head commit is not on a base-repo
+            // branch, so listPullRequestsAssociatedWithCommit misses them too. Match
+            // the open PR by its head "owner:branch" instead, which works for forks.
             let prNumber;
             if (run.pull_requests && run.pull_requests.length > 0) {
               prNumber = run.pull_requests[0].number;
             } else {
-              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner, repo, commit_sha: run.head_sha,
-              });
-              const open = prs.data.find(pr => pr.state === 'open');
-              if (!open) {
+              let candidates = [];
+              const headOwner = run.head_repository && run.head_repository.owner
+                ? run.head_repository.owner.login
+                : null;
+              if (headOwner && run.head_branch) {
+                const byHead = await github.rest.pulls.list({
+                  owner, repo, state: 'open',
+                  head: `${headOwner}:${run.head_branch}`, per_page: 10,
+                });
+                candidates = byHead.data;
+              }
+              if (candidates.length === 0) {
+                const byCommit = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner, repo, commit_sha: run.head_sha,
+                });
+                candidates = byCommit.data.filter(pr => pr.state === 'open');
+              }
+              if (candidates.length === 0) {
                 core.info('No open PR for this build; nothing to comment.');
                 return;
               }
-              prNumber = open.number;
+              prNumber = candidates[0].number;
             }
 
             // Collect the per-platform artifacts the build produced.
