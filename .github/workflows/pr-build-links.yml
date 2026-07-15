@@ -1,0 +1,105 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Posts (and keeps updated) a single PR comment linking the per-platform build
+# artifacts once "Build and Release" finishes.
+#
+# This is a workflow_run workflow on purpose: PRs from forks run "Build and
+# Release" with a read-only GITHUB_TOKEN and cannot comment. workflow_run runs
+# afterwards in the base-repo context with a read-write token and does not check
+# out untrusted fork code, so it can comment safely. Because of that, GitHub only
+# triggers it from the copy on the default branch — it does nothing until merged
+# to main.
+name: PR Build Links
+
+on:
+  workflow_run:
+    workflows: ["Build and Release"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Post artifact links
+    runs-on: ubuntu-latest
+    # Only for successful PR builds — artifacts exist only when the build passed.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Post or update the artifact-links comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+
+            // Fork PRs leave workflow_run.pull_requests empty, so fall back to
+            // resolving the PR from the build's head commit.
+            let prNumber;
+            if (run.pull_requests && run.pull_requests.length > 0) {
+              prNumber = run.pull_requests[0].number;
+            } else {
+              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: run.head_sha,
+              });
+              const open = prs.data.find(pr => pr.state === 'open');
+              if (!open) {
+                core.info('No open PR for this build; nothing to comment.');
+                return;
+              }
+              prNumber = open.number;
+            }
+
+            // Collect the per-platform artifacts the build produced.
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              { owner, repo, run_id: run.id, per_page: 100 },
+            );
+            const platforms = [
+              { key: 'win-x64', label: 'Windows (win-x64)' },
+              { key: 'linux-x64', label: 'Linux (linux-x64)' },
+              { key: 'osx-x64', label: 'macOS (osx-x64)' },
+            ];
+            const rows = [];
+            for (const platform of platforms) {
+              const artifact = artifacts.find(a => a.name.includes(platform.key));
+              if (!artifact) {
+                continue;
+              }
+              const url = `https://github.com/${owner}/${repo}/actions/runs/${run.id}/artifacts/${artifact.id}`;
+              rows.push(`| ${platform.label} | [\`${artifact.name}\`](${url}) |`);
+            }
+            if (rows.length === 0) {
+              core.info('No platform artifacts on this run; nothing to comment.');
+              return;
+            }
+
+            const marker = '<!-- pr-build-links -->';
+            const body = [
+              marker,
+              `### 📦 Build artifacts — \`${run.head_sha.substring(0, 7)}\``,
+              '',
+              '| Platform | Download |',
+              '| --- | --- |',
+              ...rows,
+              '',
+              `From [build run #${run.run_number}](${run.html_url}). ` +
+                'Downloads require a GitHub login and expire after 90 days.',
+            ].join('\n');
+
+            // Upsert one comment so repeated builds refresh it in place.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            }
