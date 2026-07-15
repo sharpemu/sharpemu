@@ -436,7 +436,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "LHMrG7e8G78",
-        ExportName = "wcslen",
+        ExportName = "wcsmisc",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
     public static int Wcslen(CpuContext ctx)
@@ -1402,6 +1402,8 @@ public static partial class KernelMemoryCompatExports
     {
         var pathAddress = ctx[CpuRegister.Rdi];
         var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        // Not migratable to [GuestCString]: the local reader's TryReadCompat host-memory
+        // fallback recovers paths in loader-mapped regions that ctx.Memory cannot see.
         if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -2980,7 +2982,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(
         Nid = "4h6F1LLbTiw",
-        ExportName = "sceKernelMapFlexibleMemoryInternal",
+        ExportName = "sceKernelMapNamedFlexibleMemoryInternal",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapFlexibleMemoryInternal(CpuContext ctx)

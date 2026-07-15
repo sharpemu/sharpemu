@@ -401,7 +401,7 @@ public static class AvPlayerExports
 
     [SysAbiExport(
         Nid = "ctTAcF5DiKQ",
-        ExportName = "sceAvPlayerSetDecoderMode",
+        ExportName = "sceAvPlayerGetStreamInfoEx",
         Target = Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
     public static int AvPlayerSetDecoderMode(CpuContext ctx) => ValidatePlayer(ctx);

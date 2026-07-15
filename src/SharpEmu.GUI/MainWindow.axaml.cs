@@ -34,6 +34,12 @@ public partial class MainWindow : Window
     private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
     private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
     private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
+    private static readonly StringComparer FilePathComparer = OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+    private static readonly StringComparison FilePathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
@@ -727,7 +733,7 @@ public partial class MainWindow : Window
         }
 
         var changed = false;
-        if (!_settings.GameFolders.Contains(path, StringComparer.OrdinalIgnoreCase))
+        if (!_settings.GameFolders.Contains(path, FilePathComparer))
         {
             _settings.GameFolders.Add(path);
             changed = true;
@@ -737,7 +743,7 @@ public partial class MainWindow : Window
         // games beneath it that were removed from the library earlier.
         var prefix = Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar;
         changed |= _settings.ExcludedGames.RemoveAll(excluded =>
-            excluded.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) > 0;
+            excluded.StartsWith(prefix, FilePathComparison)) > 0;
 
         if (changed)
         {
@@ -750,7 +756,7 @@ public partial class MainWindow : Window
     private async Task RescanLibraryAsync()
     {
         var folders = _settings.GameFolders.ToArray();
-        var excluded = new HashSet<string>(_settings.ExcludedGames, StringComparer.OrdinalIgnoreCase);
+        var excluded = new HashSet<string>(_settings.ExcludedGames, FilePathComparer);
         StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
         EmptyState.IsVisible = false;
         LoadingState.IsVisible = true;
@@ -868,7 +874,7 @@ public partial class MainWindow : Window
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
     {
         var games = new List<GameEntry>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(FilePathComparer);
         var enumeration = new EnumerationOptions
         {
             IgnoreInaccessible = true,
@@ -1132,13 +1138,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_settings.ExcludedGames.Contains(game.Path, StringComparer.OrdinalIgnoreCase))
+        if (!_settings.ExcludedGames.Contains(game.Path, FilePathComparer))
         {
             _settings.ExcludedGames.Add(game.Path);
             _settings.Save();
         }
 
-        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, StringComparison.OrdinalIgnoreCase));
+        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
         GameList.SelectedItem = null;
         RefreshVisibleGames();
         StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
@@ -1162,7 +1168,7 @@ public partial class MainWindow : Window
         }
 
         if (selectedPath is not null &&
-            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, StringComparison.OrdinalIgnoreCase))
+            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
         {
             GameList.SelectedItem = reselected;
@@ -1487,7 +1493,7 @@ public partial class MainWindow : Window
         _isRunning = true;
         _runningGameName = displayName;
         _runningGameTitleId = _allGames
-            .FirstOrDefault(game => game.Path.Equals(ebootPath, StringComparison.OrdinalIgnoreCase))?
+            .FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?
             .TitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         StatusDot.Fill = SuccessLineBrush;

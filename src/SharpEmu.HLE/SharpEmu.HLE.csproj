@@ -21,6 +21,51 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Aerolib\aerolib.bin" />
+    <!-- Forces build ordering for the aerolib task below; loaded as a build component,
+         never a runtime dependency. -->
+    <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!-- aerolib.bin (the runtime NID -> name catalog) is derived data: generated here
+       from scripts/ps5_names.txt via the same Ps5Nid implementation the analyzers use,
+       embedded from the intermediate directory, and never committed. Replaces
+       scripts/generate_aerolib_binary.py. -->
+  <PropertyGroup>
+    <SharpEmuAerolibNamesFile>$(MSBuildThisFileDirectory)..\..\scripts\ps5_names.txt</SharpEmuAerolibNamesFile>
+    <SharpEmuAerolibTaskAssembly>$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
+  </PropertyGroup>
+
+  <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
+             TaskFactory="TaskHostFactory"
+             AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
+
+  <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
+       resource processing embeds the output. Skipped for design-time builds: the IDE
+       resolves project references without compiling them, so on a fresh clone the task
+       assembly does not exist yet and loading it would break the design-time build. -->
+  <Target Name="GenerateAerolibBinary"
+          DependsOnTargets="ResolveProjectReferences"
+          Inputs="$(SharpEmuAerolibNamesFile);$(SharpEmuAerolibTaskAssembly)"
+          Outputs="$(IntermediateOutputPath)aerolib.bin">
+    <GenerateAerolibBinaryTask NamesFile="$(SharpEmuAerolibNamesFile)"
+                               OutputFile="$(IntermediateOutputPath)aerolib.bin" />
+  </Target>
+
+  <!-- The resource item is created inside a target (not statically) so design-time
+       builds never reference a file that was not generated, and in a separate target
+       from the generation so an up-to-date skip of GenerateAerolibBinary cannot drop
+       the item (an up-to-date target skips its whole body, ItemGroups included).
+       Hooked before AssignTargetPaths: dynamic EmbeddedResource items added later
+       than that miss the resource pipeline entirely. -->
+  <Target Name="EmbedAerolibBinary"
+          BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="GenerateAerolibBinary"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)aerolib.bin"
+                        LogicalName="SharpEmu.HLE.Aerolib.aerolib.bin"
+                        Visible="false" />
+    </ItemGroup>
+  </Target>
 </Project>

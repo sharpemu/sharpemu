@@ -94,13 +94,19 @@ jobs:
           cache: true
           cache-dependency-path: |
             Directory.Packages.props
-            src/**/packages.lock.json
+            Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx --locked-mode
+        run: dotnet restore SharpEmu.slnx
 
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
+
+      # Runs every test project in the solution; a test failure fails the build, as
+      # does an aerolib.bin generation failure in the build step above (the MSBuild
+      # task logs an error and returns false).
+      - name: Run tests
+        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
 
       - name: Validate synthetic shaders
         run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
@@ -157,13 +163,18 @@ jobs:
           cache: true
           cache-dependency-path: |
             Directory.Packages.props
-            src/**/packages.lock.json
+            Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx --locked-mode
+        run: dotnet restore SharpEmu.slnx
 
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
+
+      # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
+      # path handling, so a cross-platform generation regression surfaces here.
+      - name: Run tests
+        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
 
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"

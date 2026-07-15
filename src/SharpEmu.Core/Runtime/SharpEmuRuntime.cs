@@ -80,8 +80,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
         };
         var moduleManager = new ModuleManager();
-        moduleManager.RegisterFromAssembly(typeof(VideoOutExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
-        moduleManager.RegisterFromAssembly(typeof(KernelExports).Assembly, Generation.Gen4 | Generation.Gen5, Aerolib.Instance);
+        // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
+        // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
+        moduleManager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
         moduleManager.Freeze();
 
         var virtualMemory = new PhysicalVirtualMemory();

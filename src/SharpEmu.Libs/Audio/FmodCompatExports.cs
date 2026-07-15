@@ -13,7 +13,6 @@ public static class FmodCompatExports
 
     [SysAbiExport(
         Nid = "uPLTdl3psGk",
-        ExportName = "FMOD5_System_SetOutput",
         Target = Generation.Gen5,
         LibraryName = "libfmod")]
     public static int FmodSystemSetOutput(CpuContext ctx)

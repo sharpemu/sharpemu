@@ -144,6 +144,8 @@ public static class UserServiceExports
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
+    // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
+    #pragma warning disable SHEM006
     [SysAbiExport(
         Nid = "D-CzAxQL0XI",
         ExportName = "sceUserServiceGetPlatformPrivacySetting",
@@ -167,6 +169,7 @@ public static class UserServiceExports
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
+    #pragma warning restore SHEM006
 
     [SysAbiExport(
         Nid = "woNpu+45RLk",

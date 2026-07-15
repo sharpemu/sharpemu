@@ -594,6 +594,8 @@ public static partial class AgcExports
 
     private sealed record RegisterDefaultsAllocation(ulong Primary, ulong Internal);
 
+    // NID captured from shipped titles; 'sceAgcInit' is a working label that collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
+    #pragma warning disable SHEM004
     [SysAbiExport(
         Nid = "23LRUSvYu1M",
         ExportName = "sceAgcInit",
@@ -611,6 +613,7 @@ public static partial class AgcExports
         TraceAgc($"agc.init state=0x{stateAddress:X16} version={version}");
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
+    #pragma warning restore SHEM004
 
     [SysAbiExport(
         Nid = "2JtWUUiYBXs",
@@ -790,6 +793,8 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
+    #pragma warning disable SHEM004
     [SysAbiExport(
         Nid = "HV4j+E0MBHE",
         ExportName = "sceAgcCreateInterpolantMapping",
@@ -847,7 +852,10 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+    #pragma warning restore SHEM004
 
+    // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
+    #pragma warning disable SHEM004
     [SysAbiExport(
         Nid = "V++UgBtQhn0",
         ExportName = "sceAgcGetDataPacketPayloadAddress",
@@ -891,6 +899,7 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+    #pragma warning restore SHEM004
 
     [SysAbiExport(
         Nid = "LtTouSCZjHM",
@@ -2702,6 +2711,8 @@ public static partial class AgcExports
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
+    #pragma warning disable SHEM006
     [SysAbiExport(
     Nid = "-KRzWekV120",
     ExportName = "sceAgcDriverUnknown_KRzWekV120",
@@ -2716,6 +2727,7 @@ public static partial class AgcExports
 
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
+    #pragma warning restore SHEM006
 
     [SysAbiExport(
         Nid = "h9z6+0hEydk",
@@ -2729,6 +2741,8 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
+    #pragma warning disable SHEM006
     [SysAbiExport(
         Nid = "qj7QZpgr9Uw",
         ExportName = "sceAgcUnknownQj7QZpgr9Uw",
@@ -2749,6 +2763,7 @@ public static partial class AgcExports
             $"arg1=0x{ctx[CpuRegister.Rsi]:X16} arg2=0x{ctx[CpuRegister.Rdx]:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
+    #pragma warning restore SHEM006
 
     private static void EnqueueSubmittedDcb(
         CpuContext ctx,

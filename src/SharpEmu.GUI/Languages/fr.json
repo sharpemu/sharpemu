@@ -26,6 +26,15 @@
   "Library.Loading": "Chargement de la bibliothèque…",
 
   "Options.General": "Général",
+  "Options.Env.Tab": "Environnement",
+  "Options.Section.Environment": "VARIABLES D’ENVIRONNEMENT",
+  "Options.Env.Desc": "Paramètres passés à l’émulateur comme variables d’environnement au lancement.",
+  "Options.Env.Bthid.Desc": "Signaler le HID Bluetooth comme indisponible pour les titres dont le middleware volant/FFB interroge indéfiniment.\nLaissez désactivé normalement. Certains titres se bloquent si l’initialisation échoue.",
+  "Options.Env.LoopGuard.Desc": "Ne pas forcer la fermeture des titres qui répètent le même appel trop longtemps.\nEssayez ceci quand un jeu se ferme tout seul pendant le chargement.",
+  "Options.Env.VkValidation.Desc": "Activer les couches de validation Vulkan pour le débogage GPU.\nRalentit. Nécessite l’installation du Vulkan SDK.",
+  "Options.Env.DumpSpirv.Desc": "Exporter les shaders AGC et leurs traductions SPIR-V dans le dossier shader-dumps.\nÀ utiliser pour signaler des bugs de shader ou de rendu.",
+  "Options.Env.LogDirectMemory.Desc": "Journaliser les allocations de mémoire directe et les échecs dans la console.\nÀ utiliser quand un jeu plante ou se ferme pendant le démarrage.",
+  "Options.Env.LogNp.Desc": "Journaliser les appels de la bibliothèque NP (PlayStation Network) dans la console.",
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",
   "Options.Section.Launcher": "LANCEUR",
@@ -125,5 +134,13 @@
   "Dialog.PsExecutables": "Exécutables PlayStation",
   "Dialog.SaveLogFile": "Choisir l’emplacement du fichier journal",
   "Dialog.PlainTextFiles": "Fichiers texte brut",
-  "Dialog.LogFiles": "Fichiers journaux"
+  "Dialog.LogFiles": "Fichiers journaux",
+
+  "Options.About": "À propos",
+  "About.Github.Label": "GitHub",
+  "About.Github.Desc": "Code source, issues et développement du projet.",
+  "About.Discord.Label": "Discord",
+  "About.Discord.Desc": "Rejoignez la communauté, obtenez de l’aide et suivez le développement.",
+  "About.GithubButton": "Contribuer sur GitHub !",
+  "About.DiscordButton": "Rejoindre notre Discord !"
 }
