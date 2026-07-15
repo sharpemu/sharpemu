@@ -2719,8 +2719,11 @@ public static class AgcExports
                 ctx.TryReadUInt32(currentAddress + sizeof(uint), out var eventTypeRaw))
             {
                 var eventType = eventTypeRaw & 0x3Fu;
-                var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                    eventType,
+                // IT_EVENT_WRITE uses raw PM4 EVENT_TYPE values (e.g. 0x07, 0x10),
+                // but sceAgcDriverAddEqEvent registers with a different eventId
+                // numbering (e.g. 0x00, 0x20). Since the two ID spaces don't match,
+                // trigger by filter to wake any waiting graphics event.
+                var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
                     KernelEventQueueCompatExports.KernelEventFilterGraphics,
                     eventType);
                 if (tracePackets)

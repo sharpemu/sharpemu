@@ -509,6 +509,55 @@ public static class KernelEventQueueCompatExports
         return triggeredCount;
     }
 
+    public static int TriggerRegisteredEventsByFilter(
+        short filter,
+        ulong data)
+    {
+        List<ulong>? wakeHandles = null;
+        var triggeredCount = 0;
+        lock (_eventQueueGate)
+        {
+            foreach (var (handle, registrations) in _registeredEvents)
+            {
+                foreach (var ((ident, regFilter), registration) in registrations)
+                {
+                    if (regFilter != filter)
+                    {
+                        continue;
+                    }
+
+                    if (!_pendingEvents.TryGetValue(handle, out var queue))
+                    {
+                        queue = new LinkedList<KernelQueuedEvent>();
+                        _pendingEvents[handle] = queue;
+                    }
+
+                    QueueOrUpdateEvent(
+                        queue,
+                        new KernelQueuedEvent(
+                            registration.Ident,
+                            registration.Filter,
+                            0,
+                            1,
+                            data,
+                            registration.UserData));
+                    (wakeHandles ??= new List<ulong>()).Add(handle);
+                    triggeredCount++;
+                }
+            }
+        }
+
+        if (wakeHandles is not null)
+        {
+            foreach (var handle in wakeHandles.Distinct())
+            {
+                WakeEventQueue(handle);
+            }
+        }
+
+        return triggeredCount;
+    }
+
     private static bool TriggerRegisteredEvent(
         ulong handle,
         ulong ident,
