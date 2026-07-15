@@ -7,6 +7,7 @@ using Silk.NET.Maths;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using Silk.NET.Input;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -24,105 +25,6 @@ using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal sealed record VulkanGuestDrawTexture(
-    ulong Address,
-    uint Width,
-    uint Height,
-    uint Format,
-    uint NumberType,
-    byte[] RgbaPixels,
-    bool IsFallback,
-    bool IsStorage,
-    uint MipLevels = 1,
-    uint MipLevel = 0,
-    uint Pitch = 0,
-    uint TileMode = 0,
-    uint DstSelect = 0xFAC,
-    VulkanGuestSampler Sampler = default);
-
-internal readonly record struct VulkanGuestSampler(
-    uint Word0,
-    uint Word1,
-    uint Word2,
-    uint Word3);
-
-internal sealed record VulkanGuestMemoryBuffer(
-    ulong BaseAddress,
-    byte[] Data);
-
-internal sealed record VulkanGuestVertexBuffer(
-    uint Location,
-    uint ComponentCount,
-    uint DataFormat,
-    uint NumberFormat,
-    ulong BaseAddress,
-    uint Stride,
-    uint OffsetBytes,
-    byte[] Data);
-
-internal sealed record VulkanGuestIndexBuffer(
-    byte[] Data,
-    bool Is32Bit);
-
-internal readonly record struct VulkanGuestRect(
-    int X,
-    int Y,
-    uint Width,
-    uint Height);
-
-internal readonly record struct VulkanGuestViewport(
-    float X,
-    float Y,
-    float Width,
-    float Height,
-    float MinDepth,
-    float MaxDepth);
-
-internal readonly record struct VulkanGuestBlendState(
-    bool Enable,
-    uint ColorSrcFactor,
-    uint ColorDstFactor,
-    uint ColorFunc,
-    uint AlphaSrcFactor,
-    uint AlphaDstFactor,
-    uint AlphaFunc,
-    bool SeparateAlphaBlend,
-    uint WriteMask)
-{
-    public static VulkanGuestBlendState Default { get; } = new(
-        Enable: false,
-        ColorSrcFactor: 1,
-        ColorDstFactor: 0,
-        ColorFunc: 0,
-        AlphaSrcFactor: 1,
-        AlphaDstFactor: 0,
-        AlphaFunc: 0,
-        SeparateAlphaBlend: false,
-        WriteMask: 0xFu);
-}
-
-internal sealed record VulkanGuestRenderState(
-    IReadOnlyList<VulkanGuestBlendState> Blends,
-    VulkanGuestRect? Scissor,
-    VulkanGuestViewport? Viewport)
-{
-    public static VulkanGuestRenderState Default { get; } = new(
-        [VulkanGuestBlendState.Default],
-        Scissor: null,
-        Viewport: null);
-
-    public VulkanGuestBlendState Blend =>
-        Blends.Count == 0 ? VulkanGuestBlendState.Default : Blends[0];
-}
-
-internal sealed record VulkanGuestRenderTarget(
-    ulong Address,
-    uint Width,
-    uint Height,
-    uint Format,
-    uint NumberType,
-    uint MipLevels = 1);
-
 internal readonly record struct VulkanRenderTargetFormat(
     Format Format,
     Gen5PixelOutputKind OutputKind)
@@ -133,26 +35,26 @@ internal readonly record struct VulkanRenderTargetFormat(
 internal sealed record VulkanTranslatedGuestDraw(
     byte[] VertexSpirv,
     byte[] PixelSpirv,
-    IReadOnlyList<VulkanGuestDrawTexture> Textures,
-    IReadOnlyList<VulkanGuestMemoryBuffer> GlobalMemoryBuffers,
-    IReadOnlyList<VulkanGuestVertexBuffer> VertexBuffers,
+    IReadOnlyList<GuestDrawTexture> Textures,
+    IReadOnlyList<GuestMemoryBuffer> GlobalMemoryBuffers,
+    IReadOnlyList<GuestVertexBuffer> VertexBuffers,
     uint AttributeCount,
     uint VertexCount,
     uint InstanceCount,
     uint PrimitiveType,
-    VulkanGuestIndexBuffer? IndexBuffer,
-    VulkanGuestRenderState RenderState);
+    GuestIndexBuffer? IndexBuffer,
+    GuestRenderState RenderState);
 
 internal sealed record VulkanOffscreenGuestDraw(
     VulkanTranslatedGuestDraw Draw,
-    IReadOnlyList<VulkanGuestRenderTarget> Targets,
+    IReadOnlyList<GuestRenderTarget> Targets,
     bool PublishTarget);
 
 internal sealed record VulkanComputeGuestDispatch(
     ulong ShaderAddress,
     byte[] ComputeSpirv,
-    IReadOnlyList<VulkanGuestDrawTexture> Textures,
-    IReadOnlyList<VulkanGuestMemoryBuffer> GlobalMemoryBuffers,
+    IReadOnlyList<GuestDrawTexture> Textures,
+    IReadOnlyList<GuestMemoryBuffer> GlobalMemoryBuffers,
     uint GroupCountX,
     uint GroupCountY,
     uint GroupCountZ);
@@ -403,8 +305,8 @@ internal static unsafe class VulkanVideoPresenter
 
     public static void SubmitTranslatedDraw(
         byte[] pixelSpirv,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestMemoryBuffer> globalMemoryBuffers,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint width,
         uint height,
         uint attributeCount,
@@ -412,9 +314,9 @@ internal static unsafe class VulkanVideoPresenter
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
-        VulkanGuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<VulkanGuestVertexBuffer>? vertexBuffers = null,
-        VulkanGuestRenderState? renderState = null)
+        GuestIndexBuffer? indexBuffer = null,
+        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
+        GuestRenderState? renderState = null)
     {
         if (pixelSpirv.Length == 0 || width == 0 || height == 0)
         {
@@ -452,7 +354,7 @@ internal static unsafe class VulkanVideoPresenter
                     instanceCount,
                     primitiveType,
                     indexBuffer,
-                    renderState ?? VulkanGuestRenderState.Default),
+                    renderState ?? GuestRenderState.Default),
                 RequiredGuestWorkSequence: _enqueuedGuestWorkSequence,
                 IsSplash: false);
             System.Threading.Monitor.PulseAll(_gate);
@@ -469,17 +371,17 @@ internal static unsafe class VulkanVideoPresenter
 
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestMemoryBuffer> globalMemoryBuffers,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
-        VulkanGuestRenderTarget target,
+        GuestRenderTarget target,
         byte[]? vertexSpirv = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
-        VulkanGuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<VulkanGuestVertexBuffer>? vertexBuffers = null,
-        VulkanGuestRenderState? renderState = null)
+        GuestIndexBuffer? indexBuffer = null,
+        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
+        GuestRenderState? renderState = null)
     {
         SubmitOffscreenTranslatedDraw(
             pixelSpirv,
@@ -498,17 +400,17 @@ internal static unsafe class VulkanVideoPresenter
 
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestMemoryBuffer> globalMemoryBuffers,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
-        IReadOnlyList<VulkanGuestRenderTarget> targets,
+        IReadOnlyList<GuestRenderTarget> targets,
         byte[]? vertexSpirv = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
-        VulkanGuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<VulkanGuestVertexBuffer>? vertexBuffers = null,
-        VulkanGuestRenderState? renderState = null)
+        GuestIndexBuffer? indexBuffer = null,
+        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
+        GuestRenderState? renderState = null)
     {
         if (pixelSpirv.Length == 0 ||
             targets.Count == 0 ||
@@ -537,7 +439,7 @@ internal static unsafe class VulkanVideoPresenter
                 $"{firstTarget.Width}x{firstTarget.Height} textures={textures.Count}");
         }
 
-        var effectiveRenderState = renderState ?? VulkanGuestRenderState.Default;
+        var effectiveRenderState = renderState ?? GuestRenderState.Default;
         if (effectiveRenderState.Blends.Count == 1 && targets.Count > 1)
         {
             effectiveRenderState = effectiveRenderState with
@@ -585,8 +487,8 @@ internal static unsafe class VulkanVideoPresenter
 
     public static void SubmitStorageTranslatedDraw(
         byte[] pixelSpirv,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestMemoryBuffer> globalMemoryBuffers,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
         uint width,
         uint height)
@@ -619,8 +521,8 @@ internal static unsafe class VulkanVideoPresenter
                         1,
                         4,
                         null,
-                        VulkanGuestRenderState.Default),
-                    [new VulkanGuestRenderTarget(
+                        GuestRenderState.Default),
+                    [new GuestRenderTarget(
                         Address: 0,
                         width,
                         height,
@@ -633,8 +535,8 @@ internal static unsafe class VulkanVideoPresenter
     public static void SubmitComputeDispatch(
         ulong shaderAddress,
         byte[] computeSpirv,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestMemoryBuffer> globalMemoryBuffers,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint groupCountX,
         uint groupCountY,
         uint groupCountZ)
@@ -814,7 +716,7 @@ internal static unsafe class VulkanVideoPresenter
         SubmitOffscreenTranslatedDraw(
             fragmentSpirv,
             [
-                new VulkanGuestDrawTexture(
+                new GuestDrawTexture(
                     sourceAddress,
                     sourceWidth,
                     sourceHeight,
@@ -826,7 +728,7 @@ internal static unsafe class VulkanVideoPresenter
             ],
             [],
             attributeCount: 1,
-            new VulkanGuestRenderTarget(
+            new GuestRenderTarget(
                 destinationAddress,
                 destinationWidth,
                 destinationHeight,
@@ -1359,7 +1261,7 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Dictionary<byte[], Pipeline> _computePipelines =
             new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<GraphicsPipelineKey, Pipeline> _graphicsPipelines = new();
-        private readonly Dictionary<VulkanGuestSampler, Sampler> _samplers = new();
+        private readonly Dictionary<GuestSampler, Sampler> _samplers = new();
         private readonly Dictionary<byte[], string> _shaderDigests =
             new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<DescriptorLayoutKey, DescriptorLayoutBundle>
@@ -1414,9 +1316,9 @@ internal static unsafe class VulkanVideoPresenter
             public uint VertexCount = 3;
             public uint InstanceCount = 1;
             public PrimitiveTopology Topology = PrimitiveTopology.TriangleList;
-            public VulkanGuestBlendState[] Blends = [VulkanGuestBlendState.Default];
-            public VulkanGuestRect? Scissor;
-            public VulkanGuestViewport? Viewport;
+            public GuestBlendState[] Blends = [GuestBlendState.Default];
+            public GuestRect? Scissor;
+            public GuestViewport? Viewport;
             public RenderPass TransientRenderPass;
             public Framebuffer TransientFramebuffer;
         }
@@ -1436,7 +1338,7 @@ internal static unsafe class VulkanVideoPresenter
             public bool NeedsUpload;
             public bool OwnsStorage;
             public bool IsStorage;
-            public VulkanGuestSampler SamplerState;
+            public GuestSampler SamplerState;
             public Sampler Sampler;
             public GuestImageResource? GuestImage;
             public ulong CpuContentFingerprint;
@@ -1736,11 +1638,11 @@ internal static unsafe class VulkanVideoPresenter
                   $"{dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ}";
         }
 
-        private static string GuestImageDebugName(VulkanGuestRenderTarget target, Format format) =>
+        private static string GuestImageDebugName(GuestRenderTarget target, Format format) =>
             $"SharpEmu guest 0x{target.Address:X16} {target.Width}x{target.Height} " +
             $"fmt{target.Format}/{format}";
 
-        private static string TextureDebugName(VulkanGuestDrawTexture texture, Format format) =>
+        private static string TextureDebugName(GuestDrawTexture texture, Format format) =>
             $"SharpEmu texture 0x{texture.Address:X16} {texture.Width}x{texture.Height} " +
             $"fmt{texture.Format}/{format}";
 
@@ -3617,7 +3519,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private TextureResource ResolveTextureResource(VulkanGuestDrawTexture texture)
+        private TextureResource ResolveTextureResource(GuestDrawTexture texture)
         {
             if (texture.IsStorage)
             {
@@ -3691,7 +3593,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private bool TryCreateCpuTextureRefreshResource(
-            VulkanGuestDrawTexture texture,
+            GuestDrawTexture texture,
             GuestImageResource guestImage,
             ImageView view,
             out TextureResource resource)
@@ -3756,7 +3658,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private static bool IsCompatibleGuestImageAlias(
-            VulkanGuestDrawTexture texture,
+            GuestDrawTexture texture,
             GuestImageResource guestImage)
         {
             if (guestImage.Width == texture.Width &&
@@ -3777,7 +3679,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private TextureResource ResolveStorageImageResource(VulkanGuestDrawTexture texture)
+        private TextureResource ResolveStorageImageResource(GuestDrawTexture texture)
         {
             if (texture.Address == 0)
             {
@@ -3854,7 +3756,7 @@ internal static unsafe class VulkanVideoPresenter
             return resource;
         }
 
-        private TextureResource CreateStorageScratchResource(VulkanGuestDrawTexture texture)
+        private TextureResource CreateStorageScratchResource(GuestDrawTexture texture)
         {
             var width = Math.Max(texture.Width, 1);
             var height = Math.Max(texture.Height, 1);
@@ -3944,7 +3846,7 @@ internal static unsafe class VulkanVideoPresenter
             };
         }
 
-        private GuestImageResource ResolveStorageGuestImage(VulkanGuestDrawTexture texture)
+        private GuestImageResource ResolveStorageGuestImage(GuestDrawTexture texture)
         {
             if (texture.Address == 0)
             {
@@ -3953,7 +3855,7 @@ internal static unsafe class VulkanVideoPresenter
 
             var format = GetTextureFormat(texture.Format, texture.NumberType);
             var guestImage = GetOrCreateGuestImage(
-                new VulkanGuestRenderTarget(
+                new GuestRenderTarget(
                     texture.Address,
                     texture.Width,
                     texture.Height,
@@ -3970,7 +3872,7 @@ internal static unsafe class VulkanVideoPresenter
             return guestImage;
         }
 
-        private TextureResource CreateTextureResource(VulkanGuestDrawTexture texture)
+        private TextureResource CreateTextureResource(GuestDrawTexture texture)
         {
             var width = Math.Max(texture.Width, 1);
             var height = Math.Max(texture.Height, 1);
@@ -4168,7 +4070,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private void DumpTextureUpload(
-            VulkanGuestDrawTexture texture,
+            GuestDrawTexture texture,
             byte[] pixels,
             uint rowLength,
             uint width,
@@ -4260,7 +4162,7 @@ internal static unsafe class VulkanVideoPresenter
         private static void WriteInt32(byte[] output, int offset, int value) =>
             WriteUInt32(output, offset, unchecked((uint)value));
 
-        private Sampler CreateSampler(VulkanGuestSampler sampler)
+        private Sampler CreateSampler(GuestSampler sampler)
         {
             if (_samplers.TryGetValue(sampler, out var cachedSampler))
             {
@@ -4338,7 +4240,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private GlobalBufferResource CreateGlobalBufferResource(
-            VulkanGuestMemoryBuffer guestBuffer)
+            GuestMemoryBuffer guestBuffer)
         {
             var buffer = CreateHostBuffer(
                 guestBuffer.Data,
@@ -4367,7 +4269,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private VertexBufferResource CreateVertexBufferResource(
-            VulkanGuestVertexBuffer guestBuffer)
+            GuestVertexBuffer guestBuffer)
         {
             var buffer = CreateHostBuffer(
                 guestBuffer.Data,
@@ -4590,7 +4492,7 @@ internal static unsafe class VulkanVideoPresenter
         private static uint GetDrawVertexCount(
             uint primitiveType,
             uint vertexCount,
-            VulkanGuestIndexBuffer? indexBuffer)
+            GuestIndexBuffer? indexBuffer)
         {
             if (primitiveType == GuestPrimitiveRectList && indexBuffer is null)
             {
@@ -4636,41 +4538,41 @@ internal static unsafe class VulkanVideoPresenter
                 _ => BlendOp.Add,
             };
 
-        private static uint DecodeSamplerClampX(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerClampX(GuestSampler sampler) =>
             sampler.Word0 & 0x7u;
 
-        private static uint DecodeSamplerClampY(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerClampY(GuestSampler sampler) =>
             (sampler.Word0 >> 3) & 0x7u;
 
-        private static uint DecodeSamplerClampZ(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerClampZ(GuestSampler sampler) =>
             (sampler.Word0 >> 6) & 0x7u;
 
-        private static uint DecodeSamplerDepthCompare(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerDepthCompare(GuestSampler sampler) =>
             (sampler.Word0 >> 12) & 0x7u;
 
-        private static float DecodeSamplerMinLod(VulkanGuestSampler sampler) =>
+        private static float DecodeSamplerMinLod(GuestSampler sampler) =>
             (sampler.Word1 & 0xFFFu) / 256.0f;
 
-        private static float DecodeSamplerMaxLod(VulkanGuestSampler sampler) =>
+        private static float DecodeSamplerMaxLod(GuestSampler sampler) =>
             ((sampler.Word1 >> 12) & 0xFFFu) / 256.0f;
 
-        private static float DecodeSamplerLodBias(VulkanGuestSampler sampler)
+        private static float DecodeSamplerLodBias(GuestSampler sampler)
         {
             var raw = sampler.Word2 & 0x3FFFu;
             var signed = (short)((raw ^ 0x2000u) - 0x2000u);
             return signed / 256.0f;
         }
 
-        private static uint DecodeSamplerMagFilter(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerMagFilter(GuestSampler sampler) =>
             (sampler.Word2 >> 20) & 0x3u;
 
-        private static uint DecodeSamplerMinFilter(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerMinFilter(GuestSampler sampler) =>
             (sampler.Word2 >> 22) & 0x3u;
 
-        private static uint DecodeSamplerMipFilter(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerMipFilter(GuestSampler sampler) =>
             (sampler.Word2 >> 26) & 0x3u;
 
-        private static uint DecodeSamplerBorderColor(VulkanGuestSampler sampler) =>
+        private static uint DecodeSamplerBorderColor(GuestSampler sampler) =>
             (sampler.Word3 >> 30) & 0x3u;
 
         private static SamplerAddressMode ToVkSamplerAddressMode(uint mode) =>
@@ -4737,11 +4639,11 @@ internal static unsafe class VulkanVideoPresenter
             return flags;
         }
 
-        private static VulkanGuestRect ClampScissor(VulkanGuestRect? scissor, Extent2D extent)
+        private static GuestRect ClampScissor(GuestRect? scissor, Extent2D extent)
         {
             if (scissor is not { } rect)
             {
-                return new VulkanGuestRect(0, 0, extent.Width, extent.Height);
+                return new GuestRect(0, 0, extent.Width, extent.Height);
             }
 
             var left = Math.Clamp(rect.X, 0, checked((int)extent.Width));
@@ -4754,7 +4656,7 @@ internal static unsafe class VulkanVideoPresenter
                 rect.Y + checked((int)rect.Height),
                 top,
                 checked((int)extent.Height));
-            return new VulkanGuestRect(
+            return new GuestRect(
                 left,
                 top,
                 checked((uint)(right - left)),
@@ -4769,7 +4671,7 @@ internal static unsafe class VulkanVideoPresenter
             ? viewportEpsilon
             : 0f;
 
-        private static Viewport ClampViewport(VulkanGuestViewport? viewport, Extent2D extent)
+        private static Viewport ClampViewport(GuestViewport? viewport, Extent2D extent)
         {
             if (viewport is not { } rect)
             {
@@ -5472,7 +5374,7 @@ internal static unsafe class VulkanVideoPresenter
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         private GuestImageResource GetOrCreateGuestImage(
-            VulkanGuestRenderTarget target,
+            GuestRenderTarget target,
             Format format)
         {
             var mipLevels = ClampMipLevels(target.Width, target.Height, target.MipLevels);

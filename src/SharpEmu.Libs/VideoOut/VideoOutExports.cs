@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Logging;
@@ -812,7 +813,7 @@ public static class VideoOutExports
             bgraFrame[offset + 3] = rgbaFrame[offset + 3];
         }
 
-        VulkanVideoPresenter.Submit(bgraFrame, width, height);
+        GuestGpu.Current.Submit(bgraFrame, width, height);
     }
 
     internal static bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info)
@@ -1203,7 +1204,7 @@ public static class VideoOutExports
             TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
         {
             guestImageAddress = displayBuffer.Address;
-            guestImageSubmitted = VulkanVideoPresenter.TrySubmitGuestImage(
+            guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
                 displayBuffer.Address,
                 displayBuffer.Width,
                 displayBuffer.Height,
@@ -1334,14 +1335,14 @@ public static class VideoOutExports
                 TraceVideoOut(
                     $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} fmt=0x{attribute.PixelFormat:X} tile={attribute.TilingMode} {attribute.Width}x{attribute.Height} pitch={attribute.PitchInPixel}");
             }
-            VulkanVideoPresenter.EnsureStarted(attribute.Width, attribute.Height);
+            GuestGpu.Current.EnsureStarted(attribute.Width, attribute.Height);
 
             var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
             if (guestFormat != 0)
             {
                 foreach (var address in addresses)
                 {
-                    VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
+                    GuestGpu.Current.RegisterKnownDisplayBuffer(address, guestFormat);
                 }
             }
 
@@ -1573,7 +1574,7 @@ public static class VideoOutExports
             : 0u;
 
     // Maps the PS5 VideoOut pixel format space to the AGC "guest texture format" tags
-    // VulkanVideoPresenter._availableGuestImages keys on (see VulkanVideoPresenter.
+    // GuestGpu.Current._availableGuestImages keys on (see GuestGpu.Current.
     // GetGuestTextureFormat: format=10 => 56 for 8-bit RGBA variants, format=9 => 9 for 10-bit).
     private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat) =>
         NormalizePixelFormat(pixelFormat) switch
