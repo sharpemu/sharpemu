@@ -16,6 +16,40 @@ public sealed class ModuleManager : IModuleManager
     private readonly HashSet<(Assembly Assembly, Generation Generation)> _scannedAssemblies = new();
     private bool _isFrozen;
 
+    // Parity testing between the generated registry and the reflection scan.
+    internal IReadOnlyDictionary<string, ExportedFunction> ExportsForTesting => _exportTable;
+
+    public int RegisterExports(IReadOnlyList<ExportedFunction> exports)
+    {
+        ArgumentNullException.ThrowIfNull(exports);
+
+        lock (_registrationGate)
+        {
+            if (_isFrozen)
+            {
+                throw new InvalidOperationException("Module registration is frozen.");
+            }
+
+            var registeredCount = 0;
+            foreach (var export in exports)
+            {
+                if (!_dispatchTable.TryAdd(export.Nid, export.Function))
+                {
+                    Console.Error.WriteLine($"[HLE] Duplicate NID '{export.Nid}' ({export.Name}) — already registered, skipping.");
+                    continue;
+                }
+
+                _exportTable[export.Nid] = export;
+                _exportNameTable.TryAdd(export.Name, export);
+                registeredCount++;
+            }
+
+            return registeredCount;
+        }
+    }
+
+    // Retained for parity testing against the generated registry; the runtime registers
+    // through RegisterExports since the compile-time table replaced this scan.
     public int RegisterFromAssembly(Assembly assembly, Generation generation, ISymbolCatalog? symbolCatalog = null)
     {
         ArgumentNullException.ThrowIfNull(assembly);

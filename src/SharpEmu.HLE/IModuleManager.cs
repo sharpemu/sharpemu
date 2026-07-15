@@ -9,6 +9,9 @@ public interface IModuleManager
 {
     int RegisterFromAssembly(Assembly assembly, Generation generation, ISymbolCatalog? symbolCatalog = null);
 
+    /// <summary>Registers pre-built exports (the compile-time generated registry).</summary>
+    int RegisterExports(IReadOnlyList<ExportedFunction> exports);
+
     void Freeze();
 
     bool TryGetFunction(string nid, out Delegate function);

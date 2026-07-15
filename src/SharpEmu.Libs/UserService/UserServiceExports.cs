@@ -161,12 +161,15 @@ public static class UserServiceExports
         return ctx.SetReturn(0);
     }
 
-    [SysAbiExport(
+        // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
+    #pragma warning disable SHEM006
+[SysAbiExport(
         Nid = "D-CzAxQL0XI",
         ExportName = "sceUserServiceGetPlatformPrivacySetting",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceUserService")]
     public static int UserServiceGetPlatformPrivacySetting(CpuContext ctx)
+    #pragma warning restore SHEM006
     {
         var parameterId = unchecked((int)ctx[CpuRegister.Rdi]);
         var valueAddress = ctx[CpuRegister.Rsi];

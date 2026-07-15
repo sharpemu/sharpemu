@@ -138,7 +138,13 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
         if (hasName)
         {
             var computed = Ps5Nid.Compute(arguments.ExportName);
-            if (hasNid && !string.Equals(computed, arguments.Nid, StringComparison.Ordinal))
+
+            // A declared NID that contradicts its name is only provably wrong when the
+            // name is a real catalog symbol. Names outside the catalog are synthetic
+            // labels for NIDs whose true symbol is unknown (the "sceAgcUnknown..."
+            // convention) — for those the NID is authoritative and only SHEM006 applies.
+            var nameIsKnown = catalogNames is null || catalogNames.Contains(arguments.ExportName);
+            if (hasNid && nameIsKnown && !string.Equals(computed, arguments.Nid, StringComparison.Ordinal))
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     SysAbiDiagnostics.NidNameMismatch,
