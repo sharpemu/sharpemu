@@ -2253,6 +2253,12 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        if (KernelPipeCompatExports.TryClosePipeFd(fd))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         FileStream? stream;
         lock (_fdGate)
         {
@@ -2310,6 +2316,17 @@ public static partial class KernelMemoryCompatExports
             }
 
             ctx[CpuRegister.Rax] = socketBytesRead;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (KernelPipeCompatExports.TryReadPipeFd(ctx, fd, bufferAddress, requested, out var pipeBytesRead, out var pipeError))
+        {
+            if (pipeError != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return (int)pipeError;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)pipeBytesRead);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2550,6 +2567,17 @@ public static partial class KernelMemoryCompatExports
             }
 
             ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (KernelPipeCompatExports.TryWritePipeFd(fd, payload.AsSpan(0, requested), out var pipeBytesWritten, out var pipeError))
+        {
+            if (pipeError != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return (int)pipeError;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)pipeBytesWritten);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 

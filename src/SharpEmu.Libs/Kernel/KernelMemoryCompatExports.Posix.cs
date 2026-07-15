@@ -1814,12 +1814,7 @@ public static partial class KernelMemoryCompatExports
             short revents = 0;
             if (fd >= 0)
             {
-                if (TryGetOpenFileStream(fd, out _))
-                {
-                    // Regular files never block.
-                    revents = (short)(events & (PollIn | PollOut | PollRdNorm | PollWrNorm));
-                }
-                else if (KernelSocketCompatExports.TryQuerySocketPollState(fd, out var readable, out var writable))
+                if (TryQueryDescriptorReadiness(fd, out var readable, out var writable))
                 {
                     if (readable)
                     {
@@ -1831,13 +1826,9 @@ public static partial class KernelMemoryCompatExports
                         revents |= (short)(events & (PollOut | PollWrNorm));
                     }
                 }
-                else if (fd is not (0 or 1 or 2))
-                {
-                    revents = PollNval;
-                }
                 else
                 {
-                    revents = (short)(events & (PollIn | PollOut));
+                    revents = PollNval;
                 }
             }
 
@@ -1854,6 +1845,236 @@ public static partial class KernelMemoryCompatExports
         }
 
         return ready;
+    }
+
+    // Shared readiness query for poll/select. Returns false for descriptors
+    // this HLE does not know about at all.
+    private static bool TryQueryDescriptorReadiness(int fd, out bool readable, out bool writable)
+    {
+        if (TryGetOpenFileStream(fd, out _))
+        {
+            // Regular files never block.
+            readable = true;
+            writable = true;
+            return true;
+        }
+
+        if (KernelPipeCompatExports.TryQueryPipePollState(fd, out readable, out writable))
+        {
+            return true;
+        }
+
+        if (KernelSocketCompatExports.TryQuerySocketPollState(fd, out readable, out writable))
+        {
+            return true;
+        }
+
+        if (fd is 0 or 1 or 2)
+        {
+            // stdin never has data; stdout/stderr always accept writes.
+            readable = false;
+            writable = fd != 0;
+            return true;
+        }
+
+        readable = false;
+        writable = false;
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // select
+    // ------------------------------------------------------------------
+
+    private const int FdSetMaxDescriptors = 1024;
+
+    [SysAbiExport(
+        Nid = "T8fER+tIGgk",
+        ExportName = "select",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSelect(CpuContext ctx)
+    {
+        var descriptorCount = unchecked((int)ctx[CpuRegister.Rdi]);
+        var readSetAddress = ctx[CpuRegister.Rsi];
+        var writeSetAddress = ctx[CpuRegister.Rdx];
+        var exceptSetAddress = ctx[CpuRegister.Rcx];
+        var timeoutAddress = ctx[CpuRegister.R8];
+        if (descriptorCount < 0 || descriptorCount > FdSetMaxDescriptors)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        var timeoutMilliseconds = -1;
+        if (timeoutAddress != 0)
+        {
+            // struct timeval { int64 sec; int64 usec; }
+            if (!ctx.TryReadUInt64(timeoutAddress, out var timeoutSeconds) ||
+                !ctx.TryReadUInt64(timeoutAddress + 8, out var timeoutMicros))
+            {
+                return PosixFail(ctx, Efault);
+            }
+
+            timeoutMilliseconds = (int)Math.Min(
+                int.MaxValue,
+                (timeoutSeconds * 1_000UL) + (timeoutMicros / 1_000UL));
+        }
+
+        var ready = ScanSelectSets(ctx, descriptorCount, readSetAddress, writeSetAddress, exceptSetAddress, apply: false, out var badDescriptor, out var faulted);
+        if (faulted)
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        if (badDescriptor)
+        {
+            return PosixFail(ctx, Ebadf);
+        }
+
+        if (ready == 0 && timeoutMilliseconds != 0)
+        {
+            // Bounded wait like poll: never park the guest thread forever.
+            var sleep = timeoutMilliseconds < 0 ? 10 : Math.Min(timeoutMilliseconds, 10);
+            GuestThreadExecution.Scheduler?.Pump(ctx, "select");
+            Thread.Sleep(sleep);
+        }
+
+        ready = ScanSelectSets(ctx, descriptorCount, readSetAddress, writeSetAddress, exceptSetAddress, apply: true, out badDescriptor, out faulted);
+        if (faulted)
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        if (badDescriptor)
+        {
+            return PosixFail(ctx, Ebadf);
+        }
+
+        return PosixOk(ctx, unchecked((ulong)ready));
+    }
+
+    // Walks the three fd_sets; with apply=true the surviving bits are written
+    // back (except-set members never fire and are always cleared).
+    private static int ScanSelectSets(
+        CpuContext ctx,
+        int descriptorCount,
+        ulong readSetAddress,
+        ulong writeSetAddress,
+        ulong exceptSetAddress,
+        bool apply,
+        out bool badDescriptor,
+        out bool faulted)
+    {
+        badDescriptor = false;
+        faulted = false;
+        var ready = 0;
+        var wordCount = (descriptorCount + 63) / 64;
+        Span<ulong> readWords = stackalloc ulong[16];
+        Span<ulong> writeWords = stackalloc ulong[16];
+        readWords.Clear();
+        writeWords.Clear();
+
+        if (!TryReadFdSetWords(ctx, readSetAddress, wordCount, readWords, ref faulted) ||
+            !TryReadFdSetWords(ctx, writeSetAddress, wordCount, writeWords, ref faulted))
+        {
+            return 0;
+        }
+
+        for (var fd = 0; fd < descriptorCount; fd++)
+        {
+            var word = fd >> 6;
+            var bit = 1UL << (fd & 63);
+            var wantsRead = readSetAddress != 0 && (readWords[word] & bit) != 0;
+            var wantsWrite = writeSetAddress != 0 && (writeWords[word] & bit) != 0;
+            if (!wantsRead && !wantsWrite)
+            {
+                continue;
+            }
+
+            if (!TryQueryDescriptorReadiness(fd, out var readable, out var writable))
+            {
+                badDescriptor = true;
+                return 0;
+            }
+
+            if (wantsRead && !readable)
+            {
+                readWords[word] &= ~bit;
+            }
+            else if (wantsRead)
+            {
+                ready++;
+            }
+
+            if (wantsWrite && !writable)
+            {
+                writeWords[word] &= ~bit;
+            }
+            else if (wantsWrite)
+            {
+                ready++;
+            }
+        }
+
+        if (apply)
+        {
+            if (!TryWriteFdSetWords(ctx, readSetAddress, wordCount, readWords, ref faulted) ||
+                !TryWriteFdSetWords(ctx, writeSetAddress, wordCount, writeWords, ref faulted))
+            {
+                return 0;
+            }
+
+            // Exceptional conditions never fire in this HLE.
+            if (exceptSetAddress != 0)
+            {
+                Span<ulong> emptyWords = stackalloc ulong[16];
+                emptyWords.Clear();
+                if (!TryWriteFdSetWords(ctx, exceptSetAddress, wordCount, emptyWords, ref faulted))
+                {
+                    return 0;
+                }
+            }
+        }
+
+        return ready;
+    }
+
+    private static bool TryReadFdSetWords(CpuContext ctx, ulong setAddress, int wordCount, Span<ulong> words, ref bool faulted)
+    {
+        if (setAddress == 0)
+        {
+            return true;
+        }
+
+        for (var i = 0; i < wordCount; i++)
+        {
+            if (!ctx.TryReadUInt64(setAddress + ((ulong)i * 8UL), out words[i]))
+            {
+                faulted = true;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryWriteFdSetWords(CpuContext ctx, ulong setAddress, int wordCount, ReadOnlySpan<ulong> words, ref bool faulted)
+    {
+        if (setAddress == 0)
+        {
+            return true;
+        }
+
+        for (var i = 0; i < wordCount; i++)
+        {
+            if (!ctx.TryWriteUInt64(setAddress + ((ulong)i * 8UL), words[i]))
+            {
+                faulted = true;
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // ------------------------------------------------------------------

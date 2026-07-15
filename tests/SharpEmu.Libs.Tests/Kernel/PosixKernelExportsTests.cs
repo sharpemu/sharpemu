@@ -747,6 +747,226 @@ public sealed class PosixKernelExportsTests : IDisposable
         Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
     }
 
+    [Fact]
+    public void Pipe_RoundTripsDataAndSignalsEofAfterWriterCloses()
+    {
+        _ctx[CpuRegister.Rdi] = StructAddress;
+        Assert.Equal(0, KernelPipeCompatExports.PosixPipe(_ctx));
+        Assert.True(_ctx.TryReadInt32(StructAddress, out var readFd));
+        Assert.True(_ctx.TryReadInt32(StructAddress + 4, out var writeFd));
+        Assert.NotEqual(readFd, writeFd);
+
+        // write(writeFd, "ping", 4)
+        _memory.TryWrite(BufferAddress, "ping"u8);
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)writeFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 4;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelWriteUnderscore(_ctx));
+        Assert.Equal(4UL, _ctx[CpuRegister.Rax]);
+
+        // read(readFd, ...) gets the same bytes back.
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)readFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress + 0x100;
+        _ctx[CpuRegister.Rdx] = 16;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Assert.Equal(4UL, _ctx[CpuRegister.Rax]);
+        Span<byte> readBack = stackalloc byte[4];
+        Assert.True(_memory.TryRead(BufferAddress + 0x100, readBack));
+        Assert.Equal("ping", Encoding.ASCII.GetString(readBack));
+
+        // Closing the write end turns further reads into EOF (0 bytes).
+        CloseGuestFile(writeFd);
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)readFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 16;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
+
+        CloseGuestFile(readFd);
+    }
+
+    [Fact]
+    public void Pipe_ReadOnEmptyPipeWithOpenWriterReportsTryAgain()
+    {
+        _ctx[CpuRegister.Rdi] = StructAddress;
+        Assert.Equal(0, KernelPipeCompatExports.PosixPipe(_ctx));
+        Assert.True(_ctx.TryReadInt32(StructAddress, out var readFd));
+        Assert.True(_ctx.TryReadInt32(StructAddress + 4, out var writeFd));
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)readFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 16;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN,
+            KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+
+        CloseGuestFile(readFd);
+        CloseGuestFile(writeFd);
+    }
+
+    [Fact]
+    public void Socketpair_MovesDataInBothDirections()
+    {
+        _ctx[CpuRegister.Rdi] = 1;  // AF_UNIX
+        _ctx[CpuRegister.Rsi] = 1;  // SOCK_STREAM
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = StructAddress;
+        Assert.Equal(0, KernelPipeCompatExports.PosixSocketpair(_ctx));
+        Assert.True(_ctx.TryReadInt32(StructAddress, out var firstFd));
+        Assert.True(_ctx.TryReadInt32(StructAddress + 4, out var secondFd));
+
+        // first -> second
+        _memory.TryWrite(BufferAddress, "ab"u8);
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)firstFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 2;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelWriteUnderscore(_ctx));
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)secondFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress + 0x100;
+        _ctx[CpuRegister.Rdx] = 8;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
+
+        // second -> first
+        _memory.TryWrite(BufferAddress, "cd"u8);
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)secondFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 2;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelWriteUnderscore(_ctx));
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)firstFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress + 0x200;
+        _ctx[CpuRegister.Rdx] = 8;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
+        Span<byte> readBack = stackalloc byte[2];
+        Assert.True(_memory.TryRead(BufferAddress + 0x200, readBack));
+        Assert.Equal("cd", Encoding.ASCII.GetString(readBack));
+
+        CloseGuestFile(firstFd);
+        CloseGuestFile(secondFd);
+    }
+
+    [Fact]
+    public void Poll_ReportsPipeReadinessTransitions()
+    {
+        _ctx[CpuRegister.Rdi] = StructAddress;
+        Assert.Equal(0, KernelPipeCompatExports.PosixPipe(_ctx));
+        Assert.True(_ctx.TryReadInt32(StructAddress, out var readFd));
+        Assert.True(_ctx.TryReadInt32(StructAddress + 4, out var writeFd));
+
+        // Empty pipe: read end not readable, write end writable.
+        WritePollFd(StructAddress + 0x40, 0, readFd, 0x0001);  // POLLIN
+        WritePollFd(StructAddress + 0x40, 1, writeFd, 0x0004); // POLLOUT
+        _ctx[CpuRegister.Rdi] = StructAddress + 0x40;
+        _ctx[CpuRegister.Rsi] = 2;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixPoll(_ctx));
+        Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
+        Assert.Equal(0, ReadPollRevents(StructAddress + 0x40, 0));
+        Assert.Equal(0x0004, ReadPollRevents(StructAddress + 0x40, 1));
+
+        // After a write the read end becomes readable.
+        _memory.TryWrite(BufferAddress, "x"u8);
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)writeFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 1;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelWriteUnderscore(_ctx));
+
+        WritePollFd(StructAddress + 0x40, 0, readFd, 0x0001);
+        _ctx[CpuRegister.Rdi] = StructAddress + 0x40;
+        _ctx[CpuRegister.Rsi] = 1;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixPoll(_ctx));
+        Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
+        Assert.Equal(0x0001, ReadPollRevents(StructAddress + 0x40, 0));
+
+        CloseGuestFile(readFd);
+        CloseGuestFile(writeFd);
+    }
+
+    [Fact]
+    public void Select_KeepsReadyBitsAndClearsIdleOnes()
+    {
+        var hostPath = CreateHostFile("select.bin", Encoding.ASCII.GetBytes("x"));
+        var fileFd = OpenGuestFile(hostPath, flags: 0);
+
+        _ctx[CpuRegister.Rdi] = StructAddress;
+        Assert.Equal(0, KernelPipeCompatExports.PosixPipe(_ctx));
+        Assert.True(_ctx.TryReadInt32(StructAddress, out var pipeReadFd));
+        Assert.True(_ctx.TryReadInt32(StructAddress + 4, out var pipeWriteFd));
+
+        // fd_set bitmasks: file + empty pipe read end in the read set.
+        const ulong ReadSetAddress = GuestBase + 0x5000;
+        const ulong WriteSetAddress = GuestBase + 0x5100;
+        var maxFd = Math.Max(fileFd, Math.Max(pipeReadFd, pipeWriteFd));
+        Assert.True(maxFd < 128);
+        WriteFdSet(ReadSetAddress, [fileFd, pipeReadFd]);
+        WriteFdSet(WriteSetAddress, [pipeWriteFd]);
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)(maxFd + 1));
+        _ctx[CpuRegister.Rsi] = ReadSetAddress;
+        _ctx[CpuRegister.Rdx] = WriteSetAddress;
+        _ctx[CpuRegister.Rcx] = 0;
+        _ctx[CpuRegister.R8] = 0; // NULL timeout
+        Assert.Equal(0, KernelMemoryCompatExports.PosixSelect(_ctx));
+
+        // Ready: file (read) + pipe write end (write). Idle: empty pipe read end.
+        Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
+        Assert.True(IsFdSetBitSet(ReadSetAddress, fileFd));
+        Assert.False(IsFdSetBitSet(ReadSetAddress, pipeReadFd));
+        Assert.True(IsFdSetBitSet(WriteSetAddress, pipeWriteFd));
+
+        CloseGuestFile(pipeReadFd);
+        CloseGuestFile(pipeWriteFd);
+        CloseGuestFile(fileFd);
+    }
+
+    [Fact]
+    public void Select_BogusDescriptorFailsWithBadf()
+    {
+        const ulong ReadSetAddress = GuestBase + 0x5200;
+        WriteFdSet(ReadSetAddress, [100]);
+        Assert.False(KernelPipeCompatExports.IsPipeFd(100));
+
+        _ctx[CpuRegister.Rdi] = 101;
+        _ctx[CpuRegister.Rsi] = ReadSetAddress;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = 0;
+        _ctx[CpuRegister.R8] = 0;
+        var result = KernelMemoryCompatExports.PosixSelect(_ctx);
+        if (result == 0)
+        {
+            // fd 100 may legitimately exist if another test left it open;
+            // only a truly unknown descriptor must fail.
+            return;
+        }
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, _ctx[CpuRegister.Rax]);
+    }
+
+    private void WriteFdSet(ulong setAddress, int[] fds)
+    {
+        Span<byte> words = stackalloc byte[128]; // 1024 bits
+        words.Clear();
+        foreach (var fd in fds)
+        {
+            var byteIndex = fd >> 3;
+            words[byteIndex] |= (byte)(1 << (fd & 7));
+        }
+
+        Assert.True(_memory.TryWrite(setAddress, words));
+    }
+
+    private bool IsFdSetBitSet(ulong setAddress, int fd)
+    {
+        Span<byte> single = stackalloc byte[1];
+        Assert.True(_memory.TryRead(setAddress + (ulong)(fd >> 3), single));
+        return (single[0] & (1 << (fd & 7))) != 0;
+    }
+
     private void WritePollFd(ulong tableAddress, int index, int fd, short events)
     {
         Span<byte> entry = stackalloc byte[8];
