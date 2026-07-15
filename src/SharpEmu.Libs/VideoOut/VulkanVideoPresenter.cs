@@ -9412,7 +9412,9 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
                         formats,
-                        targets.Select(target => target.MipViews[0]).ToArray(),
+                        targets.Select(target => target.MipViews.Length > 0
+                            ? target.MipViews[0]
+                            : target.View).ToArray(),
                         firstTarget.Width,
                         firstTarget.Height,
                         targets.Select(target =>
