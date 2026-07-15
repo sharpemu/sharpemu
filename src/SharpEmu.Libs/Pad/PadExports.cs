@@ -442,6 +442,21 @@ public static class PadExports
             r2 = Math.Max(r2, pad.RightTrigger);
         }
 
+        // POSIX hosts have no XInput/hid readers; controllers arrive through
+        // the window's GLFW input context instead. Windows keeps its native
+        // readers only, so the same physical pad is never sampled twice.
+        if (!OperatingSystem.IsWindows() &&
+            HostWindowInput.TryGetGamepadState(out var windowPad))
+        {
+            buttons |= windowPad.Buttons;
+            leftX = MergeAxis(windowPad.LeftX, leftX);
+            leftY = MergeAxis(windowPad.LeftY, leftY);
+            rightX = MergeAxis(windowPad.RightX, rightX);
+            rightY = MergeAxis(windowPad.RightY, rightY);
+            l2 = Math.Max(l2, windowPad.L2);
+            r2 = Math.Max(r2, windowPad.R2);
+        }
+
         if (IsAutoCrossActive())
         {
             buttons |= 0x4000;
