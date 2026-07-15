@@ -1079,7 +1079,7 @@ public static class VideoOutExports
         // _stateGate without copying the list into a fresh allocation on every edge.
         // A per-port reusable buffer would race: the pump thread and a guest thread's
         // first-edge signal (AddVblankEvent) can signal the same port concurrently.
-        FlipEventRegistration[] vblankEvents;
+        FlipEventRegistration[]? vblankEvents = null;
         int vblankEventCount;
         ulong eventHint;
         lock (_stateGate)
@@ -1088,27 +1088,33 @@ public static class VideoOutExports
             eventHint = SceVideoOutInternalEventVblank |
                 ((port.VblankCount & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             vblankEventCount = port.VblankEvents.Count;
-            vblankEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(Math.Max(vblankEventCount, 1));
-            port.VblankEvents.CopyTo(vblankEvents);
+            if (vblankEventCount != 0)
+            {
+                vblankEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(vblankEventCount);
+                port.VblankEvents.CopyTo(vblankEvents);
+            }
         }
 
         var signalCount = Interlocked.Increment(ref _vblankSignalCount);
 
-        try
+        if (vblankEvents is not null)
         {
-            for (var i = 0; i < vblankEventCount; i++)
+            try
             {
-                _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
-                    vblankEvents[i].Equeue,
-                    SceVideoOutInternalEventVblank,
-                    OrbisKernelEventFilterVideoOut,
-                    eventHint,
-                    vblankEvents[i].UserData);
+                for (var i = 0; i < vblankEventCount; i++)
+                {
+                    _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
+                        vblankEvents[i].Equeue,
+                        SceVideoOutInternalEventVblank,
+                        OrbisKernelEventFilterVideoOut,
+                        eventHint,
+                        vblankEvents[i].UserData);
+                }
             }
-        }
-        finally
-        {
-            ArrayPool<FlipEventRegistration>.Shared.Return(vblankEvents);
+            finally
+            {
+                ArrayPool<FlipEventRegistration>.Shared.Return(vblankEvents);
+            }
         }
 
         if (_logVideoOutSync && (signalCount <= 8 || signalCount % 60 == 0))
@@ -1140,7 +1146,7 @@ public static class VideoOutExports
         // Pooled snapshot for the same reason as SignalVblank: triggers run outside
         // _stateGate, and SubmitFlip is per-frame so a fresh List copy is steady churn.
         ulong eventHint;
-        FlipEventRegistration[] flipEvents;
+        FlipEventRegistration[]? flipEvents = null;
         int flipEventCount;
         lock (_stateGate)
         {
@@ -1154,8 +1160,11 @@ public static class VideoOutExports
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;
-            flipEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(Math.Max(flipEventCount, 1));
-            port.FlipEvents.CopyTo(flipEvents);
+            if (flipEventCount != 0)
+            {
+                flipEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(flipEventCount);
+                port.FlipEvents.CopyTo(flipEvents);
+            }
         }
 
         var guestImageSubmitted = false;
@@ -1177,21 +1186,24 @@ public static class VideoOutExports
             _ = TryDumpFrame(ctx, port, bufferIndex, flipMode, flipArg);
         }
 
-        try
+        if (flipEvents is not null)
         {
-            for (var i = 0; i < flipEventCount; i++)
+            try
             {
-                _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
-                    flipEvents[i].Equeue,
-                    SceVideoOutInternalEventFlip,
-                    OrbisKernelEventFilterVideoOut,
-                    eventHint,
-                    flipEvents[i].UserData);
+                for (var i = 0; i < flipEventCount; i++)
+                {
+                    _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
+                        flipEvents[i].Equeue,
+                        SceVideoOutInternalEventFlip,
+                        OrbisKernelEventFilterVideoOut,
+                        eventHint,
+                        flipEvents[i].UserData);
+                }
             }
-        }
-        finally
-        {
-            ArrayPool<FlipEventRegistration>.Shared.Return(flipEvents);
+            finally
+            {
+                ArrayPool<FlipEventRegistration>.Shared.Return(flipEvents);
+            }
         }
 
         var flipCount = Interlocked.Increment(ref _flipSubmitCount);
