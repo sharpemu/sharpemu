@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
@@ -159,10 +160,12 @@ public static class AgcExports
     private static readonly HashSet<ulong> _tracedComputeShaders = new();
     private static readonly Dictionary<(ulong Address, uint Width, uint Height), ulong> _tracedTextureHashes = [];
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
-    private static readonly Dictionary<
-        (ulong Es, ulong EsState, ulong Ps, ulong PsState, string OutputLayout, uint Attributes),
+    // Concurrent so the per-draw/per-dispatch hit path is lock-free (and no longer
+    // shares _submitTraceGate with tracing).
+    private static readonly ConcurrentDictionary<
+        (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout, uint OutputCount, uint Attributes),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
-    private static readonly Dictionary<
+    private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ),
         IGuestCompiledShader> _computeShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
@@ -345,6 +348,9 @@ public static class AgcExports
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
         IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
         IReadOnlyList<RenderTargetDescriptor> RenderTargets,
+        // The seam-shaped view of RenderTargets, built once here so the per-frame
+        // submit path does not rebuild it for every draw of a cached translation.
+        IReadOnlyList<GuestRenderTarget> GuestTargets,
         GuestRenderState RenderState);
 
     private sealed record TranslatedImageBinding(
@@ -3425,13 +3431,7 @@ public static class AgcExports
                     textures,
                     globalMemoryBuffers,
                     translatedDraw.AttributeCount,
-                    translatedDraw.RenderTargets.Select(target =>
-                        new GuestRenderTarget(
-                            target.Address,
-                            target.Width,
-                            target.Height,
-                            target.Format,
-                            target.NumberType)).ToArray(),
+                    translatedDraw.GuestTargets,
                         translatedDraw.VertexShader,
                         translatedDraw.VertexCount,
                         translatedDraw.InstanceCount,
@@ -3577,16 +3577,17 @@ public static class AgcExports
             }
         }
 
-        var pixelOutputs = renderTargets
-            .Select((target, location) => new Gen5PixelOutputBinding(
-                target.Slot,
-                (uint)location,
-                renderTargetOutputKinds[location]))
-            .ToArray();
-        var outputLayout = string.Join(
-            ';',
-            pixelOutputs.Select(output =>
-                $"{output.GuestSlot}:{output.HostLocation}:{(int)output.Kind}"));
+        // Exact packed encoding of the output layout — guest slot (6 bits, CB targets are
+        // 0-7) plus output kind (2 bits) per target, host locations being the sequential
+        // byte positions. Replaces a per-draw LINQ + string build that allocated on every
+        // draw, cache hit or not; the target count disambiguates trailing zero bytes.
+        var outputLayout = 0UL;
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
+                (uint)renderTargetOutputKinds[index]) << (index * 8);
+        }
+
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = ComputeShaderStructureFingerprint(exportEvaluation);
         var pixelStateFingerprint = ComputeShaderStructureFingerprint(pixelEvaluation);
@@ -3596,18 +3597,21 @@ public static class AgcExports
             pixelShaderAddress,
             pixelStateFingerprint,
             outputLayout,
+            (uint)renderTargets.Length,
             attributeCount);
         var totalGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
             exportEvaluation.GlobalMemoryBindings.Count;
-        (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel) compiled;
-        lock (_submitTraceGate)
-        {
-            _graphicsShaderCache.TryGetValue(shaderKey, out compiled);
-        }
+        _graphicsShaderCache.TryGetValue(shaderKey, out var compiled);
 
         if (compiled.Vertex is null || compiled.Pixel is null)
         {
+            var pixelOutputs = renderTargets
+                .Select((target, location) => new Gen5PixelOutputBinding(
+                    target.Slot,
+                    (uint)location,
+                    renderTargetOutputKinds[location]))
+                .ToArray();
             if (!GuestGpu.Current.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
@@ -3644,10 +3648,7 @@ public static class AgcExports
                 pixelStateFingerprint,
                 compiled.Pixel,
                 pixelState.Program);
-            lock (_submitTraceGate)
-            {
-                _graphicsShaderCache.TryAdd(shaderKey, compiled);
-            }
+            _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
         var imageBindings = pixelEvaluation.ImageBindings
@@ -3698,6 +3699,13 @@ public static class AgcExports
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
+            renderTargets.Select(target =>
+                new GuestRenderTarget(
+                    target.Address,
+                    target.Width,
+                    target.Height,
+                    target.Format,
+                    target.NumberType)).ToArray(),
             ApplyTransparentPremultipliedFillClear(
                 CreateRenderState(state.CxRegisters, renderTargets, pixelState),
                 textures,
@@ -4925,11 +4933,7 @@ public static class AgcExports
                 localSizeX,
                 localSizeY,
                 localSizeZ);
-            IGuestCompiledShader? computeShader;
-            lock (_submitTraceGate)
-            {
-                _computeShaderCache.TryGetValue(shaderKey, out computeShader);
-            }
+            _computeShaderCache.TryGetValue(shaderKey, out var computeShader);
 
             if (computeShader is null &&
                 GuestGpu.Current.TryCompileComputeShader(
@@ -4951,10 +4955,7 @@ public static class AgcExports
 
             if (computeShader is not null)
             {
-                lock (_submitTraceGate)
-                {
-                    _computeShaderCache.TryAdd(shaderKey, computeShader);
-                }
+                _computeShaderCache.TryAdd(shaderKey, computeShader);
 
                 var textures = CreateGuestDrawTextures(
                     ctx,
