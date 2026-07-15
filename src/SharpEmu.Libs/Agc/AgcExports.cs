@@ -4,7 +4,6 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
-using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
@@ -160,13 +159,12 @@ public static class AgcExports
     private static readonly HashSet<ulong> _tracedComputeShaders = new();
     private static readonly Dictionary<(ulong Address, uint Width, uint Height), ulong> _tracedTextureHashes = [];
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
-    private static readonly Dictionary<(ulong Ps, ulong State, Gen5PixelOutputKind Output), byte[]> _pixelSpirvCache = new();
     private static readonly Dictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, string OutputLayout, uint Attributes),
-        (byte[] Vertex, byte[] Pixel)> _graphicsSpirvCache = new();
+        (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly Dictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ),
-        byte[]> _computeSpirvCache = new();
+        IGuestCompiledShader> _computeShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
     private static readonly bool _traceAgc = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
@@ -337,8 +335,8 @@ public static class AgcExports
         ulong ExportShaderAddress,
         ulong PixelShaderAddress,
         uint PrimitiveType,
-        byte[] VertexSpirv,
-        byte[] PixelSpirv,
+        IGuestCompiledShader VertexShader,
+        IGuestCompiledShader PixelShader,
         uint AttributeCount,
         uint VertexCount,
         uint InstanceCount,
@@ -2973,7 +2971,7 @@ public static class AgcExports
                     var globalMemoryBuffers =
                         CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                     GuestGpu.Current.SubmitTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDisplayBuffer.Width,
@@ -2981,7 +2979,7 @@ public static class AgcExports
                         translatedDraw.AttributeCount);
                     TraceAgcShader(
                         $"agc.shader_present ps=0x{translatedDraw.PixelShaderAddress:X16} " +
-                        $"spirv={translatedDraw.PixelSpirv.Length} textures={textures.Count} " +
+                        $"spirv={translatedDraw.PixelShader.Payload.Length} textures={textures.Count} " +
                         $"global_buffers={globalMemoryBuffers.Count} " +
                         $"fallback={fallbackTextureCount} {translatedDisplayBuffer.Width}x{translatedDisplayBuffer.Height}");
 
@@ -3423,7 +3421,7 @@ public static class AgcExports
                 TraceRectListVertices(translatedDraw, vertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, textures, vertexBuffers);
                 GuestGpu.Current.SubmitOffscreenTranslatedDraw(
-                    translatedDraw.PixelSpirv,
+                    translatedDraw.PixelShader,
                     textures,
                     globalMemoryBuffers,
                     translatedDraw.AttributeCount,
@@ -3434,7 +3432,7 @@ public static class AgcExports
                             target.Height,
                             target.Format,
                             target.NumberType)).ToArray(),
-                        translatedDraw.VertexSpirv,
+                        translatedDraw.VertexShader,
                         translatedDraw.VertexCount,
                         translatedDraw.InstanceCount,
                         translatedDraw.PrimitiveType,
@@ -3455,7 +3453,7 @@ public static class AgcExports
                     var globalMemoryBuffers =
                         CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                     GuestGpu.Current.SubmitStorageTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDraw.AttributeCount,
@@ -3602,15 +3600,15 @@ public static class AgcExports
         var totalGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
             exportEvaluation.GlobalMemoryBindings.Count;
-        (byte[] Vertex, byte[] Pixel) compiled;
+        (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel) compiled;
         lock (_submitTraceGate)
         {
-            _graphicsSpirvCache.TryGetValue(shaderKey, out compiled);
+            _graphicsShaderCache.TryGetValue(shaderKey, out compiled);
         }
 
         if (compiled.Vertex is null || compiled.Pixel is null)
         {
-            if (!Gen5SpirvTranslator.TryCompilePixelShader(
+            if (!GuestGpu.Current.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
                     pixelOutputs,
@@ -3620,7 +3618,7 @@ public static class AgcExports
                     totalGlobalBufferCount: totalGlobalBuffers + 2,
                     imageBindingBase: 0,
                     scalarRegisterBufferIndex: totalGlobalBuffers) ||
-                !Gen5SpirvTranslator.TryCompileVertexShader(
+                !GuestGpu.Current.TryCompileVertexShader(
                     exportState,
                     exportEvaluation,
                     out var vertexShader,
@@ -3633,22 +3631,22 @@ public static class AgcExports
                 return false;
             }
 
-            compiled = (vertexShader.Spirv, pixelShader.Spirv);
+            compiled = (vertexShader!, pixelShader!);
             DumpSpirv(
                 "vs",
                 exportShaderAddress,
                 exportStateFingerprint,
-                compiled.Vertex,
+                compiled.Vertex.Payload,
                 exportState.Program);
             DumpSpirv(
                 "ps",
                 pixelShaderAddress,
                 pixelStateFingerprint,
-                compiled.Pixel,
+                compiled.Pixel.Payload,
                 pixelState.Program);
             lock (_submitTraceGate)
             {
-                _graphicsSpirvCache.TryAdd(shaderKey, compiled);
+                _graphicsShaderCache.TryAdd(shaderKey, compiled);
             }
         }
 
@@ -4300,7 +4298,7 @@ public static class AgcExports
         var blend = draw.RenderState.Blend;
         TraceAgcShader(
             $"agc.shader_draw es=0x{draw.ExportShaderAddress:X16} " +
-            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelSpirv.Length} " +
+            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelShader.Payload.Length} " +
             $"primitive=0x{draw.PrimitiveType:X} " +
             $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc} " +
             $"write_mask=0x{blend.WriteMask:X} scissor={scissor} viewport={viewport} " +
@@ -4927,36 +4925,35 @@ public static class AgcExports
                 localSizeX,
                 localSizeY,
                 localSizeZ);
-            byte[] computeSpirv;
+            IGuestCompiledShader? computeShader;
             lock (_submitTraceGate)
             {
-                _computeSpirvCache.TryGetValue(shaderKey, out computeSpirv!);
+                _computeShaderCache.TryGetValue(shaderKey, out computeShader);
             }
 
-            if (computeSpirv is null &&
-                Gen5SpirvTranslator.TryCompileComputeShader(
+            if (computeShader is null &&
+                GuestGpu.Current.TryCompileComputeShader(
                     shaderState,
                     evaluation,
                     localSizeX,
                     localSizeY,
                     localSizeZ,
-                    out var compiledCompute,
+                    out computeShader,
                     out computeError))
             {
-                computeSpirv = compiledCompute.Spirv;
                 DumpSpirv(
                     "cs",
                     shaderAddress,
                     shaderKey.Item2,
-                    computeSpirv,
+                    computeShader!.Payload,
                     shaderState.Program);
             }
 
-            if (computeSpirv is not null)
+            if (computeShader is not null)
             {
                 lock (_submitTraceGate)
                 {
-                    _computeSpirvCache.TryAdd(shaderKey, computeSpirv);
+                    _computeShaderCache.TryAdd(shaderKey, computeShader);
                 }
 
                 var textures = CreateGuestDrawTextures(
@@ -4967,7 +4964,7 @@ public static class AgcExports
                     CreateGuestMemoryBuffers(evaluation.GlobalMemoryBindings);
                 GuestGpu.Current.SubmitComputeDispatch(
                     shaderAddress,
-                    computeSpirv,
+                    computeShader,
                     textures,
                     globalMemoryBuffers,
                     dispatch.GroupCountX,
@@ -5492,7 +5489,7 @@ public static class AgcExports
                                 $"pcs={string.Join(',', binding.InstructionPcs.Select(pc => $"0x{pc:X}"))}");
                         }
 
-                        if (Gen5SpirvTranslator.TryCompilePixelShader(
+                        if (GuestGpu.Current.TryCompilePixelShader(
                                  pixelState,
                                  evaluation,
                                  [new(0, 0, Gen5PixelOutputKind.Float)],
@@ -5501,7 +5498,7 @@ public static class AgcExports
                         {
                             TraceAgcShader(
                                 $"agc.shader_spirv ps=0x{pixelShaderAddress:X16} " +
-                                $"bytes={compiledPixel.Spirv.Length} bindings={evaluation.ImageBindings.Count} " +
+                                $"bytes={compiledPixel!.Payload.Length} bindings={evaluation.ImageBindings.Count} " +
                                 $"global_buffers={evaluation.GlobalMemoryBindings.Count}");
                         }
                         else

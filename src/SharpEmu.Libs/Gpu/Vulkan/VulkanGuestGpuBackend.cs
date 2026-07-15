@@ -3,16 +3,102 @@
 
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Vulkan;
 
 /// <summary>
-/// Vulkan backend for the guest-GPU seam. A thin adapter over the existing
-/// VulkanVideoPresenter statics so the seam extraction stays mechanical; folding the
-/// presenter into an instance type is follow-up work, not a seam concern.
+/// Vulkan backend for the guest-GPU seam: SPIR-V codegen via
+/// SharpEmu.ShaderCompiler.Vulkan, rendering via a thin adapter over the existing
+/// VulkanVideoPresenter statics (folding the presenter into an instance type is
+/// follow-up work, not a seam concern).
 /// </summary>
 internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
+    public bool TryCompileVertexShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        out IGuestCompiledShader? shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int scalarRegisterBufferIndex = -1)
+    {
+        shader = null;
+        if (!Gen5SpirvTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var compiled,
+                out error,
+                globalBufferBase,
+                totalGlobalBufferCount,
+                imageBindingBase,
+                scalarRegisterBufferIndex))
+        {
+            return false;
+        }
+
+        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        return true;
+    }
+
+    public bool TryCompilePixelShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        IReadOnlyList<Gen5PixelOutputBinding> outputs,
+        out IGuestCompiledShader? shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int scalarRegisterBufferIndex = -1)
+    {
+        shader = null;
+        if (!Gen5SpirvTranslator.TryCompilePixelShader(
+                state,
+                evaluation,
+                outputs,
+                out var compiled,
+                out error,
+                globalBufferBase,
+                totalGlobalBufferCount,
+                imageBindingBase,
+                scalarRegisterBufferIndex))
+        {
+            return false;
+        }
+
+        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        return true;
+    }
+
+    public bool TryCompileComputeShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        uint localSizeX,
+        uint localSizeY,
+        uint localSizeZ,
+        out IGuestCompiledShader? shader,
+        out string error)
+    {
+        shader = null;
+        if (!Gen5SpirvTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                localSizeX,
+                localSizeY,
+                localSizeZ,
+                out var compiled,
+                out error))
+        {
+            return false;
+        }
+
+        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        return true;
+    }
+
     public void EnsureStarted(uint width, uint height) =>
         VulkanVideoPresenter.EnsureStarted(width, height);
 
@@ -26,13 +112,13 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         VulkanVideoPresenter.SubmitGuestDraw(drawKind, width, height);
 
     public void SubmitTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint width,
         uint height,
         uint attributeCount,
-        byte[]? vertexSpirv = null,
+        IGuestCompiledShader? vertexShader = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
@@ -40,13 +126,13 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null) =>
         VulkanVideoPresenter.SubmitTranslatedDraw(
-            pixelSpirv,
+            Spirv(pixelShader),
             textures,
             globalMemoryBuffers,
             width,
             height,
             attributeCount,
-            vertexSpirv,
+            vertexShader is null ? null : Spirv(vertexShader),
             vertexCount,
             instanceCount,
             primitiveType,
@@ -55,12 +141,12 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             renderState);
 
     public void SubmitOffscreenTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
         IReadOnlyList<GuestRenderTarget> targets,
-        byte[]? vertexSpirv = null,
+        IGuestCompiledShader? vertexShader = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
@@ -68,12 +154,12 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null) =>
         VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
-            pixelSpirv,
+            Spirv(pixelShader),
             textures,
             globalMemoryBuffers,
             attributeCount,
             targets,
-            vertexSpirv,
+            vertexShader is null ? null : Spirv(vertexShader),
             vertexCount,
             instanceCount,
             primitiveType,
@@ -82,14 +168,14 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             renderState);
 
     public void SubmitStorageTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
         uint width,
         uint height) =>
         VulkanVideoPresenter.SubmitStorageTranslatedDraw(
-            pixelSpirv,
+            Spirv(pixelShader),
             textures,
             globalMemoryBuffers,
             attributeCount,
@@ -98,7 +184,7 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public void SubmitComputeDispatch(
         ulong shaderAddress,
-        byte[] computeSpirv,
+        IGuestCompiledShader computeShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint groupCountX,
@@ -106,7 +192,7 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         uint groupCountZ) =>
         VulkanVideoPresenter.SubmitComputeDispatch(
             shaderAddress,
-            computeSpirv,
+            Spirv(computeShader),
             textures,
             globalMemoryBuffers,
             groupCountX,
@@ -156,4 +242,10 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         outputKind = default;
         return false;
     }
+
+    private static byte[] Spirv(IGuestCompiledShader shader) =>
+        shader is VulkanCompiledGuestShader vulkanShader
+            ? vulkanShader.Spirv
+            : throw new InvalidOperationException(
+                $"shader handle of type {shader.GetType().Name} was not compiled by the Vulkan backend");
 }

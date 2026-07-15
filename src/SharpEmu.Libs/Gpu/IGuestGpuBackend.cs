@@ -12,13 +12,48 @@ namespace SharpEmu.Libs.Gpu;
 /// value (formats, blend enums, barrier or pass concepts) may cross this interface,
 /// and submission is coarse-grained — synchronization is a backend-internal concern.
 ///
-/// Interim exception, resolved when shader compilation moves behind the backend: the
-/// shader parameters are SPIR-V blobs, which presumes the Vulkan codegen.
+/// Shader compilation also lives behind the seam: the backend owns its codegen and
+/// returns opaque <see cref="IGuestCompiledShader"/> handles that only it can submit.
 /// </summary>
 internal interface IGuestGpuBackend
 {
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
+
+    // Shader compilation. The optional base/index parameters describe how a multi-stage
+    // draw lays both stages' resources into one flat per-role slot space (buffers,
+    // images, scalar-spill slots); each backend maps those slots to its own API binding
+    // model. -1 keeps the emitter's single-stage defaults.
+
+    bool TryCompileVertexShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        out IGuestCompiledShader? shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int scalarRegisterBufferIndex = -1);
+
+    bool TryCompilePixelShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        IReadOnlyList<Gen5PixelOutputBinding> outputs,
+        out IGuestCompiledShader? shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int scalarRegisterBufferIndex = -1);
+
+    bool TryCompileComputeShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        uint localSizeX,
+        uint localSizeY,
+        uint localSizeZ,
+        out IGuestCompiledShader? shader,
+        out string error);
 
     void HideSplashScreen();
 
@@ -29,13 +64,13 @@ internal interface IGuestGpuBackend
     void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height);
 
     void SubmitTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint width,
         uint height,
         uint attributeCount,
-        byte[]? vertexSpirv = null,
+        IGuestCompiledShader? vertexShader = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
@@ -44,12 +79,12 @@ internal interface IGuestGpuBackend
         GuestRenderState? renderState = null);
 
     void SubmitOffscreenTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
         IReadOnlyList<GuestRenderTarget> targets,
-        byte[]? vertexSpirv = null,
+        IGuestCompiledShader? vertexShader = null,
         uint vertexCount = 3,
         uint instanceCount = 1,
         uint primitiveType = 4,
@@ -58,7 +93,7 @@ internal interface IGuestGpuBackend
         GuestRenderState? renderState = null);
 
     void SubmitStorageTranslatedDraw(
-        byte[] pixelSpirv,
+        IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
@@ -67,7 +102,7 @@ internal interface IGuestGpuBackend
 
     void SubmitComputeDispatch(
         ulong shaderAddress,
-        byte[] computeSpirv,
+        IGuestCompiledShader computeShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint groupCountX,
