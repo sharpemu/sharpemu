@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "sharpemu_gpu_vulkan.h"
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <algorithm>
@@ -664,10 +665,17 @@ se_gpu_result SE_GPU_CALL se_gpu_create(const se_gpu_create_info* info, se_gpu_b
     auto* b = new (std::nothrow) se_gpu_backend{};
     if (!b) return SE_GPU_OUT_OF_MEMORY;
     b->log = info->log; b->log_user = info->log_user;
+    // SharpEmu owns the process entry point (and is a WinExe on Windows), so
+    // SDL never gets its usual SDL_main bootstrap. Mark the host entry point
+    // ready before initializing video from the dedicated renderer thread.
+    SDL_SetMainReady();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) { cleanup(b); return fail(nullptr, SE_GPU_PLATFORM_ERROR, SDL_GetError()); }
     b->window = SDL_CreateWindow(info->title_utf8 ? info->title_utf8 : "SharpEmu",
         static_cast<int>(info->width), static_cast<int>(info->height), SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!b->window) { cleanup(b); return fail(nullptr, SE_GPU_PLATFORM_ERROR, SDL_GetError()); }
+    if (!SDL_ShowWindow(b->window)) { cleanup(b); return fail(nullptr, SE_GPU_PLATFORM_ERROR, SDL_GetError()); }
+    SDL_RaiseWindow(b->window);
+    SDL_PumpEvents();
     uint32_t count{}; const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&count);
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "SharpEmu", 1,
         "SharpEmu native guest GPU", 1, VK_API_VERSION_1_2};
