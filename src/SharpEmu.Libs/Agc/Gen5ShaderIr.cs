@@ -291,7 +291,6 @@ internal sealed record Gen5VertexInputBinding(
 internal sealed record Gen5ShaderEvaluation(
     IReadOnlyList<uint> InitialScalarRegisters,
     IReadOnlyList<uint> ScalarRegisters,
-    IReadOnlyDictionary<uint, IReadOnlyList<uint>> ScalarRegistersByPc,
     IReadOnlyList<Gen5ImageBinding> ImageBindings,
     IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
     Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,

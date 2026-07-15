@@ -7,6 +7,7 @@ using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -3771,7 +3772,7 @@ public static class AgcExports
         var bytesPerIndex = is32Bit ? sizeof(uint) : sizeof(ushort);
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
         var byteCount = checked((int)(indexCount * (uint)bytesPerIndex));
-        var data = new byte[byteCount];
+        var data = GC.AllocateUninitializedArray<byte>(byteCount);
         var address = state.IndexBufferAddress + byteOffset;
         return (ctx.Memory.TryRead(address, data) ||
                 KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, data))
@@ -4440,7 +4441,7 @@ public static class AgcExports
             var initialPixels = Array.Empty<byte>();
             if (descriptor.Address != 0)
             {
-                var storageSource = new byte[(int)sourceByteCount];
+                var storageSource = GC.AllocateUninitializedArray<byte>((int)sourceByteCount);
                 if ((ctx.Memory.TryRead(descriptor.Address, storageSource) ||
                      KernelMemoryCompatExports.TryReadTrackedLibcHeapGpuAlias(
                          descriptor.Address,
@@ -4469,7 +4470,7 @@ public static class AgcExports
             return true;
         }
 
-        var source = new byte[(int)sourceByteCount];
+        var source = GC.AllocateUninitializedArray<byte>((int)sourceByteCount);
         if (!ctx.Memory.TryRead(descriptor.Address, source) &&
             !KernelMemoryCompatExports.TryReadTrackedLibcHeapGpuAlias(
                 descriptor.Address,
@@ -4484,25 +4485,29 @@ public static class AgcExports
 
         TraceTextureHash(descriptor, source);
 
-        var nonZero = 0;
-        for (var i = 0; i < source.Length; i++)
+        if (_traceAgcShader)
         {
-            if (source[i] != 0)
+            var nonZero = 0;
+            for (var i = 0; i < source.Length; i++)
             {
-                nonZero++;
-                if (nonZero >= 64)
+                if (source[i] != 0)
                 {
-                    break;
+                    nonZero++;
+                    if (nonZero >= 64)
+                    {
+                        break;
+                    }
                 }
             }
+
+            TraceAgcShader(
+                $"agc.texture_source addr=0x{descriptor.Address:X16} " +
+                $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
+                $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
+                $"dst=0x{descriptor.DstSelect:X3} " +
+                $"bytes={source.Length} nonzero64={nonZero}");
         }
 
-        TraceAgcShader(
-            $"agc.texture_source addr=0x{descriptor.Address:X16} " +
-            $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
-            $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
-            $"dst=0x{descriptor.DstSelect:X3} " +
-            $"bytes={source.Length} nonzero64={nonZero}");
         DumpTextureSourceIfRequested(descriptor, sourceWidth, source);
 
         var rgba = source;
@@ -5759,7 +5764,7 @@ public static class AgcExports
             return false;
         }
 
-        var sourceBytes = new byte[(int)sourceByteCount];
+        var sourceBytes = GC.AllocateUninitializedArray<byte>((int)sourceByteCount);
         if (!ctx.Memory.TryRead(source.Address, sourceBytes))
         {
             return false;
@@ -5788,28 +5793,30 @@ public static class AgcExports
         var rgbaDestination = destination.PixelFormat is
             VideoOutPixelFormatA8B8G8R8Srgb or
             VideoOutPixelFormatR8G8B8A8Unorm;
+        var sourcePixels = MemoryMarshal.Cast<byte, uint>(sourceBytes);
         for (uint y = 0; y < destination.Height; y++)
         {
             var sourceY = (uint)(((ulong)y * source.Height) / destination.Height);
-            for (uint x = 0; x < destination.Width; x++)
+            var sourceRow = sourcePixels.Slice(
+                checked((int)(sourceY * source.Width)),
+                (int)source.Width);
+            var rowPixels = MemoryMarshal.Cast<byte, uint>(
+                destinationRow.AsSpan(0, checked((int)destination.Width * 4)));
+            if (rgbaDestination && source.Width == destination.Width)
             {
-                var sourceX = (uint)(((ulong)x * source.Width) / destination.Width);
-                var sourceOffset = checked((int)(((ulong)sourceY * source.Width + sourceX) * 4));
-                var destinationOffset = checked((int)x * 4);
-                if (rgbaDestination)
+                sourceRow.CopyTo(rowPixels);
+            }
+            else
+            {
+                for (uint x = 0; x < destination.Width; x++)
                 {
-                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 0];
-                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
-                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 2];
+                    var value = sourceRow[(int)(((ulong)x * source.Width) / destination.Width)];
+                    rowPixels[(int)x] = rgbaDestination
+                        ? value
+                        : (value & 0xFF00FF00u) |
+                          ((value & 0x00FF0000u) >> 16) |
+                          ((value & 0x000000FFu) << 16);
                 }
-                else
-                {
-                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 2];
-                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
-                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 0];
-                }
-
-                destinationRow[destinationOffset + 3] = sourceBytes[sourceOffset + 3];
             }
 
             var destinationAddress = destination.Address + ((ulong)y * destinationPitch * 4);
@@ -5835,13 +5842,32 @@ public static class AgcExports
     {
         const ulong fnvOffsetBasis = 14695981039346656037UL;
         const ulong fnvPrime = 1099511628211UL;
-        var fingerprint = fnvOffsetBasis;
-        foreach (var value in bytes)
+        var h0 = fnvOffsetBasis ^ (ulong)bytes.Length;
+        var h1 = fnvOffsetBasis;
+        var h2 = fnvOffsetBasis;
+        var h3 = fnvOffsetBasis;
+        var words = MemoryMarshal.Cast<byte, ulong>(bytes);
+        var index = 0;
+        var blockEnd = words.Length - (words.Length & 3);
+        for (; index < blockEnd; index += 4)
         {
-            fingerprint = (fingerprint ^ value) * fnvPrime;
+            h0 = (h0 ^ words[index]) * fnvPrime;
+            h1 = (h1 ^ words[index + 1]) * fnvPrime;
+            h2 = (h2 ^ words[index + 2]) * fnvPrime;
+            h3 = (h3 ^ words[index + 3]) * fnvPrime;
         }
 
-        return fingerprint;
+        for (; index < words.Length; index++)
+        {
+            h0 = (h0 ^ words[index]) * fnvPrime;
+        }
+
+        foreach (var value in bytes[(words.Length * 8)..])
+        {
+            h0 = (h0 ^ value) * fnvPrime;
+        }
+
+        return (((h0 * fnvPrime + h1) * fnvPrime + h2) * fnvPrime) + h3;
     }
 
     private static void TraceSubmittedPacket(

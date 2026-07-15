@@ -10,6 +10,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -803,13 +804,16 @@ public static class VideoOutExports
             return;
         }
 
-        var bgraFrame = new byte[rgbaFrame.Length];
-        for (var offset = 0; offset < rgbaFrame.Length; offset += 4)
+        var bgraFrame = GC.AllocateUninitializedArray<byte>(rgbaFrame.Length);
+        var source = MemoryMarshal.Cast<byte, uint>(rgbaFrame);
+        var destination = MemoryMarshal.Cast<byte, uint>(bgraFrame.AsSpan());
+        for (var index = 0; index < source.Length; index++)
         {
-            bgraFrame[offset + 0] = rgbaFrame[offset + 2];
-            bgraFrame[offset + 1] = rgbaFrame[offset + 1];
-            bgraFrame[offset + 2] = rgbaFrame[offset + 0];
-            bgraFrame[offset + 3] = rgbaFrame[offset + 3];
+            var value = source[index];
+            destination[index] =
+                (value & 0xFF00FF00u) |
+                ((value & 0x00FF0000u) >> 16) |
+                ((value & 0x000000FFu) << 16);
         }
 
         VulkanVideoPresenter.Submit(bgraFrame, width, height);
@@ -1552,13 +1556,32 @@ public static class VideoOutExports
     {
         const ulong fnvOffsetBasis = 14695981039346656037UL;
         const ulong fnvPrime = 1099511628211UL;
-        var fingerprint = fnvOffsetBasis;
-        foreach (var value in bytes)
+        var h0 = fnvOffsetBasis ^ (ulong)bytes.Length;
+        var h1 = fnvOffsetBasis;
+        var h2 = fnvOffsetBasis;
+        var h3 = fnvOffsetBasis;
+        var words = MemoryMarshal.Cast<byte, ulong>(bytes);
+        var index = 0;
+        var blockEnd = words.Length - (words.Length & 3);
+        for (; index < blockEnd; index += 4)
         {
-            fingerprint = (fingerprint ^ value) * fnvPrime;
+            h0 = (h0 ^ words[index]) * fnvPrime;
+            h1 = (h1 ^ words[index + 1]) * fnvPrime;
+            h2 = (h2 ^ words[index + 2]) * fnvPrime;
+            h3 = (h3 ^ words[index + 3]) * fnvPrime;
         }
 
-        return fingerprint;
+        for (; index < words.Length; index++)
+        {
+            h0 = (h0 ^ words[index]) * fnvPrime;
+        }
+
+        foreach (var value in bytes[(words.Length * 8)..])
+        {
+            h0 = (h0 ^ value) * fnvPrime;
+        }
+
+        return (((h0 * fnvPrime + h1) * fnvPrime + h2) * fnvPrime) + h3;
     }
 
     private static uint GetBytesPerPixel(ulong pixelFormat) =>

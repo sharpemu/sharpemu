@@ -92,7 +92,6 @@ internal static class Gen5ShaderScalarEvaluator
         var globalMemoryByAddress = new Dictionary<(uint ScalarAddress, ulong BaseAddress), Gen5GlobalMemoryBinding>();
         var vertexInputBindings = new List<Gen5VertexInputBinding>();
         var runtimeScalarRegisters = CollectRuntimeScalarRegisters(state.Program);
-        var scalarRegisterSnapshots = new Dictionary<uint, IReadOnlyList<uint>>();
         var scalarConditionCode = false;
         uint? skipUntilPc = null;
 
@@ -107,8 +106,6 @@ internal static class Gen5ShaderScalarEvaluator
 
                 skipUntilPc = null;
             }
-
-            scalarRegisterSnapshots[instruction.Pc] = (uint[])scalarRegisters.Clone();
 
             if (instruction.Opcode == "SEndpgm")
             {
@@ -412,7 +409,6 @@ internal static class Gen5ShaderScalarEvaluator
         evaluation = new Gen5ShaderEvaluation(
             initialScalarRegisters,
             scalarRegisters,
-            scalarRegisterSnapshots,
             resolved,
             globalMemoryBindings,
             state.ComputeSystemRegisters,

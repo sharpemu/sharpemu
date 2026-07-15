@@ -1370,6 +1370,8 @@ internal static unsafe class VulkanVideoPresenter
             _descriptorLayouts = new();
         private readonly Dictionary<HostBufferPoolKey, Stack<HostBufferAllocation>>
             _hostBufferPool = new();
+        private readonly Dictionary<DescriptorPoolKey, Stack<DescriptorPool>>
+            _descriptorPoolPool = new();
         private readonly Dictionary<ulong, HostBufferAllocation> _hostBufferAllocations = new();
         private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
 
@@ -1385,6 +1387,11 @@ internal static unsafe class VulkanVideoPresenter
         private readonly record struct HostBufferPoolKey(
             BufferUsageFlags Usage,
             ulong Capacity);
+
+        private readonly record struct DescriptorPoolKey(
+            int SampledImages,
+            int StorageImages,
+            int StorageBuffers);
 
         private readonly record struct DescriptorLayoutKey(
             ShaderStageFlags Stages,
@@ -1408,6 +1415,7 @@ internal static unsafe class VulkanVideoPresenter
             public bool DescriptorLayoutCached;
             public DescriptorSetLayout DescriptorSetLayout;
             public DescriptorPool DescriptorPool;
+            public DescriptorPoolKey? DescriptorPoolRecycleKey;
             public DescriptorSet DescriptorSet;
             public TextureResource[] Textures = [];
             public GlobalBufferResource[] GlobalMemoryBuffers = [];
@@ -3136,25 +3144,42 @@ internal static unsafe class VulkanVideoPresenter
                 };
             }
 
-            fixed (DescriptorPoolSize* poolSizePointer = poolSizes)
+            var poolKey = new DescriptorPoolKey(
+                sampledImageCount,
+                storageImageCount,
+                globalBufferCount);
+            if (_descriptorPoolPool.TryGetValue(poolKey, out var availablePools) &&
+                availablePools.TryPop(out var recycledPool))
             {
-                var poolInfo = new DescriptorPoolCreateInfo
-                {
-                    SType = StructureType.DescriptorPoolCreateInfo,
-                    MaxSets = 1,
-                    PoolSizeCount = (uint)poolSizes.Length,
-                    PPoolSizes = poolSizePointer,
-                };
-                DescriptorPool descriptorPool;
                 Check(
-                    _vk.CreateDescriptorPool(
-                        _device,
-                        &poolInfo,
-                        null,
-                        out descriptorPool),
-                    "vkCreateDescriptorPool");
-                resources.DescriptorPool = descriptorPool;
+                    _vk.ResetDescriptorPool(_device, recycledPool, 0),
+                    "vkResetDescriptorPool");
+                resources.DescriptorPool = recycledPool;
             }
+            else
+            {
+                fixed (DescriptorPoolSize* poolSizePointer = poolSizes)
+                {
+                    var poolInfo = new DescriptorPoolCreateInfo
+                    {
+                        SType = StructureType.DescriptorPoolCreateInfo,
+                        MaxSets = 1,
+                        PoolSizeCount = (uint)poolSizes.Length,
+                        PPoolSizes = poolSizePointer,
+                    };
+                    DescriptorPool descriptorPool;
+                    Check(
+                        _vk.CreateDescriptorPool(
+                            _device,
+                            &poolInfo,
+                            null,
+                            out descriptorPool),
+                        "vkCreateDescriptorPool");
+                    resources.DescriptorPool = descriptorPool;
+                }
+            }
+
+            resources.DescriptorPoolRecycleKey = poolKey;
 
             var allocateInfo = new DescriptorSetAllocateInfo
             {
@@ -3820,33 +3845,10 @@ internal static unsafe class VulkanVideoPresenter
                 if ((ulong)texture.RgbaPixels.Length == expectedSize &&
                     texture.RgbaPixels.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
                 {
-                    resource.StagingBuffer = CreateBuffer(
-                        expectedSize,
+                    resource.StagingBuffer = CreateHostBuffer(
+                        texture.RgbaPixels,
                         BufferUsageFlags.TransferSrcBit,
-                        MemoryPropertyFlags.HostVisibleBit |
-                        MemoryPropertyFlags.HostCoherentBit,
                         out resource.StagingMemory);
-
-                    void* mapped;
-                    Check(
-                        _vk.MapMemory(
-                            _device,
-                            resource.StagingMemory,
-                            0,
-                            expectedSize,
-                            0,
-                            &mapped),
-                        "vkMapMemory(storage texture)");
-                    fixed (byte* source = texture.RgbaPixels)
-                    {
-                        System.Buffer.MemoryCopy(
-                            source,
-                            mapped,
-                            texture.RgbaPixels.Length,
-                            texture.RgbaPixels.Length);
-                    }
-
-                    _vk.UnmapMemory(_device, resource.StagingMemory);
                     resource.NeedsUpload = true;
                     guestImage.InitialUploadPending = true;
                     TraceVulkanShader(
@@ -4115,19 +4117,10 @@ internal static unsafe class VulkanVideoPresenter
             byte[] pixels,
             string debugName)
         {
-            var size = (ulong)pixels.Length;
-            var buffer = CreateBuffer(
-                size,
+            var buffer = CreateHostBuffer(
+                pixels,
                 BufferUsageFlags.TransferSrcBit,
-                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
                 out var memory);
-            void* mapped;
-            Check(_vk.MapMemory(_device, memory, 0, size, 0, &mapped), "vkMapMemory(texture)");
-            fixed (byte* source = pixels)
-            {
-                System.Buffer.MemoryCopy(source, mapped, pixels.Length, pixels.Length);
-            }
-            _vk.UnmapMemory(_device, memory);
             SetDebugName(ObjectType.Buffer, buffer.Handle, debugName);
             return (buffer, memory);
         }
@@ -7195,15 +7188,7 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.FreeMemory(_device, texture.ImageMemory, null);
                 }
 
-                if (texture.StagingBuffer.Handle != 0)
-                {
-                    _vk.DestroyBuffer(_device, texture.StagingBuffer, null);
-                }
-
-                if (texture.StagingMemory.Handle != 0)
-                {
-                    _vk.FreeMemory(_device, texture.StagingMemory, null);
-                }
+                RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
 
                 if (texture.NeedsUpload &&
                     texture.GuestImage is { Initialized: false } guestImage)
@@ -7241,7 +7226,22 @@ internal static unsafe class VulkanVideoPresenter
 
             if (resources.DescriptorPool.Handle != 0)
             {
-                _vk.DestroyDescriptorPool(_device, resources.DescriptorPool, null);
+                if (resources.DescriptorPoolRecycleKey is { } poolKey)
+                {
+                    if (!_descriptorPoolPool.TryGetValue(poolKey, out var availablePools))
+                    {
+                        availablePools = new Stack<DescriptorPool>();
+                        _descriptorPoolPool.Add(poolKey, availablePools);
+                    }
+
+                    availablePools.Push(resources.DescriptorPool);
+                    resources.DescriptorPool = default;
+                    resources.DescriptorPoolRecycleKey = null;
+                }
+                else
+                {
+                    _vk.DestroyDescriptorPool(_device, resources.DescriptorPool, null);
+                }
             }
 
             if (!resources.DescriptorLayoutCached &&
@@ -7669,18 +7669,34 @@ internal static unsafe class VulkanVideoPresenter
                 LayerCount = 1,
             };
 
-        private static byte[] ScaleBgra(byte[] source, uint sourceWidth, uint sourceHeight, uint width, uint height)
+        private byte[]? _scaleBuffer;
+
+        private byte[] ScaleBgra(byte[] source, uint sourceWidth, uint sourceHeight, uint width, uint height)
         {
-            var destination = new byte[checked((int)(width * height * 4))];
+            var byteCount = checked((int)(width * height * 4));
+            if (_scaleBuffer is null || _scaleBuffer.Length != byteCount)
+            {
+                _scaleBuffer = GC.AllocateUninitializedArray<byte>(byteCount);
+            }
+
+            var destination = _scaleBuffer;
+            var sourcePixels = MemoryMarshal.Cast<byte, uint>(source);
+            var destinationPixels = MemoryMarshal.Cast<byte, uint>(destination.AsSpan());
             for (uint y = 0; y < height; y++)
             {
-                var sourceY = (uint)(((ulong)y * sourceHeight) / height);
+                var sourceRow = sourcePixels.Slice(
+                    checked((int)((((ulong)y * sourceHeight) / height) * sourceWidth)),
+                    (int)sourceWidth);
+                var destinationRow = destinationPixels.Slice((int)(y * width), (int)width);
+                if (sourceWidth == width)
+                {
+                    sourceRow.CopyTo(destinationRow);
+                    continue;
+                }
+
                 for (uint x = 0; x < width; x++)
                 {
-                    var sourceX = (uint)(((ulong)x * sourceWidth) / width);
-                    var sourceOffset = checked((int)(((ulong)sourceY * sourceWidth + sourceX) * 4));
-                    var destinationOffset = checked((int)(((ulong)y * width + x) * 4));
-                    source.AsSpan(sourceOffset, 4).CopyTo(destination.AsSpan(destinationOffset, 4));
+                    destinationRow[(int)x] = sourceRow[(int)(((ulong)x * sourceWidth) / width)];
                 }
             }
 
@@ -7743,6 +7759,14 @@ internal static unsafe class VulkanVideoPresenter
             }
             _hostBufferAllocations.Clear();
             _hostBufferPool.Clear();
+            foreach (var pools in _descriptorPoolPool.Values)
+            {
+                while (pools.TryPop(out var pool))
+                {
+                    _vk.DestroyDescriptorPool(_device, pool, null);
+                }
+            }
+            _descriptorPoolPool.Clear();
             foreach (var guestImage in _guestImages.Values)
             {
                 DestroyGuestImage(guestImage);
