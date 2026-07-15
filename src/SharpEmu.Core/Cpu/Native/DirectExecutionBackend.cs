@@ -553,6 +553,38 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly object _guestThreadGate = new object();
 
+	// Diagnostic owner tracking for _guestThreadGate; written only while the
+	// gate is held, read lock-free by the stall watchdog's periodic snapshot.
+	private volatile string? _gateOwnerSite;
+	private int _gateOwnerManagedThreadId;
+	private long _gateAcquireTimestamp;
+
+	private GateHolder LockGate(string site)
+	{
+		Monitor.Enter(_guestThreadGate);
+		_gateOwnerSite = site;
+		Volatile.Write(ref _gateOwnerManagedThreadId, Environment.CurrentManagedThreadId);
+		Volatile.Write(ref _gateAcquireTimestamp, Stopwatch.GetTimestamp());
+		return new GateHolder(this);
+	}
+
+	private readonly struct GateHolder : IDisposable
+	{
+		private readonly DirectExecutionBackend _owner;
+
+		public GateHolder(DirectExecutionBackend owner)
+		{
+			_owner = owner;
+		}
+
+		public void Dispose()
+		{
+			_owner._gateOwnerSite = null;
+			Volatile.Write(ref _owner._gateOwnerManagedThreadId, 0);
+			Monitor.Exit(_owner._guestThreadGate);
+		}
+	}
+
 	private readonly Queue<GuestThreadState> _readyGuestThreads = new Queue<GuestThreadState>();
 
 	// Once set, guest worker threads are unwound to the host at their next import
@@ -2659,7 +2691,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return false;
 		}
-		lock (_guestThreadGate)
+		using (LockGate("TryStartThread"))
 		{
 			_guestThreads[request.ThreadHandle] = thread;
 			_readyGuestThreads.Enqueue(thread);
@@ -2698,7 +2730,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		while (!ActiveForcedGuestExit)
 		{
 			Thread? hostThread;
-			lock (_guestThreadGate)
+			using (LockGate("TryJoinThread"))
 			{
 				if (!_guestThreads.TryGetValue(threadHandle, out var thread))
 				{
@@ -2774,7 +2806,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			for (int i = 0; i < 8; i++)
 			{
 				GuestThreadState? thread = null;
-				lock (_guestThreadGate)
+				using (LockGate("Pump.dequeue"))
 				{
 					while (_readyGuestThreads.Count > 0)
 					{
@@ -2805,7 +2837,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					Name = $"SharpEmu-{thread.Name}",
 					Priority = MapGuestThreadPriority(thread.Priority),
 				};
-				lock (_guestThreadGate)
+				using (LockGate("Pump.bind_host"))
 				{
 					thread.HostThread = hostThread;
 				}
@@ -2826,7 +2858,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		var wakeCount = 0;
-		lock (_guestThreadGate)
+		using (LockGate("WakeBlockedThreads"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
@@ -2875,7 +2907,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
 	{
-		lock (_guestThreadGate)
+		using (LockGate("SnapshotThreads"))
 		{
 			var snapshots = new GuestThreadSnapshot[_guestThreads.Count];
 			var index = 0;
@@ -2907,7 +2939,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
-		lock (_guestThreadGate)
+		using (LockGate("RegisterBlockedContinuation"))
 		{
 			if (!_guestThreads.TryGetValue(guestThreadHandle, out var thread))
 			{
@@ -2926,7 +2958,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		var now = Stopwatch.GetTimestamp();
 		var wakeCount = 0;
-		lock (_guestThreadGate)
+		using (LockGate("WakeExpiredBlockedGuestThreads"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
@@ -3017,7 +3049,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private GuestThreadState[] SnapshotGuestThreads()
 	{
-		lock (_guestThreadGate)
+		using (LockGate("SnapshotGuestThreads"))
 		{
 			return _guestThreads.Values.ToArray();
 		}
@@ -3207,7 +3239,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		if (currentGuestThreadHandle != 0)
 		{
 			GuestContinuationRunner? runner;
-			lock (_guestThreadGate)
+			using (LockGate("TryCallGuestContinuation"))
 			{
 				if (_guestThreads.TryGetValue(currentGuestThreadHandle, out var guestThread))
 				{
@@ -3299,7 +3331,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		_guestTeardownRequested = true;
 		Thread[] hostThreads;
-		lock (_guestThreadGate)
+		using (LockGate("RequestGuestThreadTeardown"))
 		{
 			_readyGuestThreads.Clear();
 			Interlocked.Exchange(ref _readyGuestThreadCount, 0);
@@ -3329,7 +3361,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private void ClearGuestThreads()
 	{
 		GuestContinuationRunner[] runners;
-		lock (_guestThreadGate)
+		using (LockGate("ClearGuestThreads"))
 		{
 			runners = _guestThreads.Values
 				.Select(static thread => thread.ContinuationRunner)
@@ -3618,7 +3650,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			GuestCpuContinuation continuation = default;
 			IGuestThreadBlockWaiter? blockWaiter = null;
 			var resumeContinuation = false;
-			lock (_guestThreadGate)
+			using (LockGate("RunGuestThread.block"))
 			{
 				if (thread.HasBlockedContinuation)
 				{
@@ -3648,7 +3680,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var exitReason = resumeContinuation
 				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
-			lock (_guestThreadGate)
+			using (LockGate("RunGuestThread.exit"))
 			{
 				switch (exitReason)
 				{
@@ -4401,6 +4433,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return 20;
 	}
 
+	// SHARPEMU_PERIODIC_SNAPSHOT_SECONDS=N: dump the stall snapshot every N
+	// seconds regardless of progress, for diagnosing soft stalls where imports
+	// keep flowing but the game stops advancing.
+	private static int GetPeriodicSnapshotSeconds()
+	{
+		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PERIODIC_SNAPSHOT_SECONDS"), out var result))
+		{
+			return Math.Max(0, result);
+		}
+		return 0;
+	}
+
 	private void StartStallWatchdog()
 	{
 		int stallWatchdogSeconds = GetStallWatchdogSeconds();
@@ -4430,6 +4474,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		dispatcherThread.Start();
 
 		long num = (long)((double)stallWatchdogSeconds * Stopwatch.Frequency);
+		var periodicSnapshotTicks = (long)((double)GetPeriodicSnapshotSeconds() * Stopwatch.Frequency);
+		var lastPeriodicSnapshot = Stopwatch.GetTimestamp();
 		_stallWatchdogThread = new Thread(new ThreadStart(delegate
 		{
 			while (!_stallWatchdogStop)
@@ -4438,6 +4484,58 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				if (_stallWatchdogStop)
 				{
 					break;
+				}
+				if (periodicSnapshotTicks > 0 &&
+					Stopwatch.GetTimestamp() - lastPeriodicSnapshot >= periodicSnapshotTicks)
+				{
+					lastPeriodicSnapshot = Stopwatch.GetTimestamp();
+					var gateOwnerSite = _gateOwnerSite;
+					var gateOwnerTid = Volatile.Read(ref _gateOwnerManagedThreadId);
+					var gateHeldMs = gateOwnerSite is null
+						? 0.0
+						: Stopwatch.GetElapsedTime(Volatile.Read(ref _gateAcquireTimestamp)).TotalMilliseconds;
+					var snapshotText = new System.Text.StringBuilder();
+					snapshotText.AppendLine(
+						$"[LOADER][DIAG] Periodic snapshot: gate_owner={gateOwnerSite ?? "none"} " +
+						$"gate_tid={gateOwnerTid} gate_held_ms={gateHeldMs:0}");
+					// Never touch the gate here: the periodic snapshot must keep
+					// reporting even (especially) when the gate is wedged.
+					// Dump guest threads without the lock; tolerate torn reads.
+					try
+					{
+						foreach (var thread in _guestThreads.Values)
+						{
+							snapshotText.AppendLine(
+								$"[LOADER][DIAG] gateless guest-thread: handle=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
+								$"state={thread.State} imports={Interlocked.Read(ref thread.ImportCount)} " +
+								$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
+								$"block={thread.BlockReason ?? "none"} wake={thread.BlockWakeKey ?? "none"}");
+						}
+					}
+					catch (Exception snapshotError)
+					{
+						snapshotText.AppendLine($"[LOADER][DIAG] gateless snapshot failed: {snapshotError.Message}");
+					}
+
+					// Console can be wedged by whatever is being diagnosed, so
+					// write to a side file when one is configured and fall back
+					// to stderr otherwise.
+					var snapshotPath = Environment.GetEnvironmentVariable("SHARPEMU_PERIODIC_SNAPSHOT_FILE");
+					if (!string.IsNullOrWhiteSpace(snapshotPath))
+					{
+						try
+						{
+							System.IO.File.AppendAllText(snapshotPath, snapshotText.ToString());
+						}
+						catch
+						{
+						}
+					}
+					else
+					{
+						Console.Error.Write(snapshotText.ToString());
+						Console.Error.Flush();
+					}
 				}
 				long num2 = Stopwatch.GetTimestamp() - Volatile.Read(ref _lastProgressTimestamp);
 				if (num2 < num)
@@ -4487,7 +4585,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private bool HasReadyGuestThread()
 	{
 		WakeExpiredBlockedGuestThreads();
-		lock (_guestThreadGate)
+		using (LockGate("HasReadyGuestThread"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
