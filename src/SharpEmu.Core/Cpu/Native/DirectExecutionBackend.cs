@@ -139,9 +139,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const ulong GuestImageScanEnd = 36507222016uL;
 
-	private const ulong GuestThreadStackBaseAddress = 0x7FFF_E000_0000UL;
+	// The 0x7FFx window is Windows-specific; dyld and Rosetta reserve that
+	// range on macOS, so POSIX guest threads use the lower 0x6FFx window.
+	private static readonly ulong GuestThreadStackBaseAddress =
+		OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_E000_0000UL;
 
-	private const ulong GuestThreadTlsBaseAddress = 0x7FFE_0000_0000UL;
+	private static readonly ulong GuestThreadTlsBaseAddress =
+		OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
 
 	private const ulong GuestThreadStackSize = 0x0020_0000UL;
 
