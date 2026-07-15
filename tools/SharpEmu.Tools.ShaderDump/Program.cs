@@ -199,7 +199,6 @@ foreach (var (name, expectTranslate, words) in testPrograms)
     var evaluation = new Gen5ShaderEvaluation(
         new uint[256],
         new uint[256],
-        new Dictionary<uint, IReadOnlyList<uint>>(),
         Array.Empty<Gen5ImageBinding>(),
         globalBindings);
 
