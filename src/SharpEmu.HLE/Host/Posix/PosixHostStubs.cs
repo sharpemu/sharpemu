@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
-using SharpEmu.HLE;
 
-namespace SharpEmu.Core.Cpu.Native;
+namespace SharpEmu.HLE.Host.Posix;
 
 /// <summary>
 /// POSIX replacements for the kernel32 helpers the native backend embeds in
@@ -98,11 +97,11 @@ internal static unsafe class PosixHostStubs
     /// </summary>
     public static nint CreateWin64ToSysVThunk(nint sysvTarget)
     {
-        var page = (byte*)HostMemory.Alloc(
-            null,
+        var memory = HostPlatform.Current.Memory;
+        var page = (byte*)memory.Allocate(
+            0,
             4096,
-            HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE,
-            HostMemory.PAGE_EXECUTE_READWRITE);
+            HostPageProtection.ReadWriteExecute);
         if (page == null)
         {
             throw new OutOfMemoryException("Failed to allocate Win64->SysV thunk page");
@@ -123,12 +122,12 @@ internal static unsafe class PosixHostStubs
         Emit(page, ref offset, 0x5F);                   // pop rdi
         Emit(page, ref offset, 0xC3);                   // ret
 
-        if (!HostMemory.Protect(page, 4096, HostMemory.PAGE_EXECUTE_READ, out _))
+        if (!memory.Protect((ulong)page, 4096, HostPageProtection.ReadExecute, out _))
         {
             throw new InvalidOperationException("Failed to protect Win64->SysV thunk page");
         }
 
-        HostMemory.FlushInstructionCache(page, (nuint)offset);
+        memory.FlushInstructionCache((ulong)page, (ulong)offset);
         return (nint)page;
     }
 
@@ -153,11 +152,11 @@ internal static unsafe class PosixHostStubs
 
     private static void BuildStubs()
     {
-        var page = (byte*)HostMemory.Alloc(
-            null,
+        var memory = HostPlatform.Current.Memory;
+        var page = (byte*)memory.Allocate(
+            0,
             4096,
-            HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE,
-            HostMemory.PAGE_EXECUTE_READWRITE);
+            HostPageProtection.ReadWriteExecute);
         if (page == null)
         {
             throw new OutOfMemoryException("Failed to allocate POSIX host helper stub page");
@@ -169,12 +168,12 @@ internal static unsafe class PosixHostStubs
         _switchToThreadStub = EmitSwitchToThread(page, ref offset);
         _sleepStub = EmitSleep(page, ref offset);
 
-        if (!HostMemory.Protect(page, 4096, HostMemory.PAGE_EXECUTE_READ, out _))
+        if (!memory.Protect((ulong)page, 4096, HostPageProtection.ReadExecute, out _))
         {
             throw new InvalidOperationException("Failed to protect POSIX host helper stub page");
         }
 
-        HostMemory.FlushInstructionCache(page, (nuint)offset);
+        memory.FlushInstructionCache((ulong)page, (ulong)offset);
     }
 
     private static nint EmitTlsGetValue(byte* page, ref int offset)

@@ -11,6 +11,7 @@ namespace SharpEmu.Core.Cpu.Native.Windows;
 /// </summary>
 internal static class Win64ContextOffsets
 {
+    public const int Size = 0x4D0;
     public const int Mxcsr = 52;
     public const int Rax = 120;
     public const int Rcx = 128;

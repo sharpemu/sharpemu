@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host.Posix;
 using SharpEmu.HLE.Host.Windows;
 
 namespace SharpEmu.HLE.Host;
@@ -28,7 +29,14 @@ public static class HostPlatform
             return new WindowsHostPlatform();
         }
 
+        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
+            RuntimeInformation.ProcessArchitecture == Architecture.X64)
+        {
+            return new PosixHostPlatform();
+        }
+
         throw new PlatformNotSupportedException(
-            "SharpEmu native guest execution requires a host platform backend and none exists for this OS/architecture yet (currently Windows x64 only).");
+            "SharpEmu native guest execution requires an x86-64 process on Windows, Linux, or macOS. " +
+            "On Apple Silicon, use the osx-x64 build under Rosetta 2.");
     }
 }

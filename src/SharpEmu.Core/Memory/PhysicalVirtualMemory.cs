@@ -367,7 +367,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitWriteLock();
         }
 
-        VirtualFree((void*)address, 0, MEM_RELEASE);
+        _hostMemory.Free(address);
     }
 
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)

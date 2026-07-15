@@ -13,6 +13,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
   </ItemGroup>
 

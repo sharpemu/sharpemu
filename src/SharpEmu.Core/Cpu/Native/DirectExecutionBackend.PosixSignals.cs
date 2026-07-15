@@ -4,6 +4,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using SharpEmu.Core.Cpu.Native.Windows;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -131,8 +132,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			// action and sigaction(0, ...) fails with EINVAL).
 			EXCEPTION_RECORD record = default;
 			record.ExceptionCode = DBG_PRINTEXCEPTION_C;
-			byte* contextRecord = stackalloc byte[Win64ContextSize];
-			new Span<byte>(contextRecord, Win64ContextSize).Clear();
+			byte* contextRecord = stackalloc byte[Win64ContextOffsets.Size];
+			new Span<byte>(contextRecord, Win64ContextOffsets.Size).Clear();
 			EXCEPTION_POINTERS pointers;
 			pointers.ExceptionRecord = &record;
 			pointers.ContextRecord = contextRecord;
@@ -216,8 +217,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			return false;
 		}
 
-		byte* contextRecord = stackalloc byte[Win64ContextSize];
-		new Span<byte>(contextRecord, Win64ContextSize).Clear();
+		byte* contextRecord = stackalloc byte[Win64ContextOffsets.Size];
+		new Span<byte>(contextRecord, Win64ContextOffsets.Size).Clear();
 		int[] offsets = PosixRegisterOffsets;
 		for (int i = 0; i < offsets.Length; i++)
 		{

@@ -14,6 +14,7 @@ using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Posix;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -612,8 +613,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly RawExceptionHandlerDelegate RawVectoredHandlerDelegateInstance = RawVectoredHandlerManaged;
 	private static readonly RawExceptionHandlerDelegate RawUnhandledFilterDelegateInstance = RawUnhandledFilterManaged;
 
-	private static readonly nint ImportGatewayPtr =
-		Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance);
+	private static readonly nint ImportGatewayPtr = ResolveImportGatewayPtr();
+
+	// Emitted import trampolines use the Win64 ABI. Managed callbacks use the
+	// host ABI, so POSIX needs a small Win64-to-SysV register-shuffling thunk.
+	private static nint ResolveImportGatewayPtr()
+	{
+		var managedPtr = Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance);
+		return OperatingSystem.IsWindows()
+			? managedPtr
+			: PosixHostStubs.CreateWin64ToSysVThunk(managedPtr);
+	}
 
 	private static readonly nint RawVectoredHandlerPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawVectoredHandlerDelegateInstance);
@@ -867,7 +877,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_hostThreading = _hostPlatform.Threading;
 		_hostSymbols = _hostPlatform.Symbols;
 		_hostMemory = _hostPlatform.Memory;
-		_faultHandling = faultHandling ?? new WindowsFaultHandling(_hostMemory);
+		_faultHandling = faultHandling ?? (OperatingSystem.IsWindows()
+			? new WindowsFaultHandling(_hostMemory)
+			: NullHostFaultHandling.Instance);
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = _hostThreading.AllocateTlsSlot();

@@ -3,122 +3,157 @@
 
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.HLE;
+namespace SharpEmu.HLE.Host.Posix;
 
 /// <summary>
-/// Cross-platform host virtual memory API with Win32 semantics.
-/// On Windows this forwards directly to kernel32. On POSIX systems it is
-/// implemented over mmap/mprotect/munmap with a shadow region table that
-/// answers VirtualQuery-style questions and tracks page protections.
+/// POSIX virtual memory backend implemented over mmap/mprotect/munmap with a
+/// shadow region table that answers VirtualQuery-style questions and tracks
+/// page protections.
 /// POSIX anonymous mappings are demand-paged by the kernel, so Win32
 /// "reserve-only" regions are mapped as committed memory directly and
 /// commit requests become protection changes.
 /// </summary>
-public static unsafe class HostMemory
+internal sealed unsafe class PosixHostMemory : IHostMemory
 {
-    public const uint MEM_COMMIT = 0x1000;
-    public const uint MEM_RESERVE = 0x2000;
-    public const uint MEM_RELEASE = 0x8000;
-    public const uint MEM_FREE_STATE = 0x10000;
-    public const uint MEM_PRIVATE = 0x20000;
+    private const uint MEM_COMMIT = 0x1000;
+    private const uint MEM_RESERVE = 0x2000;
+    private const uint MEM_RELEASE = 0x8000;
+    private const uint MEM_FREE_STATE = 0x10000;
+    private const uint MEM_PRIVATE = 0x20000;
 
-    public const uint PAGE_NOACCESS = 0x01;
-    public const uint PAGE_READONLY = 0x02;
-    public const uint PAGE_READWRITE = 0x04;
-    public const uint PAGE_EXECUTE = 0x10;
-    public const uint PAGE_EXECUTE_READ = 0x20;
-    public const uint PAGE_EXECUTE_READWRITE = 0x40;
+    private const uint PAGE_NOACCESS = 0x01;
+    private const uint PAGE_READONLY = 0x02;
+    private const uint PAGE_READWRITE = 0x04;
+    private const uint PAGE_EXECUTE = 0x10;
+    private const uint PAGE_EXECUTE_READ = 0x20;
+    private const uint PAGE_EXECUTE_READWRITE = 0x40;
 
     private const ulong PageSize = 0x1000;
 
-    /// <summary>Win32 MEMORY_BASIC_INFORMATION (64-bit) layout.</summary>
-    public struct BasicInfo
+    private struct BasicInfo
     {
         public ulong BaseAddress;
         public ulong AllocationBase;
         public uint AllocationProtect;
-        public uint Alignment1;
         public ulong RegionSize;
         public uint State;
         public uint Protect;
         public uint Type;
-        public uint Alignment2;
     }
 
-    public static void* Alloc(void* address, nuint size, uint allocationType, uint protect)
+    public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
     {
-        if (OperatingSystem.IsWindows())
+        return (ulong)Posix.Alloc(
+            (void*)desiredAddress,
+            (nuint)size,
+            MEM_COMMIT | MEM_RESERVE,
+            ToNativeProtection(protection));
+    }
+
+    public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection)
+    {
+        return (ulong)Posix.Alloc(
+            (void*)desiredAddress,
+            (nuint)size,
+            MEM_RESERVE,
+            ToNativeProtection(protection));
+    }
+
+    public bool Commit(ulong address, ulong size, HostPageProtection protection)
+    {
+        return Posix.Alloc(
+            (void*)address,
+            (nuint)size,
+            MEM_COMMIT,
+            ToNativeProtection(protection)) != null;
+    }
+
+    public bool Free(ulong address)
+    {
+        return Posix.Free((void*)address, 0, MEM_RELEASE);
+    }
+
+    public bool Protect(
+        ulong address,
+        ulong size,
+        HostPageProtection protection,
+        out uint rawOldProtection)
+    {
+        return Posix.Protect(
+            (void*)address,
+            (nuint)size,
+            ToNativeProtection(protection),
+            out rawOldProtection);
+    }
+
+    public bool ProtectRaw(
+        ulong address,
+        ulong size,
+        uint rawProtection,
+        out uint rawOldProtection)
+    {
+        return Posix.Protect(
+            (void*)address,
+            (nuint)size,
+            rawProtection,
+            out rawOldProtection);
+    }
+
+    public bool Query(ulong address, out HostRegionInfo info)
+    {
+        if (Posix.Query((void*)address, out var nativeInfo) == 0)
         {
-            return Win32VirtualAlloc(address, size, allocationType, protect);
+            info = default;
+            return false;
         }
 
-        return Posix.Alloc(address, size, allocationType, protect);
+        info = new HostRegionInfo(
+            nativeInfo.BaseAddress,
+            nativeInfo.AllocationBase,
+            nativeInfo.RegionSize,
+            nativeInfo.State switch
+            {
+                MEM_COMMIT => HostRegionState.Committed,
+                MEM_RESERVE => HostRegionState.Reserved,
+                _ => HostRegionState.Free,
+            },
+            nativeInfo.State,
+            ToHostProtection(nativeInfo.Protect),
+            nativeInfo.Protect,
+            nativeInfo.AllocationProtect);
+        return true;
     }
 
-    public static bool Free(void* address, nuint size, uint freeType)
+    public void FlushInstructionCache(ulong address, ulong size)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return Win32VirtualFree(address, size, freeType);
-        }
-
-        return Posix.Free(address, size, freeType);
+        _ = address;
+        _ = size;
+        // The supported POSIX process is x86-64 (including Rosetta 2), whose
+        // instruction cache is coherent. A future arm64 backend must call the
+        // platform instruction-cache invalidation API here.
     }
 
-    public static bool Protect(void* address, nuint size, uint newProtect, out uint oldProtect)
+    private static uint ToNativeProtection(HostPageProtection protection) => protection switch
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return Win32VirtualProtect(address, size, newProtect, out oldProtect);
-        }
+        HostPageProtection.NoAccess => PAGE_NOACCESS,
+        HostPageProtection.ReadOnly => PAGE_READONLY,
+        HostPageProtection.ReadWrite => PAGE_READWRITE,
+        HostPageProtection.Execute => PAGE_EXECUTE,
+        HostPageProtection.ReadExecute => PAGE_EXECUTE_READ,
+        HostPageProtection.ReadWriteExecute => PAGE_EXECUTE_READWRITE,
+        HostPageProtection.ExecuteWriteCopy => PAGE_EXECUTE_READWRITE,
+        _ => throw new ArgumentOutOfRangeException(nameof(protection), protection, null),
+    };
 
-        return Posix.Protect(address, size, newProtect, out oldProtect);
-    }
-
-    public static nuint Query(void* address, out BasicInfo info)
+    private static HostPageProtection ToHostProtection(uint protection) => protection switch
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return Win32VirtualQuery(address, out info, (nuint)sizeof(BasicInfo));
-        }
-
-        return Posix.Query(address, out info);
-    }
-
-    public static void FlushInstructionCache(void* address, nuint size)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            Win32FlushInstructionCache(Win32GetCurrentProcess(), address, size);
-            return;
-        }
-
-        // The emulator only executes x86-64 guest code, so a non-Windows host
-        // is either x86-64 (including Rosetta 2 translation) with a coherent
-        // instruction cache, or would need sys_icache_invalidate for a future
-        // arm64 recompiler. Nothing to do today.
-    }
-
-    [DllImport("kernel32.dll", EntryPoint = "VirtualAlloc", SetLastError = true)]
-    private static extern void* Win32VirtualAlloc(void* lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
-
-    [DllImport("kernel32.dll", EntryPoint = "VirtualFree", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool Win32VirtualFree(void* lpAddress, nuint dwSize, uint dwFreeType);
-
-    [DllImport("kernel32.dll", EntryPoint = "VirtualProtect", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool Win32VirtualProtect(void* lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
-
-    [DllImport("kernel32.dll", EntryPoint = "VirtualQuery")]
-    private static extern nuint Win32VirtualQuery(void* lpAddress, out BasicInfo lpBuffer, nuint dwLength);
-
-    [DllImport("kernel32.dll", EntryPoint = "GetCurrentProcess")]
-    private static extern void* Win32GetCurrentProcess();
-
-    [DllImport("kernel32.dll", EntryPoint = "FlushInstructionCache")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool Win32FlushInstructionCache(void* hProcess, void* lpBaseAddress, nuint dwSize);
+        PAGE_READONLY => HostPageProtection.ReadOnly,
+        PAGE_READWRITE => HostPageProtection.ReadWrite,
+        PAGE_EXECUTE => HostPageProtection.Execute,
+        PAGE_EXECUTE_READ => HostPageProtection.ReadExecute,
+        PAGE_EXECUTE_READWRITE => HostPageProtection.ReadWriteExecute,
+        _ => HostPageProtection.NoAccess,
+    };
 
     private static class Posix
     {

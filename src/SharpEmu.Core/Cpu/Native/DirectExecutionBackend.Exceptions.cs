@@ -848,7 +848,7 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	private unsafe bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
 		if (address < 65536)
 		{
@@ -861,9 +861,9 @@ public sealed partial class DirectExecutionBackend
 			ulong end = address + (ulong)buffer.Length;
 			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
 			{
-				if (VirtualQuery((void*)page, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-					mbi.State != MEM_COMMIT ||
-					!IsReadableProtection(mbi.Protect))
+				if (!_hostMemory.Query(page, out var mbi) ||
+					mbi.State != HostRegionState.Committed ||
+					!IsReadableProtection(mbi.RawProtection))
 				{
 					return false;
 				}
