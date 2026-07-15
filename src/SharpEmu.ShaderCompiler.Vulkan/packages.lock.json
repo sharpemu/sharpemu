@@ -5,7 +5,7 @@
       "sharpemu.hle": {
         "type": "Project",
         "dependencies": {
-          "SharpEmu.Logging": "[1.0.0, )"
+          "SharpEmu.Logging": "[0.0.1, )"
         }
       },
       "sharpemu.logging": {
@@ -14,7 +14,7 @@
       "sharpemu.shadercompiler": {
         "type": "Project",
         "dependencies": {
-          "SharpEmu.HLE": "[1.0.0, )"
+          "SharpEmu.HLE": "[0.0.1, )"
         }
       }
     }

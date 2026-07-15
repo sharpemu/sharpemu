@@ -8,7 +8,6 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Agc;
