@@ -1,0 +1,146 @@
+{
+  "_languageName": "Hungarian",
+
+  "Page.Library": "Könyvtár",
+  "Page.Options": "Beállítások",
+  "Page.GameCount.One": "1 játék",
+  "Page.GameCount.Other": "{0} játékok",
+
+  "Library.SearchWatermark": "Keresés a könyvtárban",
+  "Library.AddFolder": "＋ Mappa hozzáadása",
+  "Library.Rescan": "⟳ Újrakeresés",
+  "Library.OpenFile": "Fájl megnyitása…",
+
+  "Library.Context.Launch": "Inditás",
+  "Library.Context.OpenFolder": "Játékmappa megnyitása",
+  "Library.Context.CopyPath": "Elérési út másolása",
+  "Library.Context.CopyTitleId": "Cím ID másolása",
+  "Library.Context.Remove": "Eltávolítás a Könyvtárból",
+
+  "Library.Empty.Title": "A könyvtárad üres",
+  "Library.Empty.Hint": "Add meg a játékaidat tartalmazó mappát a kezdáshez.",
+  "Library.Empty.SearchTitle": "Nincs találat a elemre",
+  "Library.Empty.SearchHint": "A könyvtárban nincs olyan elem, amely egyezne a „{0}” kifejezéssel.",
+  "Library.Empty.AddFolder": "＋ Játékmappa hozzáadása",
+
+  "Library.Loading": "Könyvtár betöltése",
+
+  "Options.General": "Általános",
+  "Options.Env.Tab": "Környezet",
+  "Options.Section.Environment": "KÖRNYEZETI VÁLTOZÓK",
+  "Options.Env.Desc": "Indításkor környezeti változóként az emulátorhoz átadott kapcsolók.",
+  "Options.Env.Bthid.Desc": "Jelenti, amely címeknél a Bluetooth HID nem elérhető, amelyeknél a kormány/FFB-közbenső szoftver végtelenül lekérdezi az adatokat.\nNormál esetben hagyja ki. Egyes címek lefagyanak, ha az inicializálás sikertelen.",
+  "Options.Env.LoopGuard.Desc": "Ne erőltesse a kilépést azoknál a címeknél, amelyek túl sokáig ismételnek ugyanazt a hívást.\nPróbálja ki ezt, ha egy játék betöltés közben magától kilép.",
+  "Options.Env.VkValidation.Desc": "Engedélyezze a Vulkan-érvényesítési rétegeket a GPU hibakereséshez.\nLassú. A Vulkan SDK telepítését igényli.",
+  "Options.Env.DumpSpirv.Desc": "Az AGC-shaderek és azok SPIR-V-fordításainak mentése a shader-dumps mappába.\nHasználd shader- vagy renderelési hibák jelentésekor.",
+  "Options.Env.LogDirectMemory.Desc": "A közvetlen memóriaallokációk és hibák naplózása a konzolra.\nHasználd, ha egy játék a rendszerindítás során megszakad vagy kilép.",
+  "Options.Env.LogNp.Desc": "Az NP (PlayStation Network) könyvtárhívásokat naplózza a konzolra.",
+  "Options.Section.Emulation": "EMULÁCIÓ",
+  "Options.Section.Logging": "LOGOLÁS",
+  "Options.Section.Launcher": "INDITÓ",
+
+  "Options.CpuEngine.Label": "CPU motor",
+  "Options.CpuEngine.Desc": "A játék kódjának futtatásához használt végrehajtó motor.",
+  "Options.CpuEngine.Native": "Natív",
+
+  "Options.Strict.Label": "Szigorú dynlib felbontás",
+  "Options.Strict.Desc": "Indítás megszakítása, ha egy importált szimbólum nem oldható fel.",
+
+  "Options.LogLevel.Label": "Naplózási szint",
+  "Options.LogLevel.Desc": "Az emulátor konzol kimenetének részletessége.",
+  "Options.LogLevel.Trace": "Trace",
+  "Options.LogLevel.Debug": "Debug",
+  "Options.LogLevel.Info": "Információ",
+  "Options.LogLevel.Warning": "Figyelmeztetés",
+  "Options.LogLevel.Error": "Hiba",
+  "Options.LogLevel.Critical": "Kritikus",
+
+  "Options.TraceImports.Label": "Import trace limit",
+  "Options.TraceImports.Desc": "Az első N darab import nyomon követése modulonként (0 = ki).",
+
+  "Options.LogToFile.Label": "Naplozás fájlba",
+  "Options.LogToFile.Desc": "Az emulátor kimenetének tükrözése egy log fájlba.",
+
+  "Options.LogFilePath.Label": "Naplófájl elérési útja",
+  "Options.LogFilePath.Default": "Nincs egyéni út — a logok az emulátor melletti user/logs mappába kerülnek.",
+  "Options.LogFilePath.Select": "Kiválasztás…",
+
+  "Options.OverrideLogFile.Label": "Naplófájl felülírása",
+  "Options.OverrideLogFile.Desc": "A pontos fájlútvonal használata a cím ID és időbélyeg hozzáfűzése helyett.",
+
+  "Options.TitleMusic.Label": "Címzene",
+  "Options.TitleMusic.Desc": "A kiválasztott játék előnézeti zenéjének ismétlése a könyvtárban.",
+
+  "Options.Discord.Label": "Discord jelenlét",
+  "Options.Discord.Desc": "A futó játék megjelenítése a Discord profilodon.",
+
+  "Options.Language.Label": "Emulátor nyelve",
+  "Options.Language.Desc": "Az indítóban használt nyelv. Azonnal érvénybe lép.",
+
+  "Common.On": "Be",
+  "Common.Off": "Ki",
+
+  "Console.Title": "KONZOL",
+  "Console.SearchWatermark": "Keresés...",
+  "Console.AutoScroll": "Automatikus görgetés",
+  "Console.Split": "Felosztás",
+  "Console.Copy": "Másolás",
+  "Console.Clear": "Törlés",
+  "Console.WindowTitle": "SharpEmu Konzol",
+
+  "Launch.NoGameSelected": "Nincs játék kiválasztva",
+  "Launch.NoGameHint": "Válassz egy játékot a könyvtárból, vagy nyiss meg közvetlenül egy eboot.bin fájlt.",
+  "Launch.Idle": "Tétlen",
+  "Launch.Console": "≡ Konzol",
+  "Launch.Launch": "▶  Inditás",
+  "Launch.Stop": "■  Leállítás",
+  "Launch.Running": "Fut — {0}",
+  "Launch.Stopping": "Leállítás…",
+  "Launch.Exited": "Kilépett a következő kóddal: {0} ({1})",
+  "Launch.ExeNotFound": "A SharpEmu futtatható fájl nem található. Előbb építsd fel a SharpEmu.CLI projektet (dotnet build).",
+  "Launch.LogFile": "Naplófájl: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Nem sikerült elindítani az emulátort: {0}",
+  "Launch.ProcessExited": "A folyamat kilépett a következő kóddal: {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "nemérvényes argumentumok",
+  "Exit.EbootNotFound": "eboot nem található",
+  "Exit.RuntimeException": "runtime exception",
+  "Exit.EmulationError": "emulációs hiba",
+  "Exit.Unknown": "ismeretlen",
+
+  "Status.EmulatorLocating": "Emulátor: keresés…",
+  "Status.EmulatorPath": "Emulátor: {0}",
+  "Status.EmulatorNotFound": "Emulátor: a SharpEmu futtatható fájl nem található — előbb építsd fel a SharpEmu.CLI-t.",
+  "Status.ScanningLibrary": "Könyvtár beolvasása…",
+  "Status.AddFolderPrompt": "Adj hozzá egy játékmappát a könyvtár feltöltéséhez.",
+  "Status.LibraryScanned": "Könyvtár beolvasva: {0} játék {1} mappában.",
+  "Status.CouldNotOpenFolder": "Nem sikerült megnyitni a mappát: {0}",
+  "Status.CopiedToClipboard": "{0} másolva a vágólapra.",
+  "Status.RemovedFromLibrary": "„{0}” eltávolítva a könyvtárból. A visszaállításához add hozzá újra a mappáját.",
+  "Status.Running": "Fut {0}",
+  "Status.Stopping": "Leállítás…",
+  "Status.Idle": "Nyugodt",
+
+  "Clipboard.Path": "Út",
+  "Clipboard.TitleId": "Cím ID",
+
+  "Discord.Playing": "Játékban {0}",
+  "Discord.Browsing": "Böngéssz a könyvtárban",
+
+  "Dialog.ChooseGameFolder": "Válassz egy mappát ami a játékaidat tartalmazza",
+  "Dialog.OpenExecutable": "Futtatható fájl megnyitása az indításhoz",
+  "Dialog.PsExecutables": "PS futtatható fájlok",
+  "Dialog.SaveLogFile": "Válaszd ki, hogy hova szeretnéd menteni a napló fájlokat",
+  "Dialog.PlainTextFiles": "Egyszerű szöveges fájlok",
+  "Dialog.LogFiles": "Naplózási fájlok",
+
+  "Options.About" : "Erről",
+  "About.Github.Label": "GitHub",
+  "About.Github.Desc": "Forrás kód, hibajelentések és a projekt fejlesztése.",
+  "About.Discord.Label": "Discord",
+  "About.Discord.Desc": "Csatlakozz a közösséghe, kérj segítéget és kövesd nyomon a fejlesztést.",
+  "About.GithubButton": "Járulj hozzá GitHubon!",
+  "About.DiscordButton": "Csatlakozz a Discordunhoz!"
+}
