@@ -535,8 +535,7 @@ public sealed partial class DirectExecutionBackend
 					out var blockContinuation,
 					out var hasBlockContinuation,
 					out var blockWakeKey,
-					out var blockResumeHandler,
-					out var blockWakeHandler,
+					out var blockWaiter,
 					out var blockDeadlineTimestamp) &&
 				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
 			{
@@ -546,8 +545,7 @@ public sealed partial class DirectExecutionBackend
 						GuestThreadExecution.CurrentGuestThreadHandle,
 						blockContinuation,
 						blockWakeKey,
-						blockResumeHandler,
-						blockWakeHandler,
+						blockWaiter,
 						blockDeadlineTimestamp);
 				}
 
@@ -678,8 +676,7 @@ public sealed partial class DirectExecutionBackend
 				out var blockContinuation,
 				out var hasBlockContinuation,
 				out var blockWakeKey,
-				out var blockResumeHandler,
-				out var blockWakeHandler,
+				out var blockWaiter,
 				out var blockDeadlineTimestamp) &&
 			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
 		{
@@ -689,8 +686,7 @@ public sealed partial class DirectExecutionBackend
 					GuestThreadExecution.CurrentGuestThreadHandle,
 					blockContinuation,
 					blockWakeKey,
-					blockResumeHandler,
-					blockWakeHandler,
+					blockWaiter,
 					blockDeadlineTimestamp);
 			}
 

@@ -61,10 +61,34 @@ public static class KernelPthreadCompatExports
         public string WakeKey { get; } = "pthread_mutex#" + Interlocked.Increment(ref _nextMutexWakeId).ToString("X");
     }
 
-    private sealed class PthreadMutexWaiter
+    private sealed class PthreadMutexWaiter : IGuestThreadBlockWaiter
     {
         public required ulong ThreadId { get; init; }
+        public required CpuContext Ctx { get; init; }
+        public required ulong MutexAddress { get; init; }
+        public required ulong ResolvedAddress { get; init; }
+        public required PthreadMutexState State { get; init; }
         public int Reserved;
+
+        public int Resume() => CompleteBlockedMutexLock(Ctx, MutexAddress, ResolvedAddress, State, this);
+
+        public bool TryWake() => TryReserveBlockedMutexLock(Ctx, MutexAddress, ResolvedAddress, State, this);
+    }
+
+    private sealed class PthreadCondWaiter : IGuestThreadBlockWaiter
+    {
+        public required CpuContext Ctx { get; init; }
+        public required ulong CondAddress { get; init; }
+        public required ulong MutexAddress { get; init; }
+        public required PthreadCondState State { get; init; }
+        public required ulong ObservedEpoch { get; init; }
+        public required bool Timed { get; init; }
+        public required int ReleasedRecursion { get; init; }
+        public required bool PosixResult { get; init; }
+
+        public int Resume() => ResumePthreadCondWait(Ctx, CondAddress, MutexAddress, State, ObservedEpoch, Timed, ReleasedRecursion, PosixResult);
+
+        public bool TryWake() => State.SignalEpoch != ObservedEpoch;
     }
 
     private sealed class PthreadCondState
@@ -724,7 +748,6 @@ public static class KernelPthreadCompatExports
         if (!acquired)
         {
             TraceContendedMutex(ctx, mutexAddress, resolvedAddress, state, currentThreadId);
-            var waiter = new PthreadMutexWaiter { ThreadId = currentThreadId };
             // Fibers retain the synchronous fallback to preserve switch state.
             var currentFiber = FiberExports.GetCurrentFiberAddressForDiagnostics(ctx);
             var canCooperativelyBlock = _enableMutexLockBlocking || currentFiber == 0;
@@ -736,8 +759,14 @@ public static class KernelPthreadCompatExports
                     ctx,
                     "pthread_mutex_lock",
                     state.WakeKey,
-                    () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
-                    () => TryReserveBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter)))
+                    new PthreadMutexWaiter
+                    {
+                        ThreadId = currentThreadId,
+                        Ctx = ctx,
+                        MutexAddress = mutexAddress,
+                        ResolvedAddress = resolvedAddress,
+                        State = state,
+                    }))
             {
                 TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1363,8 +1392,17 @@ public static class KernelPthreadCompatExports
                     ctx,
                     timed ? "pthread_cond_timedwait" : "pthread_cond_wait",
                     state.WakeKey,
-                    () => ResumePthreadCondWait(ctx, condAddress, mutexAddress, state, observedEpoch, timed, releasedRecursion, posixResult),
-                    () => state.SignalEpoch != observedEpoch,
+                    new PthreadCondWaiter
+                    {
+                        Ctx = ctx,
+                        CondAddress = condAddress,
+                        MutexAddress = mutexAddress,
+                        State = state,
+                        ObservedEpoch = observedEpoch,
+                        Timed = timed,
+                        ReleasedRecursion = releasedRecursion,
+                        PosixResult = posixResult,
+                    },
                     timed ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec)) : 0))
             {
                 TracePthreadCond(timed ? "wait-block-timed" : "wait-block", condAddress, mutexAddress, state, timed, waitResult);

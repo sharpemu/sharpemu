@@ -36,6 +36,19 @@ public static class KernelEventQueueCompatExports
         short Filter,
         ulong UserData);
 
+    private sealed class EqueueWaiter : IGuestThreadBlockWaiter
+    {
+        public required CpuContext Ctx { get; init; }
+        public required ulong Handle { get; init; }
+        public required ulong EventsAddress { get; init; }
+        public required int EventCapacity { get; init; }
+        public required ulong OutCountAddress { get; init; }
+
+        public int Resume() => ResumeWaitEqueue(Ctx, Handle, EventsAddress, EventCapacity, OutCountAddress);
+
+        public bool TryWake() => HasPendingEvents(Handle);
+    }
+
     [SysAbiExport(
         Nid = "D0OdFMjp46I",
         ExportName = "sceKernelCreateEqueue",
@@ -347,8 +360,14 @@ public static class KernelEventQueueCompatExports
                 ctx,
                 "sceKernelWaitEqueue",
                 GetEventQueueWakeKey(handle),
-                () => ResumeWaitEqueue(ctx, handle, eventsAddress, eventCapacity, outCountAddress),
-                () => HasPendingEvents(handle)))
+                new EqueueWaiter
+                {
+                    Ctx = ctx,
+                    Handle = handle,
+                    EventsAddress = eventsAddress,
+                    EventCapacity = eventCapacity,
+                    OutCountAddress = outCountAddress,
+                }))
         {
             TraceEventQueue(ctx, "wait-block", handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;

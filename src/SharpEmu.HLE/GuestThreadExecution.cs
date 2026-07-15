@@ -23,6 +23,20 @@ public readonly record struct GuestThreadSnapshot(
     ulong LastReturnRip,
     string? BlockReason);
 
+/// <summary>
+/// Continuation state for a blocked guest thread, replacing the closure pair a blocking
+/// wait used to allocate. TryWake runs under the scheduler's guest-thread gate and
+/// returns true when the waiter has a final result and the thread should be re-readied;
+/// false leaves it parked. Resume runs later on the woken thread outside that gate, and
+/// its return value becomes the guest's RAX for the resumed call.
+/// </summary>
+public interface IGuestThreadBlockWaiter
+{
+    int Resume();
+
+    bool TryWake();
+}
+
 public interface IGuestThreadScheduler
 {
     bool SupportsGuestContextTransfer { get; }
@@ -106,10 +120,7 @@ public static class GuestThreadExecution
     private static string? _pendingBlockWakeKey;
 
     [ThreadStatic]
-    private static Func<int>? _pendingBlockResumeHandler;
-
-    [ThreadStatic]
-    private static Func<bool>? _pendingBlockWakeHandler;
+    private static IGuestThreadBlockWaiter? _pendingBlockWaiter;
 
     [ThreadStatic]
     private static long _pendingBlockDeadlineTimestamp;
@@ -157,8 +168,7 @@ public static class GuestThreadExecution
         _pendingBlockContinuationValid = false;
         _pendingBlockContinuation = default;
         _pendingBlockWakeKey = null;
-        _pendingBlockResumeHandler = null;
-        _pendingBlockWakeHandler = null;
+        _pendingBlockWaiter = null;
         _pendingBlockDeadlineTimestamp = 0;
         _pendingEntryExit = false;
         _pendingEntryExitValue = 0;
@@ -179,8 +189,7 @@ public static class GuestThreadExecution
         _pendingBlockContinuationValid = false;
         _pendingBlockContinuation = default;
         _pendingBlockWakeKey = null;
-        _pendingBlockResumeHandler = null;
-        _pendingBlockWakeHandler = null;
+        _pendingBlockWaiter = null;
         _pendingBlockDeadlineTimestamp = 0;
         _pendingEntryExit = false;
         _pendingEntryExitValue = 0;
@@ -211,8 +220,7 @@ public static class GuestThreadExecution
         CpuContext? context,
         string reason,
         string? wakeKey = null,
-        Func<int>? resumeHandler = null,
-        Func<bool>? wakeHandler = null,
+        IGuestThreadBlockWaiter? waiter = null,
         long blockDeadlineTimestamp = 0)
     {
         if (!IsGuestThread)
@@ -222,8 +230,7 @@ public static class GuestThreadExecution
 
         _pendingBlockReason = string.IsNullOrWhiteSpace(reason) ? "guest_thread_blocked" : reason;
         _pendingBlockWakeKey = string.IsNullOrWhiteSpace(wakeKey) ? _pendingBlockReason : wakeKey;
-        _pendingBlockResumeHandler = resumeHandler;
-        _pendingBlockWakeHandler = wakeHandler;
+        _pendingBlockWaiter = waiter;
         _pendingBlockDeadlineTimestamp = blockDeadlineTimestamp;
         if (context is not null && TryCaptureCurrentBlockContinuation(context, out var continuation))
         {
@@ -255,7 +262,6 @@ public static class GuestThreadExecution
             out hasContinuation,
             out _,
             out _,
-            out _,
             out _);
     }
 
@@ -264,16 +270,14 @@ public static class GuestThreadExecution
         out GuestCpuContinuation continuation,
         out bool hasContinuation,
         out string wakeKey,
-        out Func<int>? resumeHandler,
-        out Func<bool>? wakeHandler)
+        out IGuestThreadBlockWaiter? waiter)
     {
         return TryConsumeCurrentThreadBlock(
             out reason,
             out continuation,
             out hasContinuation,
             out wakeKey,
-            out resumeHandler,
-            out wakeHandler,
+            out waiter,
             out _);
     }
 
@@ -282,8 +286,7 @@ public static class GuestThreadExecution
         out GuestCpuContinuation continuation,
         out bool hasContinuation,
         out string wakeKey,
-        out Func<int>? resumeHandler,
-        out Func<bool>? wakeHandler,
+        out IGuestThreadBlockWaiter? waiter,
         out long blockDeadlineTimestamp)
     {
         reason = _pendingBlockReason ?? string.Empty;
@@ -292,8 +295,7 @@ public static class GuestThreadExecution
             continuation = default;
             hasContinuation = false;
             wakeKey = string.Empty;
-            resumeHandler = null;
-            wakeHandler = null;
+            waiter = null;
             blockDeadlineTimestamp = 0;
             return false;
         }
@@ -301,15 +303,13 @@ public static class GuestThreadExecution
         continuation = _pendingBlockContinuation;
         hasContinuation = _pendingBlockContinuationValid;
         wakeKey = _pendingBlockWakeKey ?? reason;
-        resumeHandler = _pendingBlockResumeHandler;
-        wakeHandler = _pendingBlockWakeHandler;
+        waiter = _pendingBlockWaiter;
         blockDeadlineTimestamp = _pendingBlockDeadlineTimestamp;
         _pendingBlockReason = null;
         _pendingBlockContinuation = default;
         _pendingBlockContinuationValid = false;
         _pendingBlockWakeKey = null;
-        _pendingBlockResumeHandler = null;
-        _pendingBlockWakeHandler = null;
+        _pendingBlockWaiter = null;
         _pendingBlockDeadlineTimestamp = 0;
         return true;
     }

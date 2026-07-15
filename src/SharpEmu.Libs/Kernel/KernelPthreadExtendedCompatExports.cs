@@ -164,6 +164,17 @@ public static class KernelPthreadExtendedCompatExports
         }
     }
 
+    private sealed class RwlockWaiter : IGuestThreadBlockWaiter
+    {
+        public required PthreadRwlockState Rwlock { get; init; }
+        public required ulong ThreadId { get; init; }
+        public required bool Write { get; init; }
+
+        public int Resume() => (int)OrbisGen2Result.ORBIS_GEN2_OK;
+
+        public bool TryWake() => TryAcquireBlockedRwlock(Rwlock, ThreadId, Write);
+    }
+
     private readonly record struct TlsKeyState(ulong Destructor);
 
     private readonly record struct PthreadAttrState(
@@ -1318,8 +1329,7 @@ public static class KernelPthreadExtendedCompatExports
                             ctx,
                             "pthread_rwlock_wrlock",
                             rwlock.WakeKey,
-                            static () => (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                            () => TryAcquireBlockedRwlock(rwlock, currentThreadId, write: true)))
+                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = true }))
                     {
                         transferredToScheduler = true;
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1355,8 +1365,7 @@ public static class KernelPthreadExtendedCompatExports
                             ctx,
                             "pthread_rwlock_rdlock",
                             rwlock.WakeKey,
-                            static () => (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                            () => TryAcquireBlockedRwlock(rwlock, currentThreadId, write: false)))
+                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = false }))
                     {
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }

@@ -30,14 +30,26 @@ public static class KernelSemaphoreCompatExports
         public object Gate { get; } = new();
     }
 
-    private sealed class SemaphoreWaiter
+    private sealed class SemaphoreWaiter : IGuestThreadBlockWaiter
     {
+        public required KernelSemaphoreState Semaphore { get; init; }
         public required int NeedCount { get; init; }
         public required int CancelEpochAtBlock { get; init; }
         public bool Timed { get; init; }
 
+        // Timed-wait completion state; unused when Timed is false.
+        public CpuContext? Ctx { get; init; }
+        public ulong TimeoutAddress { get; init; }
+        public long DeadlineTimestamp { get; init; }
+
         // Written and read only under the owning semaphore's Gate.
         public int? Result { get; set; }
+
+        public int Resume() => Timed
+            ? CompleteBlockedTimedSemaWait(Ctx!, Semaphore, this, TimeoutAddress, DeadlineTimestamp)
+            : CompleteBlockedSemaWait(Semaphore, this);
+
+        public bool TryWake() => TryConsumeBlockedSemaWait(Semaphore, this);
     }
 
     private static string GetSemaphoreWakeKey(uint handle) => $"kernel_sema:0x{handle:X8}";
@@ -165,16 +177,19 @@ public static class KernelSemaphoreCompatExports
                     var deadline = GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromTicks((long)timeoutMicros * 10L));
                     var timedWaiter = new SemaphoreWaiter
                     {
+                        Semaphore = semaphore,
                         NeedCount = needCount,
                         CancelEpochAtBlock = semaphore.CancelEpoch,
                         Timed = true,
+                        Ctx = ctx,
+                        TimeoutAddress = timeoutAddress,
+                        DeadlineTimestamp = deadline,
                     };
                     if (GuestThreadExecution.RequestCurrentThreadBlock(
                             ctx,
                             "sceKernelWaitSema",
                             semaphore.WakeKey,
-                            resumeHandler: () => CompleteBlockedTimedSemaWait(ctx, semaphore, timedWaiter, timeoutAddress, deadline),
-                            wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, timedWaiter),
+                            timedWaiter,
                             blockDeadlineTimestamp: deadline))
                     {
                         semaphore.WaitingThreads++;
@@ -200,6 +215,7 @@ public static class KernelSemaphoreCompatExports
             {
                 var waiter = new SemaphoreWaiter
                 {
+                    Semaphore = semaphore,
                     NeedCount = needCount,
                     CancelEpochAtBlock = semaphore.CancelEpoch,
                 };
@@ -207,8 +223,7 @@ public static class KernelSemaphoreCompatExports
                         ctx,
                         "sceKernelWaitSema",
                         semaphore.WakeKey,
-                        resumeHandler: () => CompleteBlockedSemaWait(semaphore, waiter),
-                        wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, waiter)))
+                        waiter))
                 {
                     if (_traceSema)
                     {
