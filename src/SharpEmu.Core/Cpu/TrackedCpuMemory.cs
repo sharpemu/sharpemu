@@ -50,4 +50,9 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         address = 0;
         return false;
     }
+
+    public bool TryFreeGuestMemory(ulong address)
+    {
+        return _inner is IGuestMemoryAllocator allocator && allocator.TryFreeGuestMemory(address);
+    }
 }
