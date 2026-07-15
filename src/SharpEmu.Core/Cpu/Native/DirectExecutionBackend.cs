@@ -1759,6 +1759,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
+	// ldmxcsr raises #GP for any set bit outside the low 16 (the observed
+	// intermittent "boot crash" was an emitted stub executing ldmxcsr with a
+	// polluted continuation value, e.g. 0x00102510). All 16 low bits are
+	// architecturally loadable on x86-64, so masking is always safe; an
+	// all-clear value falls back to the SDK default control state.
+	private static uint SanitizeGuestMxcsr(uint value)
+	{
+		value &= 0xFFFFu;
+		return value == 0 ? 0x1F80u : value;
+	}
+
 	private unsafe bool TryPrepareGuestContextTransfer(
 		GuestCpuContinuation target,
 		out nint frameAddress,
@@ -1815,7 +1826,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frame[14] = target.R13;
 		frame[15] = target.R14;
 		frame[16] = target.R15;
-		frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
+		frame[17] = SanitizeGuestMxcsr(target.Mxcsr);
 		frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
 		frame[19] = target.RestoreFullFpuState ? 1u : 0u;
 		return true;
@@ -3675,7 +3686,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			FsBase = callerContext.FsBase != 0 ? callerContext.FsBase : (continuation.FsBase != 0 ? continuation.FsBase : fallbackTlsBase),
 			GsBase = callerContext.GsBase != 0 ? callerContext.GsBase : (continuation.GsBase != 0 ? continuation.GsBase : fallbackTlsBase),
 			FpuControlWord = continuation.FpuControlWord == 0 ? (ushort)0x037F : continuation.FpuControlWord,
-			Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr,
+			Mxcsr = SanitizeGuestMxcsr(continuation.Mxcsr),
 		};
 
 		context[CpuRegister.Rax] = continuation.Rax;
@@ -4870,7 +4881,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		context.FpuControlWord = continuation.FpuControlWord == 0
 			? (ushort)0x037F
 			: continuation.FpuControlWord;
-		context.Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr;
+		context.Mxcsr = SanitizeGuestMxcsr(continuation.Mxcsr);
 	}
 
 	private unsafe GuestNativeCallExitReason ExecuteGuestThreadEntry(CpuContext context, ulong entryPoint, string name, out string? reason)
@@ -5156,7 +5167,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			// continuation migrates to another managed worker.
 			Emit(0x48); Emit(0x83); Emit(0xEC); Emit(0x08); // sub rsp,8
 			Emit(0xC7); Emit(0x04); Emit(0x24);             // mov dword [rsp],imm32
-			*(uint*)(ptr2 + offset) = context.Mxcsr; offset += sizeof(uint);
+			*(uint*)(ptr2 + offset) = SanitizeGuestMxcsr(context.Mxcsr); offset += sizeof(uint);
 			Emit(0x0F); Emit(0xAE); Emit(0x14); Emit(0x24); // ldmxcsr [rsp]
 			Emit(0x66); Emit(0xC7); Emit(0x04); Emit(0x24); // mov word [rsp],imm16
 			*(ushort*)(ptr2 + offset) = context.FpuControlWord; offset += sizeof(ushort);
