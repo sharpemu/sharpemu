@@ -166,7 +166,7 @@ public partial class MainWindow : Window
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "https://github.com/par274/sharpemu",
+                FileName = "https://github.com/sharpemu/sharpemu",
                 UseShellExecute = true
             });
         };
