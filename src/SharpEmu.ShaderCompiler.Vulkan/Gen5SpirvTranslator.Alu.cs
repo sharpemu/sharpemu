@@ -38,6 +38,33 @@ public static partial class Gen5SpirvTranslator
                 case "VReadfirstlaneB32":
                     result = GetRawSource(instruction, 0);
                     break;
+                case "VWritelaneB32":
+                {
+                    // vdst[lane(src1)] = src0
+                    // Per-lane: if current lane == src1, write src0, else keep old value.
+                    var oldValue = LoadV(destination);
+                    var src0 = GetRawSource(instruction, 0);
+                    var laneSelect = GetRawSource(instruction, 1);
+                    var currentLane = _subgroupInvocationIdInput != 0
+                        ? BitwiseAnd(
+                            Load(_uintType, _subgroupInvocationIdInput),
+                            UInt(RdnaWaveLaneCount - 1))
+                        : UInt(0);
+                    var isTargetLane = _module.AddInstruction(
+                        SpirvOp.IEqual,
+                        _boolType,
+                        currentLane,
+                        laneSelect);
+                    result = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        isTargetLane,
+                        src0,
+                        oldValue);
+                    // Writelane writes to a specific lane regardless of exec mask.
+                    StoreV(destination, result, guardWithExec: false);
+                    return true;
+                }
                 case "VCndmaskB32":
                 {
                     var condition = instruction.Sources.Count > 2
