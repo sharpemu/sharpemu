@@ -191,6 +191,31 @@ jobs:
             Directory.Packages.props
             Directory.Build.props
 
+      - name: Install Linux native GPU dependencies
+        if: matrix.rid == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libvulkan-dev pkg-config
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install sdl3:x64-linux
+          cmake \
+            -S src/SharpEmu.Gpu.Vulkan.Native \
+            -B artifacts/native/gpu-vulkan \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DBUILD_TESTING=OFF
+
+      - name: Install macOS native GPU dependencies
+        if: matrix.rid == 'osx-x64'
+        run: |
+          brew install sdl3 vulkan-loader vulkan-headers
+          cmake \
+            -S src/SharpEmu.Gpu.Vulkan.Native \
+            -B artifacts/native/gpu-vulkan \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DBUILD_TESTING=OFF
+
       - name: Restore solution
         run: dotnet restore SharpEmu.slnx
 
