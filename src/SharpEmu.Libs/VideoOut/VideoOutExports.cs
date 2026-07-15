@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Logging;
@@ -67,7 +68,7 @@ public static class VideoOutExports
             return;
         }
 
-        HostTimerResolution.Request();
+        HostPlatform.Current.Threading.RequestTimerResolution();
 
         _vblankPumpThread = new Thread(VblankPumpLoop)
         {

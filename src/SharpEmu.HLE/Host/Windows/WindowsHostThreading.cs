@@ -23,6 +23,31 @@ internal sealed unsafe partial class WindowsHostThreading : IHostThreading
     private const int CtxRbp = 160;
     private const int CtxRip = 248;
 
+    private static int _timerResolutionRequested;
+
+    public void RequestTimerResolution()
+    {
+        if (Interlocked.Exchange(ref _timerResolutionRequested, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            if (TimeBeginPeriod(1) != 0)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] Host timer resolution request rejected; " +
+                    "timed waits keep the default ~15.6 ms granularity.");
+            }
+        }
+        catch (DllNotFoundException exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Host timer resolution unavailable: {exception.Message}");
+        }
+    }
+
     public uint AllocateTlsSlot() => TlsAlloc();
 
     public bool FreeTlsSlot(uint slot) => TlsFree(slot);
@@ -162,4 +187,7 @@ internal sealed unsafe partial class WindowsHostThreading : IHostThreading
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(nint hObject);
+
+    [LibraryImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static partial uint TimeBeginPeriod(uint uPeriod);
 }

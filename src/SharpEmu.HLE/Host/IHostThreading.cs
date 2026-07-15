@@ -25,6 +25,12 @@ public interface IHostThreading
     bool TrySetCurrentThreadAffinity(nuint affinityMask);
 
     /// <summary>
+    /// Asks the OS for ~1 ms timed-wait granularity for the life of the process
+    /// (idempotent; best-effort). No-op on platforms whose default is already fine.
+    /// </summary>
+    void RequestTimerResolution();
+
+    /// <summary>
     /// Creates a raw OS thread executing native code at <paramref name="entry"/> with
     /// <paramref name="stackReserveBytes"/> of reserved (not committed) stack.
     /// Returns the thread handle, or 0 on failure.
