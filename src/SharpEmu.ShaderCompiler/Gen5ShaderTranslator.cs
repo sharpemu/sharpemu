@@ -1466,6 +1466,12 @@ public static class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
+                if (opcode == "VReadlaneB32")
+                {
+                    // VReadlaneB32 writes to scalar destination (bits 8-14), not vector.
+                    // Bits 0-7 are unused for this opcode.
+                    destinations = [Gen5Operand.Scalar((word >> 8) & 0x7F)];
+                }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
                 control = new Gen5Vop3Control(
                     isVop3B ? 0 : (word >> 8) & 0x7,

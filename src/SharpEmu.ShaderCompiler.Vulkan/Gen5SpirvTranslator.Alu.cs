@@ -24,6 +24,11 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitVectorCompare(instruction, out error);
             }
 
+            if (instruction.Opcode == "VReadlaneB32")
+            {
+                return TryEmitReadlane(instruction, out error);
+            }
+
             if (!TryGetVectorDestination(instruction, out var destination))
             {
                 error = "missing vector destination";
@@ -34,7 +39,6 @@ public static partial class Gen5SpirvTranslator
             switch (instruction.Opcode)
             {
                 case "VMovB32":
-                case "VReadlaneB32":
                 case "VReadfirstlaneB32":
                     result = GetRawSource(instruction, 0);
                     break;
@@ -2336,6 +2340,42 @@ public static partial class Gen5SpirvTranslator
             }
 
             StoreWaveMask(106, carry);
+        }
+
+        private bool TryEmitReadlane(
+            Gen5ShaderInstruction instruction,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Destinations.Count == 0 ||
+                instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+            {
+                error = "VReadlaneB32 expects scalar destination";
+                return false;
+            }
+
+            var destination = instruction.Destinations[0].Value;
+            var src0 = GetRawSource(instruction, 0);
+
+            if (_subgroupInvocationIdInput != 0)
+            {
+                // sdst = vsrc0[lane(src1)] — broadcast from the specified lane.
+                var laneSelect = GetRawSource(instruction, 1);
+                var broadcast = _module.AddInstruction(
+                    SpirvOp.GroupNonUniformBroadcast,
+                    _uintType,
+                    UInt(3),  // Subgroup scope
+                    src0,
+                    laneSelect);
+                StoreS(destination, broadcast);
+            }
+            else
+            {
+                // Fallback: no subgroup ops, read current lane's value.
+                StoreS(destination, src0);
+            }
+
+            return true;
         }
 
         private uint EmitPermlane16(

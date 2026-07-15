@@ -2507,7 +2507,7 @@ public static partial class Gen5SpirvTranslator
 
         private bool UsesSubgroupShuffle() =>
             _state.Program.Instructions.Any(instruction =>
-                instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32");
+                instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32");
 
         private bool UsesWaveControl() =>
             _state.Program.Instructions.Any(instruction =>
