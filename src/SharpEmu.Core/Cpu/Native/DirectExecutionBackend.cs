@@ -670,6 +670,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private int _gateOwnerManagedThreadId;
 	private long _gateAcquireTimestamp;
 
+	// Serializes stack/TLS region reservation for new guest threads. The search in
+	// TryMapGuestThreadRegion is a check-then-map (IsGuestThreadRegionFree followed by
+	// IVirtualMemory.Map), and Map neither rejects nor is atomic against an overlapping
+	// concurrent reservation. Without this gate two threads created at the same time
+	// (e.g. an engine spawning its worker pool) can pick the same free slot; the loser's
+	// Map re-zeroes the winner's live stack, corrupting it. Held only around the region
+	// selection, never across guest execution.
+	private readonly object _guestThreadRegionGate = new object();
+
 	private GateHolder LockGate(string site)
 	{
 		Monitor.Enter(_guestThreadGate);
@@ -3480,13 +3489,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			else
 			{
-				if (!TryMapGuestThreadRegion(
+				bool mapped;
+				lock (_guestThreadRegionGate)
+				{
+					mapped = TryMapGuestThreadRegion(
 						virtualMemory,
 						GuestThreadStackBaseAddress,
 						GuestThreadStackSize,
 						ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
 						out callbackStackBase,
-						out error))
+						out error);
+				}
+
+				if (!mapped)
 				{
 					return false;
 				}
@@ -3889,20 +3904,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				if (external.ExceptionStackBase == 0)
 				{
 					string? mapError = null;
-					if (!TryGetVirtualMemory(external.Context, out var virtualMemory) ||
-						!TryMapGuestThreadRegion(
+					if (!TryGetVirtualMemory(external.Context, out var virtualMemory))
+					{
+						error = "external guest context has no virtual memory";
+						return false;
+					}
+
+					bool mapped;
+					lock (_guestThreadRegionGate)
+					{
+						mapped = TryMapGuestThreadRegion(
 							virtualMemory,
 							GuestThreadStackBaseAddress,
 							GuestThreadStackSize,
 							ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
 							out var stackBase,
-							out mapError))
-					{
-						error = mapError ?? "external guest context has no virtual memory";
-						return false;
+							out mapError);
+						external.ExceptionStackBase = stackBase;
 					}
 
-					external.ExceptionStackBase = stackBase;
+					if (!mapped)
+					{
+						error = mapError ?? "failed to reserve external guest exception stack";
+						return false;
+					}
 				}
 
 				if (_pendingGuestExceptions.ContainsKey(threadHandle))
@@ -3949,20 +3974,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (target.ExceptionStackBase == 0)
 			{
 				string? mapError = null;
-				if (!TryGetVirtualMemory(target.Context, out var virtualMemory) ||
-					!TryMapGuestThreadRegion(
+				if (!TryGetVirtualMemory(target.Context, out var virtualMemory))
+				{
+					error = "guest thread context has no virtual memory";
+					return false;
+				}
+
+				bool mapped;
+				lock (_guestThreadRegionGate)
+				{
+					mapped = TryMapGuestThreadRegion(
 						virtualMemory,
 						GuestThreadStackBaseAddress,
 						GuestThreadStackSize,
 						ProgramHeaderFlags.Read | ProgramHeaderFlags.Write,
 						out var mappedExceptionStack,
-						out mapError))
-				{
-					error = mapError ?? "guest thread context has no virtual memory";
-					return false;
+						out mapError);
+					target.ExceptionStackBase = mappedExceptionStack;
 				}
 
-				target.ExceptionStackBase = mappedExceptionStack;
+				if (!mapped)
+				{
+					error = mapError ?? "failed to reserve guest exception stack";
+					return false;
+				}
 			}
 			exceptionStackBase = target.ExceptionStackBase;
 
@@ -4426,13 +4461,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			error = "creator context memory is not backed by IVirtualMemory";
 			return false;
 		}
-		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, GuestThreadStackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
+		// Reserve the stack and TLS regions under a single lock so concurrent thread
+		// creations cannot select overlapping slots (see _guestThreadRegionGate).
+		ulong stackBase;
+		ulong tlsBase;
+		lock (_guestThreadRegionGate)
 		{
-			return false;
-		}
-		if (!TryMapGuestThreadTlsRegion(virtualMemory, out var tlsBase, out error))
-		{
-			return false;
+			if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, GuestThreadStackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out stackBase, out error))
+			{
+				return false;
+			}
+			if (!TryMapGuestThreadTlsRegion(virtualMemory, out tlsBase, out error))
+			{
+				return false;
+			}
 		}
 
 		var trackedMemory = new TrackedCpuMemory(virtualMemory);

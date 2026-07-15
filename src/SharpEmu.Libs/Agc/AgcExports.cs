@@ -3100,9 +3100,13 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong commandAddress,
         uint dwordCount,
-        bool tracePackets)
+        bool tracePackets,
+        uint nestingDepth = 0)
     {
-        if (commandAddress == 0 || dwordCount == 0 || dwordCount > 1_000_000)
+        if (commandAddress == 0 ||
+            dwordCount == 0 ||
+            dwordCount > 1_000_000 ||
+            nestingDepth > 16)
         {
             return false;
         }
@@ -3127,7 +3131,8 @@ public static partial class AgcExports
                 state,
                 commandAddress,
                 dwordCount,
-                tracePackets);
+                tracePackets,
+                nestingDepth);
         }
         finally
         {
@@ -3143,7 +3148,8 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong commandAddress,
         uint dwordCount,
-        bool tracePackets)
+        bool tracePackets,
+        uint nestingDepth)
     {
         var offset = 0u;
         while (offset < dwordCount)
@@ -3241,6 +3247,32 @@ public static partial class AgcExports
             }
 
             ApplySubmittedRegisters(ctx, state, currentAddress, length, op, register);
+
+            if (op == ItIndirectBuffer &&
+                length >= 4 &&
+                ctx.TryReadUInt32(currentAddress + 4, out var indirectAddressLo) &&
+                ctx.TryReadUInt32(currentAddress + 8, out var indirectAddressHi) &&
+                ctx.TryReadUInt32(currentAddress + 12, out var indirectControl))
+            {
+                var indirectAddress =
+                    indirectAddressLo | ((ulong)(indirectAddressHi & 0xFFFF) << 32);
+                var indirectDwords = indirectControl & 0xF_FFFF;
+                if (tracePackets)
+                {
+                    TraceAgcShader(
+                        $"agc.dcb.indirect depth={nestingDepth + 1} " +
+                        $"addr=0x{indirectAddress:X16} dwords={indirectDwords}");
+                }
+
+                ParseSubmittedDcb(
+                    ctx,
+                    gpuState,
+                    state,
+                    indirectAddress,
+                    indirectDwords,
+                    tracePackets,
+                    nestingDepth + 1);
+            }
 
             if (op == ItSetBase &&
                 length >= 4 &&
@@ -10566,6 +10598,74 @@ public static partial class AgcExports
         return (int)result;
     }
 
+    private static bool TryReadDcbJumpArguments(
+        CpuContext ctx,
+        out ulong targetAddress,
+        out uint targetDwords,
+        out string argumentForm)
+    {
+        if (IsReadableDcbSegment(
+                ctx,
+                ctx[CpuRegister.Rsi],
+                ctx[CpuRegister.Rdx],
+                out targetAddress,
+                out targetDwords))
+        {
+            argumentForm = "compact";
+            return true;
+        }
+
+        if (IsReadableDcbSegment(
+                ctx,
+                ctx[CpuRegister.Rcx],
+                ctx[CpuRegister.R8],
+                out targetAddress,
+                out targetDwords))
+        {
+            argumentForm = "extended";
+            return true;
+        }
+
+        var stackAddress = ctx[CpuRegister.Rsp];
+        if (ctx.TryReadUInt64(stackAddress + sizeof(ulong), out var stackDwords) &&
+            IsReadableDcbSegment(
+                ctx,
+                ctx[CpuRegister.R9],
+                stackDwords,
+                out targetAddress,
+                out targetDwords))
+        {
+            argumentForm = "extended-stack";
+            return true;
+        }
+
+        targetAddress = 0;
+        targetDwords = 0;
+        argumentForm = string.Empty;
+        return false;
+    }
+
+    private static bool IsReadableDcbSegment(
+        CpuContext ctx,
+        ulong address,
+        ulong dwordCount,
+        out ulong targetAddress,
+        out uint targetDwords)
+    {
+        targetAddress = 0;
+        targetDwords = 0;
+        if (address == 0 || dwordCount == 0 || dwordCount > 0xF_FFFF ||
+            !ctx.TryReadUInt32(address, out _) ||
+            !ctx.TryReadUInt32(address + ((dwordCount - 1) * sizeof(uint)), out _))
+        {
+            return false;
+        }
+
+        targetAddress = address;
+        targetDwords = (uint)dwordCount;
+        return true;
+    }
+
     private static uint Pm4(uint lengthDwords, uint op, uint register) =>
         0xC0000000u |
         ((((ushort)lengthDwords - 2u) & 0x3FFFu) << 16) |
@@ -10998,24 +11098,30 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int DcbJump(CpuContext ctx)
     {
-        var dcb = ctx[CpuRegister.Rdi];
-        var target = ctx[CpuRegister.Rsi];
-        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
-        if (dcb == 0)
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        if (commandBufferAddress == 0 ||
+            !TryReadDcbJumpArguments(
+                ctx,
+                out var targetAddress,
+                out var targetDwords,
+                out var argumentForm))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, dcb, 4, out var cmd) ||
-            !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
-            !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 12, sizeDwords & 0xFFFFF))
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
+            !ctx.TryWriteUInt32(commandAddress, Pm4(4, ItIndirectBuffer, RZero)) ||
+            !ctx.TryWriteUInt32(commandAddress + 4, (uint)targetAddress) ||
+            !ctx.TryWriteUInt32(commandAddress + 8, (uint)((targetAddress >> 32) & 0xFFFF)) ||
+            !ctx.TryWriteUInt32(commandAddress + 12, targetDwords & 0xF_FFFF))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        return ReturnPointer(ctx, cmd);
+        TraceAgcShader(
+            $"agc.dcb_jump buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"target=0x{targetAddress:X16} dwords={targetDwords} args={argumentForm}");
+        return ReturnPointer(ctx, commandAddress);
     }
 
     [SysAbiExport(

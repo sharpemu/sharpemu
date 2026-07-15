@@ -11446,7 +11446,7 @@ internal static unsafe class VulkanVideoPresenter
                 if (traceAddressedPresentation ||
                     ShouldTracePresentedGuestImageContentsForDiagnostics() &&
                     (_directPresentationCount is 1 or 30 or 120 ||
-                     _directPresentationCount % 600 == 0))
+                     _directPresentationCount % 300 == 0))
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][TRACE] vk.present_sample frame={_directPresentationCount} " +
