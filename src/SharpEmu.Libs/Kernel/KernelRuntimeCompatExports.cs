@@ -1718,40 +1718,58 @@ public static class KernelRuntimeCompatExports
 
     private static ulong ResolveKernelTscFrequency()
     {
+        var (frequencyHz, source) = SelectKernelTscFrequency(
+            _rdtscReader is not null,
+            Environment.GetEnvironmentVariable("SHARPEMU_TSC_FREQ_HZ"),
+            TryCalibrateHostTscFrequency,
+            TryResolveCpuidTscFrequency,
+            Stopwatch.Frequency);
+        TraceKernelTscFrequency(source, frequencyHz);
+        return frequencyHz;
+    }
+
+    internal delegate bool TryGetFrequency(out ulong frequencyHz);
+
+    // sceKernelReadTsc only returns the CPU's RDTSC when the host RDTSC reader is available
+    // (currently 64-bit Windows); otherwise it falls back to the QPC-based Stopwatch. The
+    // calibrated and CPUID frequencies both describe RDTSC, so reporting either while ReadTsc is
+    // actually returning Stopwatch ticks makes sceKernelGetTscFrequency disagree with the counter,
+    // and a guest computing elapsed = readTscDelta / frequency gets the wrong time on Linux and
+    // macOS. Gate those on rdtscAvailable; otherwise report Stopwatch's own frequency so the pair
+    // stays consistent.
+    internal static (ulong FrequencyHz, string Source) SelectKernelTscFrequency(
+        bool rdtscAvailable,
+        string? overrideHzText,
+        TryGetFrequency tryCalibrate,
+        TryGetFrequency tryResolveCpuid,
+        long stopwatchFrequency)
+    {
         const ulong minSane = 1_000_000UL;
 
-        var overrideHzText = Environment.GetEnvironmentVariable("SHARPEMU_TSC_FREQ_HZ");
         if (!string.IsNullOrWhiteSpace(overrideHzText) &&
             ulong.TryParse(overrideHzText, out var overrideHz) &&
             overrideHz >= minSane)
         {
-            TraceKernelTscFrequency("env", overrideHz);
-            return overrideHz;
+            return (overrideHz, "env");
         }
 
-        if (TryCalibrateHostTscFrequency(out ulong calibratedHz) && calibratedHz >= minSane)
+        if (rdtscAvailable)
         {
-            TraceKernelTscFrequency("calibrated-rdtsc", calibratedHz);
-            return calibratedHz;
+            if (tryCalibrate(out ulong calibratedHz) && calibratedHz >= minSane)
+            {
+                return (calibratedHz, "calibrated-rdtsc");
+            }
+
+            if (tryResolveCpuid(out ulong cpuidHz) && cpuidHz >= minSane)
+            {
+                return (cpuidHz, "cpuid");
+            }
         }
 
-        if (TryResolveCpuidTscFrequency(out ulong cpuidHz) && cpuidHz >= minSane)
-        {
-            TraceKernelTscFrequency("cpuid", cpuidHz);
-            return cpuidHz;
-        }
-
-        var hostQpc = Stopwatch.Frequency > 0
-            ? unchecked((ulong)Stopwatch.Frequency)
+        var hostQpc = stopwatchFrequency > 0
+            ? unchecked((ulong)stopwatchFrequency)
             : DefaultKernelTscFrequency;
-        if (hostQpc >= minSane)
-        {
-            TraceKernelTscFrequency("qpc", hostQpc);
-            return hostQpc;
-        }
-
-        TraceKernelTscFrequency("default", DefaultKernelTscFrequency);
-        return DefaultKernelTscFrequency;
+        return hostQpc >= minSane ? (hostQpc, "qpc") : (DefaultKernelTscFrequency, "default");
     }
 
     private static void TraceKernelTscFrequency(string source, ulong frequencyHz)
