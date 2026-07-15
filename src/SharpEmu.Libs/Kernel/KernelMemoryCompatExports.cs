@@ -1223,7 +1223,11 @@ public static class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var chunk = ArrayPool<byte>.Shared.Rent((int)Math.Min(rawCount, (ulong)MemcpyChunkSize));
+        // Cap iterations at the requested chunk size, not chunk.Length: Rent may hand
+        // back a larger array, and the copy granularity should not depend on pool
+        // bucketing internals.
+        var chunkLength = (int)Math.Min(rawCount, (ulong)MemcpyChunkSize);
+        var chunk = ArrayPool<byte>.Shared.Rent(chunkLength);
         try
         {
             // memmove aliases this export, so overlapping ranges must survive the chunked
@@ -1234,7 +1238,7 @@ public static class KernelMemoryCompatExports
             ulong offset = copyBackward ? rawCount : 0;
             while (remaining > 0)
             {
-                var take = (int)Math.Min((ulong)chunk.Length, remaining);
+                var take = (int)Math.Min((ulong)chunkLength, remaining);
                 if (copyBackward)
                 {
                     offset -= (ulong)take;
