@@ -10,4 +10,8 @@ internal sealed class PosixHostPlatform : IHostPlatform
     public IHostThreading Threading { get; } = new PosixHostThreading();
 
     public IHostSymbolResolver Symbols { get; } = new PosixHostSymbolResolver();
+
+    public IHostAudioOutput Audio { get; } = new PosixHostAudio();
+
+    public IHostInput Input { get; } = new PosixHostInput();
 }

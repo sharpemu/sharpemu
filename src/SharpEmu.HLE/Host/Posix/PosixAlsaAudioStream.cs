@@ -1,10 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers;
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Libs.Audio;
+namespace SharpEmu.HLE.Host.Posix;
 
 /// <summary>
 /// ALSA-based playback for Linux. The PCM device is opened in blocking mode
@@ -13,7 +12,7 @@ namespace SharpEmu.Libs.Audio;
 /// "default" device routes through PulseAudio/PipeWire on desktops and to
 /// the hardware on bare ALSA setups; SHARPEMU_ALSA_DEVICE overrides it.
 /// </summary>
-internal sealed unsafe class AlsaAudioPort : IHostAudioPort
+internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
 {
     // 32KB of stereo PCM16 at 48kHz is ~170ms; keep the same device-side
     // queue depth the WinMM/CoreAudio ports enforce in managed code.
@@ -28,7 +27,7 @@ internal sealed unsafe class AlsaAudioPort : IHostAudioPort
     private nint _pcm;
     private bool _disposed;
 
-    public AlsaAudioPort(uint sampleRate)
+    public PosixAlsaAudioStream(uint sampleRate)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -65,12 +64,7 @@ internal sealed unsafe class AlsaAudioPort : IHostAudioPort
         }
     }
 
-    public bool Submit(
-        ReadOnlySpan<byte> source,
-        uint frames,
-        int channels,
-        int bytesPerSample,
-        bool isFloat)
+    public bool Submit(ReadOnlySpan<byte> stereoPcm16)
     {
         lock (_gate)
         {
@@ -79,23 +73,7 @@ internal sealed unsafe class AlsaAudioPort : IHostAudioPort
                 return false;
             }
 
-            var outputLength = checked((int)frames * 4);
-            var output = ArrayPool<byte>.Shared.Rent(outputLength);
-            try
-            {
-                AudioSampleConverter.ConvertToStereoPcm16(
-                    source,
-                    output.AsSpan(0, outputLength),
-                    checked((int)frames),
-                    channels,
-                    bytesPerSample,
-                    isFloat);
-                return WritePcm(output.AsSpan(0, outputLength), frames);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(output);
-            }
+            return WritePcm(stereoPcm16, (uint)(stereoPcm16.Length / 4));
         }
     }
 

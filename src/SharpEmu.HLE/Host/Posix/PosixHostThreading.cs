@@ -15,6 +15,12 @@ internal sealed class PosixHostThreading : IHostThreading
 
     public uint CurrentThreadId => PosixHostStubs.GetCurrentThreadId();
 
+    public void RequestTimerResolution()
+    {
+        // POSIX sleep primitives are already high-resolution; there is no
+        // timeBeginPeriod equivalent to request.
+    }
+
     // Thread affinity is advisory on POSIX hosts (macOS offers no
     // pthread-level affinity API); callers treat false as "not applied".
     public bool TrySetCurrentThreadAffinity(nuint affinityMask)

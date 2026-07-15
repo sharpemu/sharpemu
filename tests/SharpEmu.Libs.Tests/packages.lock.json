@@ -166,6 +166,15 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
+      "sharpemu.core": {
+        "type": "Project",
+        "dependencies": {
+          "Iced": "[1.21.0, )",
+          "SharpEmu.HLE": "[1.0.0, )",
+          "SharpEmu.Libs": "[1.0.0, )",
+          "SharpEmu.Logging": "[1.0.0, )"
+        }
+      },
       "sharpemu.hle": {
         "type": "Project",
         "dependencies": {
@@ -185,6 +194,12 @@
       },
       "sharpemu.logging": {
         "type": "Project"
+      },
+      "Iced": {
+        "type": "CentralTransitive",
+        "requested": "[1.21.0, )",
+        "resolved": "1.21.0",
+        "contentHash": "dv5+81Q1TBQvVMSOOOmRcjJmvWcX3BZPZsIq31+RLc5cNft0IHAyNlkdb7ZarOWG913PyBoFDsDXoCIlKmLclg=="
       },
       "Silk.NET.Input": {
         "type": "CentralTransitive",

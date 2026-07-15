@@ -1,18 +1,17 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers;
 using System.Runtime.InteropServices;
 
-namespace SharpEmu.Libs.Audio;
+namespace SharpEmu.HLE.Host.Posix;
 
 /// <summary>
 /// AudioQueue-based playback for macOS. Buffers are enqueued as stereo PCM16
 /// and returned by the queue's internal thread through the output callback;
-/// Submit applies the same 32KB backpressure the WinMM port uses so guest
+/// Submit applies the same 32KB backpressure the WinMM backend uses so guest
 /// pacing works identically.
 /// </summary>
-internal sealed unsafe class CoreAudioPort : IHostAudioPort
+internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
 {
     private const int MaximumQueuedPcmBytes = 32 * 1024;
     private const uint FormatLinearPcm = 0x6C70636D; // 'lpcm'
@@ -28,7 +27,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
     private bool _started;
     private bool _disposed;
 
-    public CoreAudioPort(uint sampleRate)
+    public PosixCoreAudioStream(uint sampleRate)
     {
         if (!OperatingSystem.IsMacOS())
         {
@@ -63,12 +62,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
         }
     }
 
-    public bool Submit(
-        ReadOnlySpan<byte> source,
-        uint frames,
-        int channels,
-        int bytesPerSample,
-        bool isFloat)
+    public bool Submit(ReadOnlySpan<byte> stereoPcm16)
     {
         lock (_gate)
         {
@@ -77,7 +71,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
                 return false;
             }
 
-            var outputLength = checked((int)frames * 4);
+            var outputLength = stereoPcm16.Length;
             while (_queuedPcmBytes != 0 &&
                    _queuedPcmBytes + outputLength > MaximumQueuedPcmBytes)
             {
@@ -112,22 +106,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
             }
 
             var audioData = ((AudioQueueBuffer*)buffer)->AudioData;
-            var converted = ArrayPool<byte>.Shared.Rent(outputLength);
-            try
-            {
-                AudioSampleConverter.ConvertToStereoPcm16(
-                    source,
-                    converted.AsSpan(0, outputLength),
-                    checked((int)frames),
-                    channels,
-                    bytesPerSample,
-                    isFloat);
-                converted.AsSpan(0, outputLength).CopyTo(new Span<byte>(audioData, outputLength));
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(converted);
-            }
+            stereoPcm16.CopyTo(new Span<byte>(audioData, outputLength));
 
             ((AudioQueueBuffer*)buffer)->AudioDataByteSize = (uint)outputLength;
             if (AudioQueueEnqueueBuffer(_queue, buffer, 0, 0) != 0)
@@ -207,7 +186,7 @@ internal sealed unsafe class CoreAudioPort : IHostAudioPort
     [UnmanagedCallersOnly]
     private static void OutputCallback(nint userData, nint queue, nint buffer)
     {
-        if (GCHandle.FromIntPtr(userData).Target is not CoreAudioPort port)
+        if (GCHandle.FromIntPtr(userData).Target is not PosixCoreAudioStream port)
         {
             return;
         }

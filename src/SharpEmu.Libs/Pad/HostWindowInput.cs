@@ -1,16 +1,18 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Posix;
 using Silk.NET.Input;
 
 namespace SharpEmu.Libs.Pad;
 
 /// <summary>
-/// Keyboard and gamepad state sampled from the presenter's window, used by
-/// the pad exports on hosts without user32/XInput/hid (macOS/Linux). The
-/// presenter attaches the window's input context once the window exists;
-/// input events arrive on the window thread and pad reads happen on guest
-/// threads, so all state is guarded.
+/// Keyboard and gamepad state sampled from the presenter's window, feeding
+/// the POSIX host input seam (macOS/Linux have no user32/XInput/raw-HID
+/// readers). The presenter attaches the window's input context once the
+/// window exists; input events arrive on the window thread and pad reads
+/// happen on guest threads, so all state is guarded.
 /// </summary>
 public static class HostWindowInput
 {
@@ -18,9 +20,10 @@ public static class HostWindowInput
     private static readonly HashSet<Key> Pressed = new();
     private static volatile bool _connected;
 
-    // Latest window-gamepad snapshot, ORBIS conventions (see PadState).
+    // Latest window-gamepad snapshot in the host seam's conventions.
     private static bool _gamepadConnected;
-    private static uint _gamepadButtons;
+    private static string? _gamepadName;
+    private static HostGamepadButtons _gamepadButtons;
     private static byte _gamepadLeftX = 128;
     private static byte _gamepadLeftY = 128;
     private static byte _gamepadRightX = 128;
@@ -77,7 +80,8 @@ public static class HostWindowInput
             lock (Gate)
             {
                 _gamepadConnected = false;
-                _gamepadButtons = 0;
+                _gamepadName = null;
+                _gamepadButtons = HostGamepadButtons.None;
                 _gamepadLeftX = 128;
                 _gamepadLeftY = 128;
                 _gamepadRightX = 128;
@@ -86,6 +90,8 @@ public static class HostWindowInput
                 _gamepadR2 = 0;
             }
         };
+
+        PosixHostInput.SetSource(new WindowInputSource());
     }
 
     public static bool IsKeyDown(Key key)
@@ -96,27 +102,62 @@ public static class HostWindowInput
         }
     }
 
-    internal static bool TryGetGamepadState(out PadState state)
+    private sealed class WindowInputSource : IPosixWindowInputSource
     {
-        lock (Gate)
-        {
-            if (!_gamepadConnected)
-            {
-                state = default;
-                return false;
-            }
+        public bool HasKeyboardFocus => _connected;
 
-            state = new PadState(
-                Connected: true,
-                Buttons: _gamepadButtons,
-                LeftX: _gamepadLeftX,
-                LeftY: _gamepadLeftY,
-                RightX: _gamepadRightX,
-                RightY: _gamepadRightY,
-                L2: _gamepadL2,
-                R2: _gamepadR2);
-            return true;
+        public bool IsKeyDown(int virtualKey)
+        {
+            return TryMapVirtualKey(virtualKey, out var key) && HostWindowInput.IsKeyDown(key);
         }
+
+        public int GetGamepadStates(Span<HostGamepadState> destination)
+        {
+            lock (Gate)
+            {
+                if (!_gamepadConnected || destination.Length == 0)
+                {
+                    return 0;
+                }
+
+                destination[0] = new HostGamepadState(
+                    Connected: true,
+                    Buttons: _gamepadButtons,
+                    LeftX: _gamepadLeftX,
+                    LeftY: _gamepadLeftY,
+                    RightX: _gamepadRightX,
+                    RightY: _gamepadRightY,
+                    LeftTrigger: _gamepadL2,
+                    RightTrigger: _gamepadR2);
+                return 1;
+            }
+        }
+
+        public string? DescribeConnectedGamepad()
+        {
+            lock (Gate)
+            {
+                return _gamepadConnected ? _gamepadName ?? "GLFW gamepad" : null;
+            }
+        }
+    }
+
+    private static bool TryMapVirtualKey(int vk, out Key key)
+    {
+        key = vk switch
+        {
+            0x08 => Key.Backspace,
+            0x09 => Key.Tab,
+            0x0D => Key.Enter,
+            0x1B => Key.Escape,
+            0x25 => Key.Left,
+            0x26 => Key.Up,
+            0x27 => Key.Right,
+            0x28 => Key.Down,
+            >= 0x41 and <= 0x5A => Key.A + (vk - 0x41),
+            _ => Key.Unknown,
+        };
+        return key != Key.Unknown;
     }
 
     private static void AttachGamepad(IGamepad gamepad)
@@ -124,12 +165,13 @@ public static class HostWindowInput
         lock (Gate)
         {
             _gamepadConnected = true;
+            _gamepadName = gamepad.Name;
         }
 
         gamepad.ButtonDown += (_, button) =>
         {
             var bit = MapButton(button.Name);
-            if (bit == 0)
+            if (bit == HostGamepadButtons.None)
             {
                 return;
             }
@@ -142,7 +184,7 @@ public static class HostWindowInput
         gamepad.ButtonUp += (_, button) =>
         {
             var bit = MapButton(button.Name);
-            if (bit == 0)
+            if (bit == HostGamepadButtons.None)
             {
                 return;
             }
@@ -155,7 +197,7 @@ public static class HostWindowInput
         gamepad.ThumbstickMoved += (_, thumbstick) =>
         {
             // Silk's GLFW backend reports sticks -1..1 with +Y pointing down,
-            // matching the ORBIS 0..255 down-growing convention after biasing.
+            // matching the seam's 0..255 down-growing convention after biasing.
             var x = ToStickByte(thumbstick.X);
             var y = ToStickByte(thumbstick.Y);
             lock (Gate)
@@ -183,11 +225,11 @@ public static class HostWindowInput
                     _gamepadL2 = value;
                     if (value > 64)
                     {
-                        _gamepadButtons |= OrbisPadButton.L2;
+                        _gamepadButtons |= HostGamepadButtons.L2;
                     }
                     else
                     {
-                        _gamepadButtons &= ~OrbisPadButton.L2;
+                        _gamepadButtons &= ~HostGamepadButtons.L2;
                     }
                 }
                 else
@@ -195,11 +237,11 @@ public static class HostWindowInput
                     _gamepadR2 = value;
                     if (value > 64)
                     {
-                        _gamepadButtons |= OrbisPadButton.R2;
+                        _gamepadButtons |= HostGamepadButtons.R2;
                     }
                     else
                     {
-                        _gamepadButtons &= ~OrbisPadButton.R2;
+                        _gamepadButtons &= ~HostGamepadButtons.R2;
                     }
                 }
             }
@@ -211,23 +253,23 @@ public static class HostWindowInput
         return (byte)Math.Clamp((int)(128.0f + value * 127.0f), 0, 255);
     }
 
-    private static uint MapButton(ButtonName name) => name switch
+    private static HostGamepadButtons MapButton(ButtonName name) => name switch
     {
         // GLFW reports the Xbox layout: A=Cross, B=Circle, X=Square, Y=Triangle.
-        ButtonName.A => OrbisPadButton.Cross,
-        ButtonName.B => OrbisPadButton.Circle,
-        ButtonName.X => OrbisPadButton.Square,
-        ButtonName.Y => OrbisPadButton.Triangle,
-        ButtonName.LeftBumper => OrbisPadButton.L1,
-        ButtonName.RightBumper => OrbisPadButton.R1,
-        ButtonName.Back => OrbisPadButton.TouchPad,
-        ButtonName.Start => OrbisPadButton.Options,
-        ButtonName.LeftStick => OrbisPadButton.L3,
-        ButtonName.RightStick => OrbisPadButton.R3,
-        ButtonName.DPadUp => OrbisPadButton.Up,
-        ButtonName.DPadRight => OrbisPadButton.Right,
-        ButtonName.DPadDown => OrbisPadButton.Down,
-        ButtonName.DPadLeft => OrbisPadButton.Left,
-        _ => 0,
+        ButtonName.A => HostGamepadButtons.Cross,
+        ButtonName.B => HostGamepadButtons.Circle,
+        ButtonName.X => HostGamepadButtons.Square,
+        ButtonName.Y => HostGamepadButtons.Triangle,
+        ButtonName.LeftBumper => HostGamepadButtons.L1,
+        ButtonName.RightBumper => HostGamepadButtons.R1,
+        ButtonName.Back => HostGamepadButtons.TouchPad,
+        ButtonName.Start => HostGamepadButtons.Options,
+        ButtonName.LeftStick => HostGamepadButtons.L3,
+        ButtonName.RightStick => HostGamepadButtons.R3,
+        ButtonName.DPadUp => HostGamepadButtons.Up,
+        ButtonName.DPadRight => HostGamepadButtons.Right,
+        ButtonName.DPadDown => HostGamepadButtons.Down,
+        ButtonName.DPadLeft => HostGamepadButtons.Left,
+        _ => HostGamepadButtons.None,
     };
 }
