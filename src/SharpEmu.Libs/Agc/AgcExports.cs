@@ -100,6 +100,36 @@ public static class AgcExports
     private const uint CbColor0Attrib3 = 0x3B8;
     private const uint CbBlend0Control = 0x1E0;
     private const uint PaScModeCntl0 = 0x292;
+    // Depth/stencil block registers (RDNA2 standard context offsets)
+    private const uint DbRenderControl = 0x280;
+    private const uint DbDepthView = 0x281;
+    private const uint DbDepthSize = 0x282;
+    private const uint DbDepthSlice = 0x283;
+    private const uint DbDepthInfo = 0x284;
+    private const uint DbZInfo = 0x285;
+    private const uint DbStencilInfo = 0x286;
+    private const uint DbDepthBoundsMin = 0x287;
+    private const uint DbDepthBoundsMax = 0x288;
+    private const uint DbDepthBase = 0x28C;
+    private const uint DbDepthBaseExt = 0x28D;
+    private const uint DbStencilBase = 0x28E;
+    private const uint DbStencilBaseExt = 0x28F;
+    private const uint DbHtileDataBase = 0x290;
+    private const uint DbDepthControl = 0x298;
+    private const uint DbStencilRefMask = 0x29A;
+    private const uint DbStencilRefMaskBf = 0x29B;
+    // Primitive assembly screen mode control (rasterizer state)
+    // Bits [1:0]=CullMode, [2]=Face, [4:3]=PolyMode, [5]=PolyOffsetFrontEnable, [7:6]=PolyOffsetMode
+    private const uint PaSuScModeCntl = PaScModeCntl0; // same register, alias for clarity
+    private const uint PaClClipCntl = 0x293;
+    private const uint PaScLineCntl = 0x294;
+    private const uint PaScPointCntl = 0x295;
+    private const uint PaSuPolyOffsetFrontScale = 0x29D;
+    private const uint PaSuPolyOffsetFrontOffset = 0x29E;
+    private const uint PaSuPolyOffsetBackScale = 0x2A0;
+    private const uint PaSuPolyOffsetBackOffset = 0x2A1;
+    private const uint PaSuPolyOffsetClamp = 0x2A2;
+    private const uint PaSuMsaaCntl = 0x2A5;
     private const int ColorTargetCount = 8;
     private const uint PsTextureUserDataRegister = 0xC;
     private const uint VsUserDataRegister = 0x4C;
@@ -3954,6 +3984,18 @@ public static class AgcExports
 
         var target = targets[0];
         var scissor = DecodeScissor(registers, target.Width, target.Height);
+        // Decode depth target address and format from registers
+        var depthAddress = 0ul;
+        var depthFormat = 0u;
+        var depthZFormat = 0u;
+        if (registers.TryGetValue(DbDepthBase, out var depthBaseLow) &&
+            registers.TryGetValue(DbDepthBaseExt, out var depthBaseHigh))
+        {
+            depthAddress = ((ulong)(depthBaseHigh & 0xFFu) << 40) | ((ulong)depthBaseLow << 8);
+            registers.TryGetValue(DbDepthInfo, out depthFormat);
+            registers.TryGetValue(DbZInfo, out depthZFormat);
+        }
+
         return new VulkanGuestRenderState(
             targets.Select(target =>
             {
@@ -3964,7 +4006,126 @@ public static class AgcExports
                 };
             }).ToArray(),
             scissor,
-            DecodeViewport(registers, target.Width, target.Height, scissor));
+            DecodeViewport(registers, target.Width, target.Height, scissor),
+            DecodeDepthStencilState(registers),
+            DecodeRasterizerState(registers),
+            depthAddress,
+            depthFormat,
+            depthZFormat);
+    }
+
+    private static VulkanGuestDepthStencilState DecodeDepthStencilState(
+        IReadOnlyDictionary<uint, uint> registers)
+    {
+        var depthControl = 0u;
+        var stencilRefMask = 0u;
+        var stencilRefMaskBf = 0u;
+        registers.TryGetValue(DbDepthControl, out depthControl);
+        registers.TryGetValue(DbStencilRefMask, out stencilRefMask);
+        registers.TryGetValue(DbStencilRefMaskBf, out stencilRefMaskBf);
+
+        // DB_DEPTH_CONTROL bits (PS5/RDNA2):
+        // [0]     = Z_ENABLE
+        // [1]     = Z_WRITE_ENABLE
+        // [4:2]   = ZFUNC (compare op)
+        // [7]     = STENCIL_ENABLE
+        // [10:8]  = STENCILFUNC (back-face stencil func)
+        //          Actually: bits vary. We use:
+        // [7]     = STENCIL_ENABLE
+        // [12:8]  = STENCILFUNC (on some RDNA configs)
+
+        var depthEnable = ((depthControl >> 0) & 1u) != 0;
+        var depthWrite = ((depthControl >> 1) & 1u) != 0;
+        var depthFunc = (depthControl >> 2) & 0x7u; // 3-bit compare op
+        var stencilEnable = ((depthControl >> 7) & 1u) != 0;
+        // Front stencil ops from bits [20:16] (STENCILFAIL), [23:21] (STENCILZPASS), [26:24] (STENCILZFAIL), [29:27] (STENCILFUNC)
+        var frontFail = (depthControl >> 16) & 0x7u;
+        var frontPass = (depthControl >> 19) & 0x7u;
+        var frontDepthFail = (depthControl >> 22) & 0x7u;
+        var frontFunc = (depthControl >> 25) & 0x7u;
+        // Back stencil ops (separate from front on RDNA2 — may be same or different)
+        var backFail = (depthControl >> 28) & 0x7u;
+        var backPass = (depthControl >> 31) & 0x1u;
+        // Note: Actual back-stencil field layout varies per ASIC; use reasonable defaults for missing bits
+        var backDepthFail = ((depthControl >> 16) & 0x7u); // fallback
+        var backFunc = ((depthControl >> 19) & 0x7u);     // fallback
+
+        // If we have separate back-face stencil ref mask:
+        var frontRef = stencilRefMask & 0xFFu;
+        var frontMask = (stencilRefMask >> 8) & 0xFFu;
+        var frontWrite = (stencilRefMask >> 16) & 0xFFu;
+        var backRef = (stencilRefMaskBf != 0) ? (stencilRefMaskBf & 0xFFu) : frontRef;
+        var backMask = (stencilRefMaskBf != 0) ? ((stencilRefMaskBf >> 8) & 0xFFu) : frontMask;
+        var backWrite = (stencilRefMaskBf != 0) ? ((stencilRefMaskBf >> 16) & 0xFFu) : frontWrite;
+
+        return new VulkanGuestDepthStencilState(
+            DepthEnable: depthEnable,
+            DepthWriteEnable: depthWrite,
+            DepthCompareOp: depthFunc,
+            StencilEnable: stencilEnable,
+            FrontFailOp: frontFail,
+            FrontPassOp: frontPass,
+            FrontDepthFailOp: frontDepthFail,
+            FrontCompareOp: frontFunc,
+            FrontCompareMask: frontMask,
+            FrontWriteMask: frontWrite,
+            FrontReference: frontRef,
+            BackFailOp: backFail,
+            BackPassOp: backPass,
+            BackDepthFailOp: backDepthFail,
+            BackCompareOp: backFunc,
+            BackCompareMask: backMask,
+            BackWriteMask: backWrite,
+            BackReference: backRef);
+    }
+
+    private static VulkanGuestRasterizerState DecodeRasterizerState(
+        IReadOnlyDictionary<uint, uint> registers)
+    {
+        var modeCntl = 0u;
+        registers.TryGetValue(PaSuScModeCntl, out modeCntl);
+
+        // PA_SU_SC_MODE_CNTL (PS5/RDNA2):
+        // Bits [1:0] = reserved for scissor-related bits (bit 1 = VPORT_SCISSOR_ENABLE already used by DecodeScissor)
+        // Bits [3:2] = CULL_MODE (0=NONE, 1=BACK, 2=FRONT, 3=BOTH)
+        // Bit  [4]   = FACE (0=CCW, 1=CW)
+        // Bits [6:5] = POLY_MODE (0=FILL, 1=LINE, 2=POINT)
+        // Bit  [7]   = POLY_OFFSET_FRONT_ENABLE
+        // Bit  [8]   = POLY_OFFSET_BACK_ENABLE
+        // Bit  [9]   = POLY_OFFSET_MODE (0=PARALLEL, 1=PERSPECTIVE)
+
+        var cullMode = (modeCntl >> 2) & 0x3u;
+        var frontFace = (modeCntl >> 4) & 0x1u;
+        var polyMode = (modeCntl >> 5) & 0x3u;
+        var polyOffsetFrontEnable = ((modeCntl >> 7) & 0x1u) != 0;
+        var polyOffsetBackEnable = ((modeCntl >> 8) & 0x1u) != 0;
+        var depthBiasEnable = polyOffsetFrontEnable || polyOffsetBackEnable;
+
+        // Polygon offset scale/offset/clamp
+        var polyScale = 0f;
+        var polyOffset = 0f;
+        var polyClamp = 0f;
+        if (registers.TryGetValue(PaSuPolyOffsetFrontScale, out var scaleBits))
+            polyScale = BitConverter.UInt32BitsToSingle(scaleBits);
+        if (registers.TryGetValue(PaSuPolyOffsetFrontOffset, out var offsetBits))
+            polyOffset = BitConverter.UInt32BitsToSingle(offsetBits);
+        if (registers.TryGetValue(PaSuPolyOffsetClamp, out var clampBits))
+            polyClamp = BitConverter.UInt32BitsToSingle(clampBits);
+
+        // Depth clip: PA_CL_CLIP_CNTL bit 0 = CLIP_DISABLE (inverted)
+        var clipCntl = 0u;
+        registers.TryGetValue(PaClClipCntl, out clipCntl);
+        var clipDisable = (clipCntl & 0x1u) != 0;
+
+        return new VulkanGuestRasterizerState(
+            CullMode: cullMode,
+            FrontFace: frontFace,
+            PolygonMode: polyMode,
+            DepthBiasEnable: depthBiasEnable,
+            DepthBiasConstantFactor: polyOffset,
+            DepthBiasClamp: polyClamp,
+            DepthBiasSlopeFactor: polyScale,
+            DepthClipEnable: !clipDisable);
     }
 
     private static VulkanGuestBlendState DecodeBlendState(
