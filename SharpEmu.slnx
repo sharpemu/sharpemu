@@ -15,6 +15,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.ShaderCompiler.Vulkan/SharpEmu.ShaderCompiler.Vulkan.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/SharpEmu.CLI.Tests/SharpEmu.CLI.Tests.csproj" />
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
   </Folder>
 </Solution>
