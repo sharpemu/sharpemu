@@ -17,6 +17,10 @@ public static class Gen5ShaderScalarEvaluator
 
     public delegate bool Gen5FallbackMemoryReader(ulong baseAddress, Span<byte> destination);
 
+    public static long EnqueuedGuestWorkSequence;
+
+    public static long CompletedGuestWorkSequence = long.MaxValue;
+
     private const int ScalarRegisterCount = 256;
     private const int ImageDescriptorDwords = 8;
     private const int SamplerDescriptorDwords = 4;
@@ -92,7 +96,7 @@ public static class Gen5ShaderScalarEvaluator
     {
         if (_recycledReads.TryGetValue(size, out var pool) &&
             pool.Count > 0 &&
-            VideoOut.VulkanVideoPresenter.CompletedGuestWorkSequence >= pool.Peek().LastUseSequence)
+            Volatile.Read(ref CompletedGuestWorkSequence) >= pool.Peek().LastUseSequence)
         {
             var entry = pool.Dequeue();
             _recycledReadBytes -= entry.Data.Length;
@@ -861,7 +865,7 @@ public static class Gen5ShaderScalarEvaluator
         if (cache is not null && cache.TryGetValue(cacheKey, out var cached))
         {
             Interlocked.Increment(ref GlobalMemoryReadCacheHits);
-            cached.LastUseSequence = VideoOut.VulkanVideoPresenter.EnqueuedGuestWorkSequence + 1;
+            cached.LastUseSequence = Volatile.Read(ref EnqueuedGuestWorkSequence) + 1;
             data = cached.Data;
             return true;
         }
@@ -875,7 +879,7 @@ public static class Gen5ShaderScalarEvaluator
         if (previous is not null && ctx.Memory.TryCompare(baseAddress, previous.Data))
         {
             Interlocked.Increment(ref GlobalMemoryReadReuses);
-            previous.LastUseSequence = VideoOut.VulkanVideoPresenter.EnqueuedGuestWorkSequence + 1;
+            previous.LastUseSequence = Volatile.Read(ref EnqueuedGuestWorkSequence) + 1;
             if (cache is not null)
             {
                 cache[cacheKey] = previous;
@@ -887,11 +891,11 @@ public static class Gen5ShaderScalarEvaluator
 
         if (previous is not null &&
             previous.Data.Length == (int)cappedSize &&
-            VideoOut.VulkanVideoPresenter.CompletedGuestWorkSequence >= previous.LastUseSequence)
+            Volatile.Read(ref CompletedGuestWorkSequence) >= previous.LastUseSequence)
         {
             var rewriteFromPvm = ctx.Memory.TryRead(baseAddress, previous.Data);
             if (rewriteFromPvm ||
-                KernelMemoryCompatExports.TryReadTrackedLibcHeap(baseAddress, previous.Data))
+                FallbackMemoryReader?.Invoke(baseAddress, previous.Data) == true)
             {
                 Interlocked.Increment(ref GlobalMemoryReadCount);
                 Interlocked.Add(ref GlobalMemoryReadBytes, previous.Data.Length);
@@ -904,7 +908,7 @@ public static class Gen5ShaderScalarEvaluator
                     Interlocked.Add(ref GlobalMemoryReadLibcBytes, previous.Data.Length);
                 }
 
-                previous.LastUseSequence = VideoOut.VulkanVideoPresenter.EnqueuedGuestWorkSequence + 1;
+                previous.LastUseSequence = Volatile.Read(ref EnqueuedGuestWorkSequence) + 1;
                 if (cache is not null)
                 {
                     cache[cacheKey] = previous;
@@ -953,8 +957,7 @@ public static class Gen5ShaderScalarEvaluator
                     Interlocked.Add(ref GlobalMemoryReadLibcBytes, data.Length);
                 }
 
-                entry.LastUseSequence =
-                    VideoOut.VulkanVideoPresenter.EnqueuedGuestWorkSequence + 1;
+                entry.LastUseSequence = Volatile.Read(ref EnqueuedGuestWorkSequence) + 1;
                 if (cache is not null)
                 {
                     cache[cacheKey] = entry;

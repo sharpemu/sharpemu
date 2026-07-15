@@ -1149,6 +1149,7 @@ internal static unsafe class VulkanVideoPresenter
 
         _pendingGuestWork.Enqueue(work);
         _enqueuedGuestWorkSequence++;
+        Gen5ShaderScalarEvaluator.EnqueuedGuestWorkSequence = _enqueuedGuestWorkSequence;
         System.Threading.Monitor.PulseAll(_gate);
     }
 
@@ -1165,6 +1166,7 @@ internal static unsafe class VulkanVideoPresenter
         lock (_gate)
         {
             _completedGuestWorkSequence++;
+            Gen5ShaderScalarEvaluator.CompletedGuestWorkSequence = _completedGuestWorkSequence;
             System.Threading.Monitor.PulseAll(_gate);
         }
     }
