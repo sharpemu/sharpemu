@@ -16,4 +16,6 @@ public interface IHostPlatform
     IHostThreading Threading { get; }
 
     IHostSymbolResolver Symbols { get; }
+
+    IHostAudioOutput Audio { get; }
 }
