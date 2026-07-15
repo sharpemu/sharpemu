@@ -19,6 +19,8 @@ public static class KernelSemaphoreCompatExports
     private sealed class KernelSemaphoreState
     {
         public required string Name { get; init; }
+        // Formatted once at creation; signal/wait/cancel/delete all wake through this key.
+        public required string WakeKey { get; init; }
         public required int InitialCount { get; init; }
         public required int MaxCount { get; init; }
         public int Count { get; set; }
@@ -79,6 +81,7 @@ public static class KernelSemaphoreCompatExports
         var state = new KernelSemaphoreState
         {
             Name = name,
+            WakeKey = GetSemaphoreWakeKey(handle),
             InitialCount = initialCount,
             MaxCount = maxCount,
             Count = initialCount,
@@ -96,7 +99,7 @@ public static class KernelSemaphoreCompatExports
                 state.Deleted = true;
             }
 
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(state.WakeKey);
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
@@ -169,7 +172,7 @@ public static class KernelSemaphoreCompatExports
                     if (GuestThreadExecution.RequestCurrentThreadBlock(
                             ctx,
                             "sceKernelWaitSema",
-                            GetSemaphoreWakeKey(handle),
+                            semaphore.WakeKey,
                             resumeHandler: () => CompleteBlockedTimedSemaWait(ctx, semaphore, timedWaiter, timeoutAddress, deadline),
                             wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, timedWaiter),
                             blockDeadlineTimestamp: deadline))
@@ -203,7 +206,7 @@ public static class KernelSemaphoreCompatExports
                 if (!GuestThreadExecution.RequestCurrentThreadBlock(
                         ctx,
                         "sceKernelWaitSema",
-                        GetSemaphoreWakeKey(handle),
+                        semaphore.WakeKey,
                         resumeHandler: () => CompleteBlockedSemaWait(semaphore, waiter),
                         wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, waiter)))
                 {
@@ -314,7 +317,7 @@ public static class KernelSemaphoreCompatExports
         // Wake everyone; the wake handler consumes the count per waiter, so a waiter
         // whose needCount exceeds the remaining count stays parked while a smaller
         // waiter can proceed.
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(semaphore.WakeKey);
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -358,7 +361,7 @@ public static class KernelSemaphoreCompatExports
             }
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(semaphore.WakeKey);
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -382,7 +385,7 @@ public static class KernelSemaphoreCompatExports
             semaphore.Deleted = true;
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(semaphore.WakeKey);
         if (_traceSema)
         {
             TraceSemaphore($"delete handle=0x{handle:X8} name='{semaphore.Name}'");

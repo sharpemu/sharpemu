@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using System.Buffers;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Threading;
 
 namespace SharpEmu.Libs.Kernel;
@@ -78,6 +80,8 @@ public static class KernelEventQueueCompatExports
             _pendingEvents.Remove(handle);
             _registeredEvents.Remove(handle);
         }
+
+        _wakeKeys.TryRemove(handle, out _);
 
         TraceEventQueue(ctx, "delete", handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -663,8 +667,12 @@ public static class KernelEventQueueCompatExports
         return null;
     }
 
+    // Wake keys are formatted once per handle: WakeEventQueue runs on every event
+    // enqueue (vblank/flip edges included), so formatting there is steady string churn.
+    private static readonly ConcurrentDictionary<ulong, string> _wakeKeys = new();
+
     private static string GetEventQueueWakeKey(ulong handle) =>
-        $"sceKernelWaitEqueue:{handle:X16}";
+        _wakeKeys.GetOrAdd(handle, static h => $"sceKernelWaitEqueue:{h:X16}");
 
     private static void WakeEventQueue(ulong handle)
     {
@@ -678,7 +686,10 @@ public static class KernelEventQueueCompatExports
             return 0;
         }
 
+        // Engines wait on the vblank/flip equeue every frame, so the delivery buffer
+        // (usually a single event) comes from the pool instead of a per-call array.
         KernelQueuedEvent[] events;
+        int count;
         lock (_eventQueueGate)
         {
             if (!_pendingEvents.TryGetValue(handle, out var queue) || queue.Count == 0)
@@ -686,8 +697,8 @@ public static class KernelEventQueueCompatExports
                 return 0;
             }
 
-            var count = Math.Min(eventCapacity, queue.Count);
-            events = new KernelQueuedEvent[count];
+            count = Math.Min(eventCapacity, queue.Count);
+            events = ArrayPool<KernelQueuedEvent>.Shared.Rent(count);
             for (var i = 0; i < count; i++)
             {
                 events[i] = queue.First!.Value;
@@ -695,15 +706,22 @@ public static class KernelEventQueueCompatExports
             }
         }
 
-        for (var i = 0; i < events.Length; i++)
+        try
         {
-            if (!WriteKernelEvent(ctx, eventsAddress + ((ulong)i * KernelEventSize), events[i]))
+            for (var i = 0; i < count; i++)
             {
-                return i;
+                if (!WriteKernelEvent(ctx, eventsAddress + ((ulong)i * KernelEventSize), events[i]))
+                {
+                    return i;
+                }
             }
         }
+        finally
+        {
+            ArrayPool<KernelQueuedEvent>.Shared.Return(events);
+        }
 
-        return events.Length;
+        return count;
     }
 
     private static bool WriteKernelEvent(CpuContext ctx, ulong address, KernelQueuedEvent queuedEvent)
@@ -718,9 +736,12 @@ public static class KernelEventQueueCompatExports
         return ctx.Memory.TryWrite(address, eventBytes);
     }
 
+    private static readonly bool _logEqueue =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_EQUEUE"), "1", StringComparison.Ordinal);
+
     private static void TraceEventQueue(CpuContext ctx, string operation, ulong handle)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_EQUEUE"), "1", StringComparison.Ordinal))
+        if (!_logEqueue)
         {
             return;
         }
