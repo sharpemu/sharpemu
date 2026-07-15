@@ -45,6 +45,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // Avoid blocking full collections while guest and render threads are
+        // running, and establish the GC mode before the runtime reserves the
+        // fixed guest address-space window.
+        System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
+
         try
         {
             return Run(args);
@@ -84,6 +89,7 @@ internal static partial class Program
         {
             if (OperatingSystem.IsMacOS())
             {
+                ConfigureMoltenVkDefaults();
                 PreloadMacVulkanLoader();
             }
 
@@ -149,6 +155,26 @@ internal static partial class Program
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Applies MoltenVK performance defaults before the Vulkan loader is
+    /// loaded. Existing user-provided values always take precedence.
+    /// </summary>
+    private static void ConfigureMoltenVkDefaults()
+    {
+        try
+        {
+            _ = MacSetEnv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
+            _ = MacSetEnv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
+            _ = MacSetEnv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "1", 0);
+            _ = MacSetEnv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 0);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Failed to set MoltenVK defaults: {exception.Message}");
+        }
     }
 
     /// <summary>
@@ -1319,4 +1345,7 @@ internal static partial class Program
         uint creationDisposition,
         uint flagsAndAttributes,
         nint templateFile);
+
+    [DllImport("libSystem", EntryPoint = "setenv")]
+    private static extern int MacSetEnv(string name, string value, int overwrite);
 }

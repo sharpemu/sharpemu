@@ -48,7 +48,107 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null)
     {
-        _hostMemory = hostMemory ?? HostPlatform.Current.Memory;
+        _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
+    }
+
+    private sealed class CrossPlatformHostMemory : IHostMemory
+    {
+        public static readonly CrossPlatformHostMemory Instance = new();
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            unchecked((ulong)HostMemory.Alloc(
+                (void*)desiredAddress,
+                (nuint)size,
+                HostMemory.MEM_RESERVE | HostMemory.MEM_COMMIT,
+                ToRawProtection(protection)));
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            unchecked((ulong)HostMemory.Alloc(
+                (void*)desiredAddress,
+                (nuint)size,
+                HostMemory.MEM_RESERVE,
+                ToRawProtection(protection)));
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) =>
+            HostMemory.Alloc(
+                (void*)address,
+                (nuint)size,
+                HostMemory.MEM_COMMIT,
+                ToRawProtection(protection)) != null;
+
+        public bool Free(ulong address) =>
+            HostMemory.Free((void*)address, 0, HostMemory.MEM_RELEASE);
+
+        public bool Protect(
+            ulong address,
+            ulong size,
+            HostPageProtection protection,
+            out uint rawOldProtection) =>
+            HostMemory.Protect(
+                (void*)address,
+                (nuint)size,
+                ToRawProtection(protection),
+                out rawOldProtection);
+
+        public bool ProtectRaw(
+            ulong address,
+            ulong size,
+            uint rawProtection,
+            out uint rawOldProtection) =>
+            HostMemory.Protect((void*)address, (nuint)size, rawProtection, out rawOldProtection);
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (HostMemory.Query((void*)address, out var raw) == 0)
+            {
+                info = default;
+                return false;
+            }
+
+            var state = raw.State switch
+            {
+                HostMemory.MEM_FREE_STATE => HostRegionState.Free,
+                HostMemory.MEM_RESERVE => HostRegionState.Reserved,
+                _ => HostRegionState.Committed,
+            };
+
+            info = new HostRegionInfo(
+                raw.BaseAddress,
+                raw.AllocationBase,
+                raw.RegionSize,
+                state,
+                raw.State,
+                FromRawProtection(raw.Protect),
+                raw.Protect,
+                raw.AllocationProtect);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size) =>
+            HostMemory.FlushInstructionCache((void*)address, (nuint)size);
+
+        private static uint ToRawProtection(HostPageProtection protection) => protection switch
+        {
+            HostPageProtection.NoAccess => HostMemory.PAGE_NOACCESS,
+            HostPageProtection.ReadOnly => HostMemory.PAGE_READONLY,
+            HostPageProtection.ReadWrite => HostMemory.PAGE_READWRITE,
+            HostPageProtection.Execute => HostMemory.PAGE_EXECUTE,
+            HostPageProtection.ReadExecute => HostMemory.PAGE_EXECUTE_READ,
+            HostPageProtection.ReadWriteExecute => HostMemory.PAGE_EXECUTE_READWRITE,
+            HostPageProtection.ExecuteWriteCopy => 0x80,
+            _ => HostMemory.PAGE_NOACCESS,
+        };
+
+        private static HostPageProtection FromRawProtection(uint protection) => protection switch
+        {
+            HostMemory.PAGE_READONLY => HostPageProtection.ReadOnly,
+            HostMemory.PAGE_READWRITE => HostPageProtection.ReadWrite,
+            HostMemory.PAGE_EXECUTE => HostPageProtection.Execute,
+            HostMemory.PAGE_EXECUTE_READ => HostPageProtection.ReadExecute,
+            HostMemory.PAGE_EXECUTE_READWRITE => HostPageProtection.ReadWriteExecute,
+            0x80 => HostPageProtection.ExecuteWriteCopy,
+            _ => HostPageProtection.NoAccess,
+        };
     }
 
     public bool TryAllocateAtExact(ulong desiredAddress, ulong size, bool executable, out ulong actualAddress)
@@ -249,42 +349,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
 
-        // Under Rosetta 2 the kernel can ignore placement hints for whole
-        // windows, so page-stepped exact probes are pathological on macOS.
-        // Linux must keep using the exact-address search below: PS5 resource
-        // descriptors cannot represent ordinary 0x7F... host mappings. Linux
-        // HostMemory uses MAP_FIXED_NOREPLACE, making those low-address probes
-        // safe without clobbering existing host mappings.
-        if (OperatingSystem.IsMacOS())
+        // POSIX treats the requested address as a hint, and Rosetta may
+        // relocate whole guest windows. Over-allocate once so the returned
+        // host range always contains an aligned guest-visible start.
+        if (!OperatingSystem.IsWindows())
         {
-            // Prefer the requested low address.  Besides matching the guest
-            // address model, this keeps the allocation representable by every
-            // PS5 GPU descriptor (the strictest ones carry 40 address bits).
-            try
-            {
-                var exactAddress = AllocateAt(
-                    cursor,
-                    alignedSize,
-                    executable,
-                    allowAlternative: false);
-                if (exactAddress == cursor)
-                {
-                    actualAddress = exactAddress;
-                    UpdateAllocationSearchCursor(
-                        desiredAddress,
-                        effectiveAlignment,
-                        executable,
-                        exactAddress + alignedSize);
-                    return true;
-                }
-            }
-            catch
-            {
-            }
-
-            // Over-allocate by the alignment so a kernel-chosen placement
-            // always contains an aligned start; the unused head/tail stays
-            // part of the tracked region and is simply never handed out.
             var reserveSize = effectiveAlignment > PageSize
                 ? alignedSize + effectiveAlignment
                 : alignedSize;
@@ -294,10 +363,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 if (posixAddress != 0)
                 {
                     var alignedBase = AlignUp(posixAddress, effectiveAlignment);
-                    const ulong gpuAddressLimit = 1UL << 40;
-                    if (alignedBase < gpuAddressLimit &&
-                        alignedSize <= gpuAddressLimit - alignedBase &&
-                        alignedBase + alignedSize <= posixAddress + reserveSize)
+                    if (alignedBase + alignedSize <= posixAddress + reserveSize)
                     {
                         actualAddress = alignedBase;
                         UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, alignedBase + alignedSize);
@@ -327,19 +393,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 continue;
             }
 
-            try
+            if (TryAllocateAtExact(cursor, alignedSize, executable, out actualAddress))
             {
-                actualAddress = AllocateAt(cursor, alignedSize, executable, allowAlternative: false);
-                if (actualAddress == cursor)
-                {
-                    UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, actualAddress + alignedSize);
-                    return true;
-                }
-
-                actualAddress = 0;
-            }
-            catch
-            {
+                UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, actualAddress + alignedSize);
+                return true;
             }
 
             cursor = AlignUp(cursor + effectiveAlignment, effectiveAlignment);

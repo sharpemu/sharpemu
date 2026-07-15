@@ -7,8 +7,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.HLE;
-using SharpEmu.HLE.Host;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -16,6 +16,55 @@ namespace SharpEmu.Core.Cpu.Native;
 public sealed partial class DirectExecutionBackend
 {
 	private static readonly ConcurrentDictionary<ulong, byte> _knownExecutablePages = new();
+
+	private static readonly bool _perfHleHistogram =
+		string.Equals(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE"), "1", System.StringComparison.Ordinal);
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _perfHleCounts = new();
+	private static long _perfHleTotal;
+	private static long _perfHleDispatchTicks;
+
+	private static void RecordPerfHleDispatchTime(long ticks)
+	{
+		var total = System.Threading.Interlocked.Add(ref _perfHleDispatchTicks, ticks);
+		var calls = System.Threading.Interlocked.Read(ref _perfHleTotal);
+		if (calls > 0 && calls % 500000 == 0)
+		{
+			var avgUs = (double)total / System.Diagnostics.Stopwatch.Frequency * 1_000_000.0 / calls;
+			System.Console.Error.WriteLine($"[PERF][HLE] managed_dispatch_avg={avgUs:F3}us total_managed_s={(double)total / System.Diagnostics.Stopwatch.Frequency:F2}");
+		}
+	}
+
+	private static readonly bool _perfHleNoDict =
+		string.Equals(System.Environment.GetEnvironmentVariable("SHARPEMU_PERF_HLE_NODICT"), "1", System.StringComparison.Ordinal);
+
+	private static void RecordPerfHleCall(string name)
+	{
+		var total = System.Threading.Interlocked.Increment(ref _perfHleTotal);
+		if (!_perfHleNoDict)
+		{
+			_perfHleCounts.AddOrUpdate(name, 1, static (_, v) => v + 1);
+		}
+
+		if (total % 500000 == 0 && !_perfHleNoDict)
+		{
+			// Snapshot via foreach (a safe moving enumerator) before sorting.
+			// LINQ over a ConcurrentDictionary uses ICollection.CopyTo, which
+			// throws ArgumentException if another thread adds a key between the
+			// Count read and the copy — that exception was being swallowed into
+			// a CPU_TRAP return and crashing the guest.
+			var snapshot = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, long>>(_perfHleCounts.Count + 16);
+			foreach (var kvp in _perfHleCounts)
+			{
+				snapshot.Add(kvp);
+			}
+
+			var top = snapshot
+				.OrderByDescending(kvp => kvp.Value)
+				.Take(20)
+				.Select(kvp => $"{kvp.Key}={kvp.Value}");
+			System.Console.Error.WriteLine($"[PERF][HLE] total={total} top: {string.Join(", ", top)}");
+		}
+	}
 
 	private void RecordRecentImportTrace(
 		long dispatchIndex,
@@ -25,101 +74,40 @@ public sealed partial class DirectExecutionBackend
 		ulong arg1,
 		ulong arg2)
 	{
-		_recentImportTrace[_recentImportTraceWriteIndex] = new RecentImportTraceEntry(
+		var trace = _recentImportTrace;
+		trace[_recentImportTraceWriteIndex] = new RecentImportTraceEntry(
 			dispatchIndex,
 			nid,
 			returnRip,
 			arg0,
 			arg1,
-			arg2);
-		_recentImportTraceWriteIndex = (_recentImportTraceWriteIndex + 1) % _recentImportTrace.Length;
-		if (_recentImportTraceCount < _recentImportTrace.Length)
+			arg2,
+			GuestThreadExecution.CurrentGuestThreadHandle,
+			Environment.CurrentManagedThreadId);
+		_recentImportTraceWriteIndex = (_recentImportTraceWriteIndex + 1) % trace.Length;
+		if (_recentImportTraceCount < trace.Length)
 		{
 			_recentImportTraceCount++;
 		}
 	}
 
-	private void RecordDeferredBootstrapTrace(
-		long dispatchIndex,
-		ulong op,
-		ulong symbolPointer,
-		ulong outputPointer,
-		ulong returnRip)
-	{
-		lock (_deferredBootstrapTraceGate)
-		{
-			_deferredBootstrapTrace[_deferredBootstrapTraceWriteIndex] = new DeferredBootstrapTraceEntry(
-				dispatchIndex,
-				op,
-				symbolPointer,
-				outputPointer,
-				returnRip);
-			_deferredBootstrapTraceWriteIndex =
-				(_deferredBootstrapTraceWriteIndex + 1) % _deferredBootstrapTrace.Length;
-			if (_deferredBootstrapTraceCount < _deferredBootstrapTrace.Length)
-			{
-				_deferredBootstrapTraceCount++;
-			}
-		}
-	}
-
-	private void DrainDeferredBootstrapTraces()
-	{
-		if (!_logBootstrap)
-		{
-			return;
-		}
-
-		DeferredBootstrapTraceEntry[] pending;
-		lock (_deferredBootstrapTraceGate)
-		{
-			if (_deferredBootstrapTraceCount == 0)
-			{
-				return;
-			}
-
-			pending = new DeferredBootstrapTraceEntry[_deferredBootstrapTraceCount];
-			var readIndex = (_deferredBootstrapTraceWriteIndex - _deferredBootstrapTraceCount +
-				_deferredBootstrapTrace.Length) % _deferredBootstrapTrace.Length;
-			for (var i = 0; i < _deferredBootstrapTraceCount; i++)
-			{
-				pending[i] = _deferredBootstrapTrace[(readIndex + i) % _deferredBootstrapTrace.Length];
-			}
-
-			_deferredBootstrapTraceCount = 0;
-		}
-
-		foreach (var entry in pending)
-		{
-			var symbolText = "<unreadable>";
-			if (TryReadAsciiZ(entry.SymbolPointer, 256, out var sym))
-			{
-				symbolText = sym;
-			}
-
-			Console.Error.WriteLine(
-				$"[LOADER][TRACE] bootstrap_call#{entry.DispatchIndex}: op=0x{entry.Op:X16} " +
-				$"sym_ptr=0x{entry.SymbolPointer:X16} sym='{symbolText}' " +
-				$"out_ptr=0x{entry.OutputPointer:X16} ret=0x{entry.ReturnRip:X16}");
-		}
-	}
-
 	private void DumpRecentImportTrace()
 	{
-		if (_recentImportTraceCount == 0)
+		var trace = _recentImportTrace;
+		if (trace is null || _recentImportTraceCount == 0)
 		{
 			return;
 		}
-		Log.Info($"   Recent import calls ({_recentImportTraceCount}):");
-		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + _recentImportTrace.Length) % _recentImportTrace.Length;
+		Log.Info($"   Recent import calls for managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
+		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + trace.Length) % trace.Length;
 		for (int i = 0; i < _recentImportTraceCount; i++)
 		{
-			int num2 = (num + i) % _recentImportTrace.Length;
-			var entry = _recentImportTrace[num2];
+			int num2 = (num + i) % trace.Length;
+			var entry = trace[num2];
 			if (!string.IsNullOrEmpty(entry.Nid))
 			{
 				Log.Info(
-					$"     #{entry.DispatchIndex} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
+					$"     #{entry.DispatchIndex} managed={entry.ManagedThreadId} guest=0x{entry.GuestThreadHandle:X16} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
 					$"rdi=0x{entry.Arg0:X16} rsi=0x{entry.Arg1:X16} rdx=0x{entry.Arg2:X16}");
 			}
 		}
@@ -135,9 +123,8 @@ public sealed partial class DirectExecutionBackend
 		int num2 = 0;
 		List<ulong> list = new List<ulong>(16);
 		ulong num3 = scanStart;
-		var hostMemory = ResolveDiagnosticsHostMemory();
-		HostRegionInfo lpBuffer;
-		while (num3 < scanEnd && hostMemory.Query(num3, out lpBuffer))
+		MEMORY_BASIC_INFORMATION64 lpBuffer;
+		while (num3 < scanEnd && VirtualQuery((void*)num3, out lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0)
 		{
 			ulong baseAddress = lpBuffer.BaseAddress;
 			ulong num4 = baseAddress + lpBuffer.RegionSize;
@@ -147,7 +134,7 @@ public sealed partial class DirectExecutionBackend
 			}
 			ulong value = Math.Max(num3, baseAddress);
 			ulong num5 = Math.Min(num4, scanEnd);
-			if (lpBuffer.State == HostRegionState.Committed && IsReadableProtection(lpBuffer.RawProtection) && !IsExecutableProtection(lpBuffer.RawProtection))
+			if (lpBuffer.State == 4096 && IsReadableProtection(lpBuffer.Protect) && !IsExecutableProtection(lpBuffer.Protect))
 			{
 				ulong num6 = AlignUp(value, 8uL);
 				for (ulong num7 = num6; num7 + 8 <= num5; num7 += 8)
@@ -185,6 +172,50 @@ public sealed partial class DirectExecutionBackend
 		if (cpuContext == null || returnRip == 0)
 		{
 			return;
+		}
+		const int preludeSize = 192;
+		Span<byte> prelude = stackalloc byte[preludeSize];
+		if (returnRip >= preludeSize && cpuContext.Memory.TryRead(returnRip - preludeSize, prelude))
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][TRACE] Import#{dispatchIndex} pre-return bytes @0x{returnRip - preludeSize:X16}: " +
+				BitConverter.ToString(prelude.ToArray()).Replace("-", " "));
+
+			List<DecodedInst>? bestCallChain = null;
+			var preludeAddress = returnRip - preludeSize;
+			for (var startOffset = 0; startOffset < preludeSize; startOffset++)
+			{
+				var cursor = preludeAddress + (ulong)startOffset;
+				var candidate = new List<DecodedInst>();
+				while (cursor < returnRip && candidate.Count < 96 &&
+					IcedDecoder.TryReadGuestBytes(cpuContext.Memory, cursor, 15, out var instructionBytes) &&
+					IcedDecoder.TryDecode(cursor, instructionBytes, out var instruction) &&
+					instruction.Length > 0 &&
+					cursor + (ulong)instruction.Length <= returnRip)
+				{
+					candidate.Add(instruction);
+					cursor += (ulong)instruction.Length;
+				}
+
+				if (cursor == returnRip &&
+					candidate.Count > 0 &&
+					string.Equals(candidate[^1].Mnemonic, "Call", StringComparison.OrdinalIgnoreCase) &&
+					(bestCallChain is null || candidate.Count > bestCallChain.Count))
+				{
+					bestCallChain = candidate;
+				}
+			}
+
+			if (bestCallChain is not null)
+			{
+				Console.Error.WriteLine($"[LOADER][TRACE] Import#{dispatchIndex} pre-return disassembly:");
+				foreach (var instruction in bestCallChain.TakeLast(32))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][TRACE]   0x{instruction.Rip:X16}: {instruction.Text} " +
+						$"bytes={IcedDecoder.FormatBytes(instruction.Bytes)}");
+				}
+			}
 		}
 		Span<byte> destination = stackalloc byte[128];
 		if (!cpuContext.Memory.TryRead(returnRip, destination))
@@ -237,15 +268,14 @@ public sealed partial class DirectExecutionBackend
 			ulong callRip = returnRip + (ulong)i;
 			ulong target = unchecked((ulong)((long)(callRip + 5) + rel32));
 			Log.Debug($"Import#{dispatchIndex} near-call @{callRip:X16}: target=0x{target:X16}");
-			var importEntries = _importEntries;
-			for (int importIndex = 0; importIndex < importEntries.Length; importIndex++)
+			for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
 			{
-				if (importEntries[importIndex].Address != target)
+				if (_importEntries[importIndex].Address != target)
 				{
 					continue;
 				}
 
-				string nid = importEntries[importIndex].Nid;
+				string nid = _importEntries[importIndex].Nid;
 				if (_moduleManager.TryGetExport(nid, out var export))
 				{
 					Log.Debug(
@@ -272,14 +302,14 @@ public sealed partial class DirectExecutionBackend
 					{
 						Log.Debug(
 							$"Import#{dispatchIndex} near-call PLT slot: [0x{slot:X16}] = 0x{slotTarget:X16}");
-						for (int importIndex = 0; importIndex < importEntries.Length; importIndex++)
+						for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
 						{
-							if (importEntries[importIndex].Address != slotTarget)
+							if (_importEntries[importIndex].Address != slotTarget)
 							{
 								continue;
 							}
 
-							string nid = importEntries[importIndex].Nid;
+							string nid = _importEntries[importIndex].Nid;
 							if (_moduleManager.TryGetExport(nid, out var export))
 							{
 								Log.Debug(
@@ -301,6 +331,28 @@ public sealed partial class DirectExecutionBackend
 	private static bool IsUnresolvedSentinel(ulong value)
 	{
 		return value == 65534 || value == 4294967294u || value == 18446744073709551614uL;
+	}
+
+	private static ulong ParseOptionalHexAddress(string? value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			return 0;
+		}
+
+		var text = value.Trim();
+		if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+		{
+			text = text[2..];
+		}
+
+		return ulong.TryParse(
+			text,
+			System.Globalization.NumberStyles.HexNumber,
+			System.Globalization.CultureInfo.InvariantCulture,
+			out var address)
+			? address
+			: 0;
 	}
 
 	private static bool IsPlausibleReturnAddress(ulong address)
@@ -352,7 +404,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (!ResolveDiagnosticsHostMemory().Query(address, out var lpBuffer))
+		if (VirtualQuery((void*)address, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
 		{
 			return false;
 		}
@@ -361,7 +413,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (lpBuffer.State != HostRegionState.Committed || !IsReadableProtection(lpBuffer.RawProtection))
+		if (lpBuffer.State != 4096 || !IsReadableProtection(lpBuffer.Protect))
 		{
 			return false;
 		}
@@ -393,12 +445,12 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		if (!ResolveDiagnosticsHostMemory().Query(address, out var lpBuffer))
+		if (VirtualQuery((void*)address, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
 		{
 			return false;
 		}
 
-		var executable = lpBuffer.State == HostRegionState.Committed && IsExecutableProtection(lpBuffer.RawProtection);
+		var executable = lpBuffer.State == 4096 && IsExecutableProtection(lpBuffer.Protect);
 		if (executable)
 		{
 			_knownExecutablePages.TryAdd(pageAddress, 0);
@@ -415,14 +467,6 @@ public sealed partial class DirectExecutionBackend
 		}
 		ulong num = alignment - 1;
 		return (value + num) & ~num;
-	}
-
-	// Diagnostics helpers are static (reachable from static handler paths), so
-	// they use the platform injected into the backend active on this thread and
-	// fall back to the process-wide singleton only when no run is bound.
-	private static IHostMemory ResolveDiagnosticsHostMemory()
-	{
-		return _activeExecutionBackend?._hostMemory ?? HostPlatform.Current.Memory;
 	}
 
 	private static bool IsReadableProtection(uint protect)

@@ -13,7 +13,9 @@ public static class HleDataSymbols
     private const string LibcNeedFlagNid = "P330P3dFF68";
     private const string LibcInternalNeedFlagNid = "ZT4ODD2Ts9o";
     private const int ProgNameMaxBytes = 511;
-    private const ulong StackChkGuardValue = 0xC0DEC0DECAFEBABEUL;
+    // Terminator canaries reserve the low byte as NUL. Keep the process data
+    // symbol and every per-thread TLS copy byte-for-byte identical.
+    private const ulong StackChkGuardValue = 0xC0DEC0DECAFEBA00UL;
 
     private static readonly object _gate = new();
     private static readonly nint _stackChkGuardAddress = Allocate(sizeof(ulong) * 2);

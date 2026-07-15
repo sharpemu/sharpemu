@@ -9,9 +9,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu.Disasm;
-using SharpEmu.Core.Cpu.Native.Windows;
 using SharpEmu.HLE;
-using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -19,6 +17,8 @@ public sealed partial class DirectExecutionBackend
 {
 	private const ulong LazyCommitWindowBytes = 0x0200_0000UL;
 	private static int _lazyCommitTraceCount;
+	private static int _guestAllocatorHoleRecoveries;
+	private static int _auxiliaryThreadExecuteFaultRecoveries;
 
 	private unsafe void SetupExceptionHandler()
 	{
@@ -30,12 +30,12 @@ public sealed partial class DirectExecutionBackend
 
 		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RAW_HANDLER"), "1", StringComparison.Ordinal))
 		{
-			_rawExceptionHandlerStub = _faultHandling.CreateHandlerThunk(RawVectoredHandlerPtrManaged, _hostRspSlotTlsIndex, _tlsGetValueAddress);
+			_rawExceptionHandlerStub = CreateExceptionHandlerTrampoline(RawVectoredHandlerPtrManaged);
 			if (_rawExceptionHandlerStub == 0)
 			{
 				throw new InvalidOperationException("Failed to create raw exception handler trampoline");
 			}
-			_rawExceptionHandler = _faultHandling.AddFirstChanceHandler(_rawExceptionHandlerStub);
+			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
 			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
 		}
 		else
@@ -45,22 +45,22 @@ public sealed partial class DirectExecutionBackend
 
 		_handlerDelegate = VectoredHandler;
 		_handlerHandle = GCHandle.Alloc(_handlerDelegate);
-		_exceptionHandlerStub = _faultHandling.CreateHandlerThunk(Marshal.GetFunctionPointerForDelegate(_handlerDelegate), _hostRspSlotTlsIndex, _tlsGetValueAddress);
+		_exceptionHandlerStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_handlerDelegate));
 		if (_exceptionHandlerStub == 0)
 		{
 			throw new InvalidOperationException("Failed to create exception handler trampoline");
 		}
-		_exceptionHandler = _faultHandling.AddFirstChanceHandler(_exceptionHandlerStub);
+		_exceptionHandler = (nint)AddVectoredExceptionHandler(1u, _exceptionHandlerStub);
 		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
 
 		_unhandledFilterDelegate = UnhandledExceptionFilter;
 		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);
-		_unhandledFilterStub = _faultHandling.CreateHandlerThunk(Marshal.GetFunctionPointerForDelegate(_unhandledFilterDelegate), _hostRspSlotTlsIndex, _tlsGetValueAddress);
+		_unhandledFilterStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_unhandledFilterDelegate));
 		if (_unhandledFilterStub == 0)
 		{
 			throw new InvalidOperationException("Failed to create unhandled exception filter trampoline");
 		}
-		_faultHandling.SetUnhandledFilter(_unhandledFilterStub);
+		SetUnhandledExceptionFilter(_unhandledFilterStub);
 	}
 
 	private unsafe int UnhandledExceptionFilter(void* exceptionInfo)
@@ -68,8 +68,8 @@ public sealed partial class DirectExecutionBackend
 		try
 		{
 			EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-			ulong rip = ReadCtxU64(((EXCEPTION_POINTERS*)exceptionInfo)->ContextRecord, CTX_RIP);
-			ulong rsp = ReadCtxU64(((EXCEPTION_POINTERS*)exceptionInfo)->ContextRecord, CTX_RSP);
+			ulong rip = ReadCtxU64(((EXCEPTION_POINTERS*)exceptionInfo)->ContextRecord, 248);
+			ulong rsp = ReadCtxU64(((EXCEPTION_POINTERS*)exceptionInfo)->ContextRecord, 152);
 			Console.Error.WriteLine("[LOADER][FATAL] Unhandled exception filter fired.");
 			Console.Error.WriteLine($"[LOADER][FATAL]   Code: 0x{exceptionRecord->ExceptionCode:X8}");
 			Console.Error.WriteLine($"[LOADER][FATAL]   Exception Address: 0x{(ulong)(nint)exceptionRecord->ExceptionAddress:X16}");
@@ -108,19 +108,23 @@ public sealed partial class DirectExecutionBackend
 				return 0;
 			}
 
-			ulong rip = ReadCtxU64(contextRecord, CTX_RIP);
-			ulong rsp = ReadCtxU64(contextRecord, CTX_RSP);
-
-			// Thread-mode probe: a hardware exception raised while this thread is inside
-			// the managed import gateway means the VEH->managed reentry happened from
-			// cooperative GC mode — a ReversePInvokeBadTransition candidate.
-			if (LogThreadMode && _threadModeGatewayDepth > 0)
+			ulong rip = ReadCtxU64(contextRecord, 248);
+			ulong rsp = ReadCtxU64(contextRecord, 152);
+			if (TryRecoverGuestInt41(exceptionCode, contextRecord, rip))
 			{
-				TraceThreadMode(
-					$"veh_in_gateway code=0x{exceptionCode:X8} rip=0x{rip:X16} gateway_depth={_threadModeGatewayDepth}");
+				return -1;
+			}
+			if (TryRecoverAuxiliaryThreadExecuteFault(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
 			}
 
-			if (exceptionCode == WindowsFaultCodes.AccessViolation && TryHandleLazyCommittedPage(exceptionRecord, rip, rsp))
+			if (exceptionCode == 3221225477u && TryHandleLazyCommittedPage(exceptionRecord, rip, rsp))
+			{
+				return -1;
+			}
+			if (exceptionCode == 3221225477u &&
+				TryRecoverGuestAllocatorHole(exceptionRecord, contextRecord, rip))
 			{
 				return -1;
 			}
@@ -135,10 +139,10 @@ public sealed partial class DirectExecutionBackend
 
 			switch (exceptionCode)
 			{
-				case WindowsFaultCodes.AccessViolation:
+				case 3221225477u:
 					LogAccessViolationTrace(exceptionAddress, exceptionRecord);
 					break;
-				case WindowsFaultCodes.FastFail:
+				case 3221226505u:
 					{
 						ulong p0 = exceptionRecord->NumberParameters >= 1 ? (*exceptionRecord->ExceptionInformation) : 0;
 						ulong p1 = exceptionRecord->NumberParameters >= 2 ? exceptionRecord->ExceptionInformation[1] : 0;
@@ -148,27 +152,56 @@ public sealed partial class DirectExecutionBackend
 					}
 			}
 
-			ulong rax = ReadCtxU64(contextRecord, CTX_RAX);
-			ulong rbx = ReadCtxU64(contextRecord, CTX_RBX);
-			ulong rcx = ReadCtxU64(contextRecord, CTX_RCX);
-			ulong rdx = ReadCtxU64(contextRecord, CTX_RDX);
-			ulong rsi = ReadCtxU64(contextRecord, CTX_RSI);
-			ulong rdi = ReadCtxU64(contextRecord, CTX_RDI);
-			ulong rbp = ReadCtxU64(contextRecord, CTX_RBP);
-			ulong r8 = ReadCtxU64(contextRecord, CTX_R8);
-			ulong r9 = ReadCtxU64(contextRecord, CTX_R9);
-			ulong r10 = ReadCtxU64(contextRecord, CTX_R10);
-			ulong r11 = ReadCtxU64(contextRecord, CTX_R11);
-			ulong r12 = ReadCtxU64(contextRecord, CTX_R12);
-			ulong r13 = ReadCtxU64(contextRecord, CTX_R13);
-			ulong r14 = ReadCtxU64(contextRecord, CTX_R14);
-			ulong r15 = ReadCtxU64(contextRecord, CTX_R15);
+			ulong rax = ReadCtxU64(contextRecord, 120);
+			ulong rbx = ReadCtxU64(contextRecord, 144);
+			ulong rcx = ReadCtxU64(contextRecord, 128);
+			ulong rdx = ReadCtxU64(contextRecord, 136);
+			ulong rsi = ReadCtxU64(contextRecord, 168);
+			ulong rdi = ReadCtxU64(contextRecord, 176);
+			ulong rbp = ReadCtxU64(contextRecord, 160);
+			ulong r8 = ReadCtxU64(contextRecord, 184);
+			ulong r9 = ReadCtxU64(contextRecord, 192);
+			ulong r10 = ReadCtxU64(contextRecord, 200);
+			ulong r11 = ReadCtxU64(contextRecord, 208);
+			ulong r12 = ReadCtxU64(contextRecord, 216);
+			ulong r13 = ReadCtxU64(contextRecord, 224);
+			ulong r14 = ReadCtxU64(contextRecord, 232);
+			ulong r15 = ReadCtxU64(contextRecord, 240);
 
 			Console.Error.WriteLine("[LOADER][INFO] =========================================");
 			Console.Error.WriteLine("[LOADER][INFO] NATIVE EXCEPTION CAUGHT!");
 			Console.Error.WriteLine($"[LOADER][INFO]   Code: 0x{exceptionCode:X8}");
 			Console.Error.WriteLine($"[LOADER][INFO]   Exception Address: 0x{exceptionAddress:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   RIP: 0x{rip:X16}");
+			Console.Error.WriteLine(
+				$"[LOADER][INFO]   Host thread: managed={Environment.CurrentManagedThreadId} " +
+				$"name='{Thread.CurrentThread.Name ?? "<unnamed>"}'");
+			if (_activeGuestThreadState is { } activeGuestThread)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][INFO]   Guest thread: handle=0x{activeGuestThread.ThreadHandle:X16} " +
+					$"name='{activeGuestThread.Name}' state={activeGuestThread.State} " +
+					$"last_import={activeGuestThread.LastImportNid ?? "<none>"} " +
+					$"last_ret=0x{activeGuestThread.LastReturnRip:X16}");
+				Console.Error.WriteLine(
+					$"[LOADER][INFO]   Last import registers: " +
+					$"rax=0x{Volatile.Read(ref activeGuestThread.LastImportRax):X16} " +
+					$"result_valid={Volatile.Read(ref activeGuestThread.LastImportResultValid) != 0} " +
+					$"rdi=0x{activeGuestThread.LastImportRdi:X16} " +
+					$"rsi=0x{activeGuestThread.LastImportRsi:X16} " +
+					$"rdx=0x{activeGuestThread.LastImportRdx:X16} " +
+					$"rcx=0x{activeGuestThread.LastImportRcx:X16} " +
+					$"r8=0x{activeGuestThread.LastImportR8:X16} " +
+					$"r9=0x{activeGuestThread.LastImportR9:X16}");
+				Console.Error.WriteLine(
+					$"[LOADER][INFO]   Last import stack args: " +
+					$"0=0x{activeGuestThread.LastImportStack0:X16} " +
+					$"1=0x{activeGuestThread.LastImportStack1:X16} " +
+					$"2=0x{activeGuestThread.LastImportStack2:X16} " +
+					$"3=0x{activeGuestThread.LastImportStack3:X16} " +
+					$"4=0x{activeGuestThread.LastImportStack4:X16} " +
+					$"5=0x{activeGuestThread.LastImportStack5:X16}");
+			}
 			if (TryFormatNearestRuntimeSymbol(rip, out string symbol))
 			{
 				Console.Error.WriteLine("[LOADER][INFO]   RIP symbol: " + symbol);
@@ -193,7 +226,7 @@ public sealed partial class DirectExecutionBackend
 
 			ulong accessType = 0;
 			ulong target = 0;
-			if (exceptionCode == WindowsFaultCodes.AccessViolation && exceptionRecord->NumberParameters >= 2)
+			if (exceptionCode == 3221225477u && exceptionRecord->NumberParameters >= 2)
 			{
 				accessType = *exceptionRecord->ExceptionInformation;
 				target = exceptionRecord->ExceptionInformation[1];
@@ -206,9 +239,9 @@ public sealed partial class DirectExecutionBackend
 				};
 				Console.Error.WriteLine("[LOADER][INFO]   AV access: " + accessText);
 				Console.Error.WriteLine($"[LOADER][INFO]   AV target: 0x{target:X16}");
-				if (_hostMemory.Query(target, out var mbi))
+				if (VirtualQuery((void*)target, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0)
 				{
-					Console.Error.WriteLine($"[LOADER][INFO]   AV target region: base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X16} state=0x{mbi.RawState:X08} protect=0x{mbi.RawProtection:X08}");
+					Console.Error.WriteLine($"[LOADER][INFO]   AV target region: base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X16} state=0x{mbi.State:X08} protect=0x{mbi.Protect:X08}");
 				}
 
 			}
@@ -225,13 +258,46 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.WriteLine($"[LOADER][INFO]     [rsp+0x{i * 8:X2}] @0x{stackAddr:X16} = 0x{value:X16}");
 			}
 
+			if (string.Equals(
+					Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FAULT_STACK_WINDOW"),
+					"1",
+					StringComparison.Ordinal))
+			{
+				Console.Error.WriteLine("[LOADER][INFO]   Full fault stack window (RSP-0x300..RSP+0x100):");
+				var windowStart = rsp >= 0x300 ? rsp - 0x300 : 0;
+				for (var stackAddr = windowStart; stackAddr < rsp + 0x100; stackAddr += 8)
+				{
+					if (!TryReadHostQword(stackAddr, out var value))
+					{
+						continue;
+					}
+
+					var relative = unchecked((long)(stackAddr - rsp));
+					var relativeText = relative >= 0
+						? $"+0x{relative:X}"
+						: $"-0x{-relative:X}";
+					var symbolText = TryFormatNearestRuntimeSymbol(value, out var stackSymbol)
+						? $" [{stackSymbol}]"
+						: string.Empty;
+					Console.Error.WriteLine(
+						$"[LOADER][INFO]     [rsp{relativeText}] " +
+						$"@0x{stackAddr:X16} = 0x{value:X16}{symbolText}");
+				}
+			}
+
+			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
+			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
+			DumpPointerWindow("fault-register-rdi", rdi, 0x60);
+			DumpPointerWindow("fault-register-r13", r13, 0x60);
+			DumpPointerWindow("fault-register-r14", r14, 0x60);
+
 			try
 			{
 				Console.Error.WriteLine("[LOADER][INFO]   Frame chain (RBP walk):");
 				ulong frame = rbp;
 				for (int i = 0; i < 12; i++)
 				{
-					if (frame < 140733193388032L || frame > 140737488355327L)
+					if (frame < 0x10000)
 					{
 						break;
 					}
@@ -256,7 +322,7 @@ public sealed partial class DirectExecutionBackend
 
 			switch (exceptionCode)
 			{
-				case WindowsFaultCodes.AccessViolation:
+				case 3221225477u:
 					Console.Error.WriteLine("[LOADER][ERROR]   Type: Access Violation");
 					Console.Error.WriteLine("[LOADER][ERROR]   This usually means:");
 					Console.Error.WriteLine("[LOADER][ERROR]     - Guest code called an unmapped import");
@@ -290,22 +356,57 @@ public sealed partial class DirectExecutionBackend
 						{
 							Console.Error.WriteLine("[LOADER][INFO]   Code window [RIP-0x20..]: " + BitConverter.ToString(window).Replace("-", " "));
 						}
+						for (var stackIndex = 0; stackIndex < 16; stackIndex++)
+						{
+							byte[] stackSlot = new byte[8];
+							if (!TryReadHostBytes(rsp + (ulong)(stackIndex * 8), stackSlot))
+							{
+								continue;
+							}
+							var candidate = BitConverter.ToUInt64(stackSlot);
+							if (candidate < _entryPoint || candidate >= _entryPoint + 0x10000000 || candidate < 24)
+							{
+								continue;
+							}
+							byte[] callSiteWindow = new byte[48];
+							if (TryReadHostBytes(candidate - 24, callSiteWindow))
+							{
+								Console.Error.WriteLine(
+									$"[LOADER][INFO]   Stack guest-code candidate [rsp+0x{stackIndex * 8:X2}]=0x{candidate:X16}, bytes [-0x18..]: " +
+									BitConverter.ToString(callSiteWindow).Replace("-", " "));
+							}
+						}
 					}
 					else
 					{
 						Console.Error.WriteLine("[LOADER][ERROR]   Could not read code at RIP");
 					}
 					DumpRecentImportTrace();
-					DumpGuestDisasmDiagnostics(rip, rbp);
+					DumpGuestDisasmDiagnostics(rip, rbp, rsp);
+					DumpGuestRegisterWindowDiagnostics(
+						rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp,
+						r8, r9, r10, r11, r12, r13, r14, r15);
 					DumpGuestReferenceDiagnostics();
 					DumpGuestPointerWindowDiagnostics();
 					break;
-				case WindowsFaultCodes.Breakpoint:
+				case 2147483651u:
 					Console.Error.WriteLine("[LOADER][WARNING]   Type: Breakpoint (int3)");
 					Console.Error.WriteLine("[LOADER][WARNING]   Unexpected breakpoint in direct-bridge mode");
 					break;
-				case WindowsFaultCodes.IllegalInstruction:
+				case 1073741845u:
+					Console.Error.WriteLine("[LOADER][ERROR]   Type: Abort (SIGABRT)");
+					DumpRecentImportTrace();
+					DumpGuestDisasmDiagnostics(rip, rbp, rsp);
+					break;
+				case 3221225501u:
 					Console.Error.WriteLine("[LOADER][INFO]   Type: Illegal Instruction");
+					byte[] illegalCode = new byte[16];
+					if (TryReadHostBytes(rip, illegalCode))
+					{
+						Console.Error.WriteLine("[LOADER][INFO]   Code at RIP: " + BitConverter.ToString(illegalCode).Replace("-", " "));
+					}
+					DumpRecentImportTrace();
+					DumpGuestDisasmDiagnostics(rip, rbp, rsp);
 					break;
 			}
 
@@ -317,6 +418,108 @@ public sealed partial class DirectExecutionBackend
 		{
 			_vectoredHandlerDepth--;
 		}
+	}
+
+	private unsafe bool TryRecoverAuxiliaryThreadExecuteFault(
+		EXCEPTION_RECORD* exceptionRecord,
+		void* contextRecord,
+		ulong rip)
+	{
+		if (exceptionRecord->ExceptionCode != 3221225477u ||
+			rip >= 0x0000000800000000UL ||
+			_activeGuestThreadState is not { Name: "tbb_thead" } activeThread)
+		{
+			return false;
+		}
+
+		var hostExit = ActiveEntryReturnSentinelRip;
+		if (hostExit < 0x10000)
+		{
+			hostExit = unchecked((ulong)_guestReturnStub);
+		}
+		if (hostExit < 0x10000)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Could not recover auxiliary TBB execute fault: target=0x{rip:X16} " +
+				$"active_exit=0x{ActiveEntryReturnSentinelRip:X16} guest_return_stub=0x{unchecked((ulong)_guestReturnStub):X16}");
+			return false;
+		}
+
+		_ = TryPatchActiveGuestReturnSlot(hostExit);
+		WriteCtxU64(contextRecord, 120, 0);
+		WriteCtxU64(contextRecord, 248, hostExit);
+		var recovery = Interlocked.Increment(ref _auxiliaryThreadExecuteFaultRecoveries);
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] Recovered auxiliary TBB execute fault #{recovery}: " +
+			$"thread=0x{activeThread.ThreadHandle:X16} target=0x{rip:X16} -> host_exit=0x{hostExit:X16}");
+		return true;
+	}
+
+	private unsafe bool TryRecoverGuestInt41(uint exceptionCode, void* contextRecord, ulong rip)
+	{
+		if (!_ignoreGuestInt41 || exceptionCode != 3221225477u || rip < 0x10000)
+		{
+			return false;
+		}
+
+		byte[] opcode = new byte[2];
+		if (!TryReadHostBytes(rip, opcode) || opcode[0] != 0xCD || opcode[1] != 0x41)
+		{
+			return false;
+		}
+
+		var count = Interlocked.Increment(ref _ignoredGuestInt41Count);
+		WriteCtxU64(contextRecord, 248, rip + 2);
+		if (count <= 16 || count % 65536 == 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Ignored guest int 0x41 trap #{count} at 0x{rip:X16} (SHARPEMU_IGNORE_INT41=1)");
+			Console.Error.Flush();
+		}
+		return true;
+	}
+
+	private unsafe static bool TryRecoverGuestAllocatorHole(
+		EXCEPTION_RECORD* exceptionRecord,
+		void* contextRecord,
+		ulong rip)
+	{
+		if (string.Equals(
+				Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_GUEST_ALLOCATOR_HOLE_RECOVERY"),
+				"1",
+				StringComparison.Ordinal) ||
+			exceptionRecord->NumberParameters < 2 ||
+			exceptionRecord->ExceptionInformation[0] != 0 ||
+			exceptionRecord->ExceptionInformation[1] != 8 ||
+			ReadCtxU64(contextRecord, CTX_RDI) != 0 ||
+			rip < 0x10000)
+		{
+			return false;
+		}
+
+		// Demon's Souls occasionally leaves an empty payload in a locked pool
+		// tree node. The allocator dereferences payload+8 before reaching its
+		// existing empty-pool fallback. Match the instruction stream instead of
+		// a title-specific absolute address, then resume at that fallback so the
+		// lock is released and the allocator can try its next backing pool.
+		const ulong allocatorHoleSignature = 0x634CFF568D08778BUL;
+		if (*(ulong*)rip != allocatorHoleSignature || *((byte*)rip + 8) != 0xF2)
+		{
+			return false;
+		}
+
+		const ulong emptyPoolFallbackDelta = 0x8E;
+		WriteCtxU64(contextRecord, CTX_RIP, rip + emptyPoolFallbackDelta);
+		var recovery = Interlocked.Increment(ref _guestAllocatorHoleRecoveries);
+		if (recovery <= 16 || (recovery & (recovery - 1)) == 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Guest allocator empty-node adapter recovery #{recovery}: " +
+				$"rip=0x{rip:X16} -> 0x{rip + emptyPoolFallbackDelta:X16}");
+			Console.Error.Flush();
+		}
+
+		return true;
 	}
 
 	private static bool IsBenignHostDebugException(uint exceptionCode)
@@ -337,8 +540,8 @@ public sealed partial class DirectExecutionBackend
 			EXCEPTION_POINTERS* pointers = (EXCEPTION_POINTERS*)exceptionInfo;
 			EXCEPTION_RECORD* record = pointers->ExceptionRecord;
 			void* contextRecord = pointers->ContextRecord;
-			ulong rip = contextRecord != null ? ReadCtxU64(contextRecord, CTX_RIP) : 0;
-			ulong rsp = contextRecord != null ? ReadCtxU64(contextRecord, CTX_RSP) : 0;
+			ulong rip = contextRecord != null ? ReadCtxU64(contextRecord, 248) : 0;
+			ulong rsp = contextRecord != null ? ReadCtxU64(contextRecord, 152) : 0;
 			ulong accessType = record->NumberParameters >= 1 ? *record->ExceptionInformation : 0;
 			ulong target = record->NumberParameters >= 2 ? record->ExceptionInformation[1] : 0;
 			Console.Error.WriteLine(
@@ -398,7 +601,7 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private void DumpGuestDisasmDiagnostics(ulong rip, ulong rbp)
+	private void DumpGuestDisasmDiagnostics(ulong rip, ulong rbp, ulong rsp)
 	{
 		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DISASM"), "1", StringComparison.Ordinal))
 		{
@@ -410,12 +613,20 @@ public sealed partial class DirectExecutionBackend
 			DumpGuestInstructionStream("fault-prelude", rip - 0x20, 24);
 		}
 
+		// Optimized guest code frequently omits frame pointers. The return
+		// address at RSP is then more useful than an RBP walk and identifies the
+		// exact call site that supplied the faulting arguments.
+		if (TryReadHostQword(rsp, out var stackReturn) && stackReturn >= 0x60)
+		{
+			DumpGuestInstructionStream("stack-return-prelude", stackReturn - 0x60, 40);
+		}
+
 		try
 		{
 			ulong frame = rbp;
 			for (int i = 0; i < 3; i++)
 			{
-				if (frame < 140733193388032L || frame > 140737488355327L)
+				if (frame < 0x10000)
 				{
 					break;
 				}
@@ -484,7 +695,7 @@ public sealed partial class DirectExecutionBackend
 		ulong address = scanBase;
 		while (address < scanEnd)
 		{
-			if (!_hostMemory.Query(address, out var mbi))
+			if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
 			{
 				break;
 			}
@@ -496,9 +707,9 @@ public sealed partial class DirectExecutionBackend
 				break;
 			}
 
-			if (mbi.State == HostRegionState.Committed &&
-				IsReadableProtection(mbi.RawProtection) &&
-				IsExecutableProtection(mbi.RawProtection))
+			if (mbi.State == MEM_COMMIT &&
+				IsReadableProtection(mbi.Protect) &&
+				IsExecutableProtection(mbi.Protect))
 			{
 				ScanExecutableRegionForTargetReferences(regionBase, regionEnd, targetList, hitCounts, maxHitsPerTarget);
 			}
@@ -556,6 +767,55 @@ public sealed partial class DirectExecutionBackend
 		foreach (var target in targetList)
 		{
 			DumpPointerWindow($"ptrwin-0x{target:X16}", target, windowSize);
+		}
+	}
+
+	private void DumpGuestRegisterWindowDiagnostics(
+		ulong rax,
+		ulong rbx,
+		ulong rcx,
+		ulong rdx,
+		ulong rsi,
+		ulong rdi,
+		ulong rbp,
+		ulong rsp,
+		ulong r8,
+		ulong r9,
+		ulong r10,
+		ulong r11,
+		ulong r12,
+		ulong r13,
+		ulong r14,
+		ulong r15)
+	{
+		if (!string.Equals(
+				Environment.GetEnvironmentVariable("SHARPEMU_LOG_REGISTER_WINDOWS"),
+				"1",
+				StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		// A register can be the only surviving reference to the object or
+		// argument array that caused a native guest fault. Capture a compact
+		// window while the process is alive so the post-mortem log can
+		// distinguish an absent object from a partially initialized one.
+		var registers = new (string Name, ulong Value)[]
+		{
+			("rax", rax), ("rbx", rbx), ("rcx", rcx), ("rdx", rdx),
+			("rsi", rsi), ("rdi", rdi), ("rbp", rbp), ("rsp", rsp),
+			("r8", r8), ("r9", r9), ("r10", r10), ("r11", r11),
+			("r12", r12), ("r13", r13), ("r14", r14), ("r15", r15),
+		};
+		var seen = new HashSet<ulong>();
+		foreach (var (name, value) in registers)
+		{
+			if (value < 0x10000 || !seen.Add(value))
+			{
+				continue;
+			}
+
+			DumpPointerWindow($"register-{name}", value, 0x80);
 		}
 	}
 
@@ -803,13 +1063,13 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		if (!_hostMemory.Query(address, out var mbi))
+		if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
 		{
 			return false;
 		}
 
 		ulong regionEnd = mbi.BaseAddress + mbi.RegionSize;
-		if (mbi.State != HostRegionState.Committed || !IsReadableProtection(mbi.RawProtection) || regionEnd <= address || address > regionEnd - 8)
+		if (mbi.State != MEM_COMMIT || !IsReadableProtection(mbi.Protect) || regionEnd <= address || address > regionEnd - 8)
 		{
 			return false;
 		}
@@ -848,7 +1108,7 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe bool TryReadHostBytes(ulong address, byte[] buffer)
+	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
 		if (address < 65536)
 		{
@@ -861,9 +1121,9 @@ public sealed partial class DirectExecutionBackend
 			ulong end = address + (ulong)buffer.Length;
 			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
 			{
-				if (!_hostMemory.Query(page, out var mbi) ||
-					mbi.State != HostRegionState.Committed ||
-					!IsReadableProtection(mbi.RawProtection))
+				if (VirtualQuery((void*)page, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+					mbi.State != MEM_COMMIT ||
+					!IsReadableProtection(mbi.Protect))
 				{
 					return false;
 				}
@@ -976,25 +1236,25 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (!_hostMemory.Query(faultAddress, out var mbi))
+		if (VirtualQuery((void*)faultAddress, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
 		{
 			return false;
 		}
 
 		ulong pageBase = faultAddress & 0xFFFFFFFFFFFFF000uL;
-		uint commitProtect = ResolveLazyCommitProtection(accessType, mbi.RawAllocationProtection);
+		uint commitProtect = ResolveLazyCommitProtection(accessType, mbi.AllocationProtect);
 		int traceIndex = Interlocked.Increment(ref _lazyCommitTraceCount);
 		bool traceLazyCommit = ShouldTraceLazyCommit(traceIndex);
 		if (traceLazyCommit)
 		{
-			Console.Error.WriteLine($"[LOADER][TRACE] lazy-query#{traceIndex}: fault=0x{faultAddress:X16} owner={owner} rip=0x{rip:X16} rsp=0x{rsp:X16} state=0x{mbi.RawState:X08} base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X16} alloc=0x{mbi.RawAllocationProtection:X08} prot=0x{mbi.RawProtection:X08}");
+			Console.Error.WriteLine($"[LOADER][TRACE] lazy-query#{traceIndex}: fault=0x{faultAddress:X16} owner={owner} rip=0x{rip:X16} rsp=0x{rsp:X16} state=0x{mbi.State:X08} base=0x{mbi.BaseAddress:X16} size=0x{mbi.RegionSize:X16} alloc=0x{mbi.AllocationProtect:X08} prot=0x{mbi.Protect:X08}");
 		}
 
-		if (mbi.State == HostRegionState.Committed && IsAccessCompatible(accessType, mbi.RawProtection))
+		if (mbi.State == 4096 && IsAccessCompatible(accessType, mbi.Protect))
 		{
 			if (traceLazyCommit)
 			{
-				Console.Error.WriteLine($"[LOADER][TRACE] lazy-commit-race#{traceIndex}: fault=0x{faultAddress:X16} protect=0x{mbi.RawProtection:X08}");
+				Console.Error.WriteLine($"[LOADER][TRACE] lazy-commit-race#{traceIndex}: fault=0x{faultAddress:X16} protect=0x{mbi.Protect:X08}");
 			}
 			return true;
 		}
@@ -1003,10 +1263,10 @@ public sealed partial class DirectExecutionBackend
 		ulong committedBase = 0;
 		ulong committedSize = 0;
 
-		if (mbi.State == HostRegionState.Free)
+		if (mbi.State == 65536)
 		{
 			if (TryGetLazyCommitWindow(faultAddress, mbi.BaseAddress, mbi.RegionSize, out var windowBase, out var windowSize) &&
-				TryReserveThenCommit(_hostMemory, windowBase, windowSize, windowBase, windowSize, commitProtect))
+				TryReserveThenCommit(windowBase, windowSize, windowBase, windowSize, commitProtect))
 			{
 				committed = true;
 				committedBase = windowBase;
@@ -1015,7 +1275,7 @@ public sealed partial class DirectExecutionBackend
 			else
 			{
 				ulong largeBase = faultAddress & 0xFFFFFFFFFFE00000uL;
-				if (TryReserveThenCommit(_hostMemory, largeBase, 2097152uL, largeBase, 2097152uL, commitProtect))
+				if (TryReserveThenCommit(largeBase, 2097152uL, largeBase, 2097152uL, commitProtect))
 				{
 					committed = true;
 					committedBase = largeBase;
@@ -1026,13 +1286,13 @@ public sealed partial class DirectExecutionBackend
 			if (!committed)
 			{
 				ulong region64kBase = faultAddress & 0xFFFFFFFFFFFF0000uL;
-				if (TryReserveThenCommit(_hostMemory, region64kBase, 65536uL, region64kBase, 65536uL, commitProtect))
+				if (TryReserveThenCommit(region64kBase, 65536uL, region64kBase, 65536uL, commitProtect))
 				{
 					committed = true;
 					committedBase = region64kBase;
 					committedSize = 65536uL;
 				}
-				else if (TryReserveThenCommit(_hostMemory, pageBase, 4096uL, pageBase, 4096uL, commitProtect))
+				else if (TryReserveThenCommit(pageBase, 4096uL, pageBase, 4096uL, commitProtect))
 				{
 					committed = true;
 					committedBase = pageBase;
@@ -1045,7 +1305,7 @@ public sealed partial class DirectExecutionBackend
 				return false;
 			}
 
-			TryCommitRange(_hostMemory, pageBase + 4096, 4096uL, commitProtect);
+			TryCommitRange(pageBase + 4096, 4096uL, commitProtect);
 			if (traceLazyCommit)
 			{
 				Console.Error.WriteLine($"[LOADER][TRACE] lazy-reserve-commit#{traceIndex}: addr=0x{committedBase:X16} size=0x{committedSize:X16} access={accessType} protect=0x{commitProtect:X8}");
@@ -1053,13 +1313,13 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		if (mbi.State != HostRegionState.Reserved)
+		if (mbi.State != 8192)
 		{
 			return false;
 		}
 
 		if (TryGetLazyCommitWindow(faultAddress, mbi.BaseAddress, mbi.RegionSize, out var commitWindowBase, out var commitWindowSize) &&
-			TryCommitRange(_hostMemory, commitWindowBase, commitWindowSize, commitProtect))
+			TryCommitRange(commitWindowBase, commitWindowSize, commitProtect))
 		{
 			committed = true;
 			committedBase = commitWindowBase;
@@ -1068,7 +1328,7 @@ public sealed partial class DirectExecutionBackend
 		else
 		{
 			ulong largeCommitBase = faultAddress & 0xFFFFFFFFFFE00000uL;
-			if (TryCommitRange(_hostMemory, largeCommitBase, 2097152uL, commitProtect))
+			if (TryCommitRange(largeCommitBase, 2097152uL, commitProtect))
 			{
 				committed = true;
 				committedBase = largeCommitBase;
@@ -1079,19 +1339,19 @@ public sealed partial class DirectExecutionBackend
 		if (!committed)
 		{
 			ulong region64kBase = faultAddress & 0xFFFFFFFFFFFF0000uL;
-			if (TryCommitRange(_hostMemory, region64kBase, 65536uL, commitProtect))
+			if (TryCommitRange(region64kBase, 65536uL, commitProtect))
 			{
 				committed = true;
 				committedBase = region64kBase;
 				committedSize = 65536uL;
 			}
-			else if (TryCommitRange(_hostMemory, pageBase, 8192uL, commitProtect))
+			else if (TryCommitRange(pageBase, 8192uL, commitProtect))
 			{
 				committed = true;
 				committedBase = pageBase;
 				committedSize = 8192uL;
 			}
-			else if (TryCommitRange(_hostMemory, pageBase, 4096uL, commitProtect))
+			else if (TryCommitRange(pageBase, 4096uL, commitProtect))
 			{
 				committed = true;
 				committedBase = pageBase;
@@ -1104,7 +1364,7 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		TryCommitRange(_hostMemory, pageBase + 4096, 4096uL, commitProtect);
+		TryCommitRange(pageBase + 4096, 4096uL, commitProtect);
 		if (traceLazyCommit)
 		{
 			Console.Error.WriteLine($"[LOADER][TRACE] lazy-commit#{traceIndex}: addr=0x{committedBase:X16} size=0x{committedSize:X16} access={accessType} protect=0x{commitProtect:X8}");
@@ -1145,33 +1405,31 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		// The commit protection is one of the two raw values ResolveLazyCommitProtection
-		// produces (0x40 RWX / 0x04 RW); the enum mapping reproduces those exactly.
-		static bool TryCommitRange(IHostMemory hostMemory, ulong baseAddress, ulong length, uint protection)
+		static unsafe bool TryCommitRange(ulong baseAddress, ulong length, uint protection)
 		{
 			if (length == 0)
 			{
 				return false;
 			}
-			return hostMemory.Commit(baseAddress, length, protection == 64u ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite);
+			return VirtualAlloc((void*)baseAddress, (nuint)length, 4096u, protection) != null;
 		}
 
-		static bool TryReserveRange(IHostMemory hostMemory, ulong baseAddress, ulong length)
+		static unsafe bool TryReserveRange(ulong baseAddress, ulong length)
 		{
 			if (length == 0)
 			{
 				return false;
 			}
-			return hostMemory.Reserve(baseAddress, length, HostPageProtection.ReadWrite) != 0;
+			return VirtualAlloc((void*)baseAddress, (nuint)length, 8192u, 4u) != null;
 		}
 
-		static bool TryReserveThenCommit(IHostMemory hostMemory, ulong reserveAddress, ulong reserveSize, ulong commitAddress, ulong commitSize, uint protection)
+		static bool TryReserveThenCommit(ulong reserveAddress, ulong reserveSize, ulong commitAddress, ulong commitSize, uint protection)
 		{
-			if (!TryReserveRange(hostMemory, reserveAddress, reserveSize))
+			if (!TryReserveRange(reserveAddress, reserveSize))
 			{
 				return false;
 			}
-			return TryCommitRange(hostMemory, commitAddress, commitSize, protection);
+			return TryCommitRange(commitAddress, commitSize, protection);
 		}
 
 		static bool IsAccessCompatible(ulong accessType, uint protection)

@@ -41,6 +41,14 @@ public interface IGuestThreadScheduler
 {
     bool SupportsGuestContextTransfer { get; }
 
+    /// <summary>
+    /// Associates a pthread identity created on the primary guest executor
+    /// with its live CPU context. Primary execution does not pass through
+    /// TryStartThread, but kernel exception delivery must still be able to
+    /// target it.
+    /// </summary>
+    void RegisterGuestThreadContext(ulong threadHandle, CpuContext context);
+
     bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error);
 
     bool TryJoinThread(
@@ -52,6 +60,19 @@ public interface IGuestThreadScheduler
     void Pump(CpuContext callerContext, string reason);
 
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
+
+    /// <summary>
+    /// Applies a new guest scheduling priority to a live thread, mapping it
+    /// onto the host thread if one is running. Returns false when the thread
+    /// handle is unknown.
+    /// </summary>
+    bool TrySetGuestThreadPriority(ulong guestThreadHandle, int guestPriority);
+
+    /// <summary>
+    /// Records a new affinity mask for a guest thread and re-applies it to
+    /// the host thread where the platform supports it.
+    /// </summary>
+    bool TrySetGuestThreadAffinity(ulong guestThreadHandle, ulong affinityMask);
 
     IReadOnlyList<GuestThreadSnapshot> SnapshotThreads();
 
@@ -65,10 +86,35 @@ public interface IGuestThreadScheduler
         string reason,
         out string? error);
 
+    bool TryCallGuestFunction(
+        CpuContext callerContext,
+        ulong entryPoint,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong stackAddress,
+        ulong stackSize,
+        string reason,
+        out ulong returnValue,
+        out string? error);
+
     bool TryCallGuestContinuation(
         CpuContext callerContext,
         GuestCpuContinuation continuation,
         string reason,
+        out string? error);
+
+    /// <summary>
+    /// Asynchronously invokes an installed kernel exception handler as the
+    /// target guest thread. This is used by IL2CPP's stop-the-world collector:
+    /// the handler acknowledges suspension and may remain blocked until the
+    /// collecting thread resumes it.
+    /// </summary>
+    bool TryRaiseGuestException(
+        CpuContext callerContext,
+        ulong threadHandle,
+        ulong handler,
+        int exceptionType,
         out string? error);
 }
 
@@ -94,13 +140,34 @@ public readonly record struct GuestCpuContinuation(
     ulong Rdi,
     ulong R8,
     ulong R9,
+    ulong R10,
+    ulong R11,
     ulong R12,
     ulong R13,
     ulong R14,
-    ulong R15);
+    ulong R15,
+    ushort FpuControlWord,
+    uint Mxcsr,
+    bool RestoreFullFpuState);
 
 public static class GuestThreadExecution
 {
+    private sealed class DelegateGuestThreadBlockWaiter : IGuestThreadBlockWaiter
+    {
+        private readonly Func<int> _resume;
+        private readonly Func<bool> _tryWake;
+
+        public DelegateGuestThreadBlockWaiter(Func<int> resume, Func<bool> tryWake)
+        {
+            _resume = resume;
+            _tryWake = tryWake;
+        }
+
+        public int Resume() => _resume();
+
+        public bool TryWake() => _tryWake();
+    }
+
     [ThreadStatic]
     private static ulong _currentGuestThreadHandle;
 
@@ -246,6 +313,23 @@ public static class GuestThreadExecution
         return true;
     }
 
+    // Compatibility bridge for exports that still describe blocked work as a
+    // resume/wake delegate pair. New hot paths should provide an
+    // IGuestThreadBlockWaiter directly to avoid allocating closures.
+    public static bool RequestCurrentThreadBlock(
+        CpuContext? context,
+        string reason,
+        string? wakeKey,
+        Func<int> resumeHandler,
+        Func<bool> wakeHandler,
+        long blockDeadlineTimestamp = 0) =>
+        RequestCurrentThreadBlock(
+            context,
+            reason,
+            wakeKey,
+            new DelegateGuestThreadBlockWaiter(resumeHandler, wakeHandler),
+            blockDeadlineTimestamp);
+
     public static bool TryConsumeCurrentThreadBlock(out string reason)
     {
         return TryConsumeCurrentThreadBlock(out reason, out _, out _);
@@ -314,6 +398,27 @@ public static class GuestThreadExecution
         return true;
     }
 
+    public static bool TryConsumeCurrentThreadBlock(
+        out string reason,
+        out GuestCpuContinuation continuation,
+        out bool hasContinuation,
+        out string wakeKey,
+        out Func<int>? resumeHandler,
+        out Func<bool>? wakeHandler,
+        out long blockDeadlineTimestamp)
+    {
+        var consumed = TryConsumeCurrentThreadBlock(
+            out reason,
+            out continuation,
+            out hasContinuation,
+            out wakeKey,
+            out var waiter,
+            out blockDeadlineTimestamp);
+        resumeHandler = waiter is null ? null : waiter.Resume;
+        wakeHandler = waiter is null ? null : waiter.TryWake;
+        return consumed;
+    }
+
     public static long ComputeDeadlineTimestamp(TimeSpan timeout)
     {
         if (timeout <= TimeSpan.Zero)
@@ -360,10 +465,15 @@ public static class GuestThreadExecution
             context[CpuRegister.Rdi],
             context[CpuRegister.R8],
             context[CpuRegister.R9],
+            context[CpuRegister.R10],
+            context[CpuRegister.R11],
             context[CpuRegister.R12],
             context[CpuRegister.R13],
             context[CpuRegister.R14],
-            context[CpuRegister.R15]);
+            context[CpuRegister.R15],
+            context.FpuControlWord,
+            context.Mxcsr,
+            RestoreFullFpuState: false);
         return true;
     }
 

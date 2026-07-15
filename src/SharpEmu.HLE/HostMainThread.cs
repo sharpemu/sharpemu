@@ -6,12 +6,11 @@ using System.Collections.Concurrent;
 namespace SharpEmu.HLE;
 
 /// <summary>
-/// Runs work on the real process main thread. GLFW windowing must live on
-/// that thread on macOS (AppKit) and Linux (X11's single event queue), so the
-/// CLI moves emulation onto a worker thread, parks the main thread in
-/// <see cref="Pump"/>, and the video presenter posts its window loop here. On
-/// Windows <see cref="IsAvailable"/> stays false and the window keeps its own
-/// thread.
+/// Runs work on the real process main thread. macOS only allows AppKit (and
+/// therefore GLFW windowing) on that thread, so the CLI moves emulation onto
+/// a worker thread, parks the main thread in <see cref="Pump"/>, and the
+/// video presenter posts its window loop here. On other platforms
+/// <see cref="IsAvailable"/> stays false and nothing changes.
 /// </summary>
 public static class HostMainThread
 {
