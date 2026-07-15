@@ -18,24 +18,12 @@ public static class MouseExports
 
     private static readonly bool[] OpenHandles = new bool[2];
     private static bool _initialized;
-
-    [SysAbiExport(
-        Nid = "Qs0wWulgl7U",
-        ExportName = "sceMouseInit",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceMouse")]
     public static int MouseInit(CpuContext ctx)
     {
         _initialized = true;
         Array.Clear(OpenHandles);
         return SetReturn(ctx, 0);
     }
-
-    [SysAbiExport(
-        Nid = "RaqxZIf6DvE",
-        ExportName = "sceMouseOpen",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceMouse")]
     public static int MouseOpen(CpuContext ctx)
     {
         if (!_initialized)
@@ -59,12 +47,6 @@ public static class MouseExports
         OpenHandles[index] = true;
         return SetReturn(ctx, index);
     }
-
-    [SysAbiExport(
-        Nid = "x8qnXqh-tiM",
-        ExportName = "sceMouseRead",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceMouse")]
     public static int MouseRead(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);

@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
-internal static class Gen5ShaderTranslator
+public static class Gen5ShaderTranslator
 {
     private static int _dppVectorsValidated;
     /// <summary>
@@ -21,7 +20,7 @@ internal static class Gen5ShaderTranslator
     /// the SPIR-V that loads exactly these registers from the per-draw
     /// initial-state buffer is byte-stable across draws.
     /// </summary>
-    internal static ulong[] ComputeConsumedScalarMask(Gen5ShaderProgram program)
+    public static ulong[] ComputeConsumedScalarMask(Gen5ShaderProgram program)
     {
         var mask = new ulong[4];
         AddConsumedScalar(mask, 106, 2);
@@ -78,7 +77,7 @@ internal static class Gen5ShaderTranslator
         }
     }
 
-    internal static bool IsScalarConsumed(ulong[] mask, uint register) =>
+    public static bool IsScalarConsumed(ulong[] mask, uint register) =>
         register < 256 && (mask[register >> 6] & (1UL << (int)(register & 63))) != 0;
 
     private const int MaxInstructions = 4096;
@@ -404,7 +403,9 @@ internal static class Gen5ShaderTranslator
         return true;
     }
 
-    private static bool TryDecodeProgram(
+    // Public contract entry: emitter test suites and tools drive the decoder directly
+    // from raw instruction words.
+    public static bool TryDecodeProgram(
         CpuContext ctx,
         ulong address,
         out Gen5ShaderProgram program,
@@ -1481,7 +1482,7 @@ internal static class Gen5ShaderTranslator
     private static bool IsMimgInstruction(string name) =>
         name.StartsWith("Image", StringComparison.Ordinal);
 
-    internal static bool IsStorageImageOperation(string name) =>
+    public static bool IsStorageImageOperation(string name) =>
         name.StartsWith("ImageLoad", StringComparison.Ordinal) ||
         name.StartsWith("ImageStore", StringComparison.Ordinal) ||
         name.StartsWith("ImageAtomic", StringComparison.Ordinal);

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
@@ -749,7 +751,7 @@ public static class VideoOutExports
             bgraFrame[offset + 3] = rgbaFrame[offset + 3];
         }
 
-        VulkanVideoPresenter.Submit(bgraFrame, width, height);
+        GuestGpu.Current.Submit(bgraFrame, width, height);
     }
 
     internal static bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info)
@@ -1084,11 +1086,14 @@ public static class VideoOutExports
         PaceFlip(port.FlipRate);
         PerfOverlay.RecordSubmit();
 
+        var guestImageSubmitted = false;
+        ulong guestImageAddress = 0;
         if (submitGpuImage &&
             bufferIndex >= 0 &&
             TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
         {
-            _ = VulkanVideoPresenter.TrySubmitGuestImage(
+            guestImageAddress = displayBuffer.Address;
+            guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
                 displayBuffer.Address,
                 displayBuffer.Width,
                 displayBuffer.Height,
@@ -1140,7 +1145,8 @@ public static class VideoOutExports
 
         TraceVideoOut(
             $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
-            $"arg={flipArg} events={flipEventCount} ordered_completion={!submitGpuImage}");
+            $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
+            $"events={flipEventCount} ordered_completion={!submitGpuImage}");
         ReportFrameRate(presented: false);
         var diagnosticFlipNumber = Interlocked.Increment(ref _diagnosticFlipCount);
         if (_holdFirstFlipMilliseconds > 0 && diagnosticFlipNumber == _holdFlipNumber)
@@ -1362,7 +1368,17 @@ public static class VideoOutExports
                 $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} " +
                 $"addresses=[{string.Join(',', addresses.ToArray().Select(static address => $"0x{address:X16}"))}] " +
                 $"fmt=0x{attribute.PixelFormat:X} tile={attribute.TilingMode} {attribute.Width}x{attribute.Height} pitch={attribute.PitchInPixel}");
-            VulkanVideoPresenter.EnsureStarted(attribute.Width, attribute.Height);
+            GuestGpu.Current.EnsureStarted(attribute.Width, attribute.Height);
+
+            var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
+            if (guestFormat != 0)
+            {
+                foreach (var address in addresses)
+                {
+                    GuestGpu.Current.RegisterKnownDisplayBuffer(address, guestFormat);
+                }
+            }
+
             return groupIndex;
         }
     }
@@ -1611,6 +1627,28 @@ public static class VideoOutExports
             SceVideoOutPixelFormat2R10G10B10A2Bt2100Pq or
             SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq;
 
+    // Maps the PS5 VideoOut pixel format space to the AGC "guest texture format" tags
+    // the backend keys its guest-image registry on (see VulkanVideoPresenter.
+    // GetGuestTextureFormat: format=10 => 56 for 8-bit RGBA variants, format=9 => 9 for 10-bit).
+    private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat) =>
+        NormalizePixelFormat(pixelFormat) switch
+        {
+            SceVideoOutPixelFormatA8R8G8B8Srgb or
+            SceVideoOutPixelFormatA8B8G8R8Srgb or
+            SceVideoOutPixelFormat2R8G8B8A8Srgb or
+            SceVideoOutPixelFormat2B8G8R8A8Srgb => 56u,
+            SceVideoOutPixelFormatA2R10G10B10 or
+            SceVideoOutPixelFormatA2R10G10B10Srgb or
+            SceVideoOutPixelFormatA2R10G10B10Bt2020Pq or
+            SceVideoOutPixelFormat2R10G10B10A2 or
+            SceVideoOutPixelFormat2B10G10R10A2 or
+            SceVideoOutPixelFormat2R10G10B10A2Srgb or
+            SceVideoOutPixelFormat2B10G10R10A2Srgb or
+            SceVideoOutPixelFormat2R10G10B10A2Bt2100Pq or
+            SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq => 9u,
+            _ => 0u,
+        };
+
     internal static bool TryPackRgba8Pixel(
         ulong pixelFormat,
         byte red,
@@ -1714,23 +1752,6 @@ public static class VideoOutExports
         var packed = high | (low >> 16);
         return GetBytesPerPixel(packed) != 0 ? packed : pixelFormat;
     }
-
-    private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat) =>
-        NormalizePixelFormat(pixelFormat) switch
-        {
-            SceVideoOutPixelFormatA8R8G8B8Srgb or
-            SceVideoOutPixelFormatA8B8G8R8Srgb or
-            SceVideoOutPixelFormat2R8G8B8A8Srgb or
-            SceVideoOutPixelFormat2B8G8R8A8Srgb => 56u,
-            SceVideoOutPixelFormatA2R10G10B10 or
-            SceVideoOutPixelFormatA2R10G10B10Srgb or
-            SceVideoOutPixelFormatA2R10G10B10Bt2020Pq or
-            SceVideoOutPixelFormat2R10G10B10A2 or
-            SceVideoOutPixelFormat2B10G10R10A2 or
-            SceVideoOutPixelFormat2R10G10B10A2Bt2100Pq or
-            SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq => 9u,
-            _ => 0u,
-        };
 
     private static void ConvertRowToRgb(ReadOnlySpan<byte> source, Span<byte> destination, ulong pixelFormat)
     {

@@ -1,9 +1,11 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Agc;
+using SharpEmu.ShaderCompiler;
 
-internal static partial class Gen5SpirvTranslator
+namespace SharpEmu.ShaderCompiler.Vulkan;
+
+public static partial class Gen5SpirvTranslator
 {
     private const uint ScalarRegisterCount = 256;
     private const uint VectorRegisterCount = 512;
@@ -208,7 +210,6 @@ internal static partial class Gen5SpirvTranslator
         // path renders one bound color target per pass, so a multi-render-target
         // (deferred G-buffer) draw compiles one pixel variant per slot, each
         // selecting that slot's export here.
-        private readonly int _pixelRenderTargetSlot;
         // Vertex stage only: the fragment shader paired with this vertex shader
         // declares interpolated inputs for locations 0..(this-1). Metal requires
         // every fragment input location to be written by the vertex shader, so

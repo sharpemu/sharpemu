@@ -205,12 +205,6 @@ public static class JsonExports
         TraceJson("Initializer.initialize2", thisAddress, initParameterAddress);
         return SetReturn(ctx, 0);
     }
-
-    [SysAbiExport(
-        Nid = "qBMjqyBn3OM",
-        ExportName = "_ZN3sce4Json5ValueC1Ev",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceJson")]
     public static int ValueConstructor(CpuContext ctx)
     {
         _ = ConstructValue(ctx);
@@ -223,12 +217,6 @@ public static class JsonExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson")]
     public static int ValueBaseConstructor(CpuContext ctx) => ConstructValue(ctx);
-
-    [SysAbiExport(
-        Nid = "WTtYf+cNnXI",
-        ExportName = "_ZN3sce4Json5ValueD1Ev",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceJson")]
     public static int ValueDestructor(CpuContext ctx)
     {
         _ = DestroyValue(ctx);
@@ -398,12 +386,6 @@ public static class JsonExports
         ctx[CpuRegister.Rax] = destinationAddress;
         return 0;
     }
-
-    [SysAbiExport(
-        Nid = "qSmqLXXCPas",
-        ExportName = "_ZN3sce4Json6StringC1Ev",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceJson")]
     public static int StringConstructor(CpuContext ctx)
     {
         _ = ConstructString(ctx);
@@ -416,12 +398,6 @@ public static class JsonExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceJson")]
     public static int StringBaseConstructor(CpuContext ctx) => ConstructString(ctx);
-
-    [SysAbiExport(
-        Nid = "cG1VE2HMl6c",
-        ExportName = "_ZN3sce4Json6StringD1Ev",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceJson")]
     public static int StringDestructor(CpuContext ctx)
     {
         _ = DestroyString(ctx);

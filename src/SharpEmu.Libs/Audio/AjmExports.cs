@@ -12,12 +12,6 @@ public static class AjmExports
 {
     private static readonly ConcurrentDictionary<uint, byte> Contexts = new();
     private static int _nextContextId;
-
-    [SysAbiExport(
-        Nid = "dl+4eHSzUu4",
-        ExportName = "sceAjmInitialize",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAjm")]
     public static int AjmInitialize(CpuContext ctx)
     {
         var reserved = ctx[CpuRegister.Rdi];

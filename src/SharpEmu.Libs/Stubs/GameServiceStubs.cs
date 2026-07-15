@@ -37,17 +37,8 @@ public static class GameServiceStubs
     }
 
     // ---- NpTrophy2: trophy context/handle registration at boot ----
-
-    [SysAbiExport(Nid = "Bagshr7OQ6Q", ExportName = "sceNpTrophy2CreateContext",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
     public static int NpTrophy2CreateContext(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
-
-    [SysAbiExport(Nid = "Gz1rmUZpROM", ExportName = "sceNpTrophy2CreateHandle",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
     public static int NpTrophy2CreateHandle(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
-
-    [SysAbiExport(Nid = "bIDov3wBu5Q", ExportName = "sceNpTrophy2RegisterContext",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
     public static int NpTrophy2RegisterContext(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "4IzqhhUQ3nk", ExportName = "sceNpTrophy2GetGameInfo",
@@ -65,16 +56,7 @@ public static class GameServiceStubs
     public static int CesMbcsUcsContextInit(CpuContext ctx) => Ok(ctx);
 
     // ---- NpUniversalDataSystem: gameplay telemetry events ----
-
-    [SysAbiExport(Nid = "p+GcLqwpL9M", ExportName = "sceNpUniversalDataSystemCreateEvent",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
     public static int NpUniversalDataSystemCreateEvent(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
-
-    [SysAbiExport(Nid = "CzkKf7ahIyU", ExportName = "sceNpUniversalDataSystemPostEvent",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
     public static int NpUniversalDataSystemPostEvent(CpuContext ctx) => Ok(ctx);
-
-    [SysAbiExport(Nid = "wG+84pnNIuo", ExportName = "sceNpUniversalDataSystemDestroyEvent",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
     public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx) => Ok(ctx);
 }

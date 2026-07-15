@@ -127,11 +127,23 @@
       "sharpemu.hle": {
         "type": "Project",
         "dependencies": {
-          "SharpEmu.Logging": "[1.0.0, )"
+          "SharpEmu.Logging": "[0.0.1, )"
         }
       },
       "sharpemu.logging": {
         "type": "Project"
+      },
+      "sharpemu.shadercompiler": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.HLE": "[0.0.1, )"
+        }
+      },
+      "sharpemu.shadercompiler.vulkan": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.ShaderCompiler": "[0.0.1, )"
+        }
       }
     }
   }

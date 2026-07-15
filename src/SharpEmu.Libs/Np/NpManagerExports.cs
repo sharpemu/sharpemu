@@ -59,17 +59,6 @@ public static class NpManagerExports
     }
 
     [SysAbiExport(
-        Nid = "rbknaUjpqWo",
-        ExportName = "sceNpGetAccountIdA",
-        Target = Generation.Gen5,
-        LibraryName = "libSceNpManager")]
-    public static int NpGetOnlineIdA(CpuContext ctx)
-    {
-        // The A variant takes a user ID before OnlineId.
-        return WriteOfflineOnlineId(ctx, ctx[CpuRegister.Rsi]);
-    }
-
-    [SysAbiExport(
         Nid = "VfRSmPmj8Q8",
         ExportName = "sceNpRegisterStateCallback",
         Target = Generation.Gen4 | Generation.Gen5,

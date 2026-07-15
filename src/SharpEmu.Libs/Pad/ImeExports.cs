@@ -13,12 +13,6 @@ public static class ImeExports
     private const int ImeErrorNotOpened = unchecked((int)0x80BC0005);
 
     private static bool _keyboardOpen;
-
-    [SysAbiExport(
-        Nid = "eaFXjfJv3xs",
-        ExportName = "sceImeKeyboardOpen",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceIme")]
     public static int ImeKeyboardOpen(CpuContext ctx)
     {
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
@@ -36,12 +30,6 @@ public static class ImeExports
         _keyboardOpen = true;
         return SetReturn(ctx, 0);
     }
-
-    [SysAbiExport(
-        Nid = "-4GCfYdNF1s",
-        ExportName = "sceImeUpdate",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceIme")]
     public static int ImeUpdate(CpuContext ctx) =>
         SetReturn(ctx, _keyboardOpen ? 0 : ImeErrorNotOpened);
 

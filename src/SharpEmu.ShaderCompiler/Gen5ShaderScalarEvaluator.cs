@@ -2,25 +2,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.Kernel;
-using SharpEmu.Libs.VideoOut;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Numerics;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
-internal static class Gen5ShaderScalarEvaluator
+public static class Gen5ShaderScalarEvaluator
 {
-    // This evaluator rents each global-memory snapshot from the shared guest
-    // data pool, so the mainline submission-scope hooks need no extra cache.
-    internal static void BeginGlobalMemoryReadScope()
-    {
-    }
-
-    internal static void EndGlobalMemoryReadScope()
-    {
-    }
     // When a scalar POINTER load can't be resolved statically (its descriptor
     // register read back garbage — e.g. 0 or 0xFFFFFFFF, a per-draw descriptor
     // setup race), abort-and-drop-the-draw loses the whole pass. Demon's Souls'
@@ -58,10 +48,32 @@ internal static class Gen5ShaderScalarEvaluator
             "0",
             StringComparison.Ordinal);
 
+    /// <summary>
+    /// Optional fallback for global-memory reads that ctx.Memory cannot satisfy (the
+    /// emulator installs the HLE-tracked libc heap reader here at module load). Kept as
+    /// a hook so this project never depends on the HLE module implementations.
+    /// </summary>
+    public static Gen5FallbackMemoryReader? FallbackMemoryReader { get; set; }
+
+    public delegate bool Gen5FallbackMemoryReader(ulong baseAddress, Span<byte> destination);
+
+    /// <summary>
+    /// Pool used for large draw-time guest-memory snapshots. The HLE host installs
+    /// its bounded transfer pool; standalone compiler tools use the shared pool.
+    /// </summary>
+    public static ArrayPool<byte> GlobalMemoryPool { get; set; } = ArrayPool<byte>.Shared;
+
     private const int ScalarRegisterCount = 256;
     private const int ImageDescriptorDwords = 8;
     private const int SamplerDescriptorDwords = 4;
     private const int MaxGlobalMemoryBindingBytes = 16 * 1024 * 1024;
+    public static long GlobalMemoryReadCount;
+    public static long GlobalMemoryReadBytes;
+    public static long GlobalMemoryReadCacheHits;
+    public static long GlobalMemoryReadPvmBytes;
+    public static long GlobalMemoryReadLibcBytes;
+    public static long GlobalMemoryReadReuses;
+
     private const ulong RdnaWaveMask = 0xFFFF_FFFFUL;
 
     static Gen5ShaderScalarEvaluator()
@@ -779,7 +791,7 @@ internal static class Gen5ShaderScalarEvaluator
                 {
                     if (binding.DataPooled)
                     {
-                        VulkanVideoPresenter.GuestDataPool.Return(binding.Data);
+                        GlobalMemoryPool.Return(binding.Data);
                     }
                 }
 
@@ -969,24 +981,34 @@ internal static class Gen5ShaderScalarEvaluator
     // and fresh multi-megabyte allocations here kept the background GC busy
     // full-time. The rented array (possibly oversized) is handed to the
     // presenter, which returns it to the pool after the host-buffer upload.
+    public static void BeginGlobalMemoryReadScope()
+    {
+    }
+
+    public static void EndGlobalMemoryReadScope()
+    {
+    }
     private static bool TryReadGlobalMemory(
         CpuContext ctx,
         ulong baseAddress,
         out byte[] data,
         out int dataLength)
     {
-        var rented = VulkanVideoPresenter.GuestDataPool.Rent((int)MaxGlobalMemoryBindingBytes);
+        var rented = GlobalMemoryPool.Rent(MaxGlobalMemoryBindingBytes);
         for (var size = MaxGlobalMemoryBindingBytes; size >= 4096; size >>= 1)
         {
             if (ctx.Memory.TryRead(baseAddress, rented.AsSpan(0, size)))
             {
+                Interlocked.Increment(ref GlobalMemoryReadCount);
+                Interlocked.Add(ref GlobalMemoryReadBytes, size);
+                Interlocked.Add(ref GlobalMemoryReadPvmBytes, size);
                 data = rented;
                 dataLength = size;
                 return true;
             }
         }
 
-        VulkanVideoPresenter.GuestDataPool.Return(rented);
+        GlobalMemoryPool.Return(rented);
         data = [];
         dataLength = 0;
         return false;
@@ -1012,21 +1034,31 @@ internal static class Gen5ShaderScalarEvaluator
             return false;
         }
 
-        var rented = VulkanVideoPresenter.GuestDataPool.Rent(
+        var rented = GlobalMemoryPool.Rent(
             Math.Max((int)cappedSize, sizeof(uint)));
         if (cappedSize < sizeof(uint))
         {
             rented.AsSpan(0, sizeof(uint)).Clear();
             var exact = rented.AsSpan(0, (int)cappedSize);
-            if (ctx.Memory.TryRead(baseAddress, exact) ||
-                KernelMemoryCompatExports.TryReadTrackedLibcHeap(baseAddress, exact))
+            var readFromPvm = ctx.Memory.TryRead(baseAddress, exact);
+            if (readFromPvm || FallbackMemoryReader?.Invoke(baseAddress, exact) == true)
             {
+                Interlocked.Increment(ref GlobalMemoryReadCount);
+                Interlocked.Add(ref GlobalMemoryReadBytes, sizeof(uint));
+                if (readFromPvm)
+                {
+                    Interlocked.Add(ref GlobalMemoryReadPvmBytes, sizeof(uint));
+                }
+                else
+                {
+                    Interlocked.Add(ref GlobalMemoryReadLibcBytes, sizeof(uint));
+                }
                 data = rented;
                 dataLength = sizeof(uint);
                 return true;
             }
 
-            VulkanVideoPresenter.GuestDataPool.Return(rented);
+            GlobalMemoryPool.Return(rented);
             return false;
         }
 
@@ -1034,9 +1066,19 @@ internal static class Gen5ShaderScalarEvaluator
         while (candidateSize >= sizeof(uint))
         {
             var span = rented.AsSpan(0, candidateSize);
-            if (ctx.Memory.TryRead(baseAddress, span) ||
-                KernelMemoryCompatExports.TryReadTrackedLibcHeap(baseAddress, span))
+            var readFromPvm = ctx.Memory.TryRead(baseAddress, span);
+            if (readFromPvm || FallbackMemoryReader?.Invoke(baseAddress, span) == true)
             {
+                Interlocked.Increment(ref GlobalMemoryReadCount);
+                Interlocked.Add(ref GlobalMemoryReadBytes, candidateSize);
+                if (readFromPvm)
+                {
+                    Interlocked.Add(ref GlobalMemoryReadPvmBytes, candidateSize);
+                }
+                else
+                {
+                    Interlocked.Add(ref GlobalMemoryReadLibcBytes, candidateSize);
+                }
                 data = rented;
                 dataLength = candidateSize;
                 return true;
@@ -1050,7 +1092,7 @@ internal static class Gen5ShaderScalarEvaluator
             candidateSize = Math.Max(candidateSize / 2, sizeof(uint));
         }
 
-        VulkanVideoPresenter.GuestDataPool.Return(rented);
+        GlobalMemoryPool.Return(rented);
         return false;
     }
 

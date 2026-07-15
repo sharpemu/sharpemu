@@ -216,9 +216,9 @@
         "type": "Project",
         "dependencies": {
           "Iced": "[1.21.0, )",
-          "SharpEmu.HLE": "[1.0.0, )",
-          "SharpEmu.Libs": "[1.0.0, )",
-          "SharpEmu.Logging": "[1.0.0, )"
+          "SharpEmu.HLE": "[0.0.1, )",
+          "SharpEmu.Libs": "[0.0.1, )",
+          "SharpEmu.Logging": "[0.0.1, )"
         }
       },
       "sharpemu.gui": {
@@ -228,20 +228,22 @@
           "Avalonia.Desktop": "[11.3.18, )",
           "Avalonia.Fonts.Inter": "[11.3.18, )",
           "Avalonia.Themes.Fluent": "[11.3.18, )",
-          "SharpEmu.Logging": "[1.0.0, )",
+          "SharpEmu.Logging": "[0.0.1, )",
           "Tmds.DBus.Protocol": "[0.21.3, )"
         }
       },
       "sharpemu.hle": {
         "type": "Project",
         "dependencies": {
-          "SharpEmu.Logging": "[1.0.0, )"
+          "SharpEmu.Logging": "[0.0.1, )"
         }
       },
       "sharpemu.libs": {
         "type": "Project",
         "dependencies": {
-          "SharpEmu.HLE": "[1.0.0, )",
+          "SharpEmu.HLE": "[0.0.1, )",
+          "SharpEmu.ShaderCompiler": "[0.0.1, )",
+          "SharpEmu.ShaderCompiler.Vulkan": "[0.0.1, )",
           "Silk.NET.Input": "[2.23.0, )",
           "Silk.NET.Vulkan": "[2.23.0, )",
           "Silk.NET.Vulkan.Extensions.EXT": "[2.23.0, )",
@@ -251,6 +253,18 @@
       },
       "sharpemu.logging": {
         "type": "Project"
+      },
+      "sharpemu.shadercompiler": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.HLE": "[0.0.1, )"
+        }
+      },
+      "sharpemu.shadercompiler.vulkan": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.ShaderCompiler": "[0.0.1, )"
+        }
       },
       "Avalonia": {
         "type": "CentralTransitive",

@@ -4,9 +4,9 @@
 using System.Buffers.Binary;
 using System.Text;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler.Vulkan;
 
-internal enum SpirvOp : ushort
+public enum SpirvOp : ushort
 {
     Nop = 0,
     Name = 5,
@@ -168,7 +168,7 @@ internal enum SpirvOp : ushort
     GroupNonUniformShuffleDown = 348,
 }
 
-internal enum SpirvCapability : uint
+public enum SpirvCapability : uint
 {
     Shader = 1,
     Float16 = 9,
@@ -187,7 +187,7 @@ internal enum SpirvCapability : uint
     RuntimeDescriptorArray = 5302,
 }
 
-internal enum SpirvStorageClass : uint
+public enum SpirvStorageClass : uint
 {
     UniformConstant = 0,
     Input = 1,
@@ -201,21 +201,21 @@ internal enum SpirvStorageClass : uint
     StorageBuffer = 12,
 }
 
-internal enum SpirvExecutionModel : uint
+public enum SpirvExecutionModel : uint
 {
     Vertex = 0,
     Fragment = 4,
     GLCompute = 5,
 }
 
-internal enum SpirvExecutionMode : uint
+public enum SpirvExecutionMode : uint
 {
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
 }
 
-internal enum SpirvDecoration : uint
+public enum SpirvDecoration : uint
 {
     Block = 2,
     ArrayStride = 6,
@@ -228,7 +228,7 @@ internal enum SpirvDecoration : uint
     Offset = 35,
 }
 
-internal enum SpirvBuiltIn : uint
+public enum SpirvBuiltIn : uint
 {
     Position = 0,
     VertexIndex = 42,
@@ -242,7 +242,7 @@ internal enum SpirvBuiltIn : uint
     SubgroupLocalInvocationId = 41,
 }
 
-internal enum SpirvImageDim : uint
+public enum SpirvImageDim : uint
 {
     Dim1D = 0,
     Dim2D = 1,
@@ -251,7 +251,7 @@ internal enum SpirvImageDim : uint
     Buffer = 5,
 }
 
-internal enum SpirvImageFormat : uint
+public enum SpirvImageFormat : uint
 {
     Unknown = 0,
     Rgba32f = 1,
@@ -295,7 +295,7 @@ internal enum SpirvImageFormat : uint
     R8ui = 39,
 }
 
-internal sealed class SpirvModuleBuilder
+public sealed class SpirvModuleBuilder
 {
     private const uint Magic = 0x07230203;
     private const uint Version15 = 0x00010500;

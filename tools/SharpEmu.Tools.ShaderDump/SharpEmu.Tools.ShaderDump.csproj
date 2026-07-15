@@ -12,8 +12,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
   </PropertyGroup>
 
+  <!-- References only the shader-compiler projects: the conformance tool is
+       emulator-independent by design. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,11 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Agc;
@@ -193,24 +195,20 @@ public static partial class AgcExports
     private static readonly HashSet<(ulong Address, uint Initiator, string Reason)>
         _rejectedDispatchArguments = new();
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
-    private static readonly Dictionary<(ulong Ps, ulong State, Gen5PixelOutputKind Output), byte[]> _pixelSpirvCache = new();
-    private static readonly Dictionary<
-        (ulong Es, ulong EsState, ulong Ps, ulong PsState, string OutputLayout, uint PsInputEna, uint PsInputAddr, ulong AliasAlignment),
-        (byte[] Vertex, byte[] Pixel)> _graphicsSpirvCache = new();
-    private static readonly Dictionary<
-        (ulong Es, ulong EsState, ulong AliasAlignment), byte[]>
-        _depthOnlyVertexSpirvCache = new();
-    private static readonly byte[] _depthOnlyFragmentSpirv =
-        SpirvFixedShaders.CreateDepthOnlyFragment();
-    // Per-render-target pixel variants for multi-render-target draws: each
-    // routes its own MRT export slot to the fragment output. Keyed by the
-    // shader identity plus the target's output kind and slot.
-    private static readonly Dictionary<
-        (ulong Ps, ulong PsState, Gen5PixelOutputKind Output, uint Slot, uint PsInputEna, uint PsInputAddr, ulong AliasAlignment), byte[]>
-        _pixelTargetSpirvCache = new();
-    private static readonly Dictionary<
-        (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ, uint Wave, ulong AliasAlignment),
-        byte[]> _computeSpirvCache = new();
+    // Concurrent so the per-draw/per-dispatch hit path is lock-free (and no longer
+    // shares _submitTraceGate with tracing).
+    private static readonly ConcurrentDictionary<
+        (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
+         uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
+         ulong AliasAlignment),
+        (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
+    private static readonly ConcurrentDictionary<
+        (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
+         uint WaveLanes, ulong AliasAlignment),
+        IGuestCompiledShader> _computeShaderCache = new();
+    private static readonly ConcurrentDictionary<
+        (ulong Es, ulong State, ulong AliasAlignment),
+        IGuestCompiledShader> _depthOnlyVertexShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
     private static readonly bool _traceAgc = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
@@ -409,18 +407,20 @@ public static partial class AgcExports
         ulong ExportShaderAddress,
         ulong PixelShaderAddress,
         uint PrimitiveType,
-        byte[] VertexSpirv,
-        byte[] PixelSpirv,
+        IGuestCompiledShader VertexShader,
+        IGuestCompiledShader PixelShader,
         uint AttributeCount,
         uint VertexCount,
         uint InstanceCount,
-        VulkanGuestIndexBuffer? IndexBuffer,
+        GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
         IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
         IReadOnlyList<RenderTargetDescriptor> RenderTargets,
-        VulkanGuestDepthTarget? DepthTarget,
-        VulkanGuestRenderState RenderState,
+        GuestDepthTarget? DepthTarget,
+        // Seam-shaped color targets are built once with the cached translation.
+        IReadOnlyList<GuestRenderTarget> GuestTargets,
+        GuestRenderState RenderState,
         IReadOnlyList<uint> PixelUserData,
         uint RawBlendControl,
         uint RawColorInfo,
@@ -3238,27 +3238,27 @@ public static partial class AgcExports
                         pendingDisplayBuffer.Address,
                         out var pendingDisplayTarget))
                 {
-                    var textures = CreateVulkanGuestDrawTextures(
+                    var textures = CreateGuestDrawTextures(
                         ctx,
                         pendingComposite.Textures,
                         out _);
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(pendingComposite);
                     var vertexBuffers =
-                        CreateVulkanGuestVertexBuffers(pendingComposite.VertexInputs);
+                        CreateGuestVertexBuffers(pendingComposite.VertexInputs);
                     ProvideRenderTargetInitialData(ctx, pendingDisplayTarget);
-                    VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
-                        pendingComposite.PixelSpirv,
+                    GuestGpu.Current.SubmitOffscreenTranslatedDraw(
+                        pendingComposite.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         pendingComposite.AttributeCount,
-                        new VulkanGuestRenderTarget(
+                        [new GuestRenderTarget(
                             pendingDisplayTarget.Address,
                             pendingDisplayTarget.Width,
                             pendingDisplayTarget.Height,
                             pendingDisplayTarget.Format,
-                            pendingDisplayTarget.NumberType),
-                        pendingComposite.VertexSpirv,
+                            pendingDisplayTarget.NumberType)],
+                        pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
                         pendingComposite.PrimitiveType,
@@ -3280,7 +3280,7 @@ public static partial class AgcExports
                         handle,
                         displayBufferIndex,
                         out var cachedDisplayBuffer) &&
-                    VulkanVideoPresenter.TrySubmitOrderedGuestImageFlip(
+                    GuestGpu.Current.TrySubmitOrderedGuestImageFlip(
                         handle,
                         displayBufferIndex,
                         cachedDisplayBuffer.Address,
@@ -3306,11 +3306,11 @@ public static partial class AgcExports
                         displayBufferIndex,
                         translatedDisplayBuffer,
                         "draw-fallback");
-                    var textures = CreateVulkanGuestDrawTextures(ctx, translatedDraw.Textures, out var fallbackTextureCount);
+                    var textures = CreateGuestDrawTextures(ctx, translatedDraw.Textures, out var fallbackTextureCount);
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffersForPresent(ctx, translatedDraw);
-                    VulkanVideoPresenter.SubmitTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                    GuestGpu.Current.SubmitTranslatedDraw(
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDisplayBuffer.Width,
@@ -3318,7 +3318,7 @@ public static partial class AgcExports
                         translatedDraw.AttributeCount);
                     TraceAgcShader(
                         $"agc.shader_present ps=0x{translatedDraw.PixelShaderAddress:X16} " +
-                        $"spirv={translatedDraw.PixelSpirv.Length} textures={textures.Count} " +
+                        $"spirv={translatedDraw.PixelShader.Payload.Length} textures={textures.Count} " +
                         $"global_buffers={globalMemoryBuffers.Count} " +
                         $"fallback={fallbackTextureCount} {translatedDisplayBuffer.Width}x{translatedDisplayBuffer.Height}");
 
@@ -3353,7 +3353,7 @@ public static partial class AgcExports
                              displayBufferIndex,
                              out var displayBuffer))
                 {
-                    VulkanVideoPresenter.SubmitGuestDraw(
+                    GuestGpu.Current.SubmitGuestDraw(
                         state.GuestDrawKind,
                         displayBuffer.Width,
                         displayBuffer.Height);
@@ -5192,14 +5192,14 @@ public static partial class AgcExports
         {
             state.TranslatedDraw = depthOnlyDraw;
             var activeDepthTarget = depthOnlyDraw.DepthTarget!;
-            var textures = CreateVulkanGuestDrawTextures(
+            var textures = CreateGuestDrawTextures(
                 ctx,
                 depthOnlyDraw.Textures,
                 out _);
             var globalMemoryBuffers =
                 CreateTranslatedDrawGlobalBuffers(depthOnlyDraw);
             var vertexBuffers =
-                CreateVulkanGuestVertexBuffers(depthOnlyDraw.VertexInputs);
+                CreateGuestVertexBuffers(depthOnlyDraw.VertexInputs);
             var renderState = depthOnlyDraw.RenderState;
             if (activeDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
             {
@@ -5214,13 +5214,13 @@ public static partial class AgcExports
                 depthOnlyDraw,
                 textures,
                 vertexBuffers);
-            VulkanVideoPresenter.SubmitDepthOnlyTranslatedDraw(
-                depthOnlyDraw.PixelSpirv,
+            GuestGpu.Current.SubmitDepthOnlyTranslatedDraw(
+                depthOnlyDraw.PixelShader,
                 textures,
                 globalMemoryBuffers,
                 depthOnlyDraw.AttributeCount,
                 activeDepthTarget,
-                depthOnlyDraw.VertexSpirv,
+                depthOnlyDraw.VertexShader,
                 depthOnlyDraw.VertexCount,
                 depthOnlyDraw.InstanceCount,
                 depthOnlyDraw.PrimitiveType,
@@ -5335,14 +5335,14 @@ public static partial class AgcExports
                     }
                 }
 
-                var sharedTextures = CreateVulkanGuestDrawTextures(
+                var sharedTextures = CreateGuestDrawTextures(
                     ctx,
                     translatedDraw.Textures,
                     out _);
                 var sharedGlobalMemoryBuffers =
-                    CreateTranslatedDrawGlobalBuffers(translatedDraw);
+                    CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                 var sharedVertexBuffers =
-                    CreateVulkanGuestVertexBuffers(translatedDraw.VertexInputs);
+                    CreateGuestVertexBuffers(translatedDraw.VertexInputs);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
@@ -5358,19 +5358,13 @@ public static partial class AgcExports
                     }
                 }
 
-                VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
-                    translatedDraw.PixelSpirv,
+                GuestGpu.Current.SubmitOffscreenTranslatedDraw(
+                    translatedDraw.PixelShader,
                     sharedTextures,
                     sharedGlobalMemoryBuffers,
                     translatedDraw.AttributeCount,
-                    translatedDraw.RenderTargets.Select(target =>
-                        new VulkanGuestRenderTarget(
-                            target.Address,
-                            target.Width,
-                            target.Height,
-                            target.Format,
-                            target.NumberType)).ToArray(),
-                    translatedDraw.VertexSpirv,
+                    translatedDraw.GuestTargets,
+                    translatedDraw.VertexShader,
                     translatedDraw.VertexCount,
                     translatedDraw.InstanceCount,
                     translatedDraw.PrimitiveType,
@@ -5384,14 +5378,14 @@ public static partial class AgcExports
             {
                 if (translatedDraw.DepthTarget is { } translatedDepthTarget)
                 {
-                    var textures = CreateVulkanGuestDrawTextures(
+                    var textures = CreateGuestDrawTextures(
                         ctx,
                         translatedDraw.Textures,
                         out _);
                     var globalMemoryBuffers =
-                        CreateTranslatedDrawGlobalBuffers(translatedDraw);
+                        CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                     var vertexBuffers =
-                        CreateVulkanGuestVertexBuffers(translatedDraw.VertexInputs);
+                        CreateGuestVertexBuffers(translatedDraw.VertexInputs);
                     var renderState = translatedDraw.RenderState;
                     if (translatedDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
                     {
@@ -5406,13 +5400,13 @@ public static partial class AgcExports
                         translatedDraw,
                         textures,
                         vertexBuffers);
-                    VulkanVideoPresenter.SubmitDepthOnlyTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                    GuestGpu.Current.SubmitDepthOnlyTranslatedDraw(
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDraw.AttributeCount,
                         translatedDepthTarget,
-                        translatedDraw.VertexSpirv,
+                        translatedDraw.VertexShader,
                         translatedDraw.VertexCount,
                         translatedDraw.InstanceCount,
                         translatedDraw.PrimitiveType,
@@ -5427,15 +5421,15 @@ public static partial class AgcExports
                         .FirstOrDefault(binding => binding.IsStorage);
                     if (storageTarget is not null)
                     {
-                        var textures = CreateVulkanGuestDrawTextures(
+                        var textures = CreateGuestDrawTextures(
                             ctx,
                             translatedDraw.Textures,
                             out _);
                         var globalMemoryBuffers =
-                            CreateTranslatedDrawGlobalBuffers(translatedDraw);
+                            CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                         TraceDrawCompact(drawSequence, translatedDraw, textures, []);
-                        VulkanVideoPresenter.SubmitStorageTranslatedDraw(
-                            translatedDraw.PixelSpirv,
+                        GuestGpu.Current.SubmitStorageTranslatedDraw(
+                            translatedDraw.PixelShader,
                             textures,
                             globalMemoryBuffers,
                             translatedDraw.AttributeCount,
@@ -5542,7 +5536,7 @@ public static partial class AgcExports
         ulong exportShaderAddress,
         uint vertexCount,
         bool indexed,
-        VulkanGuestDepthTarget depthTarget,
+        GuestDepthTarget depthTarget,
         out TranslatedGuestDraw draw,
         out string error)
     {
@@ -5588,13 +5582,9 @@ public static partial class AgcExports
             exportShaderAddress,
             exportFingerprint,
             VulkanVideoPresenter.GuestStorageBufferOffsetAlignment);
-        byte[]? vertexSpirv;
-        lock (_submitTraceGate)
-        {
-            _depthOnlyVertexSpirvCache.TryGetValue(cacheKey, out vertexSpirv);
-        }
+        _depthOnlyVertexShaderCache.TryGetValue(cacheKey, out var vertexShader);
 
-        if (vertexSpirv is null)
+        if (vertexShader is null)
         {
             var guestGlobalBufferCount = exportEvaluation.GlobalMemoryBindings.Count;
             // CreateTranslatedDrawGlobalBuffers appends both stage scalar
@@ -5603,15 +5593,15 @@ public static partial class AgcExports
             var totalGlobalBufferCount = _bakeScalars
                 ? guestGlobalBufferCount
                 : guestGlobalBufferCount + 2;
-            if (!Gen5SpirvTranslator.TryCompileVertexShader(
+            if (!GuestGpu.Current.TryCompileVertexShader(
                     exportState,
                     exportEvaluation,
-                    out var vertexShader,
+                    out vertexShader,
                     out error,
                     globalBufferBase: 0,
                     totalGlobalBufferCount: totalGlobalBufferCount,
                     imageBindingBase: 0,
-                    initialScalarBufferIndex: _bakeScalars
+                    scalarRegisterBufferIndex: _bakeScalars
                         ? -1
                         : guestGlobalBufferCount + 1,
                     requiredVertexOutputCount: 0,
@@ -5622,18 +5612,14 @@ public static partial class AgcExports
                 return false;
             }
 
-            vertexSpirv = vertexShader.Spirv;
-            DumpSpirv(
+            DumpCompiledShader(
                 "depth-vs",
                 exportShaderAddress,
                 exportFingerprint,
-                vertexSpirv,
+                vertexShader!,
                 exportState.Program);
             VulkanVideoPresenter.CountSpirvCompilation();
-            lock (_submitTraceGate)
-            {
-                _depthOnlyVertexSpirvCache.TryAdd(cacheKey, vertexSpirv);
-            }
+            _depthOnlyVertexShaderCache.TryAdd(cacheKey, vertexShader!);
         }
 
         var textures = new List<TranslatedImageBinding>(
@@ -5686,7 +5672,7 @@ public static partial class AgcExports
             // A guest pass without a pixel shader has no colour exports.  The
             // presenter uses a private compatibility attachment, so disable
             // all writes to it and expose only the persistent DB result.
-            Blends = [VulkanGuestBlendState.Default with { WriteMask = 0 }],
+            Blends = [GuestBlendState.Default with { WriteMask = 0 }],
         };
         if (depthTarget.Width == 1 &&
             depthTarget.Height == 1 &&
@@ -5714,7 +5700,7 @@ public static partial class AgcExports
                 };
                 renderState = CreateRenderState(state.CxRegisters, syntheticTarget) with
                 {
-                    Blends = [VulkanGuestBlendState.Default with { WriteMask = 0 }],
+                    Blends = [GuestBlendState.Default with { WriteMask = 0 }],
                 };
             }
         }
@@ -5722,17 +5708,18 @@ public static partial class AgcExports
             exportShaderAddress,
             PixelShaderAddress: 0,
             primitiveType,
-            vertexSpirv,
-            _depthOnlyFragmentSpirv,
+            vertexShader!,
+            GuestGpu.Current.GetDepthOnlyFragmentShader(),
             AttributeCount: 0,
             vertexCount,
             state.InstanceCount,
-            indexed ? CreateVulkanIndexBuffer(ctx, state, vertexCount) : null,
+            indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
             vertexInputs,
             RenderTargets: [],
             depthTarget,
+            GuestTargets: [],
             renderState,
             PixelUserData: [],
             RawBlendControl: 0,
@@ -5855,14 +5842,14 @@ public static partial class AgcExports
                  $"kept={renderTargets.Length}");
         }
 
-        var renderTargetFormats = new VulkanRenderTargetFormat[renderTargets.Length];
+        var renderTargetOutputKinds = new Gen5PixelOutputKind[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {
             var target = renderTargets[index];
-            if (!VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+            if (!GuestGpu.Current.TryGetRenderTargetOutputKind(
                     target.Format,
                     target.NumberType,
-                    out renderTargetFormats[index]))
+                    out renderTargetOutputKinds[index]))
             {
                 error =
                     $"unsupported color target format={target.Format} number_type={target.NumberType}";
@@ -5872,16 +5859,18 @@ public static partial class AgcExports
             }
         }
 
-        var pixelOutputs = renderTargets
-            .Select((target, location) => new Gen5PixelOutputBinding(
-                target.Slot,
-                (uint)location,
-                renderTargetFormats[location].OutputKind))
-            .ToArray();
-        var outputLayout = string.Join(
-            ';',
-            pixelOutputs.Select(output =>
-                $"{output.GuestSlot}:{output.HostLocation}:{(int)output.Kind}"));
+        // Exact packed encoding of the output layout — guest slot (6 bits, CB targets are
+        // 0-7) plus output kind (2 bits) per target, host locations being the sequential
+        // byte positions. Replaces a per-draw LINQ + string build that allocated on every
+        // draw, cache hit or not; the target count disambiguates trailing zero bytes.
+        var outputLayout = 0UL;
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
+                (uint)renderTargetOutputKinds[index]) << (index * 8);
+        }
+
+        var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(exportEvaluation)
             : ComputeShaderStructuralFingerprint(exportEvaluation);
@@ -5894,6 +5883,8 @@ public static partial class AgcExports
             pixelShaderAddress,
             pixelStateFingerprint,
             outputLayout,
+            (uint)renderTargets.Length,
+            attributeCount,
             psInputEna,
             psInputAddr,
             VulkanVideoPresenter.GuestStorageBufferOffsetAlignment);
@@ -5906,15 +5897,20 @@ public static partial class AgcExports
         var totalGlobalBuffers = _bakeScalars
             ? guestGlobalBuffers
             : guestGlobalBuffers + 2;
-        (byte[] Vertex, byte[] Pixel) compiled;
-        lock (_submitTraceGate)
-        {
-            _graphicsSpirvCache.TryGetValue(shaderKey, out compiled);
-        }
+        _graphicsShaderCache.TryGetValue(shaderKey, out var compiled);
 
         if (compiled.Vertex is null || compiled.Pixel is null)
         {
-            if (!Gen5SpirvTranslator.TryCompilePixelShader(
+            var pixelOutputs = new Gen5PixelOutputBinding[renderTargets.Length];
+            for (var location = 0; location < renderTargets.Length; location++)
+            {
+                pixelOutputs[location] = new Gen5PixelOutputBinding(
+                    renderTargets[location].Slot,
+                    (uint)location,
+                    renderTargetOutputKinds[location]);
+            }
+
+            if (!GuestGpu.Current.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
                     pixelOutputs,
@@ -5923,12 +5919,12 @@ public static partial class AgcExports
                     globalBufferBase: 0,
                     totalGlobalBufferCount: totalGlobalBuffers,
                     imageBindingBase: 0,
-                    initialScalarBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers,
+                    scalarRegisterBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers,
                     pixelInputEnable: psInputEna,
                     pixelInputAddress: psInputAddr,
                     storageBufferOffsetAlignment:
                         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment) ||
-                !Gen5SpirvTranslator.TryCompileVertexShader(
+                !GuestGpu.Current.TryCompileVertexShader(
                     exportState,
                     exportEvaluation,
                     out var vertexShader,
@@ -5936,7 +5932,7 @@ public static partial class AgcExports
                     globalBufferBase: pixelEvaluation.GlobalMemoryBindings.Count,
                     totalGlobalBufferCount: totalGlobalBuffers,
                     imageBindingBase: pixelEvaluation.ImageBindings.Count,
-                    initialScalarBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers + 1,
+                    scalarRegisterBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers + 1,
                     requiredVertexOutputCount: (int)GetInterpolatedAttributeCount(pixelState),
                     storageBufferOffsetAlignment:
                         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
@@ -5946,32 +5942,21 @@ public static partial class AgcExports
                 return false;
             }
 
-            compiled = (vertexShader.Spirv, pixelShader.Spirv);
-            DumpSpirv(
+            compiled = (vertexShader!, pixelShader!);
+            DumpCompiledShader(
                 "vs",
                 exportShaderAddress,
                 exportStateFingerprint,
                 compiled.Vertex,
                 exportState.Program);
-            DumpSpirv(
+            DumpCompiledShader(
                 "ps",
                 pixelShaderAddress,
                 pixelStateFingerprint,
                 compiled.Pixel,
                 pixelState.Program);
             VulkanVideoPresenter.CountSpirvCompilation();
-            lock (_submitTraceGate)
-            {
-                _graphicsSpirvCache.TryAdd(shaderKey, compiled);
-            }
-        }
-
-        var titlePixelOverride = Environment.GetEnvironmentVariable(
-            "SHARPEMU_OVERRIDE_TITLE_PIXEL_SPIRV");
-        if (pixelShaderAddress == 0x0000000500781200 &&
-            !string.IsNullOrWhiteSpace(titlePixelOverride))
-        {
-            compiled = (compiled.Vertex, File.ReadAllBytes(titlePixelOverride));
+            _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
         var imageBindings = pixelEvaluation.ImageBindings
@@ -6025,6 +6010,17 @@ public static partial class AgcExports
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
             exportEvaluation.VertexInputs ?? [];
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
+        var guestTargets = new GuestRenderTarget[renderTargets.Length];
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            guestTargets[index] = new GuestRenderTarget(
+                renderTargets[index].Address,
+                renderTargets[index].Width,
+                renderTargets[index].Height,
+                renderTargets[index].Format,
+                renderTargets[index].NumberType);
+        }
+
         draw = new TranslatedGuestDraw(
             exportShaderAddress,
             pixelShaderAddress,
@@ -6034,13 +6030,14 @@ public static partial class AgcExports
             GetInterpolatedAttributeCount(pixelState),
             vertexCount,
             state.InstanceCount,
-            indexed ? CreateVulkanIndexBuffer(ctx, state, vertexCount) : null,
+            indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
             DecodeDepthTarget(state.CxRegisters),
-            ApplyFillClearHack(
+            guestTargets,
+            ApplyTransparentPremultipliedFillClear(
                 CreateRenderState(state.CxRegisters, renderTargets, pixelState),
                 textures,
                 vertexInputs,
@@ -6133,8 +6130,8 @@ public static partial class AgcExports
     /// attachment uses the same blend pattern. Disable with
     /// SHARPEMU_DISABLE_FILL_CLEAR=1.
     /// </summary>
-    private static VulkanGuestRenderState ApplyFillClearHack(
-        VulkanGuestRenderState renderState,
+    private static GuestRenderState ApplyTransparentPremultipliedFillClear(
+        GuestRenderState renderState,
         IReadOnlyList<TranslatedImageBinding> textures,
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
         IReadOnlyList<uint> pixelUserData)
@@ -6165,7 +6162,7 @@ public static partial class AgcExports
         };
     }
 
-    private static bool IsTransparentPremultipliedFillBlend(VulkanGuestBlendState blend) =>
+    private static bool IsTransparentPremultipliedFillBlend(GuestBlendState blend) =>
         blend is
         {
             Enable: true,
@@ -6174,7 +6171,7 @@ public static partial class AgcExports
             ColorFunc: 0,
         };
 
-    private static VulkanGuestIndexBuffer? CreateVulkanIndexBuffer(
+    private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
         SubmittedDcbState state,
         uint indexCount)
@@ -6194,7 +6191,7 @@ public static partial class AgcExports
         if (ctx.Memory.TryRead(address, span) ||
             KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, span))
         {
-            return new VulkanGuestIndexBuffer(data, byteCount, is32Bit, Pooled: true);
+            return new GuestIndexBuffer(data, byteCount, is32Bit, Pooled: true);
         }
 
         VulkanVideoPresenter.GuestDataPool.Return(data);
@@ -6475,12 +6472,12 @@ public static partial class AgcExports
         return targets;
     }
 
-    private static VulkanGuestRenderState CreateRenderState(
+    private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         RenderTargetDescriptor target)
     {
         var scissor = DecodeScissor(registers, target.Width, target.Height);
-        return new VulkanGuestRenderState(
+        return new GuestRenderState(
             [DecodeBlendState(registers, target.Slot)],
             scissor,
             DecodeViewport(registers, target.Width, target.Height, scissor),
@@ -6488,19 +6485,19 @@ public static partial class AgcExports
             DecodeDepthState(registers));
     }
 
-    private static VulkanGuestRenderState CreateRenderState(
+    private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> targets,
         Gen5ShaderState pixelState)
     {
         if (targets.Count == 0)
         {
-            return VulkanGuestRenderState.Default;
+            return GuestRenderState.Default;
         }
 
         var target = targets[0];
         var scissor = DecodeScissor(registers, target.Width, target.Height);
-        return new VulkanGuestRenderState(
+        return new GuestRenderState(
             targets.Select(target =>
             {
                 var blend = DecodeBlendState(registers, target.Slot);
@@ -6519,21 +6516,21 @@ public static partial class AgcExports
     // bit2, ZFUNC bits[6:4] (GCN compare, matches Vulkan CompareOp ordering).
     private const uint DbDepthControl = 0x200;
 
-    private static VulkanGuestDepthState DecodeDepthState(
+    private static GuestDepthState DecodeDepthState(
         IReadOnlyDictionary<uint, uint> registers)
     {
         if (!registers.TryGetValue(DbDepthControl, out var control))
         {
-            return VulkanGuestDepthState.Default;
+            return GuestDepthState.Default;
         }
 
         var testEnable = (control & 0x2u) != 0;
         var writeEnable = (control & 0x4u) != 0;
         var compareOp = (control >> 4) & 0x7u;
-        return new VulkanGuestDepthState(testEnable, writeEnable, compareOp);
+        return new GuestDepthState(testEnable, writeEnable, compareOp);
     }
 
-    private static VulkanGuestDepthTarget? DecodeDepthTarget(
+    private static GuestDepthTarget? DecodeDepthTarget(
         IReadOnlyDictionary<uint, uint> registers)
     {
         var depthState = DecodeDepthState(registers);
@@ -6581,7 +6578,7 @@ public static partial class AgcExports
             clearDepth = 1f;
         }
 
-        return new VulkanGuestDepthTarget(
+        return new GuestDepthTarget(
             readAddress,
             writeAddress,
             width,
@@ -6596,12 +6593,12 @@ public static partial class AgcExports
     // front-face winding and polygon (wireframe) mode.
     private const uint PaSuScModeCntl = 0x205;
 
-    private static VulkanGuestRasterState DecodeRasterState(
+    private static GuestRasterState DecodeRasterState(
         IReadOnlyDictionary<uint, uint> registers)
     {
         if (!registers.TryGetValue(PaSuScModeCntl, out var mode))
         {
-            return VulkanGuestRasterState.Default;
+            return GuestRasterState.Default;
         }
 
         var cullFront = (mode & 0x1u) != 0;
@@ -6611,10 +6608,10 @@ public static partial class AgcExports
         var frontPtype = (mode >> 5) & 0x7u;
         // POLY_MODE != 0 with a line front primitive type renders wireframe.
         var wireframe = polyMode != 0 && frontPtype == 1;
-        return new VulkanGuestRasterState(cullFront, cullBack, frontFaceClockwise, wireframe);
+        return new GuestRasterState(cullFront, cullBack, frontFaceClockwise, wireframe);
     }
 
-    private static VulkanGuestBlendState DecodeBlendState(
+    private static GuestBlendState DecodeBlendState(
         IReadOnlyDictionary<uint, uint> registers,
         uint slot)
     {
@@ -6625,7 +6622,7 @@ public static partial class AgcExports
         }
 
         registers.TryGetValue(CbBlend0Control + slot, out var control);
-        return new VulkanGuestBlendState(
+        return new GuestBlendState(
             ((control >> 30) & 1u) != 0,
             control & 0x1Fu,
             (control >> 8) & 0x1Fu,
@@ -6637,14 +6634,14 @@ public static partial class AgcExports
             writeMask);
     }
 
-    private static VulkanGuestRect? DecodeScissor(
+    private static GuestRect? DecodeScissor(
         IReadOnlyDictionary<uint, uint> registers,
         uint targetWidth,
         uint targetHeight)
     {
         if (targetWidth == 0 || targetHeight == 0)
         {
-            return new VulkanGuestRect(0, 0, 0, 0);
+            return new GuestRect(0, 0, 0, 0);
         }
 
         var left = 0;
@@ -6721,22 +6718,22 @@ public static partial class AgcExports
             return null;
         }
 
-        return new VulkanGuestRect(
+        return new GuestRect(
             left,
             top,
             checked((uint)(right - left)),
             checked((uint)(bottom - top)));
     }
 
-    private static VulkanGuestViewport? DecodeViewport(
+    private static GuestViewport? DecodeViewport(
         IReadOnlyDictionary<uint, uint> registers,
         uint targetWidth,
         uint targetHeight,
-        VulkanGuestRect? scissor)
+        GuestRect? scissor)
     {
         if (targetWidth == 0 || targetHeight == 0)
         {
-            return new VulkanGuestViewport(0, 0, 0, 0, 0, 1);
+            return new GuestViewport(0, 0, 0, 0, 0, 1);
         }
 
         var minDepth = 0f;
@@ -6762,7 +6759,7 @@ public static partial class AgcExports
             xScale > 0f &&
             yScale != 0f)
         {
-            return new VulkanGuestViewport(
+            return new GuestViewport(
                 xOffset - xScale,
                 yOffset - yScale,
                 xScale * 2f,
@@ -6775,10 +6772,10 @@ public static partial class AgcExports
         {
             return minDepth == 0f && maxDepth == 1f
                 ? null
-                : new VulkanGuestViewport(0, 0, targetWidth, targetHeight, minDepth, maxDepth);
+                : new GuestViewport(0, 0, targetWidth, targetHeight, minDepth, maxDepth);
         }
 
-        return new VulkanGuestViewport(
+        return new GuestViewport(
             rect.X,
             rect.Y,
             rect.Width,
@@ -6974,7 +6971,7 @@ public static partial class AgcExports
         var blend = draw.RenderState.Blend;
         TraceAgcShader(
             $"agc.shader_draw es=0x{draw.ExportShaderAddress:X16} " +
-            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelSpirv.Length} " +
+            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelShader.Payload.Length} " +
             $"primitive=0x{draw.PrimitiveType:X} " +
             $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc} " +
             $"write_mask=0x{blend.WriteMask:X} scissor={scissor} viewport={viewport} " +
@@ -6984,16 +6981,16 @@ public static partial class AgcExports
             $"buffers=[{buffers}] vertex=[{vertexInputs}] indices=[{indices}]");
     }
 
-    private static IReadOnlyList<VulkanGuestDrawTexture> CreateVulkanGuestDrawTextures(
+    private static IReadOnlyList<GuestDrawTexture> CreateGuestDrawTextures(
         CpuContext ctx,
         IReadOnlyList<TranslatedImageBinding> bindings,
         out int fallbackTextureCount)
     {
-        var textures = new List<VulkanGuestDrawTexture>(bindings.Count);
+        var textures = new List<GuestDrawTexture>(bindings.Count);
         fallbackTextureCount = 0;
         foreach (var binding in bindings)
         {
-            if (TryCreateVulkanGuestDrawTexture(
+            if (TryCreateGuestDrawTexture(
                     ctx,
                     binding.Descriptor,
                     binding.IsStorage,
@@ -7017,27 +7014,27 @@ public static partial class AgcExports
     /// initial scalar registers of each stage (pixel then vertex), matching
     /// the binding layout the shaders were compiled against.
     /// </summary>
-    private static IReadOnlyList<VulkanGuestMemoryBuffer> CreateTranslatedDrawGlobalBuffers(
+    private static IReadOnlyList<GuestMemoryBuffer> CreateTranslatedDrawGlobalBuffers(
         TranslatedGuestDraw translatedDraw)
     {
-        var buffers = CreateVulkanGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+        var buffers = CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
         if (_bakeScalars)
         {
             return buffers;
         }
 
-        var combined = new List<VulkanGuestMemoryBuffer>(buffers.Count + 2);
+        var combined = new List<GuestMemoryBuffer>(buffers.Count + 2);
         combined.AddRange(buffers);
         var runtimeStateLength = GetRuntimeScalarBufferLength(
             translatedDraw.GlobalMemoryBindings.Count);
-        combined.Add(new VulkanGuestMemoryBuffer(
+        combined.Add(new GuestMemoryBuffer(
             0,
             PackRuntimeScalarState(
                 translatedDraw.PixelInitialScalars,
                 translatedDraw.GlobalMemoryBindings),
             runtimeStateLength,
             Pooled: true));
-        combined.Add(new VulkanGuestMemoryBuffer(
+        combined.Add(new GuestMemoryBuffer(
             0,
             PackRuntimeScalarState(
                 translatedDraw.VertexInitialScalars,
@@ -7047,12 +7044,12 @@ public static partial class AgcExports
         return combined;
     }
 
-    private static IReadOnlyList<VulkanGuestMemoryBuffer>
+    private static IReadOnlyList<GuestMemoryBuffer>
         CreateGlobalBufferOwnershipView(
-            IReadOnlyList<VulkanGuestMemoryBuffer> buffers,
+            IReadOnlyList<GuestMemoryBuffer> buffers,
             bool ownsPooledData)
     {
-        var view = new VulkanGuestMemoryBuffer[buffers.Count];
+        var view = new GuestMemoryBuffer[buffers.Count];
         for (var index = 0; index < buffers.Count; index++)
         {
             var buffer = buffers[index];
@@ -7071,12 +7068,12 @@ public static partial class AgcExports
     /// the (pooled, single-consumption) binding arrays. Buffer contents are
     /// re-read from guest memory instead, which also presents current data.
     /// </summary>
-    private static IReadOnlyList<VulkanGuestMemoryBuffer> CreateTranslatedDrawGlobalBuffersForPresent(
+    private static IReadOnlyList<GuestMemoryBuffer> CreateTranslatedDrawGlobalBuffersForPresent(
         CpuContext ctx,
         TranslatedGuestDraw translatedDraw)
     {
         var bindings = translatedDraw.GlobalMemoryBindings;
-        var combined = new List<VulkanGuestMemoryBuffer>(bindings.Count + 2);
+        var combined = new List<GuestMemoryBuffer>(bindings.Count + 2);
         foreach (var binding in bindings)
         {
             var data = new byte[Math.Max(binding.DataLength, sizeof(uint))];
@@ -7088,7 +7085,7 @@ public static partial class AgcExports
                 // Keep the zero-filled buffer; layout must match the shader.
             }
 
-            combined.Add(new VulkanGuestMemoryBuffer(
+            combined.Add(new GuestMemoryBuffer(
                 binding.BaseAddress,
                 data,
                 data.Length,
@@ -7100,14 +7097,14 @@ public static partial class AgcExports
         if (!_bakeScalars)
         {
             var runtimeStateLength = GetRuntimeScalarBufferLength(bindings.Count);
-            combined.Add(new VulkanGuestMemoryBuffer(
+            combined.Add(new GuestMemoryBuffer(
                 0,
                 PackRuntimeScalarStateUnpooled(
                     translatedDraw.PixelInitialScalars,
                     bindings),
                 runtimeStateLength,
                 Pooled: false));
-            combined.Add(new VulkanGuestMemoryBuffer(
+            combined.Add(new GuestMemoryBuffer(
                 0,
                 PackRuntimeScalarStateUnpooled(
                     translatedDraw.VertexInitialScalars,
@@ -7249,13 +7246,13 @@ public static partial class AgcExports
         }
     }
 
-    private static IReadOnlyList<VulkanGuestMemoryBuffer> CreateVulkanGuestMemoryBuffers(
+    private static IReadOnlyList<GuestMemoryBuffer> CreateGuestMemoryBuffers(
         IReadOnlyList<Gen5GlobalMemoryBinding> bindings)
     {
-        var buffers = new VulkanGuestMemoryBuffer[bindings.Count];
+        var buffers = new GuestMemoryBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
-            buffers[index] = new VulkanGuestMemoryBuffer(
+            buffers[index] = new GuestMemoryBuffer(
                 bindings[index].BaseAddress,
                 bindings[index].Data,
                 bindings[index].DataLength,
@@ -7272,18 +7269,18 @@ public static partial class AgcExports
     /// scalar registers. Dispatch-specific SGPR values remain runtime data so
     /// one translated pipeline serves every matching shader/resource shape.
     /// </summary>
-    private static IReadOnlyList<VulkanGuestMemoryBuffer> CreateTranslatedComputeGlobalBuffers(
+    private static IReadOnlyList<GuestMemoryBuffer> CreateTranslatedComputeGlobalBuffers(
         Gen5ShaderEvaluation evaluation)
     {
-        var buffers = CreateVulkanGuestMemoryBuffers(evaluation.GlobalMemoryBindings);
+        var buffers = CreateGuestMemoryBuffers(evaluation.GlobalMemoryBindings);
         if (_bakeScalars)
         {
             return buffers;
         }
 
-        var combined = new List<VulkanGuestMemoryBuffer>(buffers.Count + 1);
+        var combined = new List<GuestMemoryBuffer>(buffers.Count + 1);
         combined.AddRange(buffers);
-        combined.Add(new VulkanGuestMemoryBuffer(
+        combined.Add(new GuestMemoryBuffer(
             0,
             PackRuntimeScalarState(
                 evaluation.InitialScalarRegisters,
@@ -7293,14 +7290,14 @@ public static partial class AgcExports
         return combined;
     }
 
-    private static IReadOnlyList<VulkanGuestVertexBuffer> CreateVulkanGuestVertexBuffers(
+    private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
         IReadOnlyList<Gen5VertexInputBinding> bindings)
     {
-        var buffers = new VulkanGuestVertexBuffer[bindings.Count];
+        var buffers = new GuestVertexBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
             var binding = bindings[index];
-            buffers[index] = new VulkanGuestVertexBuffer(
+            buffers[index] = new GuestVertexBuffer(
                 binding.Location,
                 binding.ComponentCount,
                 binding.DataFormat,
@@ -7316,12 +7313,12 @@ public static partial class AgcExports
         return buffers;
     }
 
-    private static IReadOnlyList<VulkanGuestVertexBuffer>
+    private static IReadOnlyList<GuestVertexBuffer>
         CreateVertexBufferOwnershipView(
-            IReadOnlyList<VulkanGuestVertexBuffer> buffers,
+            IReadOnlyList<GuestVertexBuffer> buffers,
             bool ownsPooledData)
     {
-        var view = new VulkanGuestVertexBuffer[buffers.Count];
+        var view = new GuestVertexBuffer[buffers.Count];
         for (var index = 0; index < buffers.Count; index++)
         {
             var buffer = buffers[index];
@@ -7334,8 +7331,8 @@ public static partial class AgcExports
         return view;
     }
 
-    private static VulkanGuestIndexBuffer? CreateIndexBufferOwnershipView(
-        VulkanGuestIndexBuffer? buffer,
+    private static GuestIndexBuffer? CreateIndexBufferOwnershipView(
+        GuestIndexBuffer? buffer,
         bool ownsPooledData) =>
         buffer is null
             ? null
@@ -7433,13 +7430,13 @@ public static partial class AgcExports
             $"dst=0x{descriptor.DstSelect:X3}");
     }
 
-    private static bool TryCreateVulkanGuestDrawTexture(
+    private static bool TryCreateGuestDrawTexture(
         CpuContext ctx,
         TextureDescriptor descriptor,
         bool isStorage,
         uint mipLevel,
         IReadOnlyList<uint> samplerDescriptor,
-        out VulkanGuestDrawTexture texture)
+        out GuestDrawTexture texture)
     {
         texture = default!;
         if ((descriptor.Type != Gen5TextureType1D &&
@@ -7507,7 +7504,7 @@ public static partial class AgcExports
                 descriptor.Format,
                 descriptor.NumberType))
         {
-            texture = new VulkanGuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -7523,7 +7520,7 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToVulkanSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor));
             return true;
         }
 
@@ -7580,7 +7577,7 @@ public static partial class AgcExports
                     $"tile={descriptor.TileMode} mip={mipLevel}");
             }
 
-            texture = new VulkanGuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -7596,7 +7593,7 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToVulkanSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor));
             return true;
         }
 
@@ -7608,7 +7605,7 @@ public static partial class AgcExports
         // the render thread evicts the stale cache entry before executing it
         // (skipping would leave the draw with no pixels and a fallback
         // texture for the frame — visible flicker on animated textures).
-        var sampler = ToVulkanSampler(samplerDescriptor);
+        var sampler = ToGuestSampler(samplerDescriptor);
         if (!_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
@@ -7624,7 +7621,7 @@ public static partial class AgcExports
                     sourceWidth,
                     sampler)))
         {
-            texture = new VulkanGuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -7684,7 +7681,7 @@ public static partial class AgcExports
             checked((int)sourceByteCount),
             source) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
-        texture = new VulkanGuestDrawTexture(
+        texture = new GuestDrawTexture(
             descriptor.Address,
             descriptor.Width,
             descriptor.Height,
@@ -7700,7 +7697,7 @@ public static partial class AgcExports
             Pitch: sourceWidth,
             TileMode: descriptor.TileMode,
             DstSelect: descriptor.DstSelect,
-            Sampler: ToVulkanSampler(samplerDescriptor));
+            Sampler: ToGuestSampler(samplerDescriptor));
         return true;
     }
 
@@ -7748,8 +7745,8 @@ public static partial class AgcExports
     private static void TraceDrawCompact(
         ulong sequence,
         TranslatedGuestDraw draw,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestVertexBuffer> vertexBuffers)
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
         if (!_traceDraws)
         {
@@ -7815,8 +7812,8 @@ public static partial class AgcExports
 
     private static void TraceGrassDrawVertices(
         TranslatedGuestDraw draw,
-        IReadOnlyList<VulkanGuestDrawTexture> textures,
-        IReadOnlyList<VulkanGuestVertexBuffer> vertexBuffers)
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
         if (_grassTraceCount >= 6 ||
             !textures.Any(texture => texture.Width == 288 && texture.Height == 160) ||
@@ -7855,7 +7852,7 @@ public static partial class AgcExports
 
     private static void TraceRectListVertices(
         TranslatedGuestDraw draw,
-        IReadOnlyList<VulkanGuestVertexBuffer> vertexBuffers)
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
         if (draw.PrimitiveType != 0x11 ||
             draw.IndexBuffer is not null ||
@@ -7973,7 +7970,7 @@ public static partial class AgcExports
         }
     }
 
-    private static VulkanGuestDrawTexture CreateFallbackGuestDrawTexture(
+    private static GuestDrawTexture CreateFallbackGuestDrawTexture(
         bool isStorage,
         uint format,
         uint numberType)
@@ -7993,9 +7990,9 @@ public static partial class AgcExports
             MipLevel: 0);
     }
 
-    private static VulkanGuestSampler ToVulkanSampler(IReadOnlyList<uint> descriptor) =>
+    private static GuestSampler ToGuestSampler(IReadOnlyList<uint> descriptor) =>
         descriptor.Count >= 4
-            ? new VulkanGuestSampler(
+            ? new GuestSampler(
                 descriptor[0],
                 descriptor[1],
                 descriptor[2],
@@ -8443,65 +8440,46 @@ public static partial class AgcExports
             var totalGlobalBufferCount = _bakeScalars
                 ? guestGlobalBufferCount
                 : guestGlobalBufferCount + 1;
-            byte[] computeSpirv;
-            lock (_submitTraceGate)
+            _computeShaderCache.TryGetValue(shaderKey, out var computeShader);
+
+            if (computeShader is null &&
+                GuestGpu.Current.TryCompileComputeShader(
+                    shaderState,
+                    evaluation,
+                    localSizeX,
+                    localSizeY,
+                    localSizeZ,
+                    out computeShader,
+                    out computeError,
+                    totalGlobalBufferCount,
+                    initialScalarBufferIndex: _bakeScalars
+                        ? -1
+                        : guestGlobalBufferCount,
+                    waveLaneCount: dispatch.WaveLaneCount,
+                    storageBufferOffsetAlignment:
+                        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
             {
-                _computeSpirvCache.TryGetValue(shaderKey, out computeSpirv!);
+                DumpCompiledShader(
+                    "cs",
+                    shaderAddress,
+                    shaderKey.Item2,
+                    computeShader!,
+                    shaderState.Program);
             }
 
-            if (computeSpirv is null)
+            if (computeShader is not null)
             {
-                if (Gen5SpirvTranslator.TryCompileComputeShader(
-                        shaderState,
-                        evaluation,
-                        localSizeX,
-                        localSizeY,
-                        localSizeZ,
-                        out var compiledCompute,
-                        out computeError,
-                        totalGlobalBufferCount,
-                        initialScalarBufferIndex: _bakeScalars
-                            ? -1
-                            : guestGlobalBufferCount,
-                        waveLaneCount: dispatch.WaveLaneCount,
-                        storageBufferOffsetAlignment:
-                            VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
-                {
-                    computeSpirv = compiledCompute.Spirv;
-                    DumpSpirv(
-                        "cs",
-                        shaderAddress,
-                        shaderKey.Item2,
-                        computeSpirv,
-                        shaderState.Program);
-                }
-                else
-                {
-                    DumpSpirv(
-                        "failed-cs",
-                        shaderAddress,
-                        shaderKey.Item2,
-                        [],
-                        shaderState.Program);
-                }
-            }
+                _computeShaderCache.TryAdd(shaderKey, computeShader);
 
-            if (computeSpirv is not null)
-            {
-                lock (_submitTraceGate)
-                {
-                    _computeSpirvCache.TryAdd(shaderKey, computeSpirv);
-                }
-
-                var textures = CreateVulkanGuestDrawTextures(
+                var textures = CreateGuestDrawTextures(
                     ctx,
                     translatedBindings,
                     out _);
                 var globalMemoryBuffers =
                     CreateTranslatedComputeGlobalBuffers(evaluation);
-                var workSequence = VulkanVideoPresenter.SubmitComputeDispatch(
+                var workSequence = GuestGpu.Current.SubmitComputeDispatch(
                     shaderAddress,
-                    computeSpirv,
+                    computeShader,
                     textures,
                     globalMemoryBuffers,
                     dispatch.GroupCountX,
@@ -9030,7 +9008,7 @@ public static partial class AgcExports
                     }
                 }
                 else if (source is { } cachedSourceTexture &&
-                    VulkanVideoPresenter.TrySubmitGuestImageBlit(
+                    GuestGpu.Current.TrySubmitGuestImageBlit(
                         cachedSourceTexture.Address,
                         cachedSourceTexture.Width,
                         cachedSourceTexture.Height,
@@ -9408,7 +9386,7 @@ public static partial class AgcExports
                                 $"pcs={string.Join(',', binding.InstructionPcs.Select(pc => $"0x{pc:X}"))}");
                         }
 
-                        if (Gen5SpirvTranslator.TryCompilePixelShader(
+                        if (GuestGpu.Current.TryCompilePixelShader(
                                  pixelState,
                                  evaluation,
                                  [new(0, 0, Gen5PixelOutputKind.Float)],
@@ -9421,7 +9399,7 @@ public static partial class AgcExports
                         {
                             TraceAgcShader(
                                 $"agc.shader_spirv ps=0x{pixelShaderAddress:X16} " +
-                                $"bytes={compiledPixel.Spirv.Length} bindings={evaluation.ImageBindings.Count} " +
+                                $"bytes={compiledPixel!.Payload.Length} bindings={evaluation.ImageBindings.Count} " +
                                 $"global_buffers={evaluation.GlobalMemoryBindings.Count}");
                         }
                         else
@@ -10615,14 +10593,15 @@ public static partial class AgcExports
             : null;
     }
 
-    private static void DumpSpirv(
+    private static void DumpCompiledShader(
         string stage,
         ulong shaderAddress,
         ulong stateFingerprint,
-        byte[] spirv,
+        IGuestCompiledShader shader,
         Gen5ShaderProgram program)
     {
-        if (!string.Equals(
+        if (shader.Payload.Length == 0 ||
+            !string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"),
                 "1",
                 StringComparison.Ordinal))
@@ -10654,10 +10633,9 @@ public static partial class AgcExports
         var directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
         Directory.CreateDirectory(directory);
         var name = $"{shaderAddress:X16}-{stateFingerprint:X16}.{stage}";
-        if (spirv.Length != 0)
-        {
-            File.WriteAllBytes(Path.Combine(directory, $"{name}.spv"), spirv);
-        }
+        File.WriteAllBytes(
+            Path.Combine(directory, $"{name}.{shader.PayloadFileExtension}"),
+            shader.Payload);
 
         var lines = new List<string>(program.Instructions.Count + 2)
         {

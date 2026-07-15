@@ -4863,6 +4863,7 @@ public static partial class KernelMemoryCompatExports
             writer.Advance(firstReadLength);
         }
 
+        Span<byte> one = stackalloc byte[1];
         while (offset < (ulong)limit)
         {
             var current = address + offset;
@@ -4894,7 +4895,6 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            Span<byte> one = stackalloc byte[1];
             if (!TryReadCompat(ctx, current, one))
             {
                 return false;

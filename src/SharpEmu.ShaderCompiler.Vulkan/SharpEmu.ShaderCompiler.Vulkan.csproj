@@ -1,0 +1,19 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The SPIR-V codegen backend: consumes the backend-neutral shader IR from
+       SharpEmu.ShaderCompiler and emits raw SPIR-V words. Deliberately has no
+       dependency on Vulkan bindings — emitters produce bytes; renderers own APIs. -->
+  <PropertyGroup>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
+  </ItemGroup>
+
+</Project>

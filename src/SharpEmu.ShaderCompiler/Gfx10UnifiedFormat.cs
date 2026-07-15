@@ -1,14 +1,14 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
 /// <summary>
 /// Converts the RDNA2 unified FORMAT field used by GFX10 buffer and image
 /// descriptors into the data-format/number-format pair used by the rest of
 /// SharpEmu's AGC pipeline.
 /// </summary>
-internal static class Gfx10UnifiedFormat
+public static class Gfx10UnifiedFormat
 {
     public static bool TryDecode(
         uint unifiedFormat,
