@@ -2727,6 +2727,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
+		// Joins regularly park here for minutes (a game main thread joining a
+		// streamer); polling at a fixed 1ms burns half a host core for the
+		// whole wait, so back off toward a 10ms cadence once the join is
+		// clearly long-lived.
+		var joinPollMilliseconds = 1;
 		while (!ActiveForcedGuestExit)
 		{
 			Thread? hostThread;
@@ -2767,16 +2772,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				try
 				{
-					hostThread.Join(1);
+					hostThread.Join(joinPollMilliseconds);
 				}
 				catch (ThreadStateException)
 				{
-					Thread.Sleep(1);
+					Thread.Sleep(joinPollMilliseconds);
 				}
 			}
 			else
 			{
-				Thread.Sleep(1);
+				Thread.Sleep(joinPollMilliseconds);
+			}
+
+			if (joinPollMilliseconds < 10)
+			{
+				joinPollMilliseconds++;
 			}
 		}
 
