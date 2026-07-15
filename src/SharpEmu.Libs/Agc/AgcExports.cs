@@ -2720,8 +2720,12 @@ public static class AgcExports
                 ctx.TryReadUInt32(currentAddress + sizeof(uint), out var eventTypeRaw))
             {
                 var eventType = eventTypeRaw & 0x3Fu;
-                var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                    eventType,
+
+                // The guest registers AGC events with a full eventId, but the command buffer
+                // only carries a 6-bit EVENT_TYPE. Those two values are not the same numbering
+                // scheme, so exact ident matching never wakes anything. Trigger every graphics
+                // event registration instead (workaround for issue #173).
+                var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
                     KernelEventQueueCompatExports.KernelEventFilterGraphics,
                     eventType);
                 if (tracePackets)

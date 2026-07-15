@@ -589,6 +589,66 @@ public static class KernelEventQueueCompatExports
         return triggeredCount;
     }
 
+    /// <summary>
+    /// Triggers every registered event on every queue that matches <paramref name="filter"/>
+    /// regardless of the registration's <c>ident</c>. This is a workaround for PS5 AGC command
+    /// buffers, where <c>IT_EVENT_WRITE</c> carries a hardware <c>EVENT_TYPE</c> that does not
+    /// match the <c>eventId</c> the guest registered with <c>sceAgcDriverAddEqEvent</c>.
+    /// See issue #173.
+    /// </summary>
+    public static int TriggerRegisteredEventsByFilter(
+        short filter,
+        ulong data)
+    {
+        List<ulong>? wakeHandles = null;
+        var triggeredCount = 0;
+        lock (_eventQueueGate)
+        {
+            foreach (var (handle, registrations) in _registeredEvents)
+            {
+                foreach (var registration in registrations.Values)
+                {
+                    if (registration.Filter != filter)
+                    {
+                        continue;
+                    }
+
+                    if (!_pendingEvents.TryGetValue(handle, out var queue))
+                    {
+                        queue = new KernelEventDeque();
+                        _pendingEvents[handle] = queue;
+                    }
+
+                    QueueOrUpdateEvent(
+                        queue,
+                        new KernelQueuedEvent(
+                            registration.Ident,
+                            registration.Filter,
+                            0,
+                            1,
+                            data,
+                            registration.UserData));
+                    (wakeHandles ??= new List<ulong>()).Add(handle);
+                    triggeredCount++;
+
+                    // A single queue only needs to be woken once, even if multiple
+                    // registrations matched.
+                    break;
+                }
+            }
+        }
+
+        if (wakeHandles is not null)
+        {
+            foreach (var handle in wakeHandles)
+            {
+                WakeEventQueue(handle);
+            }
+        }
+
+        return triggeredCount;
+    }
+
     private static bool TriggerRegisteredEvent(
         ulong handle,
         ulong ident,
