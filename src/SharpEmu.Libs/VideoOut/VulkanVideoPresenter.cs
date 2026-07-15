@@ -5915,7 +5915,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void UpdatePerformanceHud()
         {
-            if (!_performanceHudEnabled || !OperatingSystem.IsWindows())
+            if (!_performanceHudEnabled)
             {
                 return;
             }
@@ -5937,28 +5937,34 @@ internal static unsafe class VulkanVideoPresenter
                 var hottestThreadId = 0;
                 var hottestThreadCpuSeconds = 0.0;
 
-                foreach (ProcessThread thread in process.Threads)
+                // Per-thread CPU times and thread names come from Windows-only
+                // APIs; on POSIX the HUD reports process totals with an "idle"
+                // hottest-thread slot.
+                if (OperatingSystem.IsWindows())
                 {
-                    using (thread)
+                    foreach (ProcessThread thread in process.Threads)
                     {
-                        try
+                        using (thread)
                         {
-                            var threadId = thread.Id;
-                            var cpu = thread.TotalProcessorTime;
-                            currentThreadIds.Add(threadId);
-                            currentThreadCpu[threadId] = cpu;
-                            if (_performanceHudThreadCpu.TryGetValue(threadId, out var previousCpu))
+                            try
                             {
-                                var deltaSeconds = Math.Max(0.0, (cpu - previousCpu).TotalSeconds);
-                                if (deltaSeconds > hottestThreadCpuSeconds)
+                                var threadId = thread.Id;
+                                var cpu = thread.TotalProcessorTime;
+                                currentThreadIds.Add(threadId);
+                                currentThreadCpu[threadId] = cpu;
+                                if (_performanceHudThreadCpu.TryGetValue(threadId, out var previousCpu))
                                 {
-                                    hottestThreadCpuSeconds = deltaSeconds;
-                                    hottestThreadId = threadId;
+                                    var deltaSeconds = Math.Max(0.0, (cpu - previousCpu).TotalSeconds);
+                                    if (deltaSeconds > hottestThreadCpuSeconds)
+                                    {
+                                        hottestThreadCpuSeconds = deltaSeconds;
+                                        hottestThreadId = threadId;
+                                    }
                                 }
                             }
-                        }
-                        catch (InvalidOperationException)
-                        {
+                            catch (InvalidOperationException)
+                            {
+                            }
                         }
                     }
                 }
