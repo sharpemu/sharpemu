@@ -1,0 +1,146 @@
+{
+  "_languageName": "Português (Portugal)",
+
+  "Page.Library": "Biblioteca",
+  "Page.Options": "Opções",
+  "Page.GameCount.One": "1 jogo",
+  "Page.GameCount.Other": "{0} jogos",
+
+  "Library.SearchWatermark": "Pesquisar biblioteca…",
+  "Library.AddFolder": "＋ Adicionar pasta",
+  "Library.Rescan": "⟳ Reanalisar",
+  "Library.OpenFile": "Abrir ficheiro…",
+
+  "Library.Context.Launch": "Iniciar",
+  "Library.Context.OpenFolder": "Abrir pasta do jogo",
+  "Library.Context.CopyPath": "Copiar caminho",
+  "Library.Context.CopyTitleId": "Copiar ID do título",
+  "Library.Context.Remove": "Remover da biblioteca",
+
+  "Library.Empty.Title": "A sua biblioteca está vazia",
+  "Library.Empty.Hint": "Adicione uma pasta com os seus jogos para começar.",
+  "Library.Empty.SearchTitle": "Nenhum jogo corresponde à sua pesquisa",
+  "Library.Empty.SearchHint": "Nada na biblioteca corresponde a “{0}”.",
+  "Library.Empty.AddFolder": "＋ Adicionar pasta de jogos",
+
+  "Library.Loading": "A carregar biblioteca…",
+
+  "Options.General": "Geral",
+  "Options.Env.Tab": "Ambiente",
+  "Options.Section.Environment": "VARIÁVEIS DE AMBIENTE",
+  "Options.Env.Desc": "Switches passados ao emulador como variáveis de ambiente no arranque.",
+  "Options.Env.Bthid.Desc": "Reporta o Bluetooth HID como indisponível para títulos cujo middleware de volante/FFB fica à espera indefinidamente.\nDeixe desativado normalmente. Alguns títulos bloqueiam quando a inicialização falha.",
+  "Options.Env.LoopGuard.Desc": "Não force o encerramento de títulos que repetem a mesma chamada durante demasiado tempo.\nExperimente isto quando um jogo fecha sozinho durante o carregamento.",
+  "Options.Env.VkValidation.Desc": "Ativa as camadas de validação do Vulkan para depuração da GPU.\nLento. Requer que o Vulkan SDK esteja instalado.",
+  "Options.Env.DumpSpirv.Desc": "Extrai os shaders AGC e as respetivas traduções SPIR-V para a pasta shader-dumps.\nUtilize ao reportar problemas de shaders ou renderização.",
+  "Options.Env.LogDirectMemory.Desc": "Regista alocações de memória direta e falhas na consola.\nUtilize quando um jogo aborta ou fecha durante o arranque.",
+  "Options.Env.LogNp.Desc": "Regista chamadas da biblioteca NP (PlayStation Network) na consola.",
+  "Options.Section.Emulation": "EMULAÇÃO",
+  "Options.Section.Logging": "REGISTOS",
+  "Options.Section.Launcher": "LANÇADOR",
+
+  "Options.CpuEngine.Label": "Motor de CPU",
+  "Options.CpuEngine.Desc": "Motor de execução utilizado para correr o código do jogo.",
+  "Options.CpuEngine.Native": "Nativo",
+
+  "Options.Strict.Label": "Resolução estrita de dynlib",
+  "Options.Strict.Desc": "Falha o arranque quando um símbolo importado não pode ser resolvido.",
+
+  "Options.LogLevel.Label": "Nível de registo",
+  "Options.LogLevel.Desc": "Nível de detalhe da saída da consola do emulador.",
+  "Options.LogLevel.Trace": "Rastreio",
+  "Options.LogLevel.Debug": "Depuração",
+  "Options.LogLevel.Info": "Informação",
+  "Options.LogLevel.Warning": "Aviso",
+  "Options.LogLevel.Error": "Erro",
+  "Options.LogLevel.Critical": "Crítico",
+
+  "Options.TraceImports.Label": "Limite de rastreio de importações",
+  "Options.TraceImports.Desc": "Rastreia as primeiras N importações por módulo (0 = desativado).",
+
+  "Options.LogToFile.Label": "Registar para ficheiro",
+  "Options.LogToFile.Desc": "Duplicar a saída do emulador para um ficheiro de registo.",
+
+  "Options.LogFilePath.Label": "Caminho do ficheiro de registo",
+  "Options.LogFilePath.Default": "Sem caminho personalizado — os registos vão para user/logs junto ao emulador.",
+  "Options.LogFilePath.Select": "Selecionar…",
+
+  "Options.OverrideLogFile.Label": "Substituir ficheiro de registo",
+  "Options.OverrideLogFile.Desc": "Utilizar o caminho de ficheiro exato em vez de acrescentar o ID do título e a hora.",
+
+  "Options.TitleMusic.Label": "Música do título",
+  "Options.TitleMusic.Desc": "Repetir em loop a música de pré-visualização do jogo selecionado na biblioteca.",
+
+  "Options.Discord.Label": "Presença no Discord",
+  "Options.Discord.Desc": "Mostrar o jogo em execução no seu perfil do Discord.",
+
+  "Options.Language.Label": "Idioma do emulador",
+  "Options.Language.Desc": "Idioma utilizado em todo o lançador. Aplica-se de imediato.",
+
+  "Common.On": "Ativado",
+  "Common.Off": "Desativado",
+
+  "Console.Title": "CONSOLA",
+  "Console.SearchWatermark": "Pesquisar...",
+  "Console.AutoScroll": "Deslocamento automático",
+  "Console.Split": "Dividir",
+  "Console.Copy": "Copiar",
+  "Console.Clear": "Limpar",
+  "Console.WindowTitle": "Consola do SharpEmu",
+
+  "Launch.NoGameSelected": "Nenhum jogo selecionado",
+  "Launch.NoGameHint": "Escolha um jogo da biblioteca ou abra um eboot.bin diretamente.",
+  "Launch.Idle": "Inativo",
+  "Launch.Console": "≡ Consola",
+  "Launch.Launch": "▶  Iniciar",
+  "Launch.Stop": "■  Parar",
+  "Launch.Running": "Em execução — {0}",
+  "Launch.Stopping": "A parar…",
+  "Launch.Exited": "Terminou com o código {0} ({1})",
+  "Launch.ExeNotFound": "Executável do SharpEmu não encontrado. Compile primeiro o projeto SharpEmu.CLI (dotnet build).",
+  "Launch.LogFile": "Ficheiro de registo: {0}",
+  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.StartFailed": "Falha ao iniciar o emulador: {0}",
+  "Launch.ProcessExited": "O processo terminou com o código {0} ({1}).",
+
+  "Exit.Ok": "OK",
+  "Exit.InvalidArguments": "argumentos inválidos",
+  "Exit.EbootNotFound": "eboot não encontrado",
+  "Exit.RuntimeException": "exceção em tempo de execução",
+  "Exit.EmulationError": "erro de emulação",
+  "Exit.Unknown": "desconhecido",
+
+  "Status.EmulatorLocating": "Emulador: a localizar…",
+  "Status.EmulatorPath": "Emulador: {0}",
+  "Status.EmulatorNotFound": "Emulador: executável do SharpEmu não encontrado — compile primeiro o SharpEmu.CLI.",
+  "Status.ScanningLibrary": "A analisar biblioteca…",
+  "Status.AddFolderPrompt": "Adicione uma pasta de jogos para preencher a biblioteca.",
+  "Status.LibraryScanned": "Biblioteca analisada: {0} jogo(s) em {1} pasta(s).",
+  "Status.CouldNotOpenFolder": "Não foi possível abrir a pasta: {0}",
+  "Status.CopiedToClipboard": "{0} copiado para a área de transferência.",
+  "Status.RemovedFromLibrary": "“{0}” removido da biblioteca. Adicione novamente a pasta para o restaurar.",
+  "Status.Running": "A executar {0}",
+  "Status.Stopping": "A parar…",
+  "Status.Idle": "Inativo",
+
+  "Clipboard.Path": "Caminho",
+  "Clipboard.TitleId": "ID do título",
+
+  "Discord.Playing": "A jogar {0}",
+  "Discord.Browsing": "A navegar na biblioteca",
+
+  "Dialog.ChooseGameFolder": "Escolha uma pasta com jogos",
+  "Dialog.OpenExecutable": "Abrir um executável para iniciar",
+  "Dialog.PsExecutables": "Executáveis PS",
+  "Dialog.SaveLogFile": "Selecione onde guardar o ficheiro de registo",
+  "Dialog.PlainTextFiles": "Ficheiros de Texto Simples",
+  "Dialog.LogFiles": "Ficheiros de Registo",
+
+  "Options.About" : "Sobre",
+  "About.Github.Label": "GitHub",
+  "About.Github.Desc": "Código-fonte, problemas e desenvolvimento do projeto.",
+  "About.Discord.Label": "Discord",
+  "About.Discord.Desc": "Junte-se à comunidade, obtenha suporte e acompanhe o desenvolvimento.",
+  "About.GithubButton": "Contribua no GitHub!",
+  "About.DiscordButton": "Junte-se ao nosso Discord!"
+}
