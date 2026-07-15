@@ -3984,7 +3984,8 @@ internal static unsafe class VulkanVideoPresenter
             var vkFormat = GetTextureFormat(texture.Format, texture.NumberType);
 
             var expectedSize = GetTextureByteCount(texture.Format, rowLength, height);
-            if (_tracedTextureUploads.Add((texture.Address, width, height, vkFormat)))
+            if (ShouldTraceVulkanResources() &&
+                _tracedTextureUploads.Add((texture.Address, width, height, vkFormat)))
             {
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] vk.texture addr=0x{texture.Address:X16} " +
