@@ -6829,9 +6829,17 @@ internal static unsafe class VulkanVideoPresenter
 
         private static SurfaceFormatKHR ChooseSurfaceFormat(IReadOnlyList<SurfaceFormatKHR> formats)
         {
+            // Guest scanout buffers already hold display-ready, sRGB-encoded bytes,
+            // and they are presented with a plain transfer blit from an UNORM guest
+            // image. Blitting those bytes into an _sRGB_ swapchain would re-apply the
+            // sRGB encoding curve on write (UNORM source read as linear -> sRGB store),
+            // double-gamma the frame and wash the colors out. Prefer an UNORM swapchain
+            // with the sRGB-nonlinear colorspace so the blit is a 1:1 byte copy and the
+            // display applies the single, correct sRGB decode.
             foreach (var format in formats)
             {
-                if (format.Format == Format.B8G8R8A8Srgb &&
+                if ((format.Format == Format.B8G8R8A8Unorm ||
+                     format.Format == Format.R8G8B8A8Unorm) &&
                     format.ColorSpace == ColorSpaceKHR.SpaceSrgbNonlinearKhr)
                 {
                     return format;
@@ -6840,7 +6848,7 @@ internal static unsafe class VulkanVideoPresenter
 
             foreach (var format in formats)
             {
-                if (format.Format == Format.B8G8R8A8Unorm &&
+                if (format.Format == Format.B8G8R8A8Srgb &&
                     format.ColorSpace == ColorSpaceKHR.SpaceSrgbNonlinearKhr)
                 {
                     return format;
