@@ -1970,23 +1970,36 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		List<byte> list = new List<byte>(Math.Min(maxLength, 256));
-		Span<byte> destination = stackalloc byte[1];
-		for (int i = 0; i < maxLength; i++)
+		// Reads stay byte-by-byte through TryReadByteCompat (its Marshal.ReadByte
+		// fallback must probe exactly up to the terminator), but the bytes land in a
+		// stack buffer instead of a List<byte> + ToArray per symbol resolution.
+		const int StackBufferLength = 512;
+		byte[]? rented = maxLength > StackBufferLength ? System.Buffers.ArrayPool<byte>.Shared.Rent(maxLength) : null;
+		Span<byte> buffer = rented is null ? stackalloc byte[StackBufferLength] : rented;
+		try
 		{
-			if (!TryReadByteCompat(address + (ulong)i, destination))
+			for (int i = 0; i < maxLength; i++)
 			{
-				return false;
+				if (!TryReadByteCompat(address + (ulong)i, buffer.Slice(i, 1)))
+				{
+					return false;
+				}
+				if (buffer[i] == 0)
+				{
+					value = System.Text.Encoding.ASCII.GetString(buffer[..i]);
+					return true;
+				}
 			}
-			if (destination[0] == 0)
-			{
-				value = System.Text.Encoding.ASCII.GetString(list.ToArray());
-				return true;
-			}
-			list.Add(destination[0]);
+			value = System.Text.Encoding.ASCII.GetString(buffer[..maxLength]);
+			return true;
 		}
-		value = System.Text.Encoding.ASCII.GetString(list.ToArray());
-		return true;
+		finally
+		{
+			if (rented is not null)
+			{
+				System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+			}
+		}
 	}
 
 	private bool TryReadByteCompat(ulong address, Span<byte> destination)

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Text;
 
@@ -238,23 +239,63 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
             return false;
         }
 
-        var bytes = new byte[capacity];
-        for (var index = 0; index < bytes.Length; index++)
+        const int StackBufferLength = 512;
+        const int ReadChunkLength = 128;
+        var rented = capacity > StackBufferLength ? ArrayPool<byte>.Shared.Rent(capacity) : null;
+        Span<byte> bytes = rented is null ? stackalloc byte[StackBufferLength] : rented;
+        try
         {
-            if (!Memory.TryRead(address + (ulong)index, bytes.AsSpan(index, 1)))
+            var length = 0;
+            while (length < capacity)
             {
-                return false;
+                // Bulk-read in bounded chunks rather than the full capacity: the string
+                // may end just before unmapped memory, and overreading past the
+                // terminator by more than a chunk could fault where the old
+                // byte-by-byte loop succeeded.
+                var chunk = Math.Min(ReadChunkLength, capacity - length);
+                var span = bytes.Slice(length, chunk);
+                if (Memory.TryRead(address + (ulong)length, span))
+                {
+                    var terminator = span.IndexOf((byte)0);
+                    if (terminator >= 0)
+                    {
+                        value = Encoding.UTF8.GetString(bytes[..(length + terminator)]);
+                        return true;
+                    }
+
+                    length += chunk;
+                    continue;
+                }
+
+                // The chunk touches an unreadable range; fall back to per-byte reads so a
+                // terminator sitting before the bad byte still yields the string.
+                for (var i = 0; i < chunk; i++)
+                {
+                    if (!Memory.TryRead(address + (ulong)(length + i), bytes.Slice(length + i, 1)))
+                    {
+                        return false;
+                    }
+
+                    if (bytes[length + i] == 0)
+                    {
+                        value = Encoding.UTF8.GetString(bytes[..(length + i)]);
+                        return true;
+                    }
+                }
+
+                length += chunk;
             }
 
-            if (bytes[index] == 0)
+            value = Encoding.UTF8.GetString(bytes[..capacity]);
+            return true;
+        }
+        finally
+        {
+            if (rented is not null)
             {
-                value = Encoding.UTF8.GetString(bytes, 0, index);
-                return true;
+                ArrayPool<byte>.Shared.Return(rented);
             }
         }
-
-        value = Encoding.UTF8.GetString(bytes);
-        return true;
     }
 
     public bool PushUInt64(ulong value)
