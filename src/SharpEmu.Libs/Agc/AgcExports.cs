@@ -3693,7 +3693,7 @@ public static class AgcExports
             attributeCount,
             vertexCount,
             state.InstanceCount,
-            indexed ? CreateVulkanIndexBuffer(ctx, state, vertexCount) : null,
+            indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
             vertexInputs,
@@ -3758,7 +3758,7 @@ public static class AgcExports
             ColorFunc: 0,
         };
 
-    private static GuestIndexBuffer? CreateVulkanIndexBuffer(
+    private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
         SubmittedDcbState state,
         uint indexCount)

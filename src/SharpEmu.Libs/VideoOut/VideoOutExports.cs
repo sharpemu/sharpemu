@@ -1574,7 +1574,7 @@ public static class VideoOutExports
             : 0u;
 
     // Maps the PS5 VideoOut pixel format space to the AGC "guest texture format" tags
-    // GuestGpu.Current._availableGuestImages keys on (see GuestGpu.Current.
+    // the backend keys its guest-image registry on (see VulkanVideoPresenter.
     // GetGuestTextureFormat: format=10 => 56 for 8-bit RGBA variants, format=9 => 9 for 10-bit).
     private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat) =>
         NormalizePixelFormat(pixelFormat) switch
