@@ -13,7 +13,6 @@ public static class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
     public const short KernelEventFilterGraphics = -14;
-    public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -16;
     public const short KernelEventFilterAmprSystem = -17;
 
@@ -164,16 +163,8 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelAddUserEventEdge(CpuContext ctx)
     {
-        var handle = ctx[CpuRegister.Rdi];
-        var registered = RegisterEvent(
-            handle,
-            ctx[CpuRegister.Rsi],
-            KernelEventFilterUser,
-            0);
-        TraceEventQueue(ctx, "add_user_edge", handle);
-        return registered
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        TraceEventQueue(ctx, "add_user_edge", ctx[CpuRegister.Rdi]);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -183,16 +174,8 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelAddUserEvent(CpuContext ctx)
     {
-        var handle = ctx[CpuRegister.Rdi];
-        var registered = RegisterEvent(
-            handle,
-            ctx[CpuRegister.Rsi],
-            KernelEventFilterUser,
-            0);
-        TraceEventQueue(ctx, "add_user", handle);
-        return registered
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        TraceEventQueue(ctx, "add_user", ctx[CpuRegister.Rdi]);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -202,15 +185,8 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelDeleteUserEvent(CpuContext ctx)
     {
-        var handle = ctx[CpuRegister.Rdi];
-        var deleted = DeleteRegisteredEvent(
-            handle,
-            ctx[CpuRegister.Rsi],
-            KernelEventFilterUser);
-        TraceEventQueue(ctx, "delete_user", handle);
-        return deleted
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        TraceEventQueue(ctx, "delete_user", ctx[CpuRegister.Rdi]);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -220,18 +196,8 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelTriggerUserEvent(CpuContext ctx)
     {
-        var handle = ctx[CpuRegister.Rdi];
-        var triggered = TriggerRegisteredEvent(
-            handle,
-            ctx[CpuRegister.Rsi],
-            KernelEventFilterUser,
-            flags: 0x21,
-            fflags: 0,
-            data: ctx[CpuRegister.Rdx]);
-        TraceEventQueue(ctx, "trigger_user", handle);
-        return triggered
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        TraceEventQueue(ctx, "trigger_user", ctx[CpuRegister.Rdi]);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -395,13 +361,13 @@ public static class KernelEventQueueCompatExports
         }
 
         uint timeoutUsec = 0;
-        if (timeoutAddress != 0 && !ctx.TryReadUInt32(timeoutAddress, out timeoutUsec))
+        if (timeoutAddress != 0 && !TryReadUInt32(ctx, timeoutAddress, out timeoutUsec))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         var deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-        if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
+        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -450,7 +416,7 @@ public static class KernelEventQueueCompatExports
             }
 
             deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-            if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
+            if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -589,41 +555,58 @@ public static class KernelEventQueueCompatExports
         return triggeredCount;
     }
 
-    private static bool TriggerRegisteredEvent(
-        ulong handle,
-        ulong ident,
-        short filter,
-        ushort flags,
-        uint fflags,
-        ulong data)
+    /// <summary>
+    /// Queues one event for every registration using <paramref name="filter"/>.
+    /// Unlike <see cref="TriggerRegisteredEvents"/>, this preserves distinct
+    /// event identifiers registered on the same queue. AGC driver completion
+    /// queues use this form because the driver, rather than a packet-provided
+    /// identifier, announces that the whole submission reached end-of-pipe.
+    /// </summary>
+    public static int TriggerRegisteredEventsDistinct(short filter)
     {
+        HashSet<ulong>? wakeHandles = null;
+        var triggeredCount = 0;
         lock (_eventQueueGate)
         {
-            if (!_registeredEvents.TryGetValue(handle, out var registrations) ||
-                !registrations.TryGetValue((ident, filter), out var registration))
+            foreach (var (handle, registrations) in _registeredEvents)
             {
-                return false;
-            }
+                foreach (var registration in registrations.Values)
+                {
+                    if (registration.Filter != filter)
+                    {
+                        continue;
+                    }
 
-            if (!_pendingEvents.TryGetValue(handle, out var queue))
-            {
-                queue = new KernelEventDeque();
-                _pendingEvents[handle] = queue;
-            }
+                    if (!_pendingEvents.TryGetValue(handle, out var queue))
+                    {
+                        queue = new KernelEventDeque();
+                        _pendingEvents[handle] = queue;
+                    }
 
-            QueueOrUpdateEvent(
-                queue,
-                new KernelQueuedEvent(
-                    registration.Ident,
-                    registration.Filter,
-                    flags,
-                    fflags,
-                    data,
-                    registration.UserData));
+                    QueueOrUpdateEvent(
+                        queue,
+                        new KernelQueuedEvent(
+                            registration.Ident,
+                            registration.Filter,
+                            0,
+                            1,
+                            registration.Ident,
+                            registration.UserData));
+                    (wakeHandles ??= []).Add(handle);
+                    triggeredCount++;
+                }
+            }
         }
 
-        WakeEventQueue(handle);
-        return true;
+        if (wakeHandles is not null)
+        {
+            foreach (var handle in wakeHandles)
+            {
+                WakeEventQueue(handle);
+            }
+        }
+
+        return triggeredCount;
     }
 
     public static bool TriggerDisplayEvent(
@@ -692,7 +675,7 @@ public static class KernelEventQueueCompatExports
         ulong outCountAddress)
     {
         var deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-        if (outCountAddress != 0 && !ctx.TryWriteUInt32(outCountAddress, (uint)deliveredCount))
+        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -805,8 +788,29 @@ public static class KernelEventQueueCompatExports
             return;
         }
 
-        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out ulong returnRip);
+        var returnRip = 0UL;
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out returnRip);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] equeue.{operation}: thread=0x{KernelPthreadState.GetCurrentThreadHandle():X16} handle=0x{handle:X16} rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} ret=0x{returnRip:X16}");
+            $"[LOADER][TRACE] equeue.{operation}: handle=0x{handle:X16} rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} ret=0x{returnRip:X16}");
+    }
+
+    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
+        return ctx.Memory.TryWrite(address, buffer);
+    }
+
+    private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        if (!ctx.Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+        return true;
     }
 }

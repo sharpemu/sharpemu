@@ -50,6 +50,7 @@ public static class AudioOutExports
         public int BytesPerSample { get; }
         public bool IsFloat { get; }
         public IHostAudioStream? Backend { get; }
+        public volatile float Volume = 1.0f;
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
 
@@ -198,7 +199,8 @@ public static class AudioOutExports
                     checked((int)port.BufferLength),
                     port.Channels,
                     port.BytesPerSample,
-                    port.IsFloat);
+                    port.IsFloat,
+                    port.Volume);
                 if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
                 {
                     port.PaceSilence();
@@ -225,10 +227,43 @@ public static class AudioOutExports
     public static int AudioOutSetVolume(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return ctx.SetReturn(
-            Ports.ContainsKey(handle)
-                ? 0
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        var channelFlags = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var volumeArrayAddress = ctx[CpuRegister.Rdx];
+        if (!Ports.TryGetValue(handle, out var port))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        const int unityVolume = 32768;
+        var maxVolume = 0;
+        var found = false;
+        if (volumeArrayAddress != 0)
+        {
+            Span<byte> raw = stackalloc byte[sizeof(int)];
+            for (var channel = 0; channel < 8; channel++)
+            {
+                if ((channelFlags & (1u << channel)) == 0)
+                {
+                    continue;
+                }
+
+                if (!ctx.Memory.TryRead(volumeArrayAddress + (ulong)(channel * sizeof(int)), raw))
+                {
+                    return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                var value = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(raw);
+                maxVolume = Math.Max(maxVolume, value);
+                found = true;
+            }
+        }
+
+        if (found)
+        {
+            port.Volume = Math.Clamp(maxVolume / (float)unityVolume, 0f, 1f);
+        }
+
+        return ctx.SetReturn(0);
     }
 
     public static void ShutdownAllPorts()

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
+using System.Threading;
 using System.Diagnostics.CodeAnalysis;
 
 namespace SharpEmu.Libs.Kernel;
@@ -15,6 +17,8 @@ public static class KernelPthreadExtendedCompatExports
     private const int DefaultDetachState = 0;
     private const ulong DefaultGuardSize = 0x1000UL;
     private const ulong DefaultStackSize = 0x1_00000UL;
+    private const ulong NativeGuestStackSize = 0x20_0000UL;
+    private const ulong NativeGuestStackStride = 0x100_0000UL;
     private const int DefaultInheritSched = 4;
     private const int DefaultSchedPolicy = 1;
     private const int DefaultSchedPriority = DefaultThreadPriority;
@@ -224,6 +228,13 @@ public static class KernelPthreadExtendedCompatExports
     }
 
     [SysAbiExport(
+        Nid = "+U1R4WtXvoc",
+        ExportName = "pthread_detach",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadDetach(CpuContext ctx) => PthreadDetach(ctx);
+
+    [SysAbiExport(
         Nid = "How7B8Oet6k",
         ExportName = "scePthreadGetname",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -273,6 +284,7 @@ public static class KernelPthreadExtendedCompatExports
             state.Attributes = state.Attributes with { AffinityMask = mask };
         }
 
+        _ = GuestThreadExecution.Scheduler?.TrySetGuestThreadAffinity(thread, mask);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -326,7 +338,7 @@ public static class KernelPthreadExtendedCompatExports
             priority = GetOrCreateThreadStateLocked(thread).Priority;
         }
 
-        if (!ctx.TryWriteInt32(outPriorityAddress, priority))
+        if (!TryWriteInt32(ctx, outPriorityAddress, priority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -354,6 +366,9 @@ public static class KernelPthreadExtendedCompatExports
             GetOrCreateThreadStateLocked(thread).Priority = priority;
         }
 
+        // Apply to the live scheduler thread so runtime priority changes take
+        // effect, not just the local bookkeeping snapshot.
+        _ = GuestThreadExecution.Scheduler?.TrySetGuestThreadPriority(thread, priority);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -373,7 +388,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!ctx.TryReadInt32(schedParamAddress, out var schedPriority))
+        if (!TryReadInt32(ctx, schedParamAddress, out var schedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -408,9 +423,9 @@ public static class KernelPthreadExtendedCompatExports
     public static int PthreadGetschedparam(CpuContext ctx)
     {
         var thread = ctx[CpuRegister.Rdi];
-        var outPolicyAddress = ctx[CpuRegister.Rsi];
-        var outSchedParamAddress = ctx[CpuRegister.Rdx];
-        if (thread == 0 || outPolicyAddress == 0 || outSchedParamAddress == 0)
+        var policyAddress = ctx[CpuRegister.Rsi];
+        var schedParamAddress = ctx[CpuRegister.Rdx];
+        if (thread == 0 || policyAddress == 0 || schedParamAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
@@ -424,8 +439,8 @@ public static class KernelPthreadExtendedCompatExports
             priority = state.Priority;
         }
 
-        if (!ctx.TryWriteInt32(outPolicyAddress, policy) ||
-            !ctx.TryWriteInt32(outSchedParamAddress, priority))
+        if (!TryWriteInt32(ctx, policyAddress, policy) ||
+            !TryWriteInt32(ctx, schedParamAddress, priority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -528,12 +543,50 @@ public static class KernelPthreadExtendedCompatExports
         lock (_stateGate)
         {
             var threadState = GetOrCreateThreadStateLocked(thread);
+
+			// The native executor maps guest pthread stacks itself, after the
+			// kernel-facing thread object has been created.  Report that live
+			// mapping when a thread asks for its own attributes.  IL2CPP's
+			// conservative collector uses these two fields to register the stack;
+			// returning the default null address lets it recycle objects that are
+			// still reachable only from guest registers/stack frames.
+			if (thread == KernelPthreadState.GetCurrentThreadHandle() &&
+				TryInferNativeGuestStack(ctx[CpuRegister.Rsp], out var stackAddress))
+			{
+				threadState.Attributes = threadState.Attributes with
+				{
+					StackAddress = stackAddress,
+					StackSize = NativeGuestStackSize,
+				};
+			}
             _attrStates[outAttrAddress] = threadState.Attributes;
         }
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+	private static bool TryInferNativeGuestStack(ulong stackPointer, out ulong stackAddress)
+	{
+		stackAddress = 0;
+		var candidate = stackPointer & ~(NativeGuestStackStride - 1);
+		if (stackPointer - candidate >= NativeGuestStackSize)
+		{
+			return false;
+		}
+
+		var highestStack = OperatingSystem.IsWindows()
+			? 0x00007FFF_F000_0000UL
+			: 0x00006FFF_F000_0000UL;
+		var lowestStack = highestStack - (63 * NativeGuestStackStride);
+		if (candidate < lowestStack || candidate > highestStack)
+		{
+			return false;
+		}
+
+		stackAddress = candidate;
+		return true;
+	}
 
     [SysAbiExport(
         Nid = "8+s5BzZjxSg",
@@ -584,7 +637,7 @@ public static class KernelPthreadExtendedCompatExports
             state = GetOrCreateAttrStateLocked(attrAddress);
         }
 
-        if (!ctx.TryWriteInt32(outStateAddress, state.DetachState))
+        if (!TryWriteInt32(ctx, outStateAddress, state.DetachState))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -827,7 +880,7 @@ public static class KernelPthreadExtendedCompatExports
             state = GetOrCreateAttrStateLocked(attrAddress);
         }
 
-        if (!ctx.TryWriteInt32(schedParamAddress, state.SchedPriority))
+        if (!TryWriteInt32(ctx, schedParamAddress, state.SchedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -850,7 +903,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!ctx.TryReadInt32(schedParamAddress, out var schedPriority))
+        if (!TryReadInt32(ctx, schedParamAddress, out var schedPriority))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1207,7 +1260,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        if (!ctx.TryWriteInt32(outKeyAddress, key))
+        if (!TryWriteInt32(ctx, outKeyAddress, key))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1314,6 +1367,72 @@ public static class KernelPthreadExtendedCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int OrbisPthreadGetspecific(CpuContext ctx) => PosixPthreadGetspecific(ctx);
+
+    private const int PthreadDestructorIterations = 4;
+
+    /// <summary>
+    /// Runs the current thread's pthread TLS-key destructors, as POSIX
+    /// requires on thread exit. Each key holding a non-null value with a
+    /// registered destructor has its value cleared first and the destructor
+    /// then invoked with the previous value; this repeats up to
+    /// PTHREAD_DESTRUCTOR_ITERATIONS times so destructors that set new
+    /// thread-local values are themselves cleaned up. Called on the exiting
+    /// guest thread while it is still executable.
+    /// </summary>
+    public static void RunThreadLocalDestructors(CpuContext ctx)
+    {
+        var scheduler = GuestThreadExecution.Scheduler;
+        if (scheduler is null)
+        {
+            return;
+        }
+
+        var threadHandle = KernelPthreadState.GetCurrentThreadHandle();
+        if (!_threadLocalSpecific.TryGetValue(threadHandle, out var values))
+        {
+            return;
+        }
+
+        for (var iteration = 0; iteration < PthreadDestructorIterations; iteration++)
+        {
+            var ranAny = false;
+            foreach (var entry in values)
+            {
+                var value = entry.Value;
+                if (value == 0 ||
+                    !_tlsKeys.TryGetValue(entry.Key, out var keyState) ||
+                    keyState.Destructor == 0)
+                {
+                    continue;
+                }
+
+                // Clear before invoking, per POSIX, so a destructor that
+                // re-sets the key is handled on the next iteration.
+                if (!values.TryUpdate(entry.Key, 0, value))
+                {
+                    continue;
+                }
+
+                ranAny = true;
+                _ = scheduler.TryCallGuestFunction(
+                    ctx,
+                    keyState.Destructor,
+                    value,
+                    0,
+                    0,
+                    0,
+                    "pthread_tls_destructor",
+                    out _);
+            }
+
+            if (!ranAny)
+            {
+                break;
+            }
+        }
+
+        _threadLocalSpecific.TryRemove(threadHandle, out _);
+    }
 
     private static int PthreadRwlockLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
     {
@@ -1679,5 +1798,25 @@ public static class KernelPthreadExtendedCompatExports
         utf8.AsSpan(0, payloadLength).CopyTo(payload);
         payload[^1] = 0;
         return ctx.Memory.TryWrite(address, payload);
+    }
+
+    private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        if (!ctx.Memory.TryRead(address, bytes))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
+        return true;
+    }
+
+    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+        return ctx.Memory.TryWrite(address, bytes);
     }
 }

@@ -21,7 +21,8 @@ internal static class AudioPcmConversion
         int frames,
         int channels,
         int bytesPerSample,
-        bool isFloat)
+        bool isFloat,
+        float volume)
     {
         var sourceFrameSize = checked(channels * bytesPerSample);
         for (var frame = 0; frame < frames; frame++)
@@ -31,6 +32,8 @@ internal static class AudioPcmConversion
             var right = channels == 1
                 ? left
                 : ReadSample(sourceFrame, 1, bytesPerSample, isFloat);
+            left = ApplyVolume(left, volume);
+            right = ApplyVolume(right, volume);
             BinaryPrimitives.WriteInt16LittleEndian(destination[(frame * OutputFrameSize)..], left);
             BinaryPrimitives.WriteInt16LittleEndian(destination[((frame * OutputFrameSize) + 2)..], right);
         }
@@ -51,5 +54,11 @@ internal static class AudioPcmConversion
         var bits = BinaryPrimitives.ReadInt32LittleEndian(sample);
         var value = Math.Clamp(BitConverter.Int32BitsToSingle(bits), -1.0f, 1.0f);
         return checked((short)MathF.Round(value * short.MaxValue));
+    }
+
+    private static short ApplyVolume(short sample, float volume)
+    {
+        var scaled = MathF.Round(sample * Math.Clamp(volume, 0.0f, 1.0f));
+        return (short)Math.Clamp(scaled, short.MinValue, short.MaxValue);
     }
 }
