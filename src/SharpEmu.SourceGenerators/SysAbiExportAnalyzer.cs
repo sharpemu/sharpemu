@@ -17,7 +17,6 @@ namespace SharpEmu.SourceGenerators;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
 {
-    private const string AttributeFullName = SysAbiExportShape.SysAbiExportAttributeName;
     private const string CatalogFileName = "ps5_names.txt";
 
     // The catalog is ~150k lines; parse it once per file snapshot instead of on every
@@ -106,7 +105,7 @@ public sealed class SysAbiExportAnalyzer : DiagnosticAnalyzer
         AttributeData? exportAttribute = null;
         foreach (var attribute in method.GetAttributes())
         {
-            if (attribute.AttributeClass?.ToDisplayString() == AttributeFullName)
+            if (SysAbiExportShape.IsSysAbiExportAttribute(attribute.AttributeClass))
             {
                 exportAttribute = attribute;
                 break;

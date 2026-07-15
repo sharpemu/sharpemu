@@ -43,7 +43,12 @@ public sealed class GenerateAerolibBinaryTask : ITask
                 }
             }
 
-            Directory.CreateDirectory(Path.GetDirectoryName(OutputFile)!);
+            var outputDirectory = Path.GetDirectoryName(OutputFile);
+            if (!string.IsNullOrEmpty(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+
             using (var sha1 = System.Security.Cryptography.SHA1.Create())
             using (var stream = File.Create(OutputFile))
             using (var writer = new BinaryWriter(stream))
@@ -53,6 +58,13 @@ public sealed class GenerateAerolibBinaryTask : ITask
                 {
                     var nidBytes = Encoding.UTF8.GetBytes(Ps5Nid.Compute(name, sha1));
                     var nameBytes = Encoding.UTF8.GetBytes(name);
+                    if (nameBytes.Length > ushort.MaxValue)
+                    {
+                        // A silent (ushort) truncation would corrupt the catalog.
+                        throw new InvalidDataException(
+                            $"Symbol name exceeds the format's ushort length prefix ({nameBytes.Length} bytes): '{name.Substring(0, 64)}...'");
+                    }
+
                     writer.Write((byte)nidBytes.Length);
                     writer.Write(nidBytes);
                     writer.Write((ushort)nameBytes.Length);

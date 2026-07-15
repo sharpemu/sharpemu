@@ -77,8 +77,7 @@ public static class SysAbiExportShape
             return HandlerShape.Parameterless;
         }
 
-        if (method.Parameters[0].RefKind != RefKind.None ||
-            method.Parameters[0].Type.ToDisplayString() != "SharpEmu.HLE.CpuContext")
+        if (method.Parameters[0].RefKind != RefKind.None || !IsCpuContext(method.Parameters[0].Type))
         {
             return HandlerShape.Invalid;
         }
@@ -146,12 +145,20 @@ public static class SysAbiExportShape
         return HandlerShape.Typed;
     }
 
+    // Symbol names are compared with an explicit fully-qualified format so
+    // classification can never depend on a display-format default.
+    private static bool IsCpuContext(ITypeSymbol type) =>
+        type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == "global::SharpEmu.HLE.CpuContext";
+
+    public static bool IsSysAbiExportAttribute(INamedTypeSymbol? attributeClass) =>
+        attributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == "global::" + SysAbiExportAttributeName;
+
     private static bool TryGetGuestCStringMaxLength(IParameterSymbol parameter, out int maxLength)
     {
         maxLength = 0;
         foreach (var attribute in parameter.GetAttributes())
         {
-            if (attribute.AttributeClass?.ToDisplayString() != GuestCStringAttributeName)
+            if (attribute.AttributeClass?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) != "global::" + GuestCStringAttributeName)
             {
                 continue;
             }
