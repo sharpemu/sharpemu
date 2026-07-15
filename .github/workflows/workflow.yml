@@ -118,7 +118,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path $env:RELEASE_DIR -Force | Out-Null
 
-          $archiveName = "sharpemu-${{ needs.init.outputs.version }}-win-x64-${{ needs.init.outputs.short-sha }}.zip"
+          $archiveName = "sharpemu-${{ needs.init.outputs.version }}-win-x64.zip"
           $archivePath = Join-Path $env:RELEASE_DIR $archiveName
           if (Test-Path $archivePath) {
             Remove-Item $archivePath -Force
@@ -130,7 +130,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sharpemu-win-x64-${{ needs.init.outputs.short-sha }}
-          path: ${{ env.RELEASE_DIR }}\sharpemu-${{ needs.init.outputs.version }}-win-x64-${{ needs.init.outputs.short-sha }}.zip
+          path: ${{ env.RELEASE_DIR }}\sharpemu-${{ needs.init.outputs.version }}-win-x64.zip
           if-no-files-found: error
 
   build-posix:
@@ -187,14 +187,14 @@ jobs:
         run: |
           mkdir -p "$RELEASE_DIR"
           # tar keeps the executable bit, which zip would drop.
-          tar -czf "$RELEASE_DIR/sharpemu-${{ needs.init.outputs.version }}-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}.tar.gz" \
+          tar -czf "$RELEASE_DIR/sharpemu-${{ needs.init.outputs.version }}-${{ matrix.rid }}.tar.gz" \
             -C "$PUBLISH_DIR" .
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: sharpemu-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
-          path: ${{ env.RELEASE_DIR }}/sharpemu-${{ needs.init.outputs.version }}-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}.tar.gz
+          path: ${{ env.RELEASE_DIR }}/sharpemu-${{ needs.init.outputs.version }}-${{ matrix.rid }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -239,3 +239,18 @@ jobs:
               --notes "${notes}" \
               --target "${GITHUB_SHA}"
           fi
+
+          keep=()
+          for asset_path in "${assets[@]}"; do
+            keep+=("$(basename "${asset_path}")")
+          done
+          mapfile -t release_assets < <(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort)
+          for asset in "${release_assets[@]}"; do
+            case "${asset}" in
+              sharpemu-${VERSION}-*.zip|sharpemu-${VERSION}-*.tar.gz)
+                if ! printf '%s\n' "${keep[@]}" | grep -Fxq "${asset}"; then
+                  gh release delete-asset "${RELEASE_TAG}" "${asset}" --yes
+                fi
+                ;;
+            esac
+          done
