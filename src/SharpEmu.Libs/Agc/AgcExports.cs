@@ -3124,8 +3124,7 @@ public static partial class AgcExports
                     state,
                     () =>
                     {
-                        var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                            eventType,
+                        var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
                             KernelEventQueueCompatExports.KernelEventFilterGraphics,
                             eventType);
                         if (tracePackets)

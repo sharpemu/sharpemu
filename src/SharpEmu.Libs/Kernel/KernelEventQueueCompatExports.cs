@@ -13,6 +13,7 @@ public static class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
     public const short KernelEventFilterGraphics = -14;
+    public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -16;
     public const short KernelEventFilterAmprSystem = -17;
 
@@ -163,8 +164,16 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelAddUserEventEdge(CpuContext ctx)
     {
-        TraceEventQueue(ctx, "add_user_edge", ctx[CpuRegister.Rdi]);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var handle = ctx[CpuRegister.Rdi];
+        var registered = RegisterEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterUser,
+            0);
+        TraceEventQueue(ctx, "add_user_edge", handle);
+        return registered
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -174,8 +183,16 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelAddUserEvent(CpuContext ctx)
     {
-        TraceEventQueue(ctx, "add_user", ctx[CpuRegister.Rdi]);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var handle = ctx[CpuRegister.Rdi];
+        var registered = RegisterEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterUser,
+            0);
+        TraceEventQueue(ctx, "add_user", handle);
+        return registered
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -185,8 +202,15 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelDeleteUserEvent(CpuContext ctx)
     {
-        TraceEventQueue(ctx, "delete_user", ctx[CpuRegister.Rdi]);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var handle = ctx[CpuRegister.Rdi];
+        var deleted = DeleteRegisteredEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterUser);
+        TraceEventQueue(ctx, "delete_user", handle);
+        return deleted
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -196,8 +220,18 @@ public static class KernelEventQueueCompatExports
         LibraryName = "libKernel")]
     public static int KernelTriggerUserEvent(CpuContext ctx)
     {
-        TraceEventQueue(ctx, "trigger_user", ctx[CpuRegister.Rdi]);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var handle = ctx[CpuRegister.Rdi];
+        var triggered = TriggerRegisteredEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterUser,
+            flags: 0x21,
+            fflags: 0,
+            data: ctx[CpuRegister.Rdx]);
+        TraceEventQueue(ctx, "trigger_user", handle);
+        return triggered
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -556,6 +590,66 @@ public static class KernelEventQueueCompatExports
     }
 
     /// <summary>
+    /// Triggers every registered event on every queue that matches <paramref name="filter"/>
+    /// regardless of the registration's <c>ident</c>. This is a workaround for PS5 AGC command
+    /// buffers, where <c>IT_EVENT_WRITE</c> carries a hardware <c>EVENT_TYPE</c> that does not
+    /// match the <c>eventId</c> the guest registered with <c>sceAgcDriverAddEqEvent</c>.
+    /// See issue #173.
+    /// </summary>
+    public static int TriggerRegisteredEventsByFilter(
+        short filter,
+        ulong data)
+    {
+        List<ulong>? wakeHandles = null;
+        var triggeredCount = 0;
+        lock (_eventQueueGate)
+        {
+            foreach (var (handle, registrations) in _registeredEvents)
+            {
+                foreach (var registration in registrations.Values)
+                {
+                    if (registration.Filter != filter)
+                    {
+                        continue;
+                    }
+
+                    if (!_pendingEvents.TryGetValue(handle, out var queue))
+                    {
+                        queue = new KernelEventDeque();
+                        _pendingEvents[handle] = queue;
+                    }
+
+                    QueueOrUpdateEvent(
+                        queue,
+                        new KernelQueuedEvent(
+                            registration.Ident,
+                            registration.Filter,
+                            0,
+                            1,
+                            data,
+                            registration.UserData));
+                    (wakeHandles ??= new List<ulong>()).Add(handle);
+                    triggeredCount++;
+
+                    // A single queue only needs to be woken once, even if multiple
+                    // registrations matched.
+                    break;
+                }
+            }
+        }
+
+        if (wakeHandles is not null)
+        {
+            foreach (var handle in wakeHandles)
+            {
+                WakeEventQueue(handle);
+            }
+        }
+
+        return triggeredCount;
+    }
+
+    /// <summary>
     /// Queues one event for every registration using <paramref name="filter"/>.
     /// Unlike <see cref="TriggerRegisteredEvents"/>, this preserves distinct
     /// event identifiers registered on the same queue. AGC driver completion
@@ -607,6 +701,43 @@ public static class KernelEventQueueCompatExports
         }
 
         return triggeredCount;
+    }
+
+    private static bool TriggerRegisteredEvent(
+        ulong handle,
+        ulong ident,
+        short filter,
+        ushort flags,
+        uint fflags,
+        ulong data)
+    {
+        lock (_eventQueueGate)
+        {
+            if (!_registeredEvents.TryGetValue(handle, out var registrations) ||
+                !registrations.TryGetValue((ident, filter), out var registration))
+            {
+                return false;
+            }
+
+            if (!_pendingEvents.TryGetValue(handle, out var queue))
+            {
+                queue = new KernelEventDeque();
+                _pendingEvents[handle] = queue;
+            }
+
+            QueueOrUpdateEvent(
+                queue,
+                new KernelQueuedEvent(
+                    registration.Ident,
+                    registration.Filter,
+                    flags,
+                    fflags,
+                    data,
+                    registration.UserData));
+        }
+
+        WakeEventQueue(handle);
+        return true;
     }
 
     public static bool TriggerDisplayEvent(

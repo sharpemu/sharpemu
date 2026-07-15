@@ -60,34 +60,39 @@ public static partial class Gen5SpirvTranslator
                     }
                     else
                     {
-                    // SPIR-V's BroadcastFirst uses the first host-active
-                    // invocation. Guest EXEC is modeled as data, so obtain the
-                    // guest-active mask explicitly and broadcast from its first
-                    // set lane instead. This also updates the private SGPR copy
-                    // for lanes that are currently disabled and may be restored
-                    // by a later saveexec sequence.
-                    var activeLanes = _module.AddInstruction(
-                        SpirvOp.GroupNonUniformBallot,
-                        _uvec4Type,
-                        UInt(3),
-                        Load(_boolType, _exec));
-                    var activeLow = _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        _uintType,
-                        activeLanes,
-                        0);
-                    var firstActiveLane = Ext(73, _uintType, activeLow);
-                    value = _module.AddInstruction(
-                        SpirvOp.GroupNonUniformBroadcast,
-                        _uintType,
-                        UInt(3),
-                        value,
-                        firstActiveLane);
+                        // SPIR-V's BroadcastFirst uses the first host-active
+                        // invocation. Guest EXEC is modeled as data, so obtain the
+                        // guest-active mask explicitly and broadcast from its first
+                        // set lane instead. This also updates the private SGPR copy
+                        // for lanes that are currently disabled and may be restored
+                        // by a later saveexec sequence.
+                        var activeLanes = _module.AddInstruction(
+                            SpirvOp.GroupNonUniformBallot,
+                            _uvec4Type,
+                            UInt(3),
+                            Load(_boolType, _exec));
+                        var activeLow = _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            _uintType,
+                            activeLanes,
+                            0);
+                        var firstActiveLane = Ext(73, _uintType, activeLow);
+                        value = _module.AddInstruction(
+                            SpirvOp.GroupNonUniformBroadcast,
+                            _uintType,
+                            UInt(3),
+                            value,
+                            firstActiveLane);
                     }
                 }
 
                 StoreS(instruction.Destinations[0].Value, value);
                 return true;
+            }
+
+            if (instruction.Opcode == "VReadlaneB32")
+            {
+                return TryEmitReadlane(instruction, out error);
             }
 
             if (!TryGetVectorDestination(instruction, out var destination))
@@ -100,9 +105,35 @@ public static partial class Gen5SpirvTranslator
             switch (instruction.Opcode)
             {
                 case "VMovB32":
-                case "VReadlaneB32":
                     result = GetRawSource(instruction, 0);
                     break;
+                case "VWritelaneB32":
+                {
+                    // vdst[lane(src1)] = src0
+                    // Per-lane: if current lane == src1, write src0, else keep old value.
+                    var oldValue = LoadV(destination);
+                    var src0 = GetRawSource(instruction, 0);
+                    var laneSelect = GetRawSource(instruction, 1);
+                    var currentLane = _subgroupInvocationIdInput != 0
+                        ? BitwiseAnd(
+                            Load(_uintType, _subgroupInvocationIdInput),
+                            UInt(RdnaWaveLaneCount - 1))
+                        : UInt(0);
+                    var isTargetLane = _module.AddInstruction(
+                        SpirvOp.IEqual,
+                        _boolType,
+                        currentLane,
+                        laneSelect);
+                    result = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        isTargetLane,
+                        src0,
+                        oldValue);
+                    // Writelane writes to a specific lane regardless of exec mask.
+                    StoreV(destination, result, guardWithExec: false);
+                    return true;
+                }
                 case "VCndmaskB32":
                 {
                     var condition = instruction.Sources.Count > 2
@@ -3069,6 +3100,42 @@ public static partial class Gen5SpirvTranslator
             }
 
             StoreWaveMask(106, activeCarry);
+        }
+
+        private bool TryEmitReadlane(
+            Gen5ShaderInstruction instruction,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Destinations.Count == 0 ||
+                instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+            {
+                error = "VReadlaneB32 expects scalar destination";
+                return false;
+            }
+
+            var destination = instruction.Destinations[0].Value;
+            var src0 = GetRawSource(instruction, 0);
+
+            if (_subgroupInvocationIdInput != 0)
+            {
+                // sdst = vsrc0[lane(src1)] — broadcast from the specified lane.
+                var laneSelect = GetRawSource(instruction, 1);
+                var broadcast = _module.AddInstruction(
+                    SpirvOp.GroupNonUniformBroadcast,
+                    _uintType,
+                    UInt(3),  // Subgroup scope
+                    src0,
+                    laneSelect);
+                StoreS(destination, broadcast);
+            }
+            else
+            {
+                // Fallback: no subgroup ops, read current lane's value.
+                StoreS(destination, src0);
+            }
+
+            return true;
         }
 
         private uint EmitPermlane16(

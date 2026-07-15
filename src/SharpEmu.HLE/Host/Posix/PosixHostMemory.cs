@@ -271,6 +271,26 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
                     var exactFlags = OperatingSystem.IsMacOS() ? flags : flags | MAP_FIXED_NOREPLACE;
                     result = mmap((nint)address, (nuint)alignedSize, posixProtect, exactFlags, -1, 0);
+                    if (result != MAP_FAILED && (ulong)result != (ulong)address)
+                    {
+                        munmap(result, (nuint)alignedSize);
+                        result = MAP_FAILED;
+                    }
+
+                    if (result == MAP_FAILED && OperatingSystem.IsMacOS())
+                    {
+                        // The hint-only attempt above didn't land at the requested
+                        // address. This is routinely the case for the PS5's fixed
+                        // 32 GiB image base under Rosetta 2 on Apple Silicon, where
+                        // the kernel never honors that hint. Retry with true
+                        // MAP_FIXED: this can clobber an untracked host mapping
+                        // (dyld, the runtime's JIT heap, Rosetta) if one already
+                        // sits exactly there, but without it guest images that
+                        // require this base never load at all on macOS.
+                        Trace($"exact mmap hint failed, retrying with MAP_FIXED: addr=0x{(ulong)address:X16}");
+                        result = mmap((nint)address, (nuint)alignedSize, posixProtect, flags | MAP_FIXED, -1, 0);
+                    }
+
                     if (result == MAP_FAILED || (ulong)result != (ulong)address)
                     {
                         Trace($"exact mmap failed: addr=0x{(ulong)address:X16} got=0x{(ulong)result:X16} size=0x{alignedSize:X} errno={Marshal.GetLastPInvokeError()}");

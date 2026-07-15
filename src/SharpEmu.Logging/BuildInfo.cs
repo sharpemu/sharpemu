@@ -12,8 +12,8 @@ namespace SharpEmu.Logging;
 /// </summary>
 public static class BuildInfo
 {
-    private const string ProjectUrl = "https://github.com/par274/sharpemu";
-    private const string CanonicalRepository = "par274/sharpemu";
+    private const string ProjectUrl = "https://github.com/sharpemu/sharpemu";
+    private const string CanonicalRepository = "sharpemu/sharpemu";
 
     /// <summary>Short commit hash the build was produced from, or <c>null</c>.</summary>
     public static string? CommitSha { get; }
@@ -76,9 +76,9 @@ public static class BuildInfo
     /// <summary>
     /// The multi-line banner, e.g.
     /// <code>
-    /// SharpEmu UNOFFICIAL f11ac59 — https://github.com/par274/sharpemu
+    /// SharpEmu UNOFFICIAL f11ac59 — https://github.com/sharpemu/sharpemu
     ///
-    /// Built from branch "main" of "par274/sharpemu" by GitHub Actions workflow run https://github.com/par274/sharpemu/actions/runs/123.
+    /// Built from branch "main" of "sharpemu/sharpemu" by GitHub Actions workflow run https://github.com/sharpemu/sharpemu/actions/runs/123.
     /// </code>
     /// Official release builds drop the <c>UNOFFICIAL</c> tag. Falls back to a
     /// local-build line when no CI provenance is present.

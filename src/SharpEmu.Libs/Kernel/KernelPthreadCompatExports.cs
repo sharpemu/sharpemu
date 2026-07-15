@@ -60,23 +60,9 @@ public static class KernelPthreadCompatExports
     private sealed class PthreadCondState
     {
         public object SyncRoot { get; } = new();
-        public LinkedList<PthreadCondWaiter> Waiters { get; } = new();
-
-        // Unreal Engine can signal its worker condition before the worker has
-        // entered the emulated wait. Preserve such a signal as compatibility
-        // state so the worker does not fall into a timed-wait polling loop.
-        public int PendingSignals { get; set; }
-
-        public bool TryConsumePendingSignal()
-        {
-            if (PendingSignals <= 0)
-            {
-                return false;
-            }
-
-            PendingSignals--;
-            return true;
-        }
+        public LinkedList<PthreadCondWaiter> WaiterQueue { get; } = new();
+        public ulong SignalEpoch { get; set; }
+        public int Waiters { get; set; }
     }
 
     private sealed class PthreadCondWaiter
@@ -1200,7 +1186,7 @@ public static class KernelPthreadCompatExports
 
             lock (state.SyncRoot)
             {
-                if (state.Waiters.Count != 0)
+                if (state.WaiterQueue.Count != 0)
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                 }
@@ -1251,24 +1237,6 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        var consumedPendingSignal = false;
-        lock (state.SyncRoot)
-        {
-            consumedPendingSignal = state.TryConsumePendingSignal();
-        }
-
-        if (consumedPendingSignal)
-        {
-            TracePthreadCond("wait-wake-pending", condAddress, mutexAddress, state, timed, (int)OrbisGen2Result.ORBIS_GEN2_OK);
-            var unlockResult = PthreadMutexUnlockCore(ctx, mutexAddress, requireOwner: true);
-            if (unlockResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
-            {
-                return unlockResult;
-            }
-
-            return PthreadMutexLockCore(ctx, mutexAddress, tryOnly: false);
-        }
-
         var cooperative = GuestThreadExecution.IsGuestThread &&
             GuestThreadExecution.TryGetCurrentImportCallFrame(out _);
         var waiter = new PthreadCondWaiter
@@ -1284,7 +1252,8 @@ public static class KernelPthreadCompatExports
 
         lock (state.SyncRoot)
         {
-            waiter.Node = state.Waiters.AddLast(waiter);
+            waiter.Node = state.WaiterQueue.AddLast(waiter);
+            state.Waiters++;
             TracePthreadCond("wait-enter", condAddress, mutexAddress, state, timed, (int)OrbisGen2Result.ORBIS_GEN2_OK);
 
             var unlockResult = PthreadMutexUnlockCore(ctx, mutexAddress, requireOwner: true);
@@ -1374,7 +1343,8 @@ public static class KernelPthreadCompatExports
         List<PthreadCondWaiter>? completedWaiters = null;
         lock (state.SyncRoot)
         {
-            for (var node = state.Waiters.First; node is not null;)
+            state.SignalEpoch++;
+            for (var node = state.WaiterQueue.First; node is not null;)
             {
                 var next = node.Next;
                 var waiter = node.Value;
@@ -1388,11 +1358,6 @@ public static class KernelPthreadCompatExports
                 }
 
                 node = next;
-            }
-
-            if (completedWaiters is null || completedWaiters.Count == 0)
-            {
-                state.PendingSignals++;
             }
 
             TracePthreadCond(broadcast ? "broadcast" : "signal", condAddress, mutexAddress: 0, state, timed: false, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1456,9 +1421,10 @@ public static class KernelPthreadCompatExports
         };
         lock (cond.SyncRoot)
         {
-            condWaiter.Node = cond.Waiters.AddLast(condWaiter);
+            condWaiter.Node = cond.WaiterQueue.AddLast(condWaiter);
+            cond.Waiters++;
             Debug.Assert(CompleteCondWaiterLocked(cond, condWaiter, timedOut: false), "A condition waiter was not completed.");
-            Debug.Assert(cond.Waiters.Count == 0 && condWaiter.MutexWaiter is not null, "Condition completion did not atomically queue mutex reacquisition.");
+            Debug.Assert(cond.WaiterQueue.Count == 0 && cond.Waiters == 0 && condWaiter.MutexWaiter is not null, "Condition completion did not atomically queue mutex reacquisition.");
         }
     }
 
@@ -1589,8 +1555,9 @@ public static class KernelPthreadCompatExports
     {
         if (waiter.Node is not null)
         {
-            state.Waiters.Remove(waiter.Node);
+            state.WaiterQueue.Remove(waiter.Node);
             waiter.Node = null;
+            state.Waiters = Math.Max(0, state.Waiters - 1);
         }
     }
 
@@ -1823,7 +1790,7 @@ public static class KernelPthreadCompatExports
 
         Console.Error.WriteLine(
             $"[LOADER][TRACE] pthread_cond_{operation}: cond=0x{condAddress:X16} mutex=0x{mutexAddress:X16} " +
-            $"waiters={(state?.Waiters.Count ?? 0)} pending={(state?.PendingSignals ?? 0)} timed={timed} result=0x{unchecked((uint)result):X8}");
+            $"waiters={(state?.Waiters ?? 0)} epoch=0x{(state?.SignalEpoch ?? 0):X} timed={timed} result=0x{unchecked((uint)result):X8}");
     }
 
     private static bool ShouldTracePthread()
