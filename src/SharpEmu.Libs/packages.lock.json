@@ -138,6 +138,12 @@
         "dependencies": {
           "SharpEmu.HLE": "[1.0.0, )"
         }
+      },
+      "sharpemu.shadercompiler.vulkan": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.ShaderCompiler": "[1.0.0, )"
+        }
       }
     }
   }

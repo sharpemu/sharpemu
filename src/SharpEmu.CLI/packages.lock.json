@@ -226,6 +226,7 @@
         "dependencies": {
           "SharpEmu.HLE": "[1.0.0, )",
           "SharpEmu.ShaderCompiler": "[1.0.0, )",
+          "SharpEmu.ShaderCompiler.Vulkan": "[1.0.0, )",
           "Silk.NET.Vulkan": "[2.23.0, )",
           "Silk.NET.Vulkan.Extensions.EXT": "[2.23.0, )",
           "Silk.NET.Vulkan.Extensions.KHR": "[2.23.0, )",
@@ -239,6 +240,12 @@
         "type": "Project",
         "dependencies": {
           "SharpEmu.HLE": "[1.0.0, )"
+        }
+      },
+      "sharpemu.shadercompiler.vulkan": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.ShaderCompiler": "[1.0.0, )"
         }
       },
       "Avalonia": {

@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;

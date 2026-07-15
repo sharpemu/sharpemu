@@ -8,6 +8,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using Silk.NET.Input;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Vulkan.Extensions.EXT;

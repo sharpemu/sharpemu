@@ -4,10 +4,9 @@
 // Synthetic-shader conformance dumper.
 //
 // Feeds hand-assembled Gen5 (gfx10) instruction words through the real
-// decode -> SPIR-V pipeline and writes the resulting vertex, pixel, and compute
-// SPIR-V blobs to disk. The blobs can then be checked with spirv-val / spirv-dis.
-// The decoder and IR are consumed directly from SharpEmu.ShaderCompiler; only the
-// SPIR-V emitter (still internal to SharpEmu.Libs) is reached via reflection.
+// decode -> SPIR-V pipeline (SharpEmu.ShaderCompiler + SharpEmu.ShaderCompiler.Vulkan)
+// and writes the resulting vertex, pixel, and compute SPIR-V blobs to disk. The blobs
+// can then be checked with spirv-val / spirv-dis.
 //
 // Programs that contain buffer_store_dword automatically get a single
 // global-memory binding covering every store, which the emitter exposes as
@@ -21,10 +20,9 @@
 // Usage: SharpEmu.Tools.ShaderDump [output-directory]
 
 using System.Buffers.Binary;
-using System.Reflection;
 using SharpEmu.HLE;
-using SharpEmu.Libs.CxxAbi;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Vulkan;
 
 const ulong ProgramAddress = 0x100000;
 
@@ -139,22 +137,6 @@ const ulong ProgramAddress = 0x100000;
     ]),
 ];
 
-var assembly = typeof(CxaGuardExports).Assembly;
-var spirvTranslator = assembly.GetType("SharpEmu.Libs.Agc.Gen5SpirvTranslator")
-    ?? throw new InvalidOperationException("Gen5SpirvTranslator not found");
-var tryCompile = spirvTranslator.GetMethod(
-    "TryCompileVertexShader",
-    BindingFlags.Public | BindingFlags.Static)
-    ?? throw new InvalidOperationException("Gen5SpirvTranslator.TryCompileVertexShader not found");
-var tryCompilePixel = spirvTranslator.GetMethods(BindingFlags.Public | BindingFlags.Static)
-    .Single(method =>
-        method.Name == "TryCompilePixelShader" &&
-        method.GetParameters()[2].ParameterType.IsGenericType);
-var tryCompileCompute = spirvTranslator.GetMethod(
-    "TryCompileComputeShader",
-    BindingFlags.Public | BindingFlags.Static)
-    ?? throw new InvalidOperationException("Gen5SpirvTranslator.TryCompileComputeShader not found");
-
 var outputDirectory = args.Length > 0
     ? args[0]
     : Path.Combine(AppContext.BaseDirectory, "spv");
@@ -217,34 +199,28 @@ foreach (var (name, expectTranslate, words) in testPrograms)
         Array.Empty<Gen5ImageBinding>(),
         globalBindings);
 
-    var compileArgs = PadWithDefaults(tryCompile, [state, evaluation, null, null]);
-    if ((bool)tryCompile.Invoke(null, BindingFlags.OptionalParamBinding, null, compileArgs, null)!)
+    if (Gen5SpirvTranslator.TryCompileVertexShader(state, evaluation, out var vertexShader, out var vertexError))
     {
-        var shader = compileArgs[2]!;
-        var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
         var path = Path.Combine(outputDirectory, $"{name}.spv");
-        File.WriteAllBytes(path, spirv);
-        Console.WriteLine($"[{name}] emit: success, {spirv.Length} bytes -> {path}");
+        File.WriteAllBytes(path, vertexShader.Spirv);
+        Console.WriteLine($"[{name}] emit: success, {vertexShader.Spirv.Length} bytes -> {path}");
     }
     else
     {
         failures++;
-        Console.WriteLine($"[{name}] emit: FAILED ({compileArgs[3]})");
+        Console.WriteLine($"[{name}] emit: FAILED ({vertexError})");
     }
 
-    var computeArgs = PadWithDefaults(tryCompileCompute, [state, evaluation, 1u, 1u, 1u, null, null]);
-    if ((bool)tryCompileCompute.Invoke(null, BindingFlags.OptionalParamBinding, null, computeArgs, null)!)
+    if (Gen5SpirvTranslator.TryCompileComputeShader(state, evaluation, 1, 1, 1, out var computeShader, out var computeError))
     {
-        var shader = computeArgs[5]!;
-        var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
         var path = Path.Combine(outputDirectory, $"{name}-cs.spv");
-        File.WriteAllBytes(path, spirv);
-        Console.WriteLine($"[{name}] compute emit: success, {spirv.Length} bytes -> {path}");
+        File.WriteAllBytes(path, computeShader.Spirv);
+        Console.WriteLine($"[{name}] compute emit: success, {computeShader.Spirv.Length} bytes -> {path}");
     }
     else
     {
         failures++;
-        Console.WriteLine($"[{name}] compute emit: FAILED ({computeArgs[6]})");
+        Console.WriteLine($"[{name}] compute emit: FAILED ({computeError})");
     }
 
     if (name.StartsWith("mrt", StringComparison.Ordinal))
@@ -268,26 +244,16 @@ foreach (var (name, expectTranslate, words) in testPrograms)
             _ => [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
         };
 
-        var pixelArgs = PadWithDefaults(
-            tryCompilePixel,
-            [state, evaluation, pixelOutputs, null, null]);
-        if ((bool)tryCompilePixel.Invoke(
-                null,
-                BindingFlags.OptionalParamBinding,
-                null,
-                pixelArgs,
-                null)!)
+        if (Gen5SpirvTranslator.TryCompilePixelShader(state, evaluation, pixelOutputs, out var pixelShader, out var pixelError))
         {
-            var shader = pixelArgs[3]!;
-            var spirv = (byte[])shader.GetType().GetProperty("Spirv")!.GetValue(shader)!;
             var path = Path.Combine(outputDirectory, $"{name}-ps.spv");
-            File.WriteAllBytes(path, spirv);
-            Console.WriteLine($"[{name}] pixel emit: success, {spirv.Length} bytes -> {path}");
+            File.WriteAllBytes(path, pixelShader.Spirv);
+            Console.WriteLine($"[{name}] pixel emit: success, {pixelShader.Spirv.Length} bytes -> {path}");
         }
         else
         {
             failures++;
-            Console.WriteLine($"[{name}] pixel emit: FAILED ({pixelArgs[4]})");
+            Console.WriteLine($"[{name}] pixel emit: FAILED ({pixelError})");
         }
 
         if (name == "mrt")
@@ -297,22 +263,14 @@ foreach (var (name, expectTranslate, words) in testPrograms)
                 new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
                 new Gen5PixelOutputBinding(3, 7, Gen5PixelOutputKind.Float),
             ];
-            var invalidPixelArgs = PadWithDefaults(
-                tryCompilePixel,
-                [state, evaluation, invalidOutputs, null, null]);
-            if ((bool)tryCompilePixel.Invoke(
-                    null,
-                    BindingFlags.OptionalParamBinding,
-                    null,
-                    invalidPixelArgs,
-                    null)!)
+            if (Gen5SpirvTranslator.TryCompilePixelShader(state, evaluation, invalidOutputs, out _, out var invalidError))
             {
                 failures++;
                 Console.WriteLine("[mrt] FAILED: sparse host locations were accepted");
             }
             else
             {
-                Console.WriteLine($"[mrt] sparse host locations rejected as expected ({invalidPixelArgs[4]})");
+                Console.WriteLine($"[mrt] sparse host locations rejected as expected ({invalidError})");
             }
         }
     }
@@ -322,37 +280,6 @@ Console.WriteLine(failures == 0
     ? "RESULT: all programs behaved as expected"
     : $"RESULT: {failures} unexpected outcome(s)");
 Environment.ExitCode = failures == 0 ? 0 : 1;
-
-// Reflection Invoke does not apply C# default parameter values, so a newly
-// added optional parameter on a translator entry point would otherwise throw
-// TargetParameterCountException. Type.Missing + OptionalParamBinding lets the
-// runtime substitute the declared defaults; only a new *required* parameter
-// should force a tool update.
-static object?[] PadWithDefaults(MethodInfo method, object?[] arguments)
-{
-    var parameters = method.GetParameters();
-    if (arguments.Length > parameters.Length)
-    {
-        throw new InvalidOperationException(
-            $"{method.DeclaringType?.Name}.{method.Name} takes fewer parameters than the tool supplies");
-    }
-
-    var padded = new object?[parameters.Length];
-    arguments.CopyTo(padded, 0);
-    for (var i = arguments.Length; i < padded.Length; i++)
-    {
-        if (!parameters[i].IsOptional)
-        {
-            throw new InvalidOperationException(
-                $"{method.DeclaringType?.Name}.{method.Name} gained a required parameter " +
-                $"'{parameters[i].Name}' — the tool needs updating");
-        }
-
-        padded[i] = Type.Missing;
-    }
-
-    return padded;
-}
 
 internal sealed class FakeMemory : ICpuMemory
 {

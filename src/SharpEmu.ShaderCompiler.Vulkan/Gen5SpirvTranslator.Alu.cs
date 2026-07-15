@@ -3,9 +3,9 @@
 
 using SharpEmu.ShaderCompiler;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler.Vulkan;
 
-internal static partial class Gen5SpirvTranslator
+public static partial class Gen5SpirvTranslator
 {
     private sealed partial class CompilationContext
     {
