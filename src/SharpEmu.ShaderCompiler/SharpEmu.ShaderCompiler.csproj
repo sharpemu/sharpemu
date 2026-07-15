@@ -1,0 +1,20 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The backend-neutral half of guest shader compilation: the Gen5 (gfx10) microcode
+       decoder, the scalar evaluator, and the shader IR every codegen consumes. Emitters
+       (SPIR-V, MSL, DXIL) live in sibling SharpEmu.ShaderCompiler.* projects; nothing
+       here may depend on a host graphics API. -->
+  <PropertyGroup>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+  </ItemGroup>
+
+</Project>

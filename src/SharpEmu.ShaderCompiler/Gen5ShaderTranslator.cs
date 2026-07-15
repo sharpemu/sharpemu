@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
-internal static class Gen5ShaderTranslator
+public static class Gen5ShaderTranslator
 {
     private const int MaxInstructions = 4096;
     private const int MinimumUserDataDwords = 16;
@@ -276,7 +275,9 @@ internal static class Gen5ShaderTranslator
         return true;
     }
 
-    private static bool TryDecodeProgram(
+    // Public contract entry: emitter test suites and tools drive the decoder directly
+    // from raw instruction words.
+    public static bool TryDecodeProgram(
         CpuContext ctx,
         ulong address,
         out Gen5ShaderProgram program,
@@ -1220,7 +1221,7 @@ internal static class Gen5ShaderTranslator
     private static bool IsMimgInstruction(string name) =>
         name.StartsWith("Image", StringComparison.Ordinal);
 
-    internal static bool IsStorageImageOperation(string name) =>
+    public static bool IsStorageImageOperation(string name) =>
         name.StartsWith("ImageStore", StringComparison.Ordinal) ||
         name.StartsWith("ImageAtomic", StringComparison.Ordinal);
 

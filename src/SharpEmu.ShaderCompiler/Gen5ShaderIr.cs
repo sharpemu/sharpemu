@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
-internal enum Gen5ShaderEncoding
+public enum Gen5ShaderEncoding
 {
     Sop1,
     Sop2,
@@ -26,7 +26,7 @@ internal enum Gen5ShaderEncoding
     Exp,
 }
 
-internal enum Gen5OperandKind
+public enum Gen5OperandKind
 {
     ScalarRegister,
     VectorRegister,
@@ -34,7 +34,7 @@ internal enum Gen5OperandKind
     LiteralConstant,
 }
 
-internal enum Gen5ShaderResourceKind
+public enum Gen5ShaderResourceKind
 {
     ReadOnlyTexture,
     ReadWriteTexture,
@@ -42,45 +42,31 @@ internal enum Gen5ShaderResourceKind
     ConstantBuffer,
 }
 
-internal enum Gen5PixelOutputKind
+public enum Gen5PixelOutputKind
 {
     Float,
     Uint,
     Sint,
 }
 
-internal readonly record struct Gen5PixelOutputBinding(
+public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
     Gen5PixelOutputKind Kind);
 
-internal enum Gen5SpirvStage
-{
-    Vertex,
-    Pixel,
-    Compute,
-}
-
-internal sealed record Gen5SpirvShader(
-    byte[] Spirv,
-    IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
-    IReadOnlyList<Gen5ImageBinding> ImageBindings,
-    uint AttributeCount,
-    IReadOnlyList<Gen5VertexInputBinding> VertexInputs);
-
-internal readonly record struct Gen5ShaderResourceMapping(
+public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,
     uint Slot,
     uint OffsetDwords,
     bool SizeFlag);
 
-internal sealed record Gen5ShaderMetadata(
+public sealed record Gen5ShaderMetadata(
     uint ExtendedUserDataSizeDwords,
     uint ShaderResourceTableSizeDwords,
     IReadOnlyDictionary<uint, uint> DirectResources,
     IReadOnlyList<Gen5ShaderResourceMapping> Resources);
 
-internal readonly record struct Gen5ComputeSystemRegisters(
+public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupXRegister,
     uint? WorkGroupYRegister,
     uint? WorkGroupZRegister,
@@ -133,14 +119,14 @@ internal readonly record struct Gen5ComputeSystemRegisters(
     }
 }
 
-internal sealed record Gen5ShaderState(
+public sealed record Gen5ShaderState(
     Gen5ShaderProgram Program,
     IReadOnlyList<uint> UserData,
     Gen5ShaderMetadata? Metadata,
     Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
     uint UserDataScalarRegisterBase = 0);
 
-internal readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
+public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
     public static Gen5Operand Scalar(uint index) =>
         new(Gen5OperandKind.ScalarRegister, index);
@@ -177,9 +163,9 @@ internal readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
     };
 }
 
-internal abstract record Gen5InstructionControl;
+public abstract record Gen5InstructionControl;
 
-internal sealed record Gen5ImageControl(
+public sealed record Gen5ImageControl(
     uint Dmask,
     uint VectorAddress,
     IReadOnlyList<uint> AddressRegisters,
@@ -197,7 +183,7 @@ internal sealed record Gen5ImageControl(
             : VectorAddress + (uint)component;
 }
 
-internal sealed record Gen5GlobalMemoryControl(
+public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,
     uint VectorData,
@@ -206,7 +192,7 @@ internal sealed record Gen5GlobalMemoryControl(
     bool Glc,
     bool Slc) : Gen5InstructionControl;
 
-internal sealed record Gen5BufferMemoryControl(
+public sealed record Gen5BufferMemoryControl(
     uint DwordCount,
     uint VectorAddress,
     uint VectorData,
@@ -217,25 +203,25 @@ internal sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc) : Gen5InstructionControl;
 
-internal sealed record Gen5ExportControl(
+public sealed record Gen5ExportControl(
     uint Target,
     uint EnableMask,
     bool Compressed,
     bool Done,
     bool ValidMask) : Gen5InstructionControl;
 
-internal sealed record Gen5InterpolationControl(
+public sealed record Gen5InterpolationControl(
     uint Attribute,
     uint Channel) : Gen5InstructionControl;
 
-internal sealed record Gen5Vop3Control(
+public sealed record Gen5Vop3Control(
     uint AbsoluteMask,
     uint NegateMask,
     uint OutputModifier,
     bool Clamp,
     uint? ScalarDestination) : Gen5InstructionControl;
 
-internal sealed record Gen5SdwaControl(
+public sealed record Gen5SdwaControl(
     uint DestinationSelect,
     uint Source0Select,
     uint Source1Select,
@@ -244,7 +230,7 @@ internal sealed record Gen5SdwaControl(
     uint OutputModifier,
     bool Clamp) : Gen5InstructionControl;
 
-internal sealed record Gen5DppControl(
+public sealed record Gen5DppControl(
     uint Control,
     bool FetchInactive,
     bool BoundControl,
@@ -253,17 +239,17 @@ internal sealed record Gen5DppControl(
     uint BankMask,
     uint RowMask) : Gen5InstructionControl;
 
-internal sealed record Gen5ScalarMemoryControl(
+public sealed record Gen5ScalarMemoryControl(
     uint DestinationCount,
     int ImmediateOffsetBytes,
     uint? DynamicOffsetRegister) : Gen5InstructionControl;
 
-internal sealed record Gen5DataShareControl(
+public sealed record Gen5DataShareControl(
     uint Offset0,
     uint Offset1,
     bool Gds) : Gen5InstructionControl;
 
-internal sealed record Gen5ImageBinding(
+public sealed record Gen5ImageBinding(
     uint Pc,
     string Opcode,
     Gen5ImageControl Control,
@@ -271,13 +257,13 @@ internal sealed record Gen5ImageBinding(
     IReadOnlyList<uint> SamplerDescriptor,
     uint? MipLevel);
 
-internal sealed record Gen5GlobalMemoryBinding(
+public sealed record Gen5GlobalMemoryBinding(
     uint ScalarAddress,
     ulong BaseAddress,
     IReadOnlyList<uint> InstructionPcs,
     byte[] Data);
 
-internal sealed record Gen5VertexInputBinding(
+public sealed record Gen5VertexInputBinding(
     uint Pc,
     uint Location,
     uint ComponentCount,
@@ -288,7 +274,7 @@ internal sealed record Gen5VertexInputBinding(
     uint OffsetBytes,
     byte[] Data);
 
-internal sealed record Gen5ShaderEvaluation(
+public sealed record Gen5ShaderEvaluation(
     IReadOnlyList<uint> InitialScalarRegisters,
     IReadOnlyList<uint> ScalarRegisters,
     IReadOnlyDictionary<uint, IReadOnlyList<uint>> ScalarRegistersByPc,
@@ -298,7 +284,7 @@ internal sealed record Gen5ShaderEvaluation(
     IReadOnlySet<uint>? RuntimeScalarRegisters = null,
     IReadOnlyList<Gen5VertexInputBinding>? VertexInputs = null);
 
-internal sealed record Gen5ShaderInstruction(
+public sealed record Gen5ShaderInstruction(
     uint Pc,
     Gen5ShaderEncoding Encoding,
     string Opcode,
@@ -307,7 +293,7 @@ internal sealed record Gen5ShaderInstruction(
     IReadOnlyList<Gen5Operand> Destinations,
     Gen5InstructionControl? Control);
 
-internal sealed record Gen5ShaderProgram(
+public sealed record Gen5ShaderProgram(
     ulong Address,
     IReadOnlyList<Gen5ShaderInstruction> Instructions)
 {

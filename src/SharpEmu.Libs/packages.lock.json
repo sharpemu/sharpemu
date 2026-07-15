@@ -132,6 +132,12 @@
       },
       "sharpemu.logging": {
         "type": "Project"
+      },
+      "sharpemu.shadercompiler": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.HLE": "[1.0.0, )"
+        }
       }
     }
   }

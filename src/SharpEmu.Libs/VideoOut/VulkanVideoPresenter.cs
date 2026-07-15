@@ -7,6 +7,7 @@ using Silk.NET.Maths;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using Silk.NET.Input;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Vulkan.Extensions.EXT;
@@ -21,12 +22,6 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.VideoOut;
-
-internal enum GuestDrawKind
-{
-    None,
-    FullscreenBarycentric,
-}
 
 internal sealed record VulkanGuestDrawTexture(
     ulong Address,
@@ -5999,15 +5994,15 @@ internal static unsafe class VulkanVideoPresenter
                     var gpuInFlight = _pendingGuestSubmissions.Count +
                         (_presentationInFlight ? 1 : 0);
                     var readCount = Interlocked.Read(
-                        ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadCount);
+                        ref Gen5ShaderScalarEvaluator.GlobalMemoryReadCount);
                     var readBytes = Interlocked.Read(
-                        ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadBytes);
+                        ref Gen5ShaderScalarEvaluator.GlobalMemoryReadBytes);
                     var readHits = Interlocked.Read(
-                        ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadCacheHits);
+                        ref Gen5ShaderScalarEvaluator.GlobalMemoryReadCacheHits);
                     var readPvmBytes = Interlocked.Read(
-                        ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadPvmBytes);
+                        ref Gen5ShaderScalarEvaluator.GlobalMemoryReadPvmBytes);
                     var readLibcBytes = Interlocked.Read(
-                        ref Agc.Gen5ShaderScalarEvaluator.GlobalMemoryReadLibcBytes);
+                        ref Gen5ShaderScalarEvaluator.GlobalMemoryReadLibcBytes);
                     var readsPerSecond =
                         (readCount - _performanceHudLastReadCount) / elapsedSeconds;
                     var readMbPerSecond =

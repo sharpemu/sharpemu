@@ -4,10 +4,10 @@
 // Synthetic-shader conformance dumper.
 //
 // Feeds hand-assembled Gen5 (gfx10) instruction words through the real
-// decode -> SPIR-V pipeline (Gen5ShaderTranslator / Gen5SpirvTranslator, via
-// reflection so no emulator source changes are required) and writes the
-// resulting vertex, pixel, and compute SPIR-V blobs to disk. The blobs can then be
-// checked with spirv-val / spirv-dis.
+// decode -> SPIR-V pipeline and writes the resulting vertex, pixel, and compute
+// SPIR-V blobs to disk. The blobs can then be checked with spirv-val / spirv-dis.
+// The decoder and IR are consumed directly from SharpEmu.ShaderCompiler; only the
+// SPIR-V emitter (still internal to SharpEmu.Libs) is reached via reflection.
 //
 // Programs that contain buffer_store_dword automatically get a single
 // global-memory binding covering every store, which the emitter exposes as
@@ -24,6 +24,7 @@ using System.Buffers.Binary;
 using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.CxxAbi;
+using SharpEmu.ShaderCompiler;
 
 const ulong ProgramAddress = 0x100000;
 
@@ -139,30 +140,8 @@ const ulong ProgramAddress = 0x100000;
 ];
 
 var assembly = typeof(CxaGuardExports).Assembly;
-var shaderTranslator = assembly.GetType("SharpEmu.Libs.Agc.Gen5ShaderTranslator")
-    ?? throw new InvalidOperationException("Gen5ShaderTranslator not found");
 var spirvTranslator = assembly.GetType("SharpEmu.Libs.Agc.Gen5SpirvTranslator")
     ?? throw new InvalidOperationException("Gen5SpirvTranslator not found");
-var describe = shaderTranslator.GetMethod(
-    "Describe",
-    BindingFlags.Public | BindingFlags.Static)
-    ?? throw new InvalidOperationException("Gen5ShaderTranslator.Describe not found");
-var tryDecode = shaderTranslator.GetMethod(
-    "TryDecodeProgram",
-    BindingFlags.NonPublic | BindingFlags.Static)
-    ?? throw new InvalidOperationException("Gen5ShaderTranslator.TryDecodeProgram not found");
-var stateType = assembly.GetType("SharpEmu.Libs.Agc.Gen5ShaderState")
-    ?? throw new InvalidOperationException("Gen5ShaderState not found");
-var evaluationType = assembly.GetType("SharpEmu.Libs.Agc.Gen5ShaderEvaluation")
-    ?? throw new InvalidOperationException("Gen5ShaderEvaluation not found");
-var imageBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5ImageBinding")
-    ?? throw new InvalidOperationException("Gen5ImageBinding not found");
-var globalBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5GlobalMemoryBinding")
-    ?? throw new InvalidOperationException("Gen5GlobalMemoryBinding not found");
-var pixelOutputBindingType = assembly.GetType("SharpEmu.Libs.Agc.Gen5PixelOutputBinding")
-    ?? throw new InvalidOperationException("Gen5PixelOutputBinding not found");
-var pixelOutputKindType = assembly.GetType("SharpEmu.Libs.Agc.Gen5PixelOutputKind")
-    ?? throw new InvalidOperationException("Gen5PixelOutputKind not found");
 var tryCompile = spirvTranslator.GetMethod(
     "TryCompileVertexShader",
     BindingFlags.Public | BindingFlags.Static)
@@ -190,19 +169,18 @@ foreach (var (name, expectTranslate, words) in testPrograms)
 
     Console.WriteLine(
         $"[{name}] decode: " +
-        (string)describe.Invoke(null, [ctx, ProgramAddress, ProgramAddress])!);
+        Gen5ShaderTranslator.Describe(ctx, ProgramAddress, ProgramAddress));
 
-    object?[] decodeArgs = [ctx, ProgramAddress, null, null];
-    if (!(bool)tryDecode.Invoke(null, decodeArgs)!)
+    if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
     {
         if (expectTranslate)
         {
             failures++;
-            Console.WriteLine($"[{name}] FAILED: decode error ({decodeArgs[3]})");
+            Console.WriteLine($"[{name}] FAILED: decode error ({decodeError})");
         }
         else
         {
-            Console.WriteLine($"[{name}] decode failed as expected ({decodeArgs[3]})");
+            Console.WriteLine($"[{name}] decode failed as expected ({decodeError})");
         }
 
         continue;
@@ -219,52 +197,25 @@ foreach (var (name, expectTranslate, words) in testPrograms)
 
     // Buffer stores need a global-memory binding; the emitter resolves them by
     // instruction PC, so collect store PCs from the decoded program itself.
-    var programObj = decodeArgs[2]!;
-    var instructions = (System.Collections.IEnumerable)programObj
-        .GetType().GetProperty("Instructions")!.GetValue(programObj)!;
-    var storePcs = new List<uint>();
-    foreach (var instruction in instructions)
-    {
-        var op = (string)instruction.GetType().GetProperty("Opcode")!.GetValue(instruction)!;
-        if (op.StartsWith("BufferStore", StringComparison.Ordinal))
-        {
-            storePcs.Add((uint)instruction.GetType().GetProperty("Pc")!.GetValue(instruction)!);
-        }
-    }
+    var storePcs = program!.Instructions
+        .Where(instruction => instruction.Opcode.StartsWith("BufferStore", StringComparison.Ordinal))
+        .Select(instruction => instruction.Pc)
+        .ToArray();
 
     // The binding's scalar base (8 -> s[8:11]) must match the srsrc field of
     // the hand-assembled buffer_store words, and the 64-byte backing store
     // must cover every hand-assembled store offset.
-    var globalBindings = Array.CreateInstance(globalBindingType, storePcs.Count > 0 ? 1 : 0);
-    if (storePcs.Count > 0)
-    {
-        globalBindings.SetValue(
-            Activator.CreateInstance(
-                globalBindingType,
-                8u,
-                0UL,
-                (IReadOnlyList<uint>)storePcs,
-                new byte[64]),
-            0);
-    }
+    var globalBindings = storePcs.Length > 0
+        ? new[] { new Gen5GlobalMemoryBinding(8u, 0UL, storePcs, new byte[64]) }
+        : Array.Empty<Gen5GlobalMemoryBinding>();
 
-    var state = Activator.CreateInstance(
-        stateType,
-        programObj,
-        new uint[16],
-        null,
-        null,
-        0u)!;
-    var evaluation = Activator.CreateInstance(
-        evaluationType,
+    var state = new Gen5ShaderState(program, new uint[16], Metadata: null);
+    var evaluation = new Gen5ShaderEvaluation(
         new uint[256],
         new uint[256],
         new Dictionary<uint, IReadOnlyList<uint>>(),
-        Array.CreateInstance(imageBindingType, 0),
-        globalBindings,
-        null,
-        null,
-        null)!;
+        Array.Empty<Gen5ImageBinding>(),
+        globalBindings);
 
     var compileArgs = PadWithDefaults(tryCompile, [state, evaluation, null, null]);
     if ((bool)tryCompile.Invoke(null, BindingFlags.OptionalParamBinding, null, compileArgs, null)!)
@@ -298,32 +249,24 @@ foreach (var (name, expectTranslate, words) in testPrograms)
 
     if (name.StartsWith("mrt", StringComparison.Ordinal))
     {
-        (uint GuestSlot, uint HostLocation, string Kind)[] outputSpecs = name switch
+        Gen5PixelOutputBinding[] pixelOutputs = name switch
         {
-            "mrt" => new (uint GuestSlot, uint HostLocation, string Kind)[]
-            {
-                (0, 0, "Float"),
-                (3, 1, "Uint"),
-                (6, 2, "Sint"),
-            },
-            "mrt-float2" => [(0, 0, "Float"), (1, 1, "Float")],
+            "mrt" =>
+            [
+                new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(3, 1, Gen5PixelOutputKind.Uint),
+                new Gen5PixelOutputBinding(6, 2, Gen5PixelOutputKind.Sint),
+            ],
+            "mrt-float2" =>
+            [
+                new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(1, 1, Gen5PixelOutputKind.Float),
+            ],
             "mrt8" => Enumerable.Range(0, 8)
-                .Select(index => ((uint)index, (uint)index, "Float"))
+                .Select(index => new Gen5PixelOutputBinding((uint)index, (uint)index, Gen5PixelOutputKind.Float))
                 .ToArray(),
-            _ => [(0, 0, "Float")],
+            _ => [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
         };
-        var pixelOutputs = Array.CreateInstance(pixelOutputBindingType, outputSpecs.Length);
-        for (var index = 0; index < outputSpecs.Length; index++)
-        {
-            var spec = outputSpecs[index];
-            pixelOutputs.SetValue(
-                Activator.CreateInstance(
-                    pixelOutputBindingType,
-                    spec.GuestSlot,
-                    spec.HostLocation,
-                    Enum.Parse(pixelOutputKindType, spec.Kind)),
-                index);
-        }
 
         var pixelArgs = PadWithDefaults(
             tryCompilePixel,
@@ -349,21 +292,11 @@ foreach (var (name, expectTranslate, words) in testPrograms)
 
         if (name == "mrt")
         {
-            var invalidOutputs = Array.CreateInstance(pixelOutputBindingType, 2);
-            invalidOutputs.SetValue(
-                Activator.CreateInstance(
-                    pixelOutputBindingType,
-                    0u,
-                    0u,
-                    Enum.Parse(pixelOutputKindType, "Float")),
-                0);
-            invalidOutputs.SetValue(
-                Activator.CreateInstance(
-                    pixelOutputBindingType,
-                    3u,
-                    7u,
-                    Enum.Parse(pixelOutputKindType, "Float")),
-                1);
+            Gen5PixelOutputBinding[] invalidOutputs =
+            [
+                new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float),
+                new Gen5PixelOutputBinding(3, 7, Gen5PixelOutputKind.Float),
+            ];
             var invalidPixelArgs = PadWithDefaults(
                 tryCompilePixel,
                 [state, evaluation, invalidOutputs, null, null]);

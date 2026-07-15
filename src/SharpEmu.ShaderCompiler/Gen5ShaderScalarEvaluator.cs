@@ -2,13 +2,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.Libs.Kernel;
 using System.Numerics;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.ShaderCompiler;
 
-internal static class Gen5ShaderScalarEvaluator
+public static class Gen5ShaderScalarEvaluator
 {
+    /// <summary>
+    /// Optional fallback for global-memory reads that ctx.Memory cannot satisfy (the
+    /// emulator installs the HLE-tracked libc heap reader here at module load). Kept as
+    /// a hook so this project never depends on the HLE module implementations.
+    /// </summary>
+    public static Gen5FallbackMemoryReader? FallbackMemoryReader { get; set; }
+
+    public delegate bool Gen5FallbackMemoryReader(ulong baseAddress, Span<byte> destination);
+
     private const int ScalarRegisterCount = 256;
     private const int ImageDescriptorDwords = 8;
     private const int SamplerDescriptorDwords = 4;
@@ -20,12 +28,12 @@ internal static class Gen5ShaderScalarEvaluator
             ? Math.Min(configured, MaxGlobalMemoryBindingBytes)
             : 1 * 1024 * 1024;
 
-    internal static long GlobalMemoryReadCount;
-    internal static long GlobalMemoryReadBytes;
-    internal static long GlobalMemoryReadCacheHits;
-    internal static long GlobalMemoryReadPvmBytes;
-    internal static long GlobalMemoryReadLibcBytes;
-    internal static long GlobalMemoryReadReuses;
+    public static long GlobalMemoryReadCount;
+    public static long GlobalMemoryReadBytes;
+    public static long GlobalMemoryReadCacheHits;
+    public static long GlobalMemoryReadPvmBytes;
+    public static long GlobalMemoryReadLibcBytes;
+    public static long GlobalMemoryReadReuses;
 
     private const long CrossFrameReadCacheMaxBytes = 1024L * 1024 * 1024;
     private static readonly object _crossFrameReadGate = new();
@@ -573,12 +581,12 @@ internal static class Gen5ShaderScalarEvaluator
     [ThreadStatic]
     private static Dictionary<(ulong BaseAddress, int SizeBytes), byte[]>? _globalMemoryReadCache;
 
-    internal static void BeginGlobalMemoryReadScope()
+    public static void BeginGlobalMemoryReadScope()
     {
         _globalMemoryReadCache = new Dictionary<(ulong, int), byte[]>();
     }
 
-    internal static void EndGlobalMemoryReadScope()
+    public static void EndGlobalMemoryReadScope()
     {
         _globalMemoryReadCache = null;
     }
@@ -647,7 +655,7 @@ internal static class Gen5ShaderScalarEvaluator
             data = GC.AllocateUninitializedArray<byte>(candidateSize);
             var readFromPvm = ctx.Memory.TryRead(baseAddress, data);
             if (readFromPvm ||
-                KernelMemoryCompatExports.TryReadTrackedLibcHeap(baseAddress, data))
+                FallbackMemoryReader?.Invoke(baseAddress, data) == true)
             {
                 Interlocked.Increment(ref GlobalMemoryReadCount);
                 Interlocked.Add(ref GlobalMemoryReadBytes, data.Length);

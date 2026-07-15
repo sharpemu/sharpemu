@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
