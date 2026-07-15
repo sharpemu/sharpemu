@@ -141,8 +141,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	// The 0x7FFx window is Windows-specific; dyld and Rosetta reserve that
 	// range on macOS, so POSIX guest threads use the lower 0x6FFx window.
+	// The POSIX stack base sits a further 1GB down: the import-stub region
+	// descends from 0x7000_0000_0000 on the same 16MB grid and reaches
+	// 0x6FFF_C000_0000 at its 64-module limit, which would otherwise consume
+	// the top stack slots (on Windows the two bands are ~15TB apart).
 	private static readonly ulong GuestThreadStackBaseAddress =
-		OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_E000_0000UL;
+		OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_A000_0000UL;
 
 	private static readonly ulong GuestThreadTlsBaseAddress =
 		OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
