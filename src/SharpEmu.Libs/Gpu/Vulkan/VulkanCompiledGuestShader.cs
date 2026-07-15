@@ -7,4 +7,6 @@ namespace SharpEmu.Libs.Gpu.Vulkan;
 internal sealed record VulkanCompiledGuestShader(byte[] Spirv) : IGuestCompiledShader
 {
     public byte[] Payload => Spirv;
+
+    public string PayloadFileExtension => "spv";
 }

@@ -12,4 +12,8 @@ namespace SharpEmu.Libs.Gpu;
 internal interface IGuestCompiledShader
 {
     byte[] Payload { get; }
+
+    /// <summary>File extension for diagnostics dumps of <see cref="Payload"/> ("spv",
+    /// "msl", ...), so dumps stay honestly labeled whatever the backend.</summary>
+    string PayloadFileExtension { get; }
 }

@@ -3632,17 +3632,17 @@ public static class AgcExports
             }
 
             compiled = (vertexShader!, pixelShader!);
-            DumpSpirv(
+            DumpCompiledShader(
                 "vs",
                 exportShaderAddress,
                 exportStateFingerprint,
-                compiled.Vertex.Payload,
+                compiled.Vertex,
                 exportState.Program);
-            DumpSpirv(
+            DumpCompiledShader(
                 "ps",
                 pixelShaderAddress,
                 pixelStateFingerprint,
-                compiled.Pixel.Payload,
+                compiled.Pixel,
                 pixelState.Program);
             lock (_submitTraceGate)
             {
@@ -4941,11 +4941,11 @@ public static class AgcExports
                     out computeShader,
                     out computeError))
             {
-                DumpSpirv(
+                DumpCompiledShader(
                     "cs",
                     shaderAddress,
                     shaderKey.Item2,
-                    computeShader!.Payload,
+                    computeShader!,
                     shaderState.Program);
             }
 
@@ -6388,14 +6388,14 @@ public static class AgcExports
         $"type={descriptor.Type} levels={descriptor.BaseLevel}-{descriptor.LastLevel} " +
         $"pitch={descriptor.Pitch} dst=0x{descriptor.DstSelect:X3}";
 
-    private static void DumpSpirv(
+    private static void DumpCompiledShader(
         string stage,
         ulong shaderAddress,
         ulong stateFingerprint,
-        byte[] spirv,
+        IGuestCompiledShader shader,
         Gen5ShaderProgram program)
     {
-        if (spirv.Length == 0 ||
+        if (shader.Payload.Length == 0 ||
             !string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"),
                 "1",
@@ -6407,7 +6407,9 @@ public static class AgcExports
         var directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
         Directory.CreateDirectory(directory);
         var name = $"{shaderAddress:X16}-{stateFingerprint:X16}.{stage}";
-        File.WriteAllBytes(Path.Combine(directory, $"{name}.spv"), spirv);
+        File.WriteAllBytes(
+            Path.Combine(directory, $"{name}.{shader.PayloadFileExtension}"),
+            shader.Payload);
 
         var lines = new List<string>(program.Instructions.Count + 2)
         {
