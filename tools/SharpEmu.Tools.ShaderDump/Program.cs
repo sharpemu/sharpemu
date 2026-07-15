@@ -244,7 +244,9 @@ foreach (var (name, expectTranslate, words) in testPrograms)
                 8u,
                 0UL,
                 (IReadOnlyList<uint>)storePcs,
-                new byte[64]),
+                new byte[64],
+                64,
+                false),
             0);
     }
 
@@ -259,7 +261,6 @@ foreach (var (name, expectTranslate, words) in testPrograms)
         evaluationType,
         new uint[256],
         new uint[256],
-        new Dictionary<uint, IReadOnlyList<uint>>(),
         Array.CreateInstance(imageBindingType, 0),
         globalBindings,
         null,
