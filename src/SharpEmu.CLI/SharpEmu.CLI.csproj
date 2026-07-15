@@ -31,6 +31,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <TieredPGO>true</TieredPGO>
   </PropertyGroup>
 
+  <!-- Background GC's write-watch revisit calls FlushProcessWriteBuffers,
+       which on macOS uses thread_get_register_pointer_values; under Rosetta 2
+       that Mach call can stall indefinitely on threads executing translated
+       guest code, wedging the whole runtime (every allocating thread then
+       blocks behind the never-finishing GC). Non-concurrent GC never takes
+       that path. Windows and Linux keep concurrent GC. -->
+  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>none</DebugType>
