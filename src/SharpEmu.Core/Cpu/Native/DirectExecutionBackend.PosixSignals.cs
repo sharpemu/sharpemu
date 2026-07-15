@@ -310,6 +310,36 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 		if (disposition != -1 && !_posixSignalWarmup)
 		{
+			// Unrecovered: the process is about to die on the re-raised signal.
+			// Dump registers and the code window around RIP the way the Windows
+			// reporter does — the byte window is what identifies which emitted
+			// stub (and which instruction) an intermittent native fault is in.
+			try
+			{
+				var faultRip = ReadCtxU64(contextRecord, CTX_RIP);
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] posix-signal unrecovered: sig={signal} rip=0x{faultRip:X16} " +
+					$"fault=0x{record.ExceptionInformation[1]:X16} access={record.ExceptionInformation[0]} " +
+					$"rsp=0x{ReadCtxU64(contextRecord, CTX_RSP):X16} rax=0x{ReadCtxU64(contextRecord, CTX_RAX):X16} " +
+					$"rcx=0x{ReadCtxU64(contextRecord, CTX_RCX):X16} rdx=0x{ReadCtxU64(contextRecord, CTX_RDX):X16} " +
+					$"r11=0x{ReadCtxU64(contextRecord, CTX_R11):X16}");
+				var windowStart = faultRip >= 0x20 ? faultRip - 0x20 : 0;
+				var window = new byte[0x40];
+				if (TryReadHostBytes(windowStart, window))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][ERROR]   code [rip-0x20..]: {Convert.ToHexString(window)}");
+				}
+				else if (TryReadHostBytes(faultRip, window))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][ERROR]   code [rip..]: {Convert.ToHexString(window)}");
+				}
+				Console.Error.Flush();
+			}
+			catch
+			{
+			}
 			return false;
 		}
 
