@@ -8,6 +8,9 @@ namespace SharpEmu.Libs.VideoOut;
 
 internal static class PngSplashLoader
 {
+    private const uint CrcPolynomial = 0xEDB88320;
+    private static readonly uint[] CrcTable = BuildCrcTable();
+
     private static ReadOnlySpan<byte> PngSignature =>
     [
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
@@ -90,6 +93,13 @@ internal static class PngSplashLoader
 
             var chunkType = png.Slice(offset + 4, 4);
             var chunkData = png.Slice(offset + 8, (int)chunkLength);
+            var expectedCrc = BinaryPrimitives.ReadUInt32BigEndian(
+                png.Slice(offset + 8 + (int)chunkLength, 4));
+            if (CalculateCrc(chunkType, chunkData) != expectedCrc)
+            {
+                return false;
+            }
+
             if (chunkType.SequenceEqual("IHDR"u8))
             {
                 if (chunkData.Length != 13)
@@ -184,6 +194,41 @@ internal static class PngSplashLoader
         }
 
         return true;
+    }
+
+    private static uint CalculateCrc(ReadOnlySpan<byte> chunkType, ReadOnlySpan<byte> chunkData)
+    {
+        var crc = UpdateCrc(uint.MaxValue, chunkType);
+        return ~UpdateCrc(crc, chunkData);
+    }
+
+    private static uint UpdateCrc(uint crc, ReadOnlySpan<byte> bytes)
+    {
+        foreach (var value in bytes)
+        {
+            crc = CrcTable[(byte)(crc ^ value)] ^ (crc >> 8);
+        }
+
+        return crc;
+    }
+
+    private static uint[] BuildCrcTable()
+    {
+        var table = new uint[256];
+        for (var index = 0; index < table.Length; index++)
+        {
+            var value = (uint)index;
+            for (var bit = 0; bit < 8; bit++)
+            {
+                value = (value & 1) != 0
+                    ? CrcPolynomial ^ (value >> 1)
+                    : value >> 1;
+            }
+
+            table[index] = value;
+        }
+
+        return table;
     }
 
     private static bool TryUnfilter(
