@@ -45,18 +45,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
        resolves project references without compiling them, so on a fresh clone the task
        assembly does not exist yet and loading it would break the design-time build. -->
   <Target Name="GenerateAerolibBinary"
-          BeforeTargets="PrepareResources"
           DependsOnTargets="ResolveProjectReferences"
-          Condition="'$(DesignTimeBuild)' != 'true'"
           Inputs="$(SharpEmuAerolibNamesFile);$(SharpEmuAerolibTaskAssembly)"
           Outputs="$(IntermediateOutputPath)aerolib.bin">
     <GenerateAerolibBinaryTask NamesFile="$(SharpEmuAerolibNamesFile)"
                                OutputFile="$(IntermediateOutputPath)aerolib.bin" />
   </Target>
 
-  <ItemGroup>
-    <EmbeddedResource Include="$(IntermediateOutputPath)aerolib.bin"
-                      LogicalName="SharpEmu.HLE.Aerolib.aerolib.bin"
-                      Visible="false" />
-  </ItemGroup>
+  <!-- The resource item is created inside a target (not statically) so design-time
+       builds never reference a file that was not generated, and in a separate target
+       from the generation so an up-to-date skip of GenerateAerolibBinary cannot drop
+       the item (an up-to-date target skips its whole body, ItemGroups included).
+       Hooked before AssignTargetPaths: dynamic EmbeddedResource items added later
+       than that miss the resource pipeline entirely. -->
+  <Target Name="EmbedAerolibBinary"
+          BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="GenerateAerolibBinary"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)aerolib.bin"
+                        LogicalName="SharpEmu.HLE.Aerolib.aerolib.bin"
+                        Visible="false" />
+    </ItemGroup>
+  </Target>
 </Project>
