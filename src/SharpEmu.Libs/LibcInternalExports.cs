@@ -316,4 +316,131 @@ public static class LibcInternalExports
         ctx[CpuRegister.Rax] = thisPtr;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // cosf — cosine (float)
+    [SysAbiExport(
+        Nid = "-P6FNMzk2Kc",
+        ExportName = "cosf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcCosf(CpuContext ctx)
+    {
+        var x = BitConverter.Int32BitsToSingle(unchecked((int)ctx[CpuRegister.Rdi]));
+        ctx[CpuRegister.Rax] = unchecked((ulong)BitConverter.SingleToInt32Bits(MathF.Cos(x)));
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // setenv — set environment variable
+    [SysAbiExport(
+        Nid = "M4YYbSFfJ8g",
+        ExportName = "setenv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcSetenv(CpuContext ctx)
+    {
+        // rdi=name, rsi=value, rdx=overwrite
+        // Stub: just return success. We don't manage a real environment.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // puts — write string to stdout
+    [SysAbiExport(
+        Nid = "YQ0navp+YIc",
+        ExportName = "puts",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcPuts(CpuContext ctx)
+    {
+        var strAddr = ctx[CpuRegister.Rdi];
+        if (strAddr == 0) return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var buf = new byte[512];
+        if (ctx.Memory.TryRead(strAddr, buf))
+        {
+            var nullPos = Array.IndexOf(buf, (byte)0);
+            if (nullPos >= 0)
+            {
+                var s = System.Text.Encoding.ASCII.GetString(buf, 0, nullPos);
+                Console.Error.WriteLine($"[HLE][puts] {s}");
+            }
+        }
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // malloc_stats_fast — fast malloc statistics (stub)
+    [SysAbiExport(
+        Nid = "KuOuD58hqn4",
+        ExportName = "malloc_stats_fast",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcMallocStatsFast(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // scePadDeviceClassGetExtendedInformation — pad device info (stub)
+    [SysAbiExport(
+        Nid = "AcslpN1jHR8",
+        ExportName = "scePadDeviceClassGetExtendedInformation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int ScePadDeviceClassGetExtendedInfo(CpuContext ctx)
+    {
+        // Stub: return 0 (success) but don't write anything
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // il2cpp_api_register_symbol — IL2CPP runtime symbol registration (stub)
+    [SysAbiExport(
+        Nid = "cJ2Y4E-t258",
+        ExportName = "il2cpp_api_register_symbol",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libil2cpp")]
+    public static int Il2cppRegisterSymbol(CpuContext ctx)
+    {
+        // Stub: just return success
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // unity_mono_set_user_malloc_mutex — Unity mono runtime (stub)
+    [SysAbiExport(
+        Nid = "-pnj3-7a6QA",
+        ExportName = "unity_mono_set_user_malloc_mutex",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libunity")]
+    public static int UnityMonoSetMallocMutex(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // SetDataFolder — Unity data folder setup (stub)
+    [SysAbiExport(
+        Nid = "35NoyMOtYpE",
+        ExportName = "SetDataFolder",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libunity")]
+    public static int UnitySetDataFolder(CpuContext ctx)
+    {
+        var pathAddr = ctx[CpuRegister.Rdi];
+        if (pathAddr != 0)
+        {
+            var buf = new byte[256];
+            if (ctx.Memory.TryRead(pathAddr, buf))
+            {
+                var nullPos = Array.IndexOf(buf, (byte)0);
+                if (nullPos >= 0)
+                {
+                    var path = System.Text.Encoding.ASCII.GetString(buf, 0, nullPos);
+                    Console.Error.WriteLine($"[HLE][Unity] SetDataFolder: {path}");
+                }
+            }
+        }
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
