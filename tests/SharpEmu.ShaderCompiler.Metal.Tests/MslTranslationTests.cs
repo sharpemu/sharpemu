@@ -71,6 +71,36 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void PixelStageEmitsFragmentInterface()
+    {
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
+
+        Assert.Equal(Gen5MslStage.Pixel, shader.Stage);
+        Assert.Equal("gen5_ps", shader.EntryPoint);
+        Assert.Equal(1u, shader.AttributeCount);
+        Assert.Contains("fragment Gen5PsOut gen5_ps(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 attr0 [[user(locn0)]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("[[color(0)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("[[position]]", shader.Source, StringComparison.Ordinal);
+
+        // Interpolation reads land in VGPRs; the export writes MRT0 under EXEC
+        // and inactive lanes discard at the end.
+        Assert.Contains("as_type<uint>(sharpemu_in.attr0[0])", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.mrt0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("discard_fragment();", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PixelOutputKindsSelectTheAttachmentType()
+    {
+        var uintShader = Gen5ComputeFixtures.CompilePixelOrThrow(Gen5PixelOutputKind.Uint);
+        Assert.Contains("uint4 mrt0 [[color(0)]];", uintShader.Source, StringComparison.Ordinal);
+
+        var sintShader = Gen5ComputeFixtures.CompilePixelOrThrow(Gen5PixelOutputKind.Sint);
+        Assert.Contains("int4 mrt0 [[color(0)]];", sintShader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void UnsupportedOpcodeFailsLoudlyWithPc()
     {
         // v_cubeid_f32 is real but outside the phase-1 ALU set: the translator

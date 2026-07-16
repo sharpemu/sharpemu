@@ -86,6 +86,21 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void PixelShaderCompilesWithTheRuntimeMetalCompiler()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; compile validation skipped.");
+            return;
+        }
+
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+            $"[pixel] Metal rejected the emitted MSL: {error}\n{shader.Source}");
+    }
+
+    [Fact]
     public void LdsRoundTripExecutesThroughThreadgroupMemory()
     {
         if (!MetalNative.IsAvailable)

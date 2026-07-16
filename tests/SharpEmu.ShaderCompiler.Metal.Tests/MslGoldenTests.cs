@@ -24,6 +24,13 @@ public sealed class MslGoldenTests
         return data;
     }
 
+    [Fact]
+    public void PixelShaderMatchesGolden()
+    {
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
+        AssertMatchesGolden("pixel", shader.Source);
+    }
+
     [Theory]
     [MemberData(nameof(FixtureNames))]
     public void EmittedMslMatchesGolden(string name)
@@ -40,6 +47,11 @@ public sealed class MslGoldenTests
 
         Assert.NotNull(fixture);
         var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        AssertMatchesGolden(name, shader.Source);
+    }
+
+    private static void AssertMatchesGolden(string name, string source)
+    {
         var goldenPath = Path.Combine(AppContext.BaseDirectory, "Goldens", $"{name}.msl");
 
         if (Environment.GetEnvironmentVariable("SHARPEMU_UPDATE_GOLDENS") == "1")
@@ -49,13 +61,13 @@ public sealed class MslGoldenTests
                 "Goldens",
                 $"{name}.msl");
             Directory.CreateDirectory(Path.GetDirectoryName(sourcePath)!);
-            File.WriteAllText(sourcePath, shader.Source);
+            File.WriteAllText(sourcePath, source);
             return;
         }
 
         Assert.True(File.Exists(goldenPath), $"missing golden {goldenPath}; run with SHARPEMU_UPDATE_GOLDENS=1 to create it");
         var expected = File.ReadAllText(goldenPath).ReplaceLineEndings();
-        Assert.Equal(expected, shader.Source.ReplaceLineEndings());
+        Assert.Equal(expected, source.ReplaceLineEndings());
     }
 
     private static string FindSourceDirectory([System.Runtime.CompilerServices.CallerFilePath] string sourcePath = "")

@@ -112,6 +112,48 @@ internal static class Gen5ComputeFixtures
 
     public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop, Lds];
 
+    // Minimal pixel program: two interpolated attribute channels plus two
+    // inline constants exported to MRT0 (done+vm).
+    public static readonly uint[] PixelWords =
+    [
+        0xC8020002,             // v_interp_mov_f32 v0, p0, attr0.x
+        0xC8060102,             // v_interp_mov_f32 v1, p0, attr0.y
+        0x7E0402F2,             // v_mov_b32 v2, 1.0
+        0x7E0602F0,             // v_mov_b32 v3, 0.5
+        0xF800180F, 0x03020100, // exp mrt0 v0, v1, v2, v3 done vm
+        0xBF810000,             // s_endpgm
+    ];
+
+    public static Gen5MslShader CompilePixelOrThrow(
+        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
+    {
+        var memory = new FakeGuestMemory();
+        memory.AddRegion(ProgramAddress, PixelWords);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
+        {
+            throw new InvalidOperationException($"[pixel] decode failed: {decodeError}");
+        }
+
+        var state = new Gen5ShaderState(program!, new uint[16], Metadata: null);
+        var evaluation = new Gen5ShaderEvaluation(
+            new uint[128],
+            new uint[128],
+            Array.Empty<Gen5ImageBinding>(),
+            Array.Empty<Gen5GlobalMemoryBinding>());
+        if (!Gen5MslTranslator.TryCompilePixelShader(
+                state,
+                evaluation,
+                outputKind,
+                out var shader,
+                out var compileError))
+        {
+            throw new InvalidOperationException($"[pixel] MSL emit failed: {compileError}");
+        }
+
+        return shader;
+    }
+
     /// <summary>Drives the real decoder and the MSL emitter for one fixture.</summary>
     public static Gen5MslShader CompileOrThrow(Gen5ComputeFixture fixture)
     {
