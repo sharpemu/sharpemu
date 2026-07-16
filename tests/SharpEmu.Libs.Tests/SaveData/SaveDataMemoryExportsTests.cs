@@ -29,9 +29,11 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
     private const ulong LargePayloadAddress = Base + 0x1000;
     private const ulong LargeReadbackAddress = Base + 0x40000;
     private const ulong MemorySize = 0x2000;
+    private const ulong UnmappedAddress = Base + 0x100000;
     private const int MemoryNotReady = unchecked((int)0x809F0012);
     private const int ParameterError = unchecked((int)0x809F0000);
     private const int UserId = 0x1001;
+    private const string TitleId = "SDMEMTEST";
 
     private readonly FakeCpuMemory _memory = new(Base, 0x80000);
     private readonly CpuContext _ctx;
@@ -44,8 +46,11 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
         _root = Path.Combine(Path.GetTempPath(), $"sharpemu-sdmemory-{Guid.NewGuid():N}");
         _previousRoot = Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
         Environment.SetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR", _root);
-        SaveDataExports.ConfigureApplicationInfo("SDMEMTEST");
+        SaveDataExports.ConfigureApplicationInfo(TitleId);
     }
+
+    private string MemoryPath =>
+        Path.Combine(_root, UserId.ToString(), TitleId, "sce_sdmemory", "memory.dat");
 
     public void Dispose()
     {
@@ -113,6 +118,25 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
     public void Setup_AbsurdSize_ReturnsParameterError()
     {
         Assert.Equal(ParameterError, Setup(ulong.MaxValue));
+    }
+
+    [Fact]
+    public void Setup_InvalidResultPointer_DoesNotCreateBackingFile()
+    {
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+            Setup(resultAddress: UnmappedAddress));
+        Assert.False(File.Exists(MemoryPath));
+    }
+
+    [Fact]
+    public void Setup_InvalidResultPointer_DoesNotGrowExistingFile()
+    {
+        Assert.Equal(0, Setup(0x1000));
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+            Setup(MemorySize, UnmappedAddress));
+        Assert.Equal(0x1000, new FileInfo(MemoryPath).Length);
     }
 
     [Fact]
@@ -185,7 +209,7 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
         Assert.Equal(ParameterError, SaveDataExports.SaveDataSetSaveDataMemory2(Invoke()));
     }
 
-    private int Setup(ulong memorySize = MemorySize)
+    private int Setup(ulong memorySize = MemorySize, ulong resultAddress = SetupResultAddress)
     {
         Span<byte> param = stackalloc byte[0x40];
         param.Clear();
@@ -194,7 +218,7 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
         Assert.True(_ctx.Memory.TryWrite(SetupParamAddress, param));
 
         _ctx[CpuRegister.Rdi] = SetupParamAddress;
-        _ctx[CpuRegister.Rsi] = SetupResultAddress;
+        _ctx[CpuRegister.Rsi] = resultAddress;
         return SaveDataExports.SaveDataSetupSaveDataMemory2(_ctx);
     }
 

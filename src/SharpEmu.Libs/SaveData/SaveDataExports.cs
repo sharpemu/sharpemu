@@ -719,24 +719,28 @@ public static class SaveDataExports
         try
         {
             var path = ResolveSaveDataMemoryPath(userId);
-            ulong existedSize;
             lock (_memoryGate)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite);
-                existedSize = (ulong)stream.Length;
+                var backing = new FileInfo(path);
+                var existedSize = backing.Exists ? (ulong)backing.Length : 0;
+
+                // The result write comes first so a faulted result pointer
+                // cannot leave created or grown setup state behind.
+                if (resultAddress != 0 && !ctx.TryWriteUInt64(resultAddress, existedSize))
+                {
+                    return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
                 if (existedSize < memorySize)
                 {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite);
                     stream.SetLength((long)memorySize);
                 }
+
+                TraceSaveData($"memory-setup2 user={userId} size=0x{memorySize:X} existed=0x{existedSize:X}");
             }
 
-            if (resultAddress != 0 && !ctx.TryWriteUInt64(resultAddress, existedSize))
-            {
-                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
-
-            TraceSaveData($"memory-setup2 user={userId} size=0x{memorySize:X} existed=0x{existedSize:X}");
             return ctx.SetReturn(0);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
