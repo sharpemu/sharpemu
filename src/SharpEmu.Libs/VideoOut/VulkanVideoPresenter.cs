@@ -2342,6 +2342,12 @@ internal static unsafe class VulkanVideoPresenter
             _guestImageVariants = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
         private readonly HashSet<long> _capturedGuestFlipVersions = [];
+        // Resource retirement removes versions from _capturedGuestFlipVersions,
+        // but later wait-safe markers still need to know that their capture ran.
+        // Keep only the newest completed version for each display buffer so this
+        // execution-order proof remains bounded independently of image lifetime.
+        private readonly Dictionary<(int Handle, int BufferIndex), long>
+            _lastCompletedGuestFlipVersions = new();
         private readonly record struct GuestDepthKey(
             ulong Address,
             ulong ReadAddress,
@@ -4494,6 +4500,8 @@ internal static unsafe class VulkanVideoPresenter
                 snapshot.Initialized = true;
                 _guestImageVersions.Add(work.Version, snapshot);
                 _capturedGuestFlipVersions.Add(work.Version);
+                _lastCompletedGuestFlipVersions[
+                    (work.VideoOutHandle, work.DisplayBufferIndex)] = work.Version;
 
                 lock (_gate)
                 {
@@ -4541,7 +4549,10 @@ internal static unsafe class VulkanVideoPresenter
         private void ExecuteOrderedGuestFlipWait(VulkanOrderedGuestFlipWait work)
         {
             var captured = work.Version != 0 &&
-                _capturedGuestFlipVersions.Contains(work.Version);
+                _lastCompletedGuestFlipVersions.TryGetValue(
+                    (work.VideoOutHandle, work.DisplayBufferIndex),
+                    out var completedVersion) &&
+                completedVersion >= work.Version;
             TraceVulkanShader(
                 $"vk.flip_wait_safe version={work.Version} " +
                 $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
@@ -13963,6 +13974,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             _guestImageVersions.Clear();
             _capturedGuestFlipVersions.Clear();
+            _lastCompletedGuestFlipVersions.Clear();
             while (_deferredGuestImageVersionDestroys.TryDequeue(out var deferredVersion))
             {
                 DestroyGuestImage(deferredVersion.Image);

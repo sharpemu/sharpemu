@@ -16,7 +16,6 @@ public static class AudioOut2Exports
     // following the 0x40-byte parameter block.
     private const int AudioOut2ContextParamSize = 0x40;
     private const int AudioOut2ContextMemorySize = 0x10000;
-    private const int AudioOut2ContextMemoryAlignment = 0x10000;
     private const uint SpeakerArrayMemorySize = 0x10000;
     private static long _nextContextHandle = 1;
     private static long _nextUserHandle = 1;
@@ -113,20 +112,16 @@ public static class AudioOut2Exports
     public static int AudioOut2ContextQueryMemory(CpuContext ctx)
     {
         var paramAddress = ctx[CpuRegister.Rdi];
-        var memoryInfoAddress = ctx[CpuRegister.Rsi];
-        if (paramAddress == 0 || memoryInfoAddress == 0)
+        var outMemorySizeAddress = ctx[CpuRegister.Rsi];
+        if (paramAddress == 0 || outMemorySizeAddress == 0)
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        Span<byte> memoryInfo = stackalloc byte[0x20];
-        memoryInfo.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x00..], AudioOut2ContextMemorySize);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x08..], AudioOut2ContextMemoryAlignment);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x10..], AudioOut2ContextMemorySize);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x18..], AudioOut2ContextMemoryAlignment);
-
-        return ctx.Memory.TryWrite(memoryInfoAddress, memoryInfo)
+        // The second argument is a pointer to one uint64_t, not a larger memory-info
+        // structure. Writing past these eight bytes corrupts callers that keep the
+        // output in a stack slot (including GTA V's saved stack canary).
+        return ctx.TryWriteUInt64(outMemorySizeAddress, AudioOut2ContextMemorySize)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -271,11 +266,26 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2ContextGetQueueLevel(CpuContext ctx)
     {
-        // The advance path paces synchronously, so the queue is always drained.
-        var levelAddress = ctx[CpuRegister.Rsi];
-        if (levelAddress != 0)
+        var handle = ctx[CpuRegister.Rdi];
+        var outQueueLevelAddress = ctx[CpuRegister.Rsi];
+        var outQueueAvailableAddress = ctx[CpuRegister.Rdx];
+        if (handle == 0)
         {
-            _ = TryWriteUInt64(ctx, levelAddress, 0);
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Both outputs are uint32_t values. GTA V places the level output four
+        // bytes before its stack canary, so an eight-byte write corrupts it.
+        if (outQueueLevelAddress != 0 && !ctx.TryWriteUInt32(outQueueLevelAddress, 0))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // Nothing is queued to real hardware: report an empty queue with room
+        // available so submitters keep flowing.
+        if (outQueueAvailableAddress != 0 && !ctx.TryWriteUInt32(outQueueAvailableAddress, 4))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         return SetReturn(ctx, 0);
