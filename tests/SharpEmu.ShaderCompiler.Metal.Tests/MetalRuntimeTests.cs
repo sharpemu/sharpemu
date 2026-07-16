@@ -163,9 +163,16 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
             throw new InvalidOperationException($"[{fixture.Name}] {compileError}\n{shader.Source}");
         }
 
-        // SharpEmuUniforms per the translator contract: dispatch limit (one
-        // thread), reserved, then the byte length of each bound buffer.
-        var uniforms = new byte[20];
+        // Per the translator contract, global buffers occupy indices
+        // 0..count-1 and SharpEmuUniforms sits at index count; the executable
+        // fixtures bind exactly one data buffer.
+        var bufferCount = shader.GlobalMemoryBindings.Count;
+        Assert.Equal(1, bufferCount);
+
+        // SharpEmuUniforms: dispatch limit (one thread), reserved, then the
+        // byte length of each bound buffer (the struct's array never has fewer
+        // than one entry).
+        var uniforms = new byte[16 + (Math.Max(bufferCount, 1) * sizeof(uint))];
         BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(0), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(4), 1);
         BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(8), 1);
@@ -176,6 +183,8 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
                 shader.EntryPoint,
                 buffer,
                 uniforms,
+                dataIndex: 0,
+                uniformsIndex: (nuint)bufferCount,
                 out var result,
                 out var runError))
         {
