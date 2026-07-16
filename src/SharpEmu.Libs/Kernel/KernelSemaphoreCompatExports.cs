@@ -379,7 +379,35 @@ public static class KernelSemaphoreCompatExports
             MaxCount = int.MaxValue,
             Count = initialCount,
         };
-        if (!TryWriteUInt32(ctx, semaphoreAddress, handle))
+        // The semaphore address may be a host-heap pointer (from Marshal.AllocHGlobal
+        // in the libc malloc path). Try guest memory first, then host memory directly.
+        Span<byte> handleBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(handleBytes, handle);
+        bool wrote = false;
+        if (ctx.Memory.TryWrite(semaphoreAddress, handleBytes))
+        {
+            wrote = true;
+        }
+        else
+        {
+            // Try writing directly to host memory (the address may be a host pointer)
+            try
+            {
+                unsafe
+                {
+                    System.Runtime.InteropServices.Marshal.Copy(handleBytes.ToArray(), 0,
+                        (nint)semaphoreAddress, sizeof(uint));
+                    wrote = true;
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] sema.posix-init: host-write fallback addr=0x{semaphoreAddress:X16}");
+                }
+            }
+            catch
+            {
+                wrote = false;
+            }
+        }
+        if (!wrote)
         {
             _semaphores.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);

@@ -11039,6 +11039,9 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        // DIAGNOSTIC: mark AGC resource registration as initialized
+        SharpEmu.Diagnostics.ApiStateValidator.Agc_InitResourceRegistration();
+
         var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
@@ -11096,7 +11099,28 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        // DIAGNOSTIC: validate AGC state — RegisterOwner requires InitResourceRegistration first
+        SharpEmu.Diagnostics.ApiStateValidator.Agc_RegisterOwner();
+
+        // WORKAROUND: some games (e.g. Arise: A Simple Story) call RegisterOwner
+        // without first calling InitResourceRegistration. On real PS5 hardware,
+        // the driver has a default-initialized state. We auto-initialize here
+        // if the game hasn't done so.
         var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        if (!state.ResourceRegistrationInitialized)
+        {
+            Console.Error.WriteLine(
+                "[HLE][AGC] sceAgcDriverRegisterOwner called before InitResourceRegistration — auto-initializing");
+            state.ResourceRegistrationInitialized = true;
+            state.ResourceRegistrationMemory = 0;
+            state.ResourceRegistrationMemorySize = 0;
+            state.ResourceRegistrationMaxOwners = 64; // reasonable default
+            state.ResourceOwners.Clear();
+            state.RegisteredResources.Clear();
+            state.DefaultOwner = DefaultAgcOwner;
+            state.NextOwner = 1;
+            state.NextResource = 1;
+        }
         uint owner;
         lock (state.Gate)
         {

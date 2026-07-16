@@ -221,6 +221,12 @@
           "SharpEmu.Logging": "[0.0.1, )"
         }
       },
+      "sharpemu.diagnostics": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.Logging": "[0.0.1, )"
+        }
+      },
       "sharpemu.gui": {
         "type": "Project",
         "dependencies": {
@@ -241,6 +247,7 @@
       "sharpemu.libs": {
         "type": "Project",
         "dependencies": {
+          "SharpEmu.Diagnostics": "[0.0.1, )",
           "SharpEmu.HLE": "[0.0.1, )",
           "SharpEmu.ShaderCompiler": "[0.0.1, )",
           "SharpEmu.ShaderCompiler.Vulkan": "[0.0.1, )",

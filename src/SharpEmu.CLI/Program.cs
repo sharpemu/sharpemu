@@ -56,9 +56,35 @@ internal static partial class Program
         }
         finally
         {
+            // DIAGNOSTICS: write final report before exit
+            try
+            {
+                WriteDiagnosticsReport();
+            }
+            catch { }
             DropConsoleFileMirror();
             SharpEmuLog.Shutdown();
         }
+    }
+
+    private static void WriteDiagnosticsReport()
+    {
+        var reportDir = "/home/z/my-project/download/crashes";
+        try { Directory.CreateDirectory(reportDir); } catch { }
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("========== SharpEmu Diagnostics Report ==========");
+        sb.AppendLine($"Generated: {DateTimeOffset.UtcNow:O}");
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.MissingNidReporter.Instance.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.ApiStateValidator.RenderReport());
+
+        var path = Path.Combine(reportDir, "diagnostics_report.txt");
+        File.WriteAllText(path, sb.ToString());
+        Console.Error.WriteLine($"[DIAGNOSTICS] Report written to {path}");
     }
 
     private static int Run(string[] args)
