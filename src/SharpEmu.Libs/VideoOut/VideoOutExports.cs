@@ -260,6 +260,22 @@ public static class VideoOutExports
     }
 
     [SysAbiExport(
+        Nid = "Nv8c-Kb+DUM",
+        ExportName = "sceVideoOutIsOutputSupported",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutIsOutputSupported(CpuContext ctx)
+    {
+        var busType = unchecked((int)ctx[CpuRegister.Rdi]);
+        _ = ctx[CpuRegister.Rsi]; // pixelFormat
+        _ = ctx[CpuRegister.Rdx]; // aspectRatio
+
+        // The emulator supports any output configuration on the main bus.
+        // Return 1 (supported) for SceVideoOutBusTypeMain, 0 otherwise.
+        return busType == SceVideoOutBusTypeMain ? 1 : 0;
+    }
+
+    [SysAbiExport(
         Nid = "uquVH4-Du78",
         ExportName = "sceVideoOutClose",
         Target = Generation.Gen4 | Generation.Gen5,
