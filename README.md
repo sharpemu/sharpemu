@@ -10,7 +10,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 </p>
 
 <p align="center">
-  An experimental PlayStation 5 emulator for Windows, Linux and macOS.  
+  An experimental PlayStation 5 emulator for Windows, Linux and macOS-BETA BRANCH.  
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 </p>
 
 <p align="center">
-  <strong>Join our Discord for development updates, compatibility discussions, support, and community chat.</strong>
+  <strong>Right now I'm working on implementing better performance and compatibility so the main devs can get more games working.</strong>
 </p>
 
 ---
