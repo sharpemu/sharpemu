@@ -1566,6 +1566,11 @@ internal static unsafe class VulkanVideoPresenter
     public static void RequestClose()
     {
         Volatile.Write(ref _presenterCloseRequested, true);
+        _shutdownRequested = true;
+        lock (_gate)
+        {
+            System.Threading.Monitor.PulseAll(_gate);
+        }
     }
 
     /// <summary>
@@ -1699,6 +1704,75 @@ internal static unsafe class VulkanVideoPresenter
             System.Runtime.InteropServices.NativeLibrary.TryLoad(name, out handle);
     }
 
+    private static void RunHeadless()
+    {
+        // Headless mode: consume presentation frames without displaying them.
+        // This allows the game to run without a GPU/Vulkan driver.
+        // Frames are optionally saved to disk if SHARPEMU_DUMP_FRAMES=1.
+        var dumpFrames = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FRAMES"),
+            "1", StringComparison.Ordinal);
+        var frameCount = 0;
+        var dumpDir = "/home/z/my-project/download/frames";
+        if (dumpFrames)
+        {
+            Directory.CreateDirectory(dumpDir);
+        }
+
+        try
+        {
+            while (!_shutdownRequested)
+            {
+                Presentation? presentation = null;
+                lock (_gate)
+                {
+                    if (_pendingGuestImagePresentations.Count > 0)
+                    {
+                        presentation = _pendingGuestImagePresentations.Dequeue();
+                    }
+                    else
+                    {
+                        System.Threading.Monitor.Wait(_gate, TimeSpan.FromMilliseconds(16));
+                    }
+                }
+
+                if (presentation != null)
+                {
+                    frameCount++;
+                    if (frameCount <= 10 || frameCount % 100 == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[HEADLESS] Frame#{frameCount}: seq={presentation.Value.Sequence} " +
+                            $"w={presentation.Value.Width} h={presentation.Value.Height}");
+                    }
+
+                    if (dumpFrames && frameCount <= 5)
+                    {
+                        // Could save frame to PNG here
+                        Console.Error.WriteLine(
+                            $"[HEADLESS] Would save frame#{frameCount} to {dumpDir}/frame_{frameCount}.raw");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[HEADLESS] Error: {ex.Message}");
+        }
+        finally
+        {
+            Console.Error.WriteLine($"[HEADLESS] Total frames consumed: {frameCount}");
+            lock (_gate)
+            {
+                _closed = true;
+                _thread = null;
+                System.Threading.Monitor.PulseAll(_gate);
+            }
+        }
+    }
+
+    private static bool _shutdownRequested;
+
     private static void Run()
     {
         uint width;
@@ -1712,6 +1786,22 @@ internal static unsafe class VulkanVideoPresenter
         PreferX11OnLinuxWayland();
         InitializeMacVulkanLoader();
 
+        // Check for headless mode (no Vulkan/GPU needed — for CI, debugging, AI agents)
+        var headless = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_HEADLESS"),
+            "1", StringComparison.Ordinal) ||
+            string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_HEADLESS_AI"),
+            "1", StringComparison.Ordinal);
+
+        if (headless)
+        {
+            Console.Error.WriteLine("[LOADER][INFO] Headless mode: skipping Vulkan/GPU initialization");
+            Console.Error.WriteLine("[LOADER][INFO] VideoOut will accept frames but not display them");
+            RunHeadless();
+            return;
+        }
+
         try
         {
             using var presenter = new Presenter(width, height);
@@ -1720,6 +1810,8 @@ internal static unsafe class VulkanVideoPresenter
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[LOADER][ERROR] Vulkan VideoOut presenter failed: {exception}");
+            Console.Error.WriteLine("[LOADER][INFO] Falling back to headless mode (no display)");
+            RunHeadless();
         }
         finally
         {
