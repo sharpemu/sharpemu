@@ -595,6 +595,8 @@ public partial class MainWindow : Window
         GithubButton.Content = loc.Get("About.GithubButton");
         DiscordButton.Content = loc.Get("About.DiscordButton");
         UpdateLabel.Text = loc.Get("Updater.Label");
+        LatestCommitLabel.Text = loc.Get("Github.LatestCommitLabel");
+        LatestCommitDescription.Text = loc.Get("Github.LatestCommitDescription");
         RefreshUpdateText();
 
         UpdateEmptyStateTexts();

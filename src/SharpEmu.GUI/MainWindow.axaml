@@ -377,7 +377,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                           <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
-                          <TextBlock Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                          <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
                         </StackPanel>
 
                         <TextBlock Grid.Column="1" x:Name="LatestCommitHashText" Text="Loading…"

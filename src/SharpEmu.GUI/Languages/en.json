@@ -141,6 +141,8 @@
   "Options.About" : "About",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Source code, issues and project development.",
+  "About.Github.LatestCommitLabel": "Latest Commit",
+  "About.Github.LatestCommitDescription": "Latest commit on the main branch",
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Join the community, get support and follow development.",
   "About.GithubButton": "Contribute in GitHub!",
