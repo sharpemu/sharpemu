@@ -1,0 +1,111 @@
+{
+  "_description": "AI Debug Report for PPSA06328 (Arise: A Simple Story)",
+  "_format": "Structured JSON for AI consumption. No game files included.",
+  "_version": "1.0",
+
+  "session": {
+    "game_id": "PPSA06328",
+    "title": "Arise: A Simple Story",
+    "test_date": "2026-07-16T15:37:50Z",
+    "emulator_version": "v1.0.0009",
+    "test_mode": "headless"
+  },
+
+  "boot_status": {
+    "self_loader": "OK",
+    "elf_parse": "OK",
+    "tls_setup": "OK",
+    "relocations": "OK",
+    "import_stubs": "OK",
+    "crt_init": "OK",
+    "libc_init": "OK",
+    "pthread_init": "OK",
+    "direct_memory": "OK",
+    "agc_init": "OK",
+    "videoout": "OPENED (headless)",
+    "first_frame": "NOT_REACHED"
+  },
+
+  "import_stats": {
+    "total_calls": 2665,
+    "successful": 2599,
+    "failed": 66,
+    "unique_functions_used": 40,
+    "most_called": [
+      {"function": "libc:__cxa_atexit", "count": 1305},
+      {"function": "libc:malloc", "count": 251},
+      {"function": "libSceFiber:_sceFiberInitializeImpl", "count": 138},
+      {"function": "libc:strchr", "count": 98},
+      {"function": "libKernel:_Mtx_init", "count": 75},
+      {"function": "libSceAgc:sceAgcDriverRegisterResource", "count": 60},
+      {"function": "libKernel:_Cnd_init", "count": 60},
+      {"function": "libSceAgc:sceAgcCreateShader", "count": 52}
+    ]
+  },
+
+  "missing_nids": [
+    {"nid": "L51FfEMZa4o", "name": "unknown", "calls": 9, "severity": "low"},
+    {"nid": "GqL992msUmo", "name": "unknown", "calls": 4, "severity": "low"},
+    {"nid": "y2ybsIQ073A", "name": "unknown", "calls": 2, "severity": "low"},
+    {"nid": "527zZ46M9IM", "name": "unknown", "calls": 2, "severity": "low"},
+    {"nid": "o2hcK6F8Ih4", "name": "unknown", "calls": 1, "severity": "low"},
+    {"nid": "iILsKSo5Syg", "name": "unknown", "calls": 1, "severity": "low"},
+    {"nid": "MjQ5oH6b620", "name": "unknown", "calls": 1, "severity": "low"},
+    {"nid": "4AQlc0jE9PQ", "name": "unknown", "calls": 1, "severity": "low"},
+    {"nid": "MPBXfoxd+eo", "name": "unknown", "calls": 1, "severity": "low"},
+    {"nid": "M3wFXbYQtAA", "name": "sceNpUnregisterStateCallbackA", "calls": 1, "severity": "low"}
+  ],
+
+  "crash": {
+    "type": "null_pointer_dereference",
+    "rip": "0x0000000800000BFE",
+    "fault_address": "0x0000000000000018",
+    "instruction_hex": "48 8B 46 18",
+    "instruction_asm": "mov rax, [rsi+0x18]",
+    "null_register": "RSI",
+    "null_value": "0x0000000000000000",
+    "access_type": "read",
+    "access_offset": "0x18",
+    "registers": {
+      "RAX": "0xC0DEC0DECAFEBA00",
+      "RSI": "0x0000000000000000",
+      "RDI": "0x00006FFFF01FF200"
+    },
+    "stack_strings": ["ios_base::failbit set", "View Culled filter", "AutoKillLD", "gameTime"],
+    "root_cause_candidate": {
+      "description": "RSI is NULL but game expects a valid object pointer at offset 0x18",
+      "first_failure": "Import#1590 sceKernelStat returned NOT_FOUND (benign file check)",
+      "confidence": 0.60,
+      "suggested_fix": "Trace which HLE call should have set RSI — likely a game object constructor",
+      "fix_difficulty": "medium"
+    }
+  },
+
+  "api_state": {
+    "agc": "OwnerRegistered (auto-initialized)",
+    "videoout": "Uninitialized",
+    "violations": [
+      "sceAgcDriverRegisterOwner called before InitResourceRegistration (auto-fixed)"
+    ]
+  },
+
+  "pointer_origins": {
+    "gpu_range_pointers": 0,
+    "host_range_pointers": 31,
+    "leak_detected": true,
+    "leak_source": "libc:malloc uses Marshal.AllocHGlobal which returns host addresses"
+  },
+
+  "timeline": [
+    {"time_ms": 0, "event": "SELF loaded"},
+    {"time_ms": 100, "event": "TLS initialized (memsz=0x2C39)"},
+    {"time_ms": 500, "event": "91120 relocations processed"},
+    {"time_ms": 1000, "event": "777 import stubs created"},
+    {"time_ms": 2000, "event": "GPU placeholder mapped at 0x1FE000000"},
+    {"time_ms": 3000, "event": "CRT init, libc, pthread"},
+    {"time_ms": 5000, "event": "AGC: 52 shaders created, 60 resources registered"},
+    {"time_ms": 7000, "event": "VideoOut opened (headless mode)"},
+    {"time_ms": 8000, "event": "Game engine main loop started"},
+    {"time_ms": 9000, "event": "CRASH: NULL pointer deref at 0x80000BFE"}
+  ]
+}

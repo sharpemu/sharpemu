@@ -1,0 +1,85 @@
+{
+  "_description": "SharpEmu Game Compatibility Database",
+  "_copyright": "NO game files stored. Only metadata and test results.",
+
+  "PPSA06328": {
+    "title": "Arise: A Simple Story",
+    "image_size_mb": 25,
+    "tls_memsz": "0x2C39",
+    "entry_point": "0x70",
+    "test_history": [
+      {
+        "date": "2026-07-16",
+        "version": "v1.0.0009",
+        "mode": "headless",
+        "imports_reached": 824,
+        "missing_nids": 4,
+        "reached_agc": true,
+        "reached_videoout": true,
+        "reached_shaders": true,
+        "crash_rip": "0x80000BFE",
+        "crash_type": "NULL pointer deref (RSI=0)",
+        "first_failure": "sceKernelStat NOT_FOUND (benign)",
+        "game_strings": ["View Culled filter", "AutoKillLD", "gameTime", "PathControllerLD"],
+        "rating": {
+          "boot": 5,
+          "graphics": 2,
+          "audio": 0,
+          "input": 0,
+          "overall": "Boots to VideoOut"
+        }
+      }
+    ],
+    "known_issues": [
+      "NULL pointer deref at RIP 0x80000BFE — likely from uninitialized game object",
+      "4 NIDs not in aerolib — possibly game-internal functions",
+      "Host pointer leak from malloc (Marshal.AllocHGlobal returns host addresses)"
+    ],
+    "workarounds": [
+      "SHARPEMU_HEADLESS=1 — skip Vulkan/GPU",
+      "GPU placeholder at 0x1FE000000",
+      "sem_init/wait host pointer fallback",
+      "AGC auto-init when RegisterOwner called before InitResourceRegistration"
+    ]
+  },
+
+  "PPSA14677": {
+    "title": "Unknown (3D game with mesh processing)",
+    "image_size_mb": 33,
+    "tls_memsz": "0xD0",
+    "entry_point": "0x70",
+    "test_history": [
+      {
+        "date": "2026-07-16",
+        "version": "v1.0.0009",
+        "mode": "headless",
+        "imports_reached": 611,
+        "missing_nids": 2,
+        "reached_agc": false,
+        "reached_videoout": false,
+        "reached_shaders": false,
+        "crash_rip": "0x8007F33FE",
+        "crash_type": "NULL pointer deref (RDI=0, accessing [0+0x1836])",
+        "first_failure": "std::call_once (DiGVep5yB5w) UNRESOLVED",
+        "game_strings": ["Mesh Vertices", "topology", "Overloaded New", "%s Peak"],
+        "rating": {
+          "boot": 4,
+          "graphics": 0,
+          "audio": 0,
+          "input": 0,
+          "overall": "Boots to engine init"
+        }
+      }
+    ],
+    "known_issues": [
+      "std::call_once not implemented — game crashes after 611 imports",
+      "NULL pointer deref at RIP 0x8007F33FE — object at RDI was never initialized",
+      "__cxa_decrement_exception_refcount missing"
+    ],
+    "workarounds": [],
+    "missing_hle_needed": [
+      "DiGVep5yB5w — std::call_once (CRITICAL — blocks all C++ games)",
+      "MQFPAqQPt1s — __cxa_decrement_exception_refcount"
+    ]
+  }
+}
