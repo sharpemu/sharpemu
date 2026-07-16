@@ -1593,11 +1593,18 @@ public sealed partial class DirectExecutionBackend
 			"qvMUCyyaCSI" or
 			"Vo5V8KAwCmk" or // sceSystemServiceHideSplashScreen
 			"TywrFKCoLGY" or // sceSaveDataInitialize3
+			"ZkZhskCPXFw" or // sceSaveDataInitialize
+			"l1NmDeDpNGU" or // sceSaveDataInitialize2
 			"dyIhnXq-0SM" or // sceSaveDataDirNameSearch
 			"ZP4e7rlzOUk" or // sceSaveDataMount3
+			"32HQAQdwM2o" or // sceSaveDataMount
+			"0z45PIH+SNI" or // sceSaveDataMount2
 			"ERKzksauAJA" or // sceSaveDataDialogGetStatus
 			"KK3Bdg1RWK0" or // sceSaveDataDialogUpdateStatus
 			"en7gNVnh878" or // sceSaveDataDialogIsReadyToDisplay
+			"G5kSn8PRHGA" or // sceSaveDataDialogParamInitialize
+			"45JWahOrYpE" or // sceSaveDataDialogParamInit
+			"Nv8c-Kb+DUM" or // sceVideoOutIsOutputSupported
 			"jO8DM8oyego" or // sceNpEntitlementAccessInitialize
 			"TFyU+KFBv54" or // sceNpEntitlementAccessGetAddcontEntitlementInfoList
 			"27bAgiJmOh0" or // pthread_cond_timedwait

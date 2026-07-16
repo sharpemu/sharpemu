@@ -594,6 +594,20 @@ public static class SaveDataExports
     }
 
     [SysAbiExport(
+        Nid = "ZkZhskCPXFw",
+        ExportName = "sceSaveDataInitialize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataInitialize(CpuContext ctx) => SaveDataInitialize3(ctx);
+
+    [SysAbiExport(
+        Nid = "l1NmDeDpNGU",
+        ExportName = "sceSaveDataInitialize2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataInitialize2(CpuContext ctx) => SaveDataInitialize3(ctx);
+
+    [SysAbiExport(
         Nid = "dyIhnXq-0SM",
         ExportName = "sceSaveDataDirNameSearch",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -763,6 +777,195 @@ public static class SaveDataExports
                 $"mount3 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
                 $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
                 $"mount_point={mountPoint} created={!existed} root='{savePath}'");
+            return SetReturn(ctx, 0);
+        }
+        catch (IOException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (ArgumentException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "32HQAQdwM2o",
+        ExportName = "sceSaveDataMount",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataMount(CpuContext ctx)
+    {
+        var mountAddress = ctx[CpuRegister.Rdi];
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (mountAddress == 0 || resultAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadInt32(ctx, mountAddress + 0x00, out var userId) ||
+            !ctx.TryReadUInt64(mountAddress + 0x08, out var titleIdAddress) ||
+            !ctx.TryReadUInt64(mountAddress + 0x10, out var dirNameAddress) ||
+            !ctx.TryReadUInt64(mountAddress + 0x18, out var fingerprintAddress) ||
+            !ctx.TryReadUInt64(mountAddress + 0x20, out var blocks) ||
+            !TryReadUInt32(ctx, mountAddress + 0x28, out var mountMode))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        string? dirName = null;
+        if (dirNameAddress != 0 && !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out dirName))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (userId < 0 || string.IsNullOrWhiteSpace(dirName))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        try
+        {
+            string titleId;
+            if (titleIdAddress == 0)
+            {
+                titleId = ResolveConfiguredTitleId();
+            }
+            else if (!TryReadFixedAscii(ctx, titleIdAddress, SaveDataTitleIdSize, out titleId))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            var savePath = Path.Combine(
+                ResolveTitleSaveRoot(userId, titleId),
+                SanitizePathSegment(dirName));
+            var existed = Directory.Exists(savePath);
+            var create = (mountMode & MountModeCreate) != 0;
+            var createIfMissing = (mountMode & MountModeCreate2) != 0;
+
+            if (!existed && !create && !createIfMissing)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorNotFound);
+            }
+
+            if (existed && create)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorExists);
+            }
+
+            if (!existed)
+            {
+                Directory.CreateDirectory(savePath);
+            }
+
+            const string mountPoint = "/savedata0";
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
+
+            Span<byte> result = stackalloc byte[MountResultSize];
+            result.Clear();
+            WriteAscii(result[..16], mountPoint);
+            BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
+            if (!ctx.Memory.TryWrite(resultAddress, result))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            TraceSaveData(
+                $"mount user={userId} title={titleId} dir={dirName} blocks={blocks} " +
+                $"mount_mode=0x{mountMode:X} mount_point={mountPoint} created={!existed} root='{savePath}'");
+            return SetReturn(ctx, 0);
+        }
+        catch (IOException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (ArgumentException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "0z45PIH+SNI",
+        ExportName = "sceSaveDataMount2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataMount2(CpuContext ctx)
+    {
+        var mountAddress = ctx[CpuRegister.Rdi];
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (mountAddress == 0 || resultAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadInt32(ctx, mountAddress + 0x00, out var userId) ||
+            !ctx.TryReadUInt64(mountAddress + 0x08, out var dirNameAddress) ||
+            !ctx.TryReadUInt64(mountAddress + 0x10, out var blocks) ||
+            !TryReadUInt32(ctx, mountAddress + 0x18, out var mountMode))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        string? dirName = null;
+        if (dirNameAddress != 0 && !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out dirName))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (userId < 0 || string.IsNullOrWhiteSpace(dirName))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        try
+        {
+            var titleId = ResolveConfiguredTitleId();
+            var savePath = Path.Combine(
+                ResolveTitleSaveRoot(userId, titleId),
+                SanitizePathSegment(dirName));
+            var existed = Directory.Exists(savePath);
+            var create = (mountMode & MountModeCreate) != 0;
+            var createIfMissing = (mountMode & MountModeCreate2) != 0;
+
+            if (!existed && !create && !createIfMissing)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorNotFound);
+            }
+
+            if (existed && create)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorExists);
+            }
+
+            if (!existed)
+            {
+                Directory.CreateDirectory(savePath);
+            }
+
+            const string mountPoint = "/savedata0";
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
+
+            Span<byte> result = stackalloc byte[MountResultSize];
+            result.Clear();
+            WriteAscii(result[..16], mountPoint);
+            BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
+            if (!ctx.Memory.TryWrite(resultAddress, result))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            TraceSaveData(
+                $"mount2 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
+                $"mount_mode=0x{mountMode:X} mount_point={mountPoint} created={!existed} root='{savePath}'");
             return SetReturn(ctx, 0);
         }
         catch (IOException)

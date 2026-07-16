@@ -181,6 +181,30 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogProgressBarSetValue(CpuContext ctx) => ctx.SetReturn(ErrorOk);
 
+    [SysAbiExport(
+        Nid = "G5kSn8PRHGA",
+        ExportName = "sceSaveDataDialogParamInitialize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveDataDialog")]
+    public static int SaveDataDialogParamInitialize(CpuContext ctx)
+    {
+        var paramAddress = ctx[CpuRegister.Rdi];
+        if (paramAddress != 0)
+        {
+            Span<byte> zero = stackalloc byte[0x180];
+            zero.Clear();
+            _ = ctx.Memory.TryWrite(paramAddress, zero);
+        }
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "45JWahOrYpE",
+        ExportName = "sceSaveDataDialogParamInit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveDataDialog")]
+    public static int SaveDataDialogParamInit(CpuContext ctx) => SaveDataDialogParamInitialize(ctx);
+
     private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
     {
         value = 0;
