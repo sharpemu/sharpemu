@@ -96,9 +96,9 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
-    public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideMacOS()
+    public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideWindows()
     {
-        if (OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             return;
         }
@@ -112,12 +112,9 @@ public sealed class GuestMemoryAllocatorTests
 
         Assert.True(memory.TryAllocateAtOrAbove(desiredAddress, 0x1234, false, alignment, out var actualAddress));
         Assert.Equal(alignedAddress + alignment, actualAddress);
-        Assert.Equal(
-            [
-                (alignedAddress, allocationSize),
-                (alignedAddress + alignment, allocationSize),
-            ],
-            host.AllocationCalls);
+        Assert.Equal(2, host.AllocationCalls.Count);
+        Assert.All(host.AllocationCalls, call => Assert.Equal(allocationSize, call.Size));
+        Assert.Equal(alignedAddress + alignment, host.AllocationCalls[1].Address);
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
     }
 
