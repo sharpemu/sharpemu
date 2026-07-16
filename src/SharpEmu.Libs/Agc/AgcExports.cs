@@ -6398,12 +6398,23 @@ public static partial class AgcExports
     private static bool HasPixelColorExport(Gen5ShaderState state, uint target) =>
         GetPixelColorExportMask(state, target) != 0;
 
-    private static uint GetPixelColorExportMask(Gen5ShaderState state, uint target) =>
-        state.Program.Instructions
-            .Select(instruction => instruction.Control)
-            .OfType<Gen5ExportControl>()
-            .Where(export => export.Target == target)
-            .Aggregate(0u, (mask, export) => mask | (export.EnableMask & 0xFu));
+    private static uint GetPixelColorExportMask(Gen5ShaderState state, uint target)
+    {
+        // Called per render target (twice per draw via CreateRenderState +
+        // HasPixelColorExport); a manual scan avoids the per-call LINQ iterator
+        // and closure allocations. Same result as the previous
+        // Select/OfType/Where/Aggregate chain.
+        var mask = 0u;
+        foreach (var instruction in state.Program.Instructions)
+        {
+            if (instruction.Control is Gen5ExportControl export && export.Target == target)
+            {
+                mask |= export.EnableMask & 0xFu;
+            }
+        }
+
+        return mask;
+    }
 
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
