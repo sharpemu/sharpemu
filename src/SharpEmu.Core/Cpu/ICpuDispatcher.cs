@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Core.Loader;
 
 namespace SharpEmu.Core.Cpu;
 
@@ -33,7 +34,8 @@ public interface ICpuDispatcher
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string processImageName = "eboot.bin",
-        CpuExecutionOptions executionOptions = default);
+        CpuExecutionOptions executionOptions = default,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null);
 
     OrbisGen2Result DispatchModuleInitializer(
         ulong entryPoint,
@@ -41,5 +43,6 @@ public interface ICpuDispatcher
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string moduleName = "module",
-        CpuExecutionOptions executionOptions = default);
+        CpuExecutionOptions executionOptions = default,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null);
 }

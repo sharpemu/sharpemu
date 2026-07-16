@@ -234,7 +234,8 @@ public sealed class SelfLoader : ISelfLoader
             imageBase,
             _moduleManager,
             tlsModuleId,
-            out var importedRelocations);
+            out var importedRelocations,
+            out var importMetadata);
         var effectiveImportStubs = importStubs.Count == 0
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
@@ -306,7 +307,8 @@ public sealed class SelfLoader : ISelfLoader
             applicationInfo.Version,
             tlsModuleId,
             tlsInfo.MemorySize,
-            tlsInfo.StaticOffset);
+            tlsInfo.StaticOffset,
+            importMetadata);
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
@@ -549,9 +551,11 @@ public sealed class SelfLoader : ISelfLoader
         ulong imageBase,
         IModuleManager? moduleManager,
         uint tlsModuleId,
-        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations)
+        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations,
+        out IReadOnlyDictionary<string, ImportedSymbolMetadata> importMetadata)
     {
         importedRelocations = Array.Empty<ImportedSymbolRelocation>();
+        importMetadata = new Dictionary<string, ImportedSymbolMetadata>(StringComparer.Ordinal);
         if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex))
         {
             return EmptyImportStubs;
@@ -673,6 +677,10 @@ public sealed class SelfLoader : ISelfLoader
         var descriptors = new List<RelocationDescriptor>(256);
         var orderedImportNids = new List<string>(128);
         var seenImportNids = new HashSet<string>(StringComparer.Ordinal);
+        var importNames = stringTable.Length == 0
+            ? SceImportNameTables.Empty
+            : SceImportMetadataParser.Parse(dynamicTable, stringTable);
+        var discoveredImportMetadata = new Dictionary<string, ImportedSymbolMetadata>(StringComparer.Ordinal);
         AppendRelocationDescriptors(
             relocations,
             symbolTable,
@@ -682,7 +690,9 @@ public sealed class SelfLoader : ISelfLoader
             tlsModuleId,
             descriptors,
             orderedImportNids,
-            seenImportNids);
+            seenImportNids,
+            importNames,
+            discoveredImportMetadata);
 
         if (descriptors.Count == 0)
         {
@@ -695,7 +705,9 @@ public sealed class SelfLoader : ISelfLoader
                 tlsModuleId,
                 descriptors,
                 orderedImportNids,
-                seenImportNids);
+                seenImportNids,
+                importNames,
+                discoveredImportMetadata);
             if (sectionFallbackRelocCount != 0)
             {
                 Console.WriteLine(
@@ -712,6 +724,7 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         importedRelocations = BuildImportedRelocations(descriptors);
+        importMetadata = discoveredImportMetadata;
 
         var stubImportNids = orderedImportNids
             .Where(nid => ShouldCreateImportStub(nid, descriptors, moduleManager))
@@ -820,7 +833,9 @@ public sealed class SelfLoader : ISelfLoader
         uint tlsModuleId,
         ICollection<RelocationDescriptor> descriptors,
         IList<string> orderedImportNids,
-        ISet<string> seenImportNids)
+        ISet<string> seenImportNids,
+        SceImportNameTables importNames,
+        IDictionary<string, ImportedSymbolMetadata> importMetadata)
     {
         if (elfHeader.SectionHeaderOffset == 0 ||
             elfHeader.SectionHeaderCount == 0 ||
@@ -875,7 +890,9 @@ public sealed class SelfLoader : ISelfLoader
                 tlsModuleId,
                 descriptors,
                 orderedImportNids,
-                seenImportNids);
+                seenImportNids,
+                importNames,
+                importMetadata);
             appendedRelocations += relocations.Count;
         }
 
@@ -891,7 +908,9 @@ public sealed class SelfLoader : ISelfLoader
         uint tlsModuleId,
         ICollection<RelocationDescriptor> descriptors,
         IList<string> orderedImportNids,
-        ISet<string> seenImportNids)
+        ISet<string> seenImportNids,
+        SceImportNameTables importNames,
+        IDictionary<string, ImportedSymbolMetadata> importMetadata)
     {
         foreach (var relocation in relocations)
         {
@@ -1091,7 +1110,7 @@ public sealed class SelfLoader : ISelfLoader
                 continue;
             }
 
-            var nid = ExtractNid(symbolName);
+            var nid = SceImportMetadataParser.ExtractNid(symbolName);
             if (string.IsNullOrWhiteSpace(nid))
             {
                 if (symbolBind == SymbolBindWeak)
@@ -1110,6 +1129,12 @@ public sealed class SelfLoader : ISelfLoader
             if (seenImportNids.Add(nid))
             {
                 orderedImportNids.Add(nid);
+            }
+
+            if (!importMetadata.ContainsKey(nid) &&
+                SceImportMetadataParser.TryResolve(symbolName, importNames, out _, out var metadata))
+            {
+                importMetadata[nid] = metadata;
             }
 
             descriptors.Add(CreateSymbolRelocationDescriptor(

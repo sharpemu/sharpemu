@@ -41,6 +41,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public string Nid { get; }
 
+		public ImportedSymbolMetadata Metadata { get; }
+
 		public ExportedFunction? Export { get; }
 
 		// Precomputed per-import classification: DispatchImport runs for
@@ -59,6 +61,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public ImportStubEntry(
 			ulong address,
 			string nid,
+			ImportedSymbolMetadata metadata,
 			ExportedFunction? export,
 			bool isLeaf,
 			bool isNoBlockLeaf,
@@ -68,6 +71,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			Address = address;
 			Nid = nid;
+			Metadata = metadata;
 			Export = export;
 			IsLeaf = isLeaf;
 			IsNoBlockLeaf = isNoBlockLeaf;
@@ -1043,7 +1047,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		SetupExceptionHandler();
 	}
 
-	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
+	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ImportedSymbolMetadata> importMetadata, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
 	{
 		Console.Error.WriteLine("[LOADER][INFO] === Execute START ===");
 		Console.Error.WriteLine($"[LOADER][INFO] EntryPoint: 0x{entryPoint:X16}, ImportStubs: {importStubs.Count}");
@@ -1116,7 +1120,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		GuestThreadExecution.Scheduler = this;
 		try
 		{
-			if (!SetupImportStubs(importStubs))
+			if (!SetupImportStubs(importStubs, importMetadata))
 			{
 				if (string.IsNullOrEmpty(LastError))
 				{
@@ -1154,7 +1158,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine($"[LOADER][INFO] {LastError}");
 	}
 
-	private bool SetupImportStubs(IReadOnlyDictionary<ulong, string> importStubs)
+	private bool SetupImportStubs(
+		IReadOnlyDictionary<ulong, string> importStubs,
+		IReadOnlyDictionary<string, ImportedSymbolMetadata> importMetadata)
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] Setting up {importStubs.Count} import stubs...");
 		ClearImportHandlerTrampolines();
@@ -1166,9 +1172,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		foreach (var (num4, text2) in importStubs)
 		{
 			_ = _moduleManager.TryGetExport(text2, out var resolvedExport);
+			importMetadata.TryGetValue(text2, out var metadata);
 			_importEntries[num] = new ImportStubEntry(
 				num4,
 				text2,
+				metadata,
 				resolvedExport,
 				IsLeafImport(text2),
 				IsNoBlockLeafImport(text2),

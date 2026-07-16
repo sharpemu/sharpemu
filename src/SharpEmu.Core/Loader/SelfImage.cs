@@ -27,7 +27,8 @@ public sealed class SelfImage
         string? version = null,
         uint tlsModuleId = 0,
         ulong tlsMemorySize = 0,
-        ulong tlsStaticOffset = 0)
+        ulong tlsStaticOffset = 0,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null)
     {
         ArgumentNullException.ThrowIfNull(programHeaders);
         ArgumentNullException.ThrowIfNull(mappedRegions);
@@ -37,6 +38,7 @@ public sealed class SelfImage
         ProgramHeaders = programHeaders;
         MappedRegions = mappedRegions;
         ImportStubs = importStubs ?? new Dictionary<ulong, string>();
+        ImportMetadata = importMetadata ?? new Dictionary<string, ImportedSymbolMetadata>(StringComparer.Ordinal);
         RuntimeSymbols = runtimeSymbols ?? new Dictionary<string, ulong>(StringComparer.Ordinal);
         ImportedRelocations = importedRelocations ?? Array.Empty<ImportedSymbolRelocation>();
         PreInitializerFunctions = preInitializerFunctions ?? Array.Empty<ulong>();
@@ -61,6 +63,8 @@ public sealed class SelfImage
     public IReadOnlyList<VirtualMemoryRegion> MappedRegions { get; }
 
     public IReadOnlyDictionary<ulong, string> ImportStubs { get; }
+
+    public IReadOnlyDictionary<string, ImportedSymbolMetadata> ImportMetadata { get; }
 
     public IReadOnlyDictionary<string, ulong> RuntimeSymbols { get; }
 

@@ -85,14 +85,15 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string processImageName = "eboot.bin",
-        CpuExecutionOptions executionOptions = default)
+        CpuExecutionOptions executionOptions = default,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null)
     {
         Console.Error.WriteLine("[DISPATCHER] === DispatchEntry START ===");
         Console.Error.WriteLine($"[DISPATCHER] entryPoint=0x{entryPoint:X16}, generation={generation}");
 
         try
         {
-            return DispatchEntryCore(entryPoint, generation, importStubs, runtimeSymbols, processImageName, executionOptions);
+            return DispatchEntryCore(entryPoint, generation, importStubs, importMetadata, runtimeSymbols, processImageName, executionOptions);
         }
         catch (Exception ex)
         {
@@ -108,7 +109,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string moduleName = "module",
-        CpuExecutionOptions executionOptions = default)
+        CpuExecutionOptions executionOptions = default,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null)
     {
         Console.Error.WriteLine("[DISPATCHER] === DispatchModuleInitializer START ===");
         Console.Error.WriteLine($"[DISPATCHER] moduleInit=0x{entryPoint:X16}, generation={generation}, module={moduleName}");
@@ -119,6 +121,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 entryPoint,
                 generation,
                 importStubs,
+                importMetadata,
                 runtimeSymbols,
                 moduleName,
                 executionOptions,
@@ -136,6 +139,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         ulong entryPoint,
         Generation generation,
         IReadOnlyDictionary<ulong, string>? importStubs = null,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata>? importMetadata = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string processImageName = "eboot.bin",
         CpuExecutionOptions executionOptions = default,
@@ -214,6 +218,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         var effectiveImportStubs = importStubs is null
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
+        var effectiveImportMetadata = importMetadata is null
+            ? new Dictionary<string, ImportedSymbolMetadata>(StringComparer.Ordinal)
+            : new Dictionary<string, ImportedSymbolMetadata>(importMetadata, StringComparer.Ordinal);
         var entryParamsConfigured = false;
         if (frameKind == EntryFrameKind.ProcessEntry)
         {
@@ -278,6 +285,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 entryPoint,
                 generation,
                 effectiveImportStubs,
+                effectiveImportMetadata,
                 runtimeSymbols ?? new Dictionary<string, ulong>(StringComparer.Ordinal),
                 executionOptions,
                 out var nativeResult))

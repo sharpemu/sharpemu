@@ -148,6 +148,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
         var activeImportStubs = new Dictionary<ulong, string>(image.ImportStubs);
+        var activeImportMetadata = new Dictionary<string, ImportedSymbolMetadata>(image.ImportMetadata, StringComparer.Ordinal);
         var activeRuntimeSymbols = new Dictionary<string, ulong>(image.RuntimeSymbols, StringComparer.Ordinal);
         var processImageName = Path.GetFileName(ebootPath);
         if (string.IsNullOrWhiteSpace(processImageName))
@@ -157,13 +158,18 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(
+            ebootPath,
+            activeImportStubs,
+            activeImportMetadata,
+            activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,
             generation,
             activeImportStubs,
+            activeImportMetadata,
             activeRuntimeSymbols,
             processImageName);
         if (initializerResult is { } failedInitializerResult)
@@ -185,7 +191,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             activeImportStubs,
             activeRuntimeSymbols,
             processImageName,
-            _cpuExecutionOptions);
+            _cpuExecutionOptions,
+            activeImportMetadata);
 
         Console.Error.WriteLine($"[RUNTIME] DispatchEntry returned: {result}");
         Console.Error.WriteLine($"[RUNTIME] Dispatch result: {result}");
@@ -413,6 +420,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyList<LoadedModuleImage> loadedModuleImages,
         Generation generation,
         IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata> activeImportMetadata,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
         string processImageName)
     {
@@ -420,6 +428,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             loadedModuleImages,
             generation,
             activeImportStubs,
+            activeImportMetadata,
             activeRuntimeSymbols);
         if (moduleStartResult is not null)
         {
@@ -486,6 +495,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyList<LoadedModuleImage> loadedModuleImages,
         Generation generation,
         IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata> activeImportMetadata,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
     {
         for (var i = 0; i < loadedModuleImages.Count; i++)
@@ -522,7 +532,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 activeImportStubs,
                 activeRuntimeSymbols,
                 moduleName,
-                _cpuExecutionOptions);
+                _cpuExecutionOptions,
+                activeImportMetadata);
             KernelModuleRegistry.CompleteModuleStart(
                 loadedModule.Handle,
                 result == OrbisGen2Result.ORBIS_GEN2_OK);
@@ -542,6 +553,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         SelfImage image,
         Generation generation,
         IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata> activeImportMetadata,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
         string processImageName)
     {
@@ -558,6 +570,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             image.PreInitializerFunctions,
             generation,
             activeImportStubs,
+            activeImportMetadata,
             activeRuntimeSymbols,
             processImageName);
         if (result is not null)
@@ -570,6 +583,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             image.InitializerFunctions,
             generation,
             activeImportStubs,
+            activeImportMetadata,
             activeRuntimeSymbols,
             processImageName);
     }
@@ -579,6 +593,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IReadOnlyList<ulong> initializerFunctions,
         Generation generation,
         IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata> activeImportMetadata,
         IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
         string processImageName)
     {
@@ -599,7 +614,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 activeImportStubs,
                 activeRuntimeSymbols,
                 processImageName,
-                _cpuExecutionOptions);
+                _cpuExecutionOptions,
+                activeImportMetadata);
             if (result != OrbisGen2Result.ORBIS_GEN2_OK)
             {
                 return result;
@@ -612,6 +628,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private List<LoadedModuleImage> LoadAdjacentSceModules(
         string ebootPath,
         IDictionary<ulong, string> importStubs,
+        IDictionary<string, ImportedSymbolMetadata> importMetadata,
         IDictionary<string, ulong> runtimeSymbols)
     {
         var loadedImages = new List<LoadedModuleImage>();
@@ -706,6 +723,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     Path.GetDirectoryName(modulePath));
 
                 mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
+                MergeImportMetadata(importMetadata, moduleImage.ImportMetadata, modulePath);
                 mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
                 InstallNativePluginCompatibilityHooks(importStubs, moduleImage, modulePath);
                 var moduleHandle = RegisterLoadedModule(modulePath, moduleImage, isMain: false, isSystemModule: false);
@@ -874,6 +892,29 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         return added;
+    }
+
+    private static void MergeImportMetadata(
+        IDictionary<string, ImportedSymbolMetadata> destination,
+        IReadOnlyDictionary<string, ImportedSymbolMetadata> source,
+        string modulePath)
+    {
+        foreach (var (nid, metadata) in source)
+        {
+            if (destination.TryGetValue(nid, out var existing))
+            {
+                if (existing != metadata)
+                {
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Import metadata conflict for {nid}: keep={existing.LibraryName}/{existing.ModuleName}, " +
+                        $"skip={metadata.LibraryName}/{metadata.ModuleName} ({Path.GetFileName(modulePath)})");
+                }
+
+                continue;
+            }
+
+            destination[nid] = metadata;
+        }
     }
 
     private static int MergeRuntimeSymbols(
