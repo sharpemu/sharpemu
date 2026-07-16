@@ -75,7 +75,9 @@ internal static class Gen5ComputeFixtures
         StoreBackingBytes: 64);
 
     // Control flow through the PC dispatcher: a scalar loop counting down from 5,
-    // accumulating into v1, with the result stored to buffer 0.
+    // accumulating 5+4+3+2+1 = 15 into v1, with the result stored to buffer 0.
+    // (s_sub_i32's SCC is signed overflow, so the loop condition needs an
+    // explicit s_cmp_lg_u32 — which also exercises the scalar-compare path.)
     public static readonly Gen5ComputeFixture Loop = new(
         "loop",
         [
@@ -84,7 +86,8 @@ internal static class Gen5ComputeFixtures
             // loop: (pc=0x8)
             0x4A020200,             // v_add_nc_u32 v1, s0, v1
             0x81808100,             // s_sub_i32 s0, s0, 1 (inline +1 = 0x81)
-            0xBF85FFFD,             // s_cbranch_scc1 loop
+            0xBF078000,             // s_cmp_lg_u32 s0, 0
+            0xBF85FFFC,             // s_cbranch_scc1 loop
             0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
             0xBF810000,             // s_endpgm
         ],
