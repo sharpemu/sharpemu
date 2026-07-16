@@ -1707,11 +1707,11 @@ internal static unsafe class VulkanVideoPresenter
 
     private static void RunHeadless()
     {
-        // Headless mode: consume presentation frames without displaying them.
-        // This allows the game to run without a GPU/Vulkan driver.
-        // Frames are optionally saved to disk if SHARPEMU_DUMP_FRAMES=1.
         var dumpFrames = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FRAMES"),
+            "1", StringComparison.Ordinal) ||
+            string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_CAPTURE"),
             "1", StringComparison.Ordinal);
         var frameCount = 0;
         var dumpDir = "/home/z/my-project/download/frames";
@@ -1740,6 +1740,9 @@ internal static unsafe class VulkanVideoPresenter
                 if (presentation != null)
                 {
                     frameCount++;
+                    SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                        $"Frame #{frameCount}", $"seq={presentation.Value.Sequence} {presentation.Value.Width}x{presentation.Value.Height}");
+
                     if (frameCount <= 10 || frameCount % 100 == 0)
                     {
                         Console.Error.WriteLine(
@@ -1747,11 +1750,20 @@ internal static unsafe class VulkanVideoPresenter
                             $"w={presentation.Value.Width} h={presentation.Value.Height}");
                     }
 
-                    if (dumpFrames && frameCount <= 5)
+                    if (dumpFrames && frameCount <= 10)
                     {
-                        // Could save frame to PNG here
-                        Console.Error.WriteLine(
-                            $"[HEADLESS] Would save frame#{frameCount} to {dumpDir}/frame_{frameCount}.raw");
+                        try
+                        {
+                            // Save raw frame data
+                            var rawPath = Path.Combine(dumpDir, $"frame_{frameCount:D4}.raw");
+                            Console.Error.WriteLine($"[HEADLESS] Saving frame#{frameCount} to {rawPath}");
+                            SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                                $"Frame Capture", $"saved to {rawPath}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"[HEADLESS] Frame save failed: {ex.Message}");
+                        }
                     }
                 }
             }
@@ -1763,6 +1775,8 @@ internal static unsafe class VulkanVideoPresenter
         finally
         {
             Console.Error.WriteLine($"[HEADLESS] Total frames consumed: {frameCount}");
+            SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                "Headless Exit", $"frames={frameCount}");
             lock (_gate)
             {
                 _closed = true;

@@ -430,4 +430,28 @@ public static class LibcInternalExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // Unknown NID: dZGYu5wObJs — not in aerolib, likely game-internal
+    [SysAbiExport(
+        Nid = "dZGYu5wObJs",
+        ExportName = "unknown_dZGYu5wObJs",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libunity")]
+    public static int UnknownNid1(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Unknown NID: zlqfTyrQSPk — not in aerolib, called in a loop (likely logging)
+    [SysAbiExport(
+        Nid = "zlqfTyrQSPk",
+        ExportName = "unknown_zlqfTyrQSPk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libunity")]
+    public static int UnknownNid2(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

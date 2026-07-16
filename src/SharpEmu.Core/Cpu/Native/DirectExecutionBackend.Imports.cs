@@ -2162,18 +2162,60 @@ public sealed partial class DirectExecutionBackend
                         return true;
                 }
 
-                // Fallback: return a fake function pointer for all il2cpp_* symbols.
-                // The game will call this pointer, which hits an unresolved import stub
-                // and returns 0 (success). This allows the game to proceed past
-                // IL2CPP initialization.
-                if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal))
+                // Fallback: return a fake function pointer for ALL symbols looked up
+                // via il2cpp_api_lookup_symbol.
+                // For il2cpp_resolve_icall: return a stub that returns the unresolved
+                // return stub address (so the game gets a callable non-NULL pointer).
+                // For all others: return the unresolved return stub (returns 0).
+                if (_unresolvedReturnStub != 0)
                 {
-                        address = _unresolvedReturnStub != 0 ? (ulong)_unresolvedReturnStub : 0x10000;
-                        Console.Error.WriteLine($"[HLE][IL2CPP] Resolved '{symbolName}' -> 0x{address:X16} (stub)");
+                        if (symbolName == "il2cpp_resolve_icall" || symbolName.Contains("resolve_icall"))
+                        {
+                                // Create or reuse a stub that returns the unresolved return stub address
+                                address = GetResolveIcallStub((ulong)_unresolvedReturnStub);
+                                if (!_loggedIl2cppSymbols.Contains(symbolName))
+                                {
+                                        _loggedIl2cppSymbols.Add(symbolName);
+                                        Console.Error.WriteLine($"[HLE][IL2CPP] Resolved '{symbolName}' -> 0x{address:X16} (returns stub ptr)");
+                                }
+                                return true;
+                        }
+                        address = (ulong)_unresolvedReturnStub;
+                        if (!_loggedIl2cppSymbols.Contains(symbolName))
+                        {
+                                _loggedIl2cppSymbols.Add(symbolName);
+                                Console.Error.WriteLine($"[HLE][IL2CPP] Resolved '{symbolName}' -> 0x{address:X16} (stub)");
+                        }
                         return true;
                 }
 
                 return false;
+        }
+
+        private static readonly HashSet<string> _loggedIl2cppSymbols = new();
+
+        private static ulong _resolveIcallStub;
+        /// <summary>
+        /// Creates a native stub that returns the given address in RAX.
+        /// Used for il2cpp_resolve_icall: the game calls this, gets a non-NULL
+        /// function pointer back, and can safely call it later.
+        /// Code: mov rax, <addr>; ret  (10 bytes)
+        /// </summary>
+        private unsafe static ulong GetResolveIcallStub(ulong returnAddress)
+        {
+                if (_resolveIcallStub != 0) return _resolveIcallStub;
+                void* ptr = VirtualAlloc(null, 4096u, 12288u, 64u);
+                if (ptr == null) return 0;
+                byte* p = (byte*)ptr;
+                p[0] = 0x48; p[1] = 0xB8; // mov rax, imm64
+                *(ulong*)(p + 2) = returnAddress;
+                p[10] = 0xC3; // ret
+                uint old = 0;
+                VirtualProtect(ptr, 4096u, 32u, &old);
+                FlushInstructionCache(GetCurrentProcess(), ptr, 16u);
+                _resolveIcallStub = (ulong)ptr;
+                Console.Error.WriteLine($"[HLE][IL2CPP] resolve_icall stub at 0x{_resolveIcallStub:X16} (returns 0x{returnAddress:X16})");
+                return _resolveIcallStub;
         }
 
         private OrbisGen2Result DispatchBootstrapBridge()
