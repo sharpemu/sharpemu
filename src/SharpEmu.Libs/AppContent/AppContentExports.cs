@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
+using SharpEmu.GameContent;
 
 namespace SharpEmu.Libs.AppContent;
 
@@ -130,6 +131,33 @@ public static class AppContentExports
         }
 
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        var mounted = GameFileSystemMount.Current;
+        if (mounted is not null)
+        {
+            const string mountedPath = "sce_sys/param.json";
+            if (!mounted.FileSystem.TryGetEntry(mountedPath, out var mountedEntry) || !mountedEntry.IsFile)
+            {
+                return true;
+            }
+
+            try
+            {
+                using var mountedStream = mounted.FileSystem.OpenRead(mountedPath);
+                using var mountedDocument = JsonDocument.Parse(mountedStream);
+                var propertyName = $"userDefinedParam{paramId}";
+                if (mountedDocument.RootElement.TryGetProperty(propertyName, out var element) &&
+                    element.TryGetInt32(out var parsedValue))
+                {
+                    value = parsedValue;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or JsonException)
+            {
+            }
+
+            return true;
+        }
+
         if (string.IsNullOrWhiteSpace(app0Root))
         {
             return true;
@@ -188,9 +216,10 @@ public static class AppContentExports
         }
 
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
-        var appName = string.IsNullOrWhiteSpace(app0Root)
-            ? "default"
-            : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
+        var appName = GameFileSystemMount.Current?.DisplayName ??
+            (string.IsNullOrWhiteSpace(app0Root)
+                ? "default"
+                : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root)));
         if (string.IsNullOrWhiteSpace(appName))
         {
             appName = "default";

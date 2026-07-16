@@ -10,6 +10,7 @@ using System.Linq;
 using SharpEmu.Core;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Memory;
+using SharpEmu.GameContent;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Loader;
@@ -106,7 +107,7 @@ public sealed class SelfLoader : ISelfLoader
         return Load(imageData, virtualMemory, fs: null, mountRoot: null);
     }
 
-    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IFileSystem? fs, string? mountRoot)
+    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IReadOnlyGameFileSystem? fs, string? mountRoot)
     {
         return LoadCore(
             imageData,
@@ -122,7 +123,7 @@ public sealed class SelfLoader : ISelfLoader
         return Load(imageData, virtualMemory, moduleManager, fs: null, mountRoot: null);
     }
 
-    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot)
+    public SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IReadOnlyGameFileSystem? fs, string? mountRoot)
     {
         _moduleManager = moduleManager;
         return LoadCore(
@@ -134,7 +135,7 @@ public sealed class SelfLoader : ISelfLoader
             readParamJson: true);
     }
 
-    public SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot)
+    public SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IReadOnlyGameFileSystem? fs, string? mountRoot)
     {
         _moduleManager = moduleManager;
         return LoadCore(
@@ -149,7 +150,7 @@ public sealed class SelfLoader : ISelfLoader
     private SelfImage LoadCore(
         ReadOnlySpan<byte> imageData,
         IVirtualMemory virtualMemory,
-        IFileSystem? fs,
+        IReadOnlyGameFileSystem? fs,
         string? mountRoot,
         bool clearVirtualMemory,
         bool readParamJson)
@@ -310,7 +311,7 @@ public sealed class SelfLoader : ISelfLoader
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
-        IFileSystem? fs,
+        IReadOnlyGameFileSystem? fs,
         string? mountRoot)
     {
         if (fs == null)
@@ -326,7 +327,7 @@ public sealed class SelfLoader : ISelfLoader
         string? foundPath = null;
         foreach (var path in possiblePaths)
         {
-            if (fs.Exists(path))
+            if (fs.TryGetEntry(path, out var entry) && entry.IsFile)
             {
                 foundPath = path;
                 break;

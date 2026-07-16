@@ -4,6 +4,7 @@
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
 using SharpEmu.GUI;
+using SharpEmu.GameContent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
@@ -249,7 +250,7 @@ internal static partial class Program
 
         if (!File.Exists(ebootPath))
         {
-            Log.Error($"EBOOT file was not found: {ebootPath}");
+            Log.Error($"Game source was not found: {ebootPath}");
             return 2;
         }
 
@@ -653,35 +654,8 @@ internal static partial class Program
 
         try
         {
-            var directory = Path.GetDirectoryName(Path.GetFullPath(ebootPath));
-            if (string.IsNullOrEmpty(directory))
-            {
-                return null;
-            }
-
-            foreach (var paramPath in new[]
-            {
-                Path.Combine(directory, "sce_sys", "param.json"),
-                Path.Combine(directory, "param.json"),
-            })
-            {
-                if (!File.Exists(paramPath))
-                {
-                    continue;
-                }
-
-                using var stream = File.OpenRead(paramPath);
-                using var document = JsonDocument.Parse(stream);
-                if (document.RootElement.TryGetProperty("titleId", out var titleIdElement) &&
-                    titleIdElement.ValueKind == JsonValueKind.String)
-                {
-                    var titleId = titleIdElement.GetString();
-                    if (!string.IsNullOrWhiteSpace(titleId))
-                    {
-                        return titleId.Trim();
-                    }
-                }
-            }
+            using var source = GameSource.Open(ebootPath);
+            return GameMetadataReader.Read(source.FileSystem).TitleId?.Trim();
         }
         catch
         {
@@ -931,8 +905,8 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] <path-to-eboot.bin>");
-        Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] <path-to-eboot.bin-or-game.zar>");
+        Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\Example.zar""");
     }
 
     private static bool TryParseArguments(

@@ -15,11 +15,11 @@ using Avalonia.VisualTree;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Logging;
+using SharpEmu.GameContent;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Reflection;
-using System.Text.Json;
 using System.Net.Http.Headers;
 
 namespace SharpEmu.GUI;
@@ -1001,7 +1001,8 @@ public partial class MainWindow : Window
 
                 try
                 {
-                    using var stream = File.OpenRead(game.CoverPath);
+                    using var source = GameSource.Open(game.Path);
+                    using var stream = source.FileSystem.OpenRead(game.CoverPath);
                     var bitmap = Bitmap.DecodeToWidth(stream, 312);
                     Dispatcher.UIThread.Post(() =>
                     {
@@ -1043,33 +1044,17 @@ public partial class MainWindow : Window
     /// Totals the size of the game's install folder (the directory holding
     /// the eboot), which is far more accurate than the eboot alone.
     /// </summary>
-    private static long ComputeInstallSize(string ebootPath)
+    private static long ComputeInstallSize(string sourcePath)
     {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return 0;
-        }
-
-        long total = 0;
         try
         {
-            var enumeration = new EnumerationOptions
-            {
-                IgnoreInaccessible = true,
-                RecurseSubdirectories = true,
-            };
-            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", enumeration))
-            {
-                total += file.Length;
-            }
+            using var source = GameSource.Open(sourcePath);
+            return source.GetStorageSize();
         }
         catch (Exception)
         {
-            // Fall back to whatever was accumulated so far.
+            return 0;
         }
-
-        return total;
     }
 
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
@@ -1092,27 +1077,41 @@ public partial class MainWindow : Window
 
             try
             {
-                foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration))
+                foreach (var file in Directory.EnumerateFiles(folder, "*", enumeration))
                 {
+                    if (!string.Equals(Path.GetFileName(file), "eboot.bin", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(Path.GetExtension(file), ".zar", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     var fullPath = Path.GetFullPath(file);
                     if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
                     {
                         continue;
                     }
 
-                    long size = 0;
                     try
                     {
-                        size = new FileInfo(fullPath).Length;
+                        using var source = GameSource.Open(fullPath);
+                        var metadata = GameMetadataReader.Read(source.FileSystem);
+                        var executableSize = source.FileSystem.TryGetEntry(source.ExecutablePath, out var executable)
+                            ? executable.Length
+                            : 0;
+                        var initialSize = source.IsArchive ? new FileInfo(fullPath).Length : executableSize;
+                        games.Add(new GameEntry(
+                            metadata.Title ?? source.DisplayName,
+                            metadata.TitleId,
+                            metadata.Version,
+                            fullPath,
+                            initialSize,
+                            FindAsset(source.FileSystem, "icon0.png", "pic0.png"),
+                            FindAsset(source.FileSystem, "pic0.png", "pic1.png")));
                     }
-                    catch (IOException)
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
                     {
+                        // Skip malformed archives and inaccessible games.
                     }
-
-                    var (title, titleId, version) = TryReadParamJson(fullPath);
-                    games.Add(new GameEntry(
-                        title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
-                        FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
                 }
             }
             catch (Exception)
@@ -1125,145 +1124,18 @@ public partial class MainWindow : Window
         return games;
     }
 
-    /// <summary>
-    /// Reads the game title, title id and content version from
-    /// sce_sys/param.json next to the executable, when present.
-    /// </summary>
-    private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string ebootPath)
+    private static string? FindAsset(IReadOnlyGameFileSystem fileSystem, params string[] names)
     {
-        try
+        foreach (var name in names)
         {
-            var directory = Path.GetDirectoryName(ebootPath);
-            if (directory is null)
+            var path = $"sce_sys/{name}";
+            if (fileSystem.TryGetEntry(path, out var entry) && entry.IsFile)
             {
-                return (null, null, null);
-            }
-
-            var paramPath = Path.Combine(directory, "sce_sys", "param.json");
-            if (!File.Exists(paramPath))
-            {
-                return (null, null, null);
-            }
-
-            // ReadAllText handles a UTF-8 BOM, which JsonDocument rejects in
-            // raw bytes.
-            using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
-            var root = document.RootElement;
-
-            string? titleId = null;
-            if (root.TryGetProperty("titleId", out var idElement) && idElement.ValueKind == JsonValueKind.String)
-            {
-                titleId = idElement.GetString();
-            }
-
-            // contentVersion carries the installed app version
-            // ("01.000.000"); masterVersion is the fallback on older dumps.
-            string? version = null;
-            if (root.TryGetProperty("contentVersion", out var versionElement) &&
-                versionElement.ValueKind == JsonValueKind.String)
-            {
-                version = versionElement.GetString();
-            }
-            else if (root.TryGetProperty("masterVersion", out var masterElement) &&
-                     masterElement.ValueKind == JsonValueKind.String)
-            {
-                version = masterElement.GetString();
-            }
-
-            string? title = null;
-            if (root.TryGetProperty("localizedParameters", out var localized) &&
-                localized.ValueKind == JsonValueKind.Object)
-            {
-                if (localized.TryGetProperty("defaultLanguage", out var language) &&
-                    language.ValueKind == JsonValueKind.String &&
-                    localized.TryGetProperty(language.GetString()!, out var defaultBlock) &&
-                    defaultBlock.ValueKind == JsonValueKind.Object &&
-                    defaultBlock.TryGetProperty("titleName", out var titleName) &&
-                    titleName.ValueKind == JsonValueKind.String)
-                {
-                    title = titleName.GetString();
-                }
-                else
-                {
-                    foreach (var property in localized.EnumerateObject())
-                    {
-                        if (property.Value.ValueKind == JsonValueKind.Object &&
-                            property.Value.TryGetProperty("titleName", out var anyTitleName) &&
-                            anyTitleName.ValueKind == JsonValueKind.String)
-                        {
-                            title = anyTitleName.GetString();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            return (
-                string.IsNullOrWhiteSpace(title) ? null : title,
-                string.IsNullOrWhiteSpace(titleId) ? null : titleId,
-                string.IsNullOrWhiteSpace(version) ? null : version.Trim());
-        }
-        catch (Exception)
-        {
-            return (null, null, null);
-        }
-    }
-
-    /// <summary>
-    /// Finds the cover art shipped with the game: sce_sys/icon0.png next to
-    /// the executable (falling back to pic0.png).
-    /// </summary>
-    private static string? FindCoverFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "icon0.png", "pic0.png" })
-        {
-            var coverPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(coverPath))
-            {
-                return coverPath;
+                return path;
             }
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Finds the key art shipped with the game (sce_sys/pic0.png, falling
-    /// back to pic1.png), used as the window backdrop when selected.
-    /// </summary>
-    private static string? FindBackgroundFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "pic0.png", "pic1.png" })
-        {
-            var backgroundPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(backgroundPath))
-            {
-                return backgroundPath;
-            }
-        }
-
-        return null;
-    }
-
-    private static string GameNameFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        var name = directory is not null ? Path.GetFileName(directory) : null;
-        return string.IsNullOrEmpty(name) ? Path.GetFileName(ebootPath) : name;
     }
 
     // ---- Game context menu ----
@@ -1458,8 +1330,19 @@ public partial class MainWindow : Window
             return;
         }
 
-        var directory = Path.GetDirectoryName(game.Path);
-        var sndPath = directory is null ? null : Path.Combine(directory, "sce_sys", "snd0.at9");
+        string? sndPath = null;
+        try
+        {
+            using var source = GameSource.Open(game.Path);
+            if (source.PhysicalRootPath is not null)
+            {
+                sndPath = Path.Combine(source.PhysicalRootPath, "sce_sys", "snd0.at9");
+            }
+        }
+        catch (Exception)
+        {
+        }
+
         if (sndPath is not null && File.Exists(sndPath))
         {
             _sndPreview.Play(sndPath);
@@ -1521,7 +1404,8 @@ public partial class MainWindow : Window
                 var path = game.BackgroundPath;
                 game.Background = await Task.Run(() =>
                 {
-                    using var stream = File.OpenRead(path);
+                    using var source = GameSource.Open(game.Path);
+                    using var stream = source.FileSystem.OpenRead(path);
                     return Bitmap.DecodeToWidth(stream, 1600);
                 });
             }
@@ -1549,7 +1433,7 @@ public partial class MainWindow : Window
             FileTypeFilter = new[]
             {
                 new FilePickerFileType(Localization.Instance.Get("Dialog.PsExecutables"))
-                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf" } },
+                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar" } },
                 FilePickerFileTypes.All,
             },
         });

@@ -2,24 +2,30 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using SharpEmu.GameContent;
 
 namespace SharpEmu.Libs.Ampr;
 
 internal static class AmprFileRegistry
 {
-    private static readonly ConcurrentDictionary<uint, string> _hostPathsById = new();
+    private static readonly ConcurrentDictionary<uint, RegisteredFile> _filesById = new();
 
-    public static uint Register(string guestPath, string hostPath)
+    public static uint RegisterHost(string guestPath, string hostPath)
     {
         var id = ComputeFileId(guestPath);
-        _hostPathsById[id] = hostPath;
+        _filesById[id] = new RegisteredFile(hostPath, IsMountedGame: false);
         return id;
     }
 
-    public static bool TryGetHostPath(uint id, out string hostPath)
+    public static uint RegisterGame(string guestPath, string gamePath)
     {
-        return _hostPathsById.TryGetValue(id, out hostPath!);
+        var id = ComputeFileId(guestPath);
+        _filesById[id] = new RegisteredFile(gamePath, IsMountedGame: true);
+        return id;
     }
+
+    public static bool TryGetFile(uint id, out RegisteredFile file) =>
+        _filesById.TryGetValue(id, out file!);
 
     internal static uint ComputeFileId(string guestPath)
     {
@@ -36,5 +42,26 @@ internal static class AmprFileRegistry
         }
 
         return hash;
+    }
+
+    internal sealed record RegisteredFile(string Path, bool IsMountedGame)
+    {
+        public Stream OpenRead()
+        {
+            if (!IsMountedGame)
+            {
+                return new FileStream(
+                    Path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 1024 * 1024,
+                    FileOptions.RandomAccess);
+            }
+
+            var mount = GameFileSystemMount.Current
+                ?? throw new IOException("The game filesystem is not mounted.");
+            return mount.FileSystem.OpenRead(Path);
+        }
     }
 }

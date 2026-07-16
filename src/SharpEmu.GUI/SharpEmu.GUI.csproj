@@ -17,6 +17,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <!-- Dependency-free; provides the BuildInfo provenance shown in the
        title bar. -->
   <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.GameContent\SharpEmu.GameContent.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
   </ItemGroup>
 

@@ -91,7 +91,7 @@
   "Console.WindowTitle": "SharpEmu Console",
 
   "Launch.NoGameSelected": "No game selected",
-  "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
+  "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin or .zar directly.",
   "Launch.Idle": "Idle",
   "Launch.Console": "≡ Console",
   "Launch.Launch": "▶  Launch",
@@ -132,8 +132,8 @@
   "Discord.Browsing": "Browsing the library",
 
   "Dialog.ChooseGameFolder": "Choose a folder containing games",
-  "Dialog.OpenExecutable": "Open an executable to launch",
-  "Dialog.PsExecutables": "PS executables",
+  "Dialog.OpenExecutable": "Open a game to launch",
+  "Dialog.PsExecutables": "PS executables and ZArchives",
   "Dialog.SaveLogFile": "Select where to save the Log file",
   "Dialog.PlainTextFiles": "Plain Text Files",
   "Dialog.LogFiles": "Log Files",

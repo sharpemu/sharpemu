@@ -4,6 +4,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using SharpEmu.GameContent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
@@ -16,7 +17,7 @@ public static class LibcStdioExports
     private const int ReadChunkSize = 1024 * 1024;
     private const ulong GuestFileObjectSize = 0x100;
 
-    private static readonly ConcurrentDictionary<ulong, FileStream> _fileHandles = new();
+    private static readonly ConcurrentDictionary<ulong, Stream> _fileHandles = new();
 
     private static readonly bool _traceStdio =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STDIO"), "1", StringComparison.Ordinal);
@@ -90,7 +91,7 @@ public static class LibcStdioExports
                 }
             }
 
-            var stream = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            var stream = OpenGuestStream(guestPath, hostPath, fileMode, fileAccess);
             if (mode.StartsWith('a') && fileAccess == FileAccess.ReadWrite)
             {
                 stream.Seek(0, SeekOrigin.End);
@@ -677,7 +678,7 @@ public static class LibcStdioExports
                 }
             }
 
-            var stream = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            var stream = OpenGuestStream(guestPath, hostPath, fileMode, fileAccess);
             // freopen keeps the caller's FILE* identity, so rebind the same handle value.
             _fileHandles[handle] = stream;
 
@@ -808,6 +809,24 @@ public static class LibcStdioExports
             default:
                 return false;
         }
+    }
+
+    private static Stream OpenGuestStream(
+        string guestPath,
+        string hostPath,
+        FileMode mode,
+        FileAccess access)
+    {
+        if (mode == FileMode.Open &&
+            access == FileAccess.Read &&
+            KernelMemoryCompatExports.TryResolveMountedGamePath(guestPath, out var relativePath))
+        {
+            var mount = GameFileSystemMount.Current
+                ?? throw new FileNotFoundException("No game filesystem is mounted.", guestPath);
+            return mount.FileSystem.OpenRead(relativePath);
+        }
+
+        return new FileStream(hostPath, mode, access, FileShare.ReadWrite);
     }
 
     private static bool TryGetSeekOrigin(int whence, out SeekOrigin origin)

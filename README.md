@@ -77,7 +77,8 @@ so compatibility and performance vary by game, operating system, and GPU driver.
 ## Using
 
 Download the release archive for your operating system, extract it, and launch
-SharpEmu with the path to a legally obtained game's `eboot.bin`.
+SharpEmu with either the path to a legally obtained game's `eboot.bin` or a
+standard ZArchive (`.zar`) containing the extracted game.
 
 Windows PowerShell:
 
@@ -93,6 +94,17 @@ chmod +x ./SharpEmu
 
 ./SharpEmu "/path/to/game/eboot.bin" 2>&1 |
   tee SharpEmu.log
+```
+
+The game picker and library scanner also recognize `.zar` files. The archive
+must contain `eboot.bin` at its root, with the rest of the extracted game laid
+out exactly as it would be beside that executable (for example,
+`sce_sys/param.json`). SharpEmu reads these archives in place and does not
+extract them. Create archives with an external ZArchive-compatible tool; archive
+creation, update/DLC layouts, and integrity-verification UI are not included.
+
+```powershell
+.\SharpEmu.exe "C:\path\to\game.zar"
 ```
 
 A Vulkan-capable GPU and current graphics driver are required. The macOS
@@ -127,8 +139,13 @@ Helped with understanding the basic architecture of the PlayStation 4.
 * **[Kyty](https://github.com/InoriRus/Kyty)**  
 One of the few PS5 emulator projects available and very useful for studying native code execution.
 
-* **Ryujinx**  
-Provided valuable references for filesystem handling and low-level C# implementation patterns.
+* **Ryujinx** provided valuable references for filesystem handling and low-level
+  C# implementation patterns.
+
+* **[ZArchive](https://github.com/Exzap/ZArchive)** and
+  **[ZstdSharp](https://github.com/oleg-st/ZstdSharp)** provide the documented
+  archive layout and fully managed zstd implementation used for read-only
+  `.zar` support.
 
 # License
 

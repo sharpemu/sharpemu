@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.Core\SharpEmu.Core.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.GameContent\SharpEmu.GameContent.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.HLE\SharpEmu.HLE.csproj" />
   </ItemGroup>
@@ -20,5 +21,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 </Project>

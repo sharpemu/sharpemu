@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using SharpEmu.GameContent;
 
 namespace SharpEmu.Libs.PlayGo;
 
@@ -680,6 +681,27 @@ public static class PlayGoExports
 
     private static PlayGoMetadata LoadPlayGoMetadata()
     {
+        var mounted = GameFileSystemMount.Current;
+        if (mounted is not null)
+        {
+            const string mountedPlayGoDat = "sce_sys/playgo-chunk.dat";
+            const string mountedScenarioJson = "sce_sys/playgo-scenario.json";
+            const string mountedChunkDefsXml = "playgo-chunkdefs.xml";
+            var hasMountedMetadata = HasMountedFile(mounted.FileSystem, mountedPlayGoDat) ||
+                HasMountedFile(mounted.FileSystem, mountedScenarioJson) ||
+                HasMountedFile(mounted.FileSystem, mountedChunkDefsXml);
+            if (!hasMountedMetadata)
+            {
+                return new PlayGoMetadata(true, [(ushort)0], PlayGoChunkIdKnowledge.Authoritative);
+            }
+
+            var mountedChunkIds = LoadMountedChunkIds(mounted.FileSystem, mountedChunkDefsXml);
+            return new PlayGoMetadata(
+                true,
+                mountedChunkIds,
+                mountedChunkIds.Length == 0 ? PlayGoChunkIdKnowledge.Unknown : PlayGoChunkIdKnowledge.Authoritative);
+        }
+
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
         if (string.IsNullOrWhiteSpace(app0Root))
         {
@@ -718,6 +740,32 @@ public static class PlayGoExports
                 : PlayGoChunkIdKnowledge.Authoritative);
     }
 
+    private static bool HasMountedFile(IReadOnlyGameFileSystem fileSystem, string path) =>
+        fileSystem.TryGetEntry(path, out var entry) && entry.IsFile;
+
+    private static ushort[] LoadMountedChunkIds(IReadOnlyGameFileSystem fileSystem, string path)
+    {
+        if (!HasMountedFile(fileSystem, path))
+        {
+            return Array.Empty<ushort>();
+        }
+
+        try
+        {
+            using var stream = fileSystem.OpenRead(path);
+            using var reader = new StreamReader(stream);
+            return ParseChunkIds(reader.ReadToEnd());
+        }
+        catch (IOException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (System.Xml.XmlException)
+        {
+            return Array.Empty<ushort>();
+        }
+    }
+
     private static ushort[] LoadChunkIds(string chunkDefsXml)
     {
         if (!File.Exists(chunkDefsXml))
@@ -727,16 +775,7 @@ public static class PlayGoExports
 
         try
         {
-            var xml = File.ReadAllText(chunkDefsXml);
-            _ = XDocument.Parse(xml, LoadOptions.None);
-
-            var chunkIds = new HashSet<ushort>();
-            AddChunkIds(xml, DefaultChunkPattern, chunkIds);
-            AddChunkIds(xml, ChunkIdPattern, chunkIds);
-
-            var sorted = chunkIds.ToArray();
-            Array.Sort(sorted);
-            return sorted;
+            return ParseChunkIds(File.ReadAllText(chunkDefsXml));
         }
         catch (IOException)
         {
@@ -750,6 +789,17 @@ public static class PlayGoExports
         {
             return Array.Empty<ushort>();
         }
+    }
+
+    private static ushort[] ParseChunkIds(string xml)
+    {
+        _ = XDocument.Parse(xml, LoadOptions.None);
+        var chunkIds = new HashSet<ushort>();
+        AddChunkIds(xml, DefaultChunkPattern, chunkIds);
+        AddChunkIds(xml, ChunkIdPattern, chunkIds);
+        var sorted = chunkIds.ToArray();
+        Array.Sort(sorted);
+        return sorted;
     }
 
     private static void AddChunkIds(string xml, Regex pattern, HashSet<ushort> chunkIds)

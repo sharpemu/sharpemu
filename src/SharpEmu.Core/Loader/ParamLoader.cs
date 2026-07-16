@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using SharpEmu.Core;
+using SharpEmu.GameContent;
 
 namespace SharpEmu.Core.Loader;
 
@@ -27,15 +28,25 @@ public sealed record Disc(LocalizedParameters? LocalizedParameters);
 
 public static class Ps5ParamJsonReader
 {
-    public static (string? Title, string? TitleId, string? Version) TryReadPs5Param(IFileSystem fs, string paramJsonPath)
+    public static (string? Title, string? TitleId, string? Version) TryReadPs5Param(IReadOnlyGameFileSystem fs, string paramJsonPath)
     {
-        if (!fs.Exists(paramJsonPath))
+        if (!fs.TryGetEntry(paramJsonPath, out var entry) || !entry.IsFile)
             return (null, null, null);
 
-        if (!fs.TryReadAllBytes(paramJsonPath, out var data))
-            return (null, null, null);
+        try
+        {
+            using var stream = fs.OpenRead(paramJsonPath);
+            if (stream.Length > int.MaxValue)
+                return (null, null, null);
 
-        return TryReadPs5Param(data);
+            var data = GC.AllocateUninitializedArray<byte>((int)stream.Length);
+            stream.ReadExactly(data);
+            return TryReadPs5Param(data);
+        }
+        catch (IOException)
+        {
+            return (null, null, null);
+        }
     }
 
     public static (string? Title, string? TitleId, string? Version) TryReadPs5Param(byte[] data)

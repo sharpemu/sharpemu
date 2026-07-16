@@ -13,6 +13,7 @@ using SharpEmu.Libs.AppContent;
 using SharpEmu.Libs.SaveData;
 using SharpEmu.Libs.Fiber;
 using SharpEmu.Libs.SystemService;
+using SharpEmu.GameContent;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -36,7 +37,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private readonly IModuleManager _moduleManager;
     private readonly ISymbolCatalog _symbolCatalog;
     private readonly CpuExecutionOptions _cpuExecutionOptions;
-    private readonly IFileSystem _fileSystem;
     private bool _disposed;
 
     public string? LastExecutionDiagnostics { get; private set; }
@@ -55,8 +55,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         ICpuDispatcher cpuDispatcher,
         IModuleManager moduleManager,
         ISymbolCatalog? symbolCatalog = null,
-        CpuExecutionOptions cpuExecutionOptions = default,
-        IFileSystem? fileSystem = null)
+        CpuExecutionOptions cpuExecutionOptions = default)
     {
         _selfLoader = selfLoader ?? throw new ArgumentNullException(nameof(selfLoader));
         _virtualMemory = virtualMemory ?? throw new ArgumentNullException(nameof(virtualMemory));
@@ -69,7 +68,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             StrictDynlibResolution = cpuExecutionOptions.StrictDynlibResolution,
             ImportTraceLimit = Math.Max(0, cpuExecutionOptions.ImportTraceLimit),
         };
-        _fileSystem = fileSystem ?? new PhysicalFileSystem();
     }
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
@@ -88,50 +86,55 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         var virtualMemory = new PhysicalVirtualMemory();
 
-        var fileSystem = new PhysicalFileSystem();
-
         return new SharpEmuRuntime(
             new SelfLoader(),
             virtualMemory,
             new CpuDispatcher(virtualMemory, moduleManager),
             moduleManager,
             Aerolib.Instance,
-            cpuExecutionOptions,
-            fileSystem);
+            cpuExecutionOptions);
     }
 
     public SelfImage LoadImage(string ebootPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ebootPath);
+        using var source = GameSource.Open(ebootPath);
+        return LoadImage(source);
+    }
 
-        var fullPath = Path.GetFullPath(ebootPath);
-        if (!File.Exists(fullPath))
+    private SelfImage LoadImage(GameSource source)
+    {
+        if (!source.FileSystem.TryGetEntry(source.ExecutablePath, out var executable) || !executable.IsFile)
         {
-            throw new FileNotFoundException("Executable file was not found.", fullPath);
+            throw new FileNotFoundException("Executable file was not found.", source.ExecutablePath);
         }
 
-        var fileInfo = new FileInfo(fullPath);
-        if (fileInfo.Length > int.MaxValue)
+        if (executable.Length > int.MaxValue)
         {
             throw new NotSupportedException("Images larger than 2 GB are not currently supported.");
         }
 
-        var bytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
-        using (var stream = File.OpenRead(fullPath))
+        var bytes = GC.AllocateUninitializedArray<byte>((int)executable.Length);
+        using (var stream = source.FileSystem.OpenRead(source.ExecutablePath))
         {
             stream.ReadExactly(bytes);
         }
 
-        var mountRoot = Path.GetDirectoryName(fullPath);
-
-        return _selfLoader.Load(bytes.AsSpan(), _virtualMemory, _moduleManager, _fileSystem, mountRoot);
+        return _selfLoader.Load(bytes.AsSpan(), _virtualMemory, _moduleManager, source.FileSystem, string.Empty);
     }
 
     public OrbisGen2Result Run(string ebootPath)
     {
-        var normalizedEbootPath = Path.GetFullPath(ebootPath);
-        using var app0Binding = BindApp0Root(normalizedEbootPath);
-        Console.Error.WriteLine($"[RUNTIME] Loading: {ebootPath}");
+        using var source = GameSource.Open(ebootPath);
+        using var mount = GameFileSystemMount.Bind(source);
+        using var app0Binding = BindApp0Root(source);
+        return Run(source);
+    }
+
+    private OrbisGen2Result Run(GameSource source)
+    {
+        var ebootPath = source.ExecutablePath;
+        Console.Error.WriteLine($"[RUNTIME] Loading: {source.SourcePath}");
         LastExecutionDiagnostics = null;
         LastExecutionTrace = null;
         LastSessionSummary = null;
@@ -139,11 +142,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         LastMilestoneLog = null;
         FiberExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
-        var image = LoadImage(normalizedEbootPath);
+        var image = LoadImage(source);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId);
-        _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
+        _ = RegisterLoadedModule(ebootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
@@ -157,7 +160,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(source, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var initializerResult = RunAllInitializers(
             image,
@@ -359,7 +362,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
-    private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
+    private static App0BindingScope? BindApp0Root(GameSource source)
     {
         const string app0VariableName = "SHARPEMU_APP0_DIR";
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(app0VariableName)))
@@ -367,24 +370,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return null;
         }
 
-        var app0Root = Path.GetDirectoryName(normalizedEbootPath);
+        var app0Root = source.PhysicalRootPath;
         if (string.IsNullOrWhiteSpace(app0Root))
         {
             return null;
-        }
-
-        // Dump tools commonly place decrypted executables in an app0/decrypted
-        // sidecar while leaving Unity data in the parent app0 directory. Keep
-        // loading code/modules beside the decrypted eboot, but mount /app0 at
-        // the content-bearing parent so boot.config, metadata and assets resolve.
-        if (string.Equals(Path.GetFileName(app0Root), "decrypted", StringComparison.OrdinalIgnoreCase))
-        {
-            var parentRoot = Path.GetDirectoryName(app0Root);
-            if (!string.IsNullOrWhiteSpace(parentRoot) &&
-                Directory.Exists(Path.Combine(parentRoot, "Media")))
-            {
-                app0Root = parentRoot;
-            }
         }
 
         Environment.SetEnvironmentVariable(app0VariableName, app0Root);
@@ -610,30 +599,26 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     }
 
     private List<LoadedModuleImage> LoadAdjacentSceModules(
-        string ebootPath,
+        GameSource source,
         IDictionary<ulong, string> importStubs,
         IDictionary<string, ulong> runtimeSymbols)
     {
         var loadedImages = new List<LoadedModuleImage>();
-        var ebootDirectory = Path.GetDirectoryName(ebootPath);
-        if (string.IsNullOrWhiteSpace(ebootDirectory))
-        {
-            return loadedImages;
-        }
+        var ebootDirectory = GetGameDirectoryName(source.ExecutablePath);
 
         var moduleDirectories = new[]
         {
-            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true),
-            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true),
-            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true),
+            (Path: CombineGamePath(ebootDirectory, "sce_module"), StartAtBoot: true),
+            (Path: CombineGamePath(ebootDirectory, "sce_modules"), StartAtBoot: true),
+            (Path: CombineGamePath(ebootDirectory, "Media/Modules"), StartAtBoot: true),
             // Unity native plugins are loaded later through sceKernelLoadStartModule. Map
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.
-            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false),
+            (Path: CombineGamePath(ebootDirectory, "Media/Plugins"), StartAtBoot: false),
         }
         .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
         .Select(group => group.First())
-        .Where(entry => Directory.Exists(entry.Path))
+        .Where(entry => source.FileSystem.TryGetEntry(entry.Path, out var info) && info.IsDirectory)
         .ToArray();
 
         if (moduleDirectories.Length == 0)
@@ -642,10 +627,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         var allModulePaths = moduleDirectories
-            .SelectMany(directory => Directory
-                .EnumerateFiles(directory.Path)
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                .Select(path => (Path: path, directory.StartAtBoot)))
+            .SelectMany(directory => source.FileSystem
+                .EnumerateDirectory(directory.Path)
+                .Where(static entry => entry.IsFile)
+                .OrderBy(static entry => entry.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(entry => (Path: CombineGamePath(directory.Path, entry.Name), directory.StartAtBoot)))
             .Where(entry =>
             {
                 var extension = Path.GetExtension(entry.Path);
@@ -685,15 +671,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             var modulePath = moduleEntry.Path;
             try
             {
-                var fileInfo = new FileInfo(modulePath);
-                if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
+                if (!source.FileSystem.TryGetEntry(modulePath, out var moduleEntryInfo) ||
+                    !moduleEntryInfo.IsFile || moduleEntryInfo.Length <= 0 || moduleEntryInfo.Length > int.MaxValue)
                 {
                     failedModules++;
                     continue;
                 }
 
-                var moduleBytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
-                using (var stream = File.OpenRead(modulePath))
+                var moduleBytes = GC.AllocateUninitializedArray<byte>((int)moduleEntryInfo.Length);
+                using (var stream = source.FileSystem.OpenRead(modulePath))
                 {
                     stream.ReadExactly(moduleBytes);
                 }
@@ -702,8 +688,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     moduleBytes.AsSpan(),
                     _virtualMemory,
                     _moduleManager,
-                    _fileSystem,
-                    Path.GetDirectoryName(modulePath));
+                    source.FileSystem,
+                    GetGameDirectoryName(modulePath));
 
                 mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
                 mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
@@ -729,6 +715,18 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         Console.Error.WriteLine(
             $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
         return loadedImages;
+    }
+
+    private static string CombineGamePath(string directory, string relativePath) =>
+        string.IsNullOrEmpty(directory)
+            ? relativePath.Replace('\\', '/')
+            : $"{directory.TrimEnd('/', '\\')}/{relativePath.Replace('\\', '/')}";
+
+    private static string GetGameDirectoryName(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        var separator = normalized.LastIndexOf('/');
+        return separator < 0 ? string.Empty : normalized[..separator];
     }
 
     private static void InstallNativePluginCompatibilityHooks(

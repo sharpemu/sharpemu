@@ -24,7 +24,7 @@ public static class AmprExports
     private const uint KernelEventQueueRecordType = 2;
     private const uint WriteAddressRecordType = 3;
     private static readonly ConcurrentDictionary<ulong, CommandBufferState> _commandBuffers = new();
-    private static readonly ConcurrentDictionary<string, Lazy<CachedHostFile>> _hostFileCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<AmprFileRegistry.RegisteredFile, Lazy<CachedFile>> _fileCache = new();
     private static readonly bool _traceAmpr =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR"), "1", StringComparison.Ordinal);
     private static readonly bool _traceAmprReads =
@@ -39,21 +39,15 @@ public static class AmprExports
         public ulong CommandCount;
     }
 
-    private sealed class CachedHostFile
+    private sealed class CachedFile
     {
-        public CachedHostFile(string path)
+        public CachedFile(AmprFileRegistry.RegisteredFile file)
         {
-            Stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete,
-                bufferSize: 1024 * 1024,
-                FileOptions.RandomAccess);
+            Stream = file.OpenRead();
         }
 
         public object Gate { get; } = new();
-        public FileStream Stream { get; }
+        public Stream Stream { get; }
     }
 
     [SysAbiExport(
@@ -268,13 +262,14 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
+        if (!AmprFileRegistry.TryGetFile(fileId, out var file))
         {
-            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, string.Empty, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
+        var hostPath = file.Path;
+        var result = TryReadFileToGuestMemory(ctx, file, fileOffset, destination, size, out var bytesRead);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
@@ -708,7 +703,7 @@ public static class AmprExports
 
     private static int TryReadFileToGuestMemory(
         CpuContext ctx,
-        string hostPath,
+        AmprFileRegistry.RegisteredFile file,
         ulong fileOffset,
         ulong destination,
         ulong size,
@@ -730,7 +725,7 @@ public static class AmprExports
 
         try
         {
-            if (!TryGetCachedHostFile(hostPath, out var cachedFile, out var openResult))
+            if (!TryGetCachedFile(file, out var cachedFile, out var openResult))
             {
                 return openResult;
             }
@@ -796,24 +791,17 @@ public static class AmprExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static bool TryGetCachedHostFile(string hostPath, out CachedHostFile file, out int result)
+    private static bool TryGetCachedFile(
+        AmprFileRegistry.RegisteredFile registeredFile,
+        out CachedFile file,
+        out int result)
     {
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
 
-        string cachePath;
-        try
-        {
-            cachePath = Path.GetFullPath(hostPath);
-        }
-        catch
-        {
-            cachePath = hostPath;
-        }
-
-        var lazy = _hostFileCache.GetOrAdd(
-            cachePath,
-            static path => new Lazy<CachedHostFile>(() => new CachedHostFile(path), isThreadSafe: true));
+        var lazy = _fileCache.GetOrAdd(
+            registeredFile,
+            static entry => new Lazy<CachedFile>(() => new CachedFile(entry), isThreadSafe: true));
 
         try
         {
@@ -822,13 +810,13 @@ public static class AmprExports
         }
         catch (UnauthorizedAccessException)
         {
-            _hostFileCache.TryRemove(cachePath, out _);
+            _fileCache.TryRemove(registeredFile, out _);
             result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
             return false;
         }
         catch (IOException)
         {
-            _hostFileCache.TryRemove(cachePath, out _);
+            _fileCache.TryRemove(registeredFile, out _);
             result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             return false;
         }

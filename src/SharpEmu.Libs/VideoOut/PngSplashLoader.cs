@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.IO.Compression;
+using SharpEmu.GameContent;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -35,6 +36,22 @@ internal static class PngSplashLoader
 
         try
         {
+            var mounted = GameFileSystemMount.Current;
+            if (mounted is not null)
+            {
+                var mountedPath = $"sce_sys/{fileName}";
+                if (!mounted.FileSystem.TryGetEntry(mountedPath, out var entry) ||
+                    !entry.IsFile || entry.Length > int.MaxValue)
+                {
+                    return false;
+                }
+
+                var data = GC.AllocateUninitializedArray<byte>((int)entry.Length);
+                using var stream = mounted.FileSystem.OpenRead(mountedPath);
+                stream.ReadExactly(data);
+                return TryDecode(data, out pixels, out width, out height, requestRgba);
+            }
+
             var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
             if (string.IsNullOrWhiteSpace(app0Root))
             {

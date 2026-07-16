@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Bink;
+using SharpEmu.GameContent;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -93,7 +94,7 @@ public static partial class KernelMemoryCompatExports
     private const int KernelStatStBirthtimOffset = 104;
 
     private static readonly object _fdGate = new();
-    private static readonly Dictionary<int, FileStream> _openFiles = new();
+    private static readonly Dictionary<int, OpenFile> _openFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
     private static readonly object _libcAllocGate = new();
     private static readonly object _memoryGate = new();
@@ -179,9 +180,11 @@ public static partial class KernelMemoryCompatExports
     private sealed class OpenDirectory
     {
         public required string Path { get; init; }
-        public required string[] Entries { get; init; }
+        public required GameFileEntry[] Entries { get; init; }
         public int NextIndex { get; set; }
     }
+
+    private sealed record OpenFile(Stream Stream, string Path, GameFileEntry Entry);
 
     private readonly record struct DirectAllocation(ulong Start, ulong Length, int MemoryType);
     private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
@@ -1413,6 +1416,11 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (TryResolveMountedGamePath(guestPath, out var gamePath))
+        {
+            return OpenMountedGamePath(ctx, guestPath, gamePath, flags);
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
@@ -1476,7 +1484,11 @@ public static partial class KernelMemoryCompatExports
             var fd = (int)Interlocked.Increment(ref _nextFileDescriptor);
             lock (_fdGate)
             {
-                _openFiles[fd] = stream;
+                var info = new FileInfo(hostPath);
+                _openFiles[fd] = new OpenFile(
+                    stream,
+                    hostPath,
+                    new GameFileEntry(info.Name, IsDirectory: false, info.Length, info.LastWriteTimeUtc));
             }
 
             // Bink is linked directly into some games, so there is no media
@@ -1501,6 +1513,70 @@ public static partial class KernelMemoryCompatExports
             return ex is UnauthorizedAccessException
                 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+    }
+
+    private static int OpenMountedGamePath(CpuContext ctx, string guestPath, string gamePath, int flags)
+    {
+        var mount = GameFileSystemMount.Current;
+        if (mount is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (IsMutatingOpen(flags))
+        {
+            LogOpenTrace($"_open readonly path='{guestPath}' game='{gamePath}' flags=0x{flags:X8}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        try
+        {
+            if (!mount.FileSystem.TryGetEntry(gamePath, out var entry))
+            {
+                LogOpenTrace($"_open miss path='{guestPath}' game='{gamePath}' flags=0x{flags:X8}");
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            var wantsDirectory = (flags & O_DIRECTORY) != 0;
+            if (entry.IsDirectory)
+            {
+                var fd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+                lock (_fdGate)
+                {
+                    _openDirectories[fd] = new OpenDirectory
+                    {
+                        Path = gamePath,
+                        Entries = mount.FileSystem.EnumerateDirectory(gamePath).ToArray(),
+                        NextIndex = 0,
+                    };
+                }
+
+                ctx[CpuRegister.Rax] = unchecked((ulong)fd);
+                LogOpenTrace($"_open dir path='{guestPath}' game='{gamePath}' flags=0x{flags:X8} fd={fd}");
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            if (wantsDirectory)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            var stream = mount.FileSystem.OpenRead(gamePath);
+            var fileFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            lock (_fdGate)
+            {
+                _openFiles[fileFd] = new OpenFile(stream, gamePath, entry);
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)fileFd);
+            LogOpenTrace($"_open file path='{guestPath}' game='{gamePath}' flags=0x{flags:X8} fd={fileFd}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        {
+            LogOpenTrace($"_open fail path='{guestPath}' game='{gamePath}' ex={ex.GetType().Name}: {ex.Message}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
     }
 
@@ -1542,6 +1618,23 @@ public static partial class KernelMemoryCompatExports
         if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (TryResolveMountedGamePath(guestPath, out var gamePath))
+        {
+            var mount = GameFileSystemMount.Current;
+            if (mount is null || !mount.FileSystem.TryGetEntry(gamePath, out var gameEntry))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            if (!TryWriteGameEntryStat(ctx, statAddress, gamePath, gameEntry))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         var hostPath = ResolveGuestPath(guestPath);
@@ -1632,8 +1725,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
-            if (!TryGetAprFileSize(hostPath, out var fileSize))
+            if (!TryResolveAprFile(guestPath, out var registeredFile, out var fileSize))
             {
                 // Per-file resolve: a missing entry gets an invalid id
                 // (0xFFFFFFFF, already written above) and size 0, and the batch
@@ -1641,7 +1733,7 @@ public static partial class KernelMemoryCompatExports
                 // remaining paths unresolved and could stall the guest's asset
                 // streaming when a batch happens to include an absent (e.g.
                 // patch/DLC) file; the caller checks per-file id/size.
-                LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                LogIoTrace("apr_resolve", guestPath, $"index={i} count={count} result=not_found");
                 if (sizesAddress != 0 &&
                     !TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), 0))
                 {
@@ -1652,8 +1744,10 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
-            LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+            var fileId = registeredFile.IsMountedGame
+                ? AmprFileRegistry.RegisterGame(guestPath, registeredFile.Path)
+                : AmprFileRegistry.RegisterHost(guestPath, registeredFile.Path);
+            LogIoTrace("apr_resolve", guestPath, $"path='{registeredFile.Path}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
 
             if (idsAddress != 0 &&
                 !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
@@ -1709,16 +1803,17 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
-            if (!TryGetAprFileSize(hostPath, out _))
+            if (!TryResolveAprFile(guestPath, out var registeredFile, out _))
             {
-                LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                LogIoTrace("apr_resolve_ids", guestPath, $"index={i} count={count} result=not_found");
                 KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
-            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
-            LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8}");
+            var fileId = registeredFile.IsMountedGame
+                ? AmprFileRegistry.RegisterGame(guestPath, registeredFile.Path)
+                : AmprFileRegistry.RegisterHost(guestPath, registeredFile.Path);
+            LogIoTrace("apr_resolve_ids", guestPath, $"path='{registeredFile.Path}' index={i} count={count} id=0x{fileId:X8}");
 
             if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
             {
@@ -1751,21 +1846,34 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
+        if (!AmprFileRegistry.TryGetFile(fileId, out var registeredFile))
         {
             LogIoTrace("apr_get_file_stat", $"id=0x{fileId:X8}", "result=id_not_registered");
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        if (!TryWriteHostPathStat(ctx, statAddress, hostPath))
+        bool wroteStat;
+        if (registeredFile.IsMountedGame)
         {
-            LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8} result=not_found");
+            var mount = GameFileSystemMount.Current;
+            wroteStat = mount is not null &&
+                mount.FileSystem.TryGetEntry(registeredFile.Path, out var entry) &&
+                TryWriteGameEntryStat(ctx, statAddress, registeredFile.Path, entry);
+        }
+        else
+        {
+            wroteStat = TryWriteHostPathStat(ctx, statAddress, registeredFile.Path);
+        }
+
+        if (!wroteStat)
+        {
+            LogIoTrace("apr_get_file_stat", registeredFile.Path, $"id=0x{fileId:X8} result=not_found");
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8}");
+        LogIoTrace("apr_get_file_stat", registeredFile.Path, $"id=0x{fileId:X8}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1966,10 +2074,10 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        FileStream? stream;
+        OpenFile? file;
         lock (_fdGate)
         {
-            if (_openFiles.Remove(fd, out stream))
+            if (_openFiles.Remove(fd, out file))
             {
             }
             else if (_openDirectories.Remove(fd))
@@ -1983,7 +2091,7 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        stream.Dispose();
+        file.Stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2009,17 +2117,18 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        FileStream? stream;
+        OpenFile? file;
         lock (_fdGate)
         {
-            _openFiles.TryGetValue(fd, out stream);
+            _openFiles.TryGetValue(fd, out file);
         }
 
-        if (stream is null)
+        if (file is null)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        var stream = file.Stream;
         long positionBefore;
         try
         {
@@ -2049,7 +2158,7 @@ public static partial class KernelMemoryCompatExports
 
         LogIoTrace(
             "read",
-            stream.Name,
+            file.Path,
             $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
 
         ctx[CpuRegister.Rax] = unchecked((ulong)read);
@@ -2149,18 +2258,19 @@ public static partial class KernelMemoryCompatExports
     {
         position = -1;
 
-        FileStream? stream;
+        OpenFile? file;
         lock (_fdGate)
         {
-            _openFiles.TryGetValue(fd, out stream);
+            _openFiles.TryGetValue(fd, out file);
         }
 
-        if (stream is null)
+        if (file is null)
         {
             LogIoTrace("lseek", $"fd:{fd}", $"offset={offset} whence={whence} result=badfd");
             return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        var stream = file.Stream;
         SeekOrigin origin;
         switch (whence)
         {
@@ -2174,7 +2284,7 @@ public static partial class KernelMemoryCompatExports
                 origin = SeekOrigin.End;
                 break;
             default:
-                LogIoTrace("lseek", stream.Name, $"fd={fd} offset={offset} whence={whence} result=invalid_whence");
+                LogIoTrace("lseek", file.Path, $"fd={fd} offset={offset} whence={whence} result=invalid_whence");
                 return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
@@ -2184,16 +2294,16 @@ public static partial class KernelMemoryCompatExports
         }
         catch (IOException ex)
         {
-            LogIoTrace("lseek", stream.Name, $"fd={fd} offset={offset} whence={whence} result=io_error ex={ex.Message}");
+            LogIoTrace("lseek", file.Path, $"fd={fd} offset={offset} whence={whence} result=io_error ex={ex.Message}");
             return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
         catch (ArgumentException ex)
         {
-            LogIoTrace("lseek", stream.Name, $"fd={fd} offset={offset} whence={whence} result=invalid ex={ex.Message}");
+            LogIoTrace("lseek", file.Path, $"fd={fd} offset={offset} whence={whence} result=invalid ex={ex.Message}");
             return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        LogIoTrace("lseek", stream.Name, $"fd={fd} offset={offset} whence={whence} pos={position}");
+        LogIoTrace("lseek", file.Path, $"fd={fd} offset={offset} whence={whence} pos={position}");
         return OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -2238,19 +2348,19 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        FileStream? stream;
+        OpenFile? file;
         lock (_fdGate)
         {
-            _openFiles.TryGetValue(fd, out stream);
+            _openFiles.TryGetValue(fd, out file);
         }
 
-        if (stream is null)
+        if (file is null)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        stream.Write(payload, 0, requested);
-        stream.Flush();
+        file.Stream.Write(payload, 0, requested);
+        file.Stream.Flush();
         ctx[CpuRegister.Rax] = unchecked((ulong)requested);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -4528,6 +4638,59 @@ public static partial class KernelMemoryCompatExports
         return FileMode.Open;
     }
 
+    internal static bool TryResolveMountedGamePath(string guestPath, out string relativePath)
+    {
+        relativePath = string.Empty;
+        if (GameFileSystemMount.Current is null || string.IsNullOrWhiteSpace(guestPath))
+        {
+            return false;
+        }
+
+        var normalized = guestPath.Replace('\\', '/');
+        string candidate;
+        if (normalized is "$" or "$/" ||
+            string.Equals(normalized, "/app0", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "app0", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "app0:", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = string.Empty;
+        }
+        else if (normalized.StartsWith("$/", StringComparison.Ordinal))
+        {
+            candidate = normalized[2..];
+        }
+        else if (normalized.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = normalized[6..];
+        }
+        else if (normalized.StartsWith("app0:/", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = normalized[6..];
+        }
+        else if (normalized.StartsWith("app0/", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = normalized[5..];
+        }
+        else if (normalized.StartsWith("/", StringComparison.Ordinal) ||
+                 normalized.Contains(':', StringComparison.Ordinal))
+        {
+            return false;
+        }
+        else
+        {
+            candidate = normalized;
+        }
+
+        var components = candidate.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (components.Any(static component => component is "." or ".."))
+        {
+            return false;
+        }
+
+        relativePath = string.Join('/', components);
+        return true;
+    }
+
     public static string ResolveGuestPath(string guestPath)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
@@ -4749,10 +4912,7 @@ public static partial class KernelMemoryCompatExports
             return Path.GetFullPath(configuredRoot);
         }
 
-        var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
-        var appName = string.IsNullOrWhiteSpace(app0Root)
-            ? "default"
-            : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
+        var appName = ResolveAppName();
         if (string.IsNullOrWhiteSpace(appName))
         {
             appName = "default";
@@ -4812,6 +4972,20 @@ public static partial class KernelMemoryCompatExports
 
     private static string GetPerAppWritableRoot()
     {
+        var appName = ResolveAppName();
+        var invalidChars = Path.GetInvalidFileNameChars();
+        appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
+        return Path.Combine(Path.GetTempPath(), "SharpEmu", appName);
+    }
+
+    private static string ResolveAppName()
+    {
+        var mountedName = GameFileSystemMount.Current?.DisplayName;
+        if (!string.IsNullOrWhiteSpace(mountedName))
+        {
+            return mountedName;
+        }
+
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
         var appName = string.IsNullOrWhiteSpace(app0Root)
             ? "default"
@@ -4821,9 +4995,7 @@ public static partial class KernelMemoryCompatExports
             appName = "default";
         }
 
-        var invalidChars = Path.GetInvalidFileNameChars();
-        appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        return Path.Combine(Path.GetTempPath(), "SharpEmu", appName);
+        return appName;
     }
 
     private static void EnsureOpenParentDirectoryExists(string guestPath, string hostPath, int flags)
@@ -6377,40 +6549,55 @@ public static partial class KernelMemoryCompatExports
             return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0, now, now, now, $"stdio:{fd}");
         }
 
-        string? hostPath = null;
-        bool isDirectory = false;
+        string? path = null;
+        GameFileEntry? entry = null;
         lock (_fdGate)
         {
             if (_openDirectories.TryGetValue(fd, out var directory))
             {
-                hostPath = directory.Path;
-                isDirectory = true;
+                path = directory.Path;
+                entry = new GameFileEntry(
+                    Path.GetFileName(directory.Path),
+                    IsDirectory: true,
+                    Length: 0,
+                    DateTime.UtcNow);
             }
-            else if (_openFiles.TryGetValue(fd, out var stream))
+            else if (_openFiles.TryGetValue(fd, out var file))
             {
-                hostPath = stream.Name;
+                path = file.Path;
+                entry = file.Entry;
             }
         }
 
-        if (!string.IsNullOrWhiteSpace(hostPath))
+        if (path is not null && entry is { } descriptorEntry)
         {
-            long size = 0;
-            if (!isDirectory)
-            {
-                try
-                {
-                    size = new FileInfo(hostPath!).Length;
-                }
-                catch (IOException)
-                {
-                    size = -1;
-                }
-            }
-
-            LogIoTrace("fstat", hostPath!, $"fd={fd} size={size} dir={(isDirectory ? 1 : 0)}");
+            LogIoTrace(
+                "fstat",
+                path,
+                $"fd={fd} size={descriptorEntry.Length} dir={(descriptorEntry.IsDirectory ? 1 : 0)}");
+            return TryWriteGameEntryStat(ctx, statAddress, path, descriptorEntry);
         }
 
-        return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
+        return false;
+    }
+
+    private static bool TryWriteGameEntryStat(
+        CpuContext ctx,
+        ulong statAddress,
+        string path,
+        GameFileEntry entry)
+    {
+        var timestamp = entry.LastWriteTimeUtc == default ? DateTime.UnixEpoch : entry.LastWriteTimeUtc;
+        var size = entry.IsDirectory ? 65536L : entry.Length;
+        return TryWriteKernelStat(
+            ctx,
+            statAddress,
+            entry.IsDirectory,
+            size,
+            timestamp,
+            timestamp,
+            timestamp,
+            path);
     }
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
@@ -6570,13 +6757,13 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var entryName = directory.Entries[currentIndex];
+        var entry = directory.Entries[currentIndex];
+        var entryName = entry.Name;
         directory.NextIndex = currentIndex + 1;
 
         var entryBytes = Encoding.UTF8.GetBytes(entryName);
         var nameLength = Math.Min(entryBytes.Length, 255);
-        var entryPath = Path.Combine(directory.Path, entryName);
-        var entryType = Directory.Exists(entryPath) ? (byte)4 : (byte)8;
+        var entryType = entry.IsDirectory ? (byte)4 : (byte)8;
 
         var payload = new byte[512];
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, sizeof(uint)), ComputeDirectoryEntryHash(entryBytes.AsSpan(0, nameLength)));
@@ -6594,13 +6781,56 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static string[] EnumerateDirectoryEntries(string hostPath)
+    private static GameFileEntry[] EnumerateDirectoryEntries(string hostPath)
     {
         return Directory.EnumerateFileSystemEntries(hostPath)
-            .Select(Path.GetFileName)
-            .Where(static name => !string.IsNullOrEmpty(name))
-            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
-            .ToArray()!;
+            .Select(static path => Directory.Exists(path)
+                ? new GameFileEntry(
+                    Path.GetFileName(path),
+                    IsDirectory: true,
+                    Length: 0,
+                    Directory.GetLastWriteTimeUtc(path))
+                : new GameFileEntry(
+                    Path.GetFileName(path),
+                    IsDirectory: false,
+                    new FileInfo(path).Length,
+                    File.GetLastWriteTimeUtc(path)))
+            .Where(static entry => !string.IsNullOrEmpty(entry.Name))
+            .OrderBy(static entry => entry.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static bool TryResolveAprFile(
+        string guestPath,
+        out AmprFileRegistry.RegisteredFile file,
+        out ulong size)
+    {
+        if (TryResolveMountedGamePath(guestPath, out var gamePath))
+        {
+            var mount = GameFileSystemMount.Current;
+            if (mount is not null &&
+                mount.FileSystem.TryGetEntry(gamePath, out var entry) &&
+                entry.IsFile)
+            {
+                file = new AmprFileRegistry.RegisteredFile(gamePath, IsMountedGame: true);
+                size = unchecked((ulong)entry.Length);
+                return true;
+            }
+
+            file = null!;
+            size = 0;
+            return false;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (TryGetAprFileSize(hostPath, out size))
+        {
+            file = new AmprFileRegistry.RegisteredFile(hostPath, IsMountedGame: false);
+            return true;
+        }
+
+        file = null!;
+        return false;
     }
 
     private static uint ComputeDirectoryEntryHash(ReadOnlySpan<byte> utf8Name)

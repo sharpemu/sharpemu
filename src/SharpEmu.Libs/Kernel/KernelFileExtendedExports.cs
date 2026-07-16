@@ -34,11 +34,11 @@ public static partial class KernelMemoryCompatExports
     private static long _nextAioSubmitId = 1;
     private static readonly ConcurrentDictionary<uint, int> _aioResults = new();
 
-    private static FileStream? GetOpenFile(int fd)
+    private static Stream? GetOpenFile(int fd)
     {
         lock (_fdGate)
         {
-            return _openFiles.TryGetValue(fd, out var stream) ? stream : null;
+            return _openFiles.TryGetValue(fd, out var file) ? file.Stream : null;
         }
     }
 
@@ -79,7 +79,7 @@ public static partial class KernelMemoryCompatExports
         int read;
         try
         {
-            read = RandomAccess.Read(stream.SafeFileHandle, buffer, offset);
+            read = ReadAt(stream, buffer, offset);
         }
         catch (IOException)
         {
@@ -134,7 +134,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            RandomAccess.Write(stream.SafeFileHandle, payload, offset);
+            WriteAt(stream, payload, offset);
         }
         catch (IOException)
         {
@@ -180,7 +180,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            stream.Flush(flushToDisk: true);
+            stream.Flush();
         }
         catch (IOException)
         {
@@ -196,9 +196,9 @@ public static partial class KernelMemoryCompatExports
     {
         lock (_fdGate)
         {
-            foreach (var stream in _openFiles.Values)
+            foreach (var file in _openFiles.Values)
             {
-                try { stream.Flush(flushToDisk: true); } catch (IOException) { }
+                try { file.Stream.Flush(); } catch (IOException) { }
             }
         }
 
@@ -388,7 +388,7 @@ public static partial class KernelMemoryCompatExports
             // If newFd names an open file, dup2 closes it first.
             if (_openFiles.TryGetValue(newFd, out var existing) && !ReferenceEquals(existing, stream))
             {
-                try { existing.Dispose(); } catch (IOException) { }
+                try { existing.Stream.Dispose(); } catch (IOException) { }
             }
 
             _openFiles[newFd] = stream;
@@ -587,11 +587,11 @@ public static partial class KernelMemoryCompatExports
                     return -1;
                 }
 
-                RandomAccess.Write(stream.SafeFileHandle, scratch, offset);
+                WriteAt(stream, scratch, offset);
                 return nbyte;
             }
 
-            var read = RandomAccess.Read(stream.SafeFileHandle, scratch, offset);
+            var read = ReadAt(stream, scratch, offset);
             if (read > 0 && !ctx.Memory.TryWrite(buf, scratch.AsSpan(0, read)))
             {
                 return -1;
@@ -602,6 +602,51 @@ public static partial class KernelMemoryCompatExports
         catch (IOException)
         {
             return -1;
+        }
+    }
+
+    private static int ReadAt(Stream stream, Span<byte> destination, long offset)
+    {
+        if (stream is FileStream fileStream)
+        {
+            return RandomAccess.Read(fileStream.SafeFileHandle, destination, offset);
+        }
+
+        lock (stream)
+        {
+            var previous = stream.Position;
+            try
+            {
+                stream.Position = offset;
+                return stream.Read(destination);
+            }
+            finally
+            {
+                stream.Position = previous;
+            }
+        }
+    }
+
+    private static void WriteAt(Stream stream, ReadOnlySpan<byte> source, long offset)
+    {
+        if (stream is FileStream fileStream)
+        {
+            RandomAccess.Write(fileStream.SafeFileHandle, source, offset);
+            return;
+        }
+
+        lock (stream)
+        {
+            var previous = stream.Position;
+            try
+            {
+                stream.Position = offset;
+                stream.Write(source);
+            }
+            finally
+            {
+                stream.Position = previous;
+            }
         }
     }
 

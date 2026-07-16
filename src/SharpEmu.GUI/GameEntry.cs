@@ -74,10 +74,10 @@ public sealed class GameEntry : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Path to the cover art image shipped with the game, if found.</summary>
+    /// <summary>Root-relative path to the cover art image, if found.</summary>
     public string? CoverPath { get; }
 
-    /// <summary>Path to the key art (pic0/pic1) shipped with the game, if found.</summary>
+    /// <summary>Root-relative path to the key art (pic0/pic1), if found.</summary>
     public string? BackgroundPath { get; }
 
     /// <summary>

@@ -613,7 +613,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </Grid>
 
-              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
+              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin or .zar directly."
                          FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
               <StackPanel Orientation="Horizontal" Spacing="7">
                 <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
