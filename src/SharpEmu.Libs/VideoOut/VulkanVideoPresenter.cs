@@ -608,6 +608,42 @@ internal static unsafe class VulkanVideoPresenter
             shaderAddress);
     }
 
+    // Manual scans (targets are <= 8) so the per-draw validation does not
+    // allocate LINQ iterators/closures or a Distinct HashSet.
+    private static bool AnyRenderTargetInvalid(IReadOnlyList<GuestRenderTarget> targets)
+    {
+        foreach (var target in targets)
+        {
+            if (target.Address == 0 || target.Width == 0 || target.Height == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool RenderTargetsMismatchedOrAliased(IReadOnlyList<GuestRenderTarget> targets, GuestRenderTarget first)
+    {
+        for (var i = 0; i < targets.Count; i++)
+        {
+            if (targets[i].Width != first.Width || targets[i].Height != first.Height)
+            {
+                return true;
+            }
+
+            for (var j = i + 1; j < targets.Count; j++)
+            {
+                if (targets[i].Address == targets[j].Address)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -627,16 +663,13 @@ internal static unsafe class VulkanVideoPresenter
         if (pixelSpirv.Length == 0 ||
             targets.Count == 0 ||
             targets.Count > 8 ||
-            targets.Any(target =>
-                target.Address == 0 || target.Width == 0 || target.Height == 0))
+            AnyRenderTargetInvalid(targets))
         {
             return;
         }
 
         var firstTarget = targets[0];
-        if (targets.Any(target =>
-                target.Width != firstTarget.Width || target.Height != firstTarget.Height) ||
-            targets.Select(target => target.Address).Distinct().Count() != targets.Count)
+        if (RenderTargetsMismatchedOrAliased(targets, firstTarget))
         {
             Console.Error.WriteLine(
                 "[LOADER][WARN] Vulkan skipped MRT draw with mismatched dimensions or aliased targets.");
@@ -654,9 +687,11 @@ internal static unsafe class VulkanVideoPresenter
         var effectiveRenderState = renderState ?? GuestRenderState.Default;
         if (effectiveRenderState.Blends.Count == 1 && targets.Count > 1)
         {
+            var broadcastBlends = new GuestBlendState[targets.Count];
+            Array.Fill(broadcastBlends, effectiveRenderState.Blends[0]);
             effectiveRenderState = effectiveRenderState with
             {
-                Blends = Enumerable.Repeat(effectiveRenderState.Blends[0], targets.Count).ToArray(),
+                Blends = broadcastBlends,
             };
         }
         lock (_gate)
