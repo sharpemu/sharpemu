@@ -139,13 +139,8 @@ Helped with understanding the basic architecture of the PlayStation 4.
 * **[Kyty](https://github.com/InoriRus/Kyty)**  
 One of the few PS5 emulator projects available and very useful for studying native code execution.
 
-* **Ryujinx** provided valuable references for filesystem handling and low-level
-  C# implementation patterns.
-
-* **[ZArchive](https://github.com/Exzap/ZArchive)** and
-  **[ZstdSharp](https://github.com/oleg-st/ZstdSharp)** provide the documented
-  archive layout and fully managed zstd implementation used for read-only
-  `.zar` support.
+* **Ryujinx**  
+Provided valuable references for filesystem handling and low-level C# implementation patterns.
 
 # License
 
