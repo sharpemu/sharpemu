@@ -38,8 +38,8 @@ public static class SystemServiceExports
         }
 
         // No system notice screen to skip in the emulator; report "do not skip".
-        Span<byte> flagBytes = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(flagBytes, 0);
+        Span<byte> flagBytes = stackalloc byte[1];
+        flagBytes[0] = 0;
         return ctx.Memory.TryWrite(flagAddress, flagBytes)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
