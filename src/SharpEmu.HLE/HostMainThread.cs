@@ -24,6 +24,11 @@ public static class HostMainThread
     private static string? _blockReason;
     private static bool _isBlocked = false;
 
+    // Pending guest exception tracking for deadlock breaking
+    private static volatile bool _pendingException;
+    private static object? _blockedSemaphoreGate;
+    private static ulong _externalGuestThreadHandle;
+
     public static bool IsAvailable { get; private set; }
 
     // Static accessors for main thread tracking
@@ -50,6 +55,21 @@ public static class HostMainThread
     public static void SetLastRip(ulong rip) => _lastRip = rip;
     public static string? GetLastImportNid() => _lastImportNid;
     public static void SetLastImportNid(string? nid) => _lastImportNid = nid;
+
+    // Pending guest exception for deadlock breaking (Unity GC)
+    public static bool HasPendingException => _pendingException;
+    public static void SetPendingException() => _pendingException = true;
+    public static void ClearPendingException() => _pendingException = false;
+    public static object? BlockedSemaphoreGate
+    {
+        get => _blockedSemaphoreGate;
+        set => _blockedSemaphoreGate = value;
+    }
+    public static ulong ExternalGuestThreadHandle
+    {
+        get => _externalGuestThreadHandle;
+        set => _externalGuestThreadHandle = value;
+    }
 
     /// <summary>
     /// Registers a callback invoked by <see cref="Shutdown"/> so a

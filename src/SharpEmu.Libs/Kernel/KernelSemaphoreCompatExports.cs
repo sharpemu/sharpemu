@@ -239,50 +239,82 @@ public static class KernelSemaphoreCompatExports
         ulong timeoutAddress,
         uint timeoutUsec)
     {
+        var isMainThread = !GuestThreadExecution.IsGuestThread &&
+            Environment.CurrentManagedThreadId == HostMainThread.GetManagedThreadId();
         var deadlineMs = timeoutAddress != 0
             ? Environment.TickCount64 + Math.Max(1L, timeoutUsec / 1000L)
             : long.MaxValue;
-        lock (semaphore.Gate)
+        if (isMainThread)
         {
-            TraceSemaphore(
-                $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
-                $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
-            while (semaphore.Count < needCount)
+            HostMainThread.BlockedSemaphoreGate = semaphore.Gate;
+        }
+        try
+        {
+            lock (semaphore.Gate)
             {
-                var remaining = deadlineMs - Environment.TickCount64;
-                if (timeoutAddress != 0 && remaining <= 0)
+                if (isMainThread && HostMainThread.HasPendingException)
                 {
+                    HostMainThread.ClearPendingException();
+                    semaphore.Count -= needCount;
                     semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
-                    _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
+                    HostMainThread.SetBlocked(false, null);
+                    if (timeoutAddress != 0)
+                    {
+                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                    }
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
                 }
 
-                Monitor.Wait(semaphore.Gate, (int)Math.Min(remaining, 100));
-            }
+                TraceSemaphore(
+                    $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
+                    $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
+                while (semaphore.Count < needCount)
+                {
+                    var remaining = deadlineMs - Environment.TickCount64;
+                    if (timeoutAddress != 0 && remaining <= 0)
+                    {
+                        semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
+                    }
 
-            semaphore.Count -= needCount;
-            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
-            TraceSemaphore(
-                $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
-            
-            // Track main thread unblocking
-            if (!GuestThreadExecution.IsGuestThread)
-            {
-                var currentThreadId = Environment.CurrentManagedThreadId;
-                if (currentThreadId == HostMainThread.GetManagedThreadId())
+                    Monitor.Wait(semaphore.Gate, (int)Math.Min(remaining, 100));
+
+                    if (isMainThread && HostMainThread.HasPendingException)
+                    {
+                        HostMainThread.ClearPendingException();
+                        semaphore.Count = Math.Max(semaphore.Count, needCount);
+                        break;
+                    }
+                }
+
+                semaphore.Count -= needCount;
+                semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                TraceSemaphore(
+                    $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
+
+                // Track main thread unblocking
+                if (isMainThread)
                 {
                     HostMainThread.SetBlocked(false, null);
                     Console.Error.WriteLine(
                         $"[MAIN_THREAD] Unblocked from semaphore handle=0x{handle:X8} name='{semaphore.Name}'");
                 }
-            }
-            
-            if (timeoutAddress != 0)
-            {
-                _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-            }
 
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+                if (timeoutAddress != 0)
+                {
+                    _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                }
+
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            }
+        }
+        finally
+        {
+            if (isMainThread)
+            {
+                HostMainThread.BlockedSemaphoreGate = null;
+            }
         }
     }
 
