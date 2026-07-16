@@ -250,6 +250,10 @@ internal static partial class Program
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
 
+        // Release the early address space reservation before the loader needs it.
+        // This allows PhysicalVirtualMemory to allocate at the required base addresses.
+        GuestAddressSpaceReservation.ReleaseReservation();
+
         using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
 
         OrbisGen2Result result;
