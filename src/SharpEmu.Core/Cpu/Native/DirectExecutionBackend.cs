@@ -3043,6 +3043,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				Context = context,
 			};
+
+			if (!GuestThreadExecution.IsGuestThread &&
+				Environment.CurrentManagedThreadId == HostMainThread.GetManagedThreadId() &&
+				HostMainThread.ExternalGuestThreadHandle == 0)
+			{
+				HostMainThread.ExternalGuestThreadHandle = threadHandle;
+			}
 		}
 	}
 
@@ -3914,6 +3921,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					Console.Error.WriteLine(
 						$"[LOADER][TRACE] guest_exception.queued " +
 						$"target=0x{threadHandle:X16} type=0x{exceptionType:X2} mode=external");
+				}
+
+				// If the main thread is blocked on a host semaphore, the pending
+				// exception will never be delivered because the thread never reaches
+				// an HLE boundary. Wake the semaphore so the wait returns and the
+				// import dispatch's safe-point check delivers the exception.
+				if (threadHandle == HostMainThread.ExternalGuestThreadHandle)
+				{
+					HostMainThread.SetPendingException();
+					var blockedGate = HostMainThread.BlockedSemaphoreGate;
+					if (blockedGate != null)
+					{
+						lock (blockedGate)
+						{
+							Monitor.PulseAll(blockedGate);
+						}
+					}
 				}
 				return true;
 			}

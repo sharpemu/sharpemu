@@ -17,7 +17,59 @@ public static class HostMainThread
     private static readonly BlockingCollection<Action> _work = new();
     private static Action? _shutdownRequestHandler;
 
+    // Main thread tracking for diagnostics
+    private static int _managedThreadId = -1;
+    private static ulong _lastRip = 0;
+    private static string? _lastImportNid;
+    private static string? _blockReason;
+    private static bool _isBlocked = false;
+
+    // Pending guest exception tracking for deadlock breaking
+    private static volatile bool _pendingException;
+    private static object? _blockedSemaphoreGate;
+    private static ulong _externalGuestThreadHandle;
+
     public static bool IsAvailable { get; private set; }
+
+    // Static accessors for main thread tracking
+    public static int GetManagedThreadId() => _managedThreadId;
+    public static void SetManagedThreadId(int id) => _managedThreadId = id;
+    
+    public static void SetBlocked(bool blocked, string? reason)
+    {
+        _isBlocked = blocked;
+        _blockReason = reason;
+        if (blocked)
+        {
+            Console.Error.WriteLine($"[MAIN_THREAD] State changed to Blocked: {reason}");
+        }
+        else
+        {
+            Console.Error.WriteLine($"[MAIN_THREAD] State changed to Running");
+        }
+    }
+    
+    public static bool IsBlocked() => _isBlocked;
+    public static string? GetBlockReason() => _blockReason;
+    public static ulong GetLastRip() => _lastRip;
+    public static void SetLastRip(ulong rip) => _lastRip = rip;
+    public static string? GetLastImportNid() => _lastImportNid;
+    public static void SetLastImportNid(string? nid) => _lastImportNid = nid;
+
+    // Pending guest exception for deadlock breaking (Unity GC)
+    public static bool HasPendingException => _pendingException;
+    public static void SetPendingException() => _pendingException = true;
+    public static void ClearPendingException() => _pendingException = false;
+    public static object? BlockedSemaphoreGate
+    {
+        get => _blockedSemaphoreGate;
+        set => _blockedSemaphoreGate = value;
+    }
+    public static ulong ExternalGuestThreadHandle
+    {
+        get => _externalGuestThreadHandle;
+        set => _externalGuestThreadHandle = value;
+    }
 
     /// <summary>
     /// Registers a callback invoked by <see cref="Shutdown"/> so a
