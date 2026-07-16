@@ -5936,13 +5936,14 @@ public static partial class AgcExports
         // Every bound color target the shader exports to. Deferred renderers
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
+        var pixelColorExportMasks = pixelState.Program.PixelColorExportMasks;
         var allBoundTargets = GetRenderTargets(state.CxRegisters);
         // At most 8 slots; a manual filter avoids the per-draw LINQ iterator/
         // closure allocations. Slots are distinct, so sorting by slot is stable.
         var selectedTargets = new List<RenderTargetDescriptor>(allBoundTargets.Count);
         foreach (var target in allBoundTargets)
         {
-            if (HasPixelColorExport(pixelState, target.Slot))
+            if (GetPixelColorExportMask(pixelColorExportMasks, target.Slot) != 0)
             {
                 selectedTargets.Add(target);
             }
@@ -5965,7 +5966,7 @@ public static partial class AgcExports
         {
             TraceAgcShader(
                 $"agc.mrt_filter ps=0x{pixelShaderAddress:X16} " +
-                $"bound=[{string.Join(",", allBoundTargets.Select(t => $"s{t.Slot}:0x{t.Address:X}:exp{(HasPixelColorExport(pixelState, t.Slot) ? 1 : 0)}"))}] " +
+                $"bound=[{string.Join(",", allBoundTargets.Select(t => $"s{t.Slot}:0x{t.Address:X}:exp{(GetPixelColorExportMask(pixelColorExportMasks, t.Slot) != 0 ? 1 : 0)}"))}] " +
                  $"kept={renderTargets.Length}");
         }
 
@@ -6165,7 +6166,7 @@ public static partial class AgcExports
             DecodeDepthTarget(state.CxRegisters),
             guestTargets,
             ApplyTransparentPremultipliedFillClear(
-                CreateRenderState(state.CxRegisters, renderTargets, pixelState),
+                CreateRenderState(state.CxRegisters, renderTargets, pixelColorExportMasks),
                 textures,
                 vertexInputs,
                 pixelEvaluation.InitialScalarRegisters),
@@ -6409,26 +6410,10 @@ public static partial class AgcExports
         return true;
     }
 
-    private static bool HasPixelColorExport(Gen5ShaderState state, uint target) =>
-        GetPixelColorExportMask(state, target) != 0;
-
-    private static uint GetPixelColorExportMask(Gen5ShaderState state, uint target)
-    {
-        // Called per render target (twice per draw via CreateRenderState +
-        // HasPixelColorExport); a manual scan avoids the per-call LINQ iterator
-        // and closure allocations. Same result as the previous
-        // Select/OfType/Where/Aggregate chain.
-        var mask = 0u;
-        foreach (var instruction in state.Program.Instructions)
-        {
-            if (instruction.Control is Gen5ExportControl export && export.Target == target)
-            {
-                mask |= export.EnableMask & 0xFu;
-            }
-        }
-
-        return mask;
-    }
+    private static uint GetPixelColorExportMask(uint packedMasks, uint target) =>
+        target < ColorTargetCount
+            ? (packedMasks >> (int)(target * 4)) & 0xFu
+            : 0;
 
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
@@ -6626,7 +6611,7 @@ public static partial class AgcExports
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> targets,
-        Gen5ShaderState pixelState)
+        uint pixelColorExportMasks)
     {
         if (targets.Count == 0)
         {
@@ -6641,7 +6626,8 @@ public static partial class AgcExports
                 var blend = DecodeBlendState(registers, target.Slot);
                 return blend with
                 {
-                    WriteMask = blend.WriteMask & GetPixelColorExportMask(pixelState, target.Slot),
+                    WriteMask = blend.WriteMask &
+                        GetPixelColorExportMask(pixelColorExportMasks, target.Slot),
                 };
             }).ToArray(),
             scissor,
