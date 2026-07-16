@@ -16,8 +16,8 @@ public static class KernelExports
 
     // Guest printf output is relayed through a collapser so a chatty guest cannot
     // flood the log with the same line repeated thousands of times. See
-    // GuestLogCollapser.
-    private static readonly GuestLogCollapser _printfLog = new("[DEBUG][PRINF] ");
+    // KernelGuestLogCollapser.
+    private static readonly KernelGuestLogCollapser _printfLog = new("[DEBUG][PRINF] ");
 
     private readonly record struct CxaDestructorEntry(
         ulong Function,
