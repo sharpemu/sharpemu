@@ -84,4 +84,74 @@ public sealed class VirtualMemoryTests
         Assert.False(memory.TryRead(0x3000, unchanged));
         Assert.True(memory.TryWrite(0x3000, [9]));
     }
+
+    [Fact]
+    public void TryReadAndTryWriteOnUnmappedAddressReturnFalse()
+    {
+        var memory = new VirtualMemory();
+        memory.Map(0x1000, 0x100, 0, [], ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+
+        // Addresses with no covering region fail for both reads and writes.
+        Span<byte> value = stackalloc byte[1];
+        Assert.False(memory.TryRead(0x2000, value));
+        Assert.False(memory.TryWrite(0x2000, value));
+
+        // With no regions mapped at all, every access fails.
+        var empty = new VirtualMemory();
+        Assert.False(empty.TryRead(0x1000, value));
+        Assert.False(empty.TryWrite(0x1000, value));
+    }
+
+    // Zero-length operations succeed on a mapped address and touch nothing, but
+    // still require a mapped address.
+    [Fact]
+    public void ZeroLengthOperationsOnMappedAddressReturnTrue()
+    {
+        var memory = new VirtualMemory();
+        memory.Map(0x1000, 0x100, 0, [0x01], ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+
+        Assert.True(memory.TryRead(0x1000, []));
+        Assert.True(memory.TryWrite(0x1000, []));
+
+        Span<byte> value = stackalloc byte[1];
+        Assert.True(memory.TryRead(0x1000, value));
+        Assert.Equal(0x01, value[0]);
+
+        Assert.False(memory.TryRead(0x2000, []));
+        Assert.False(memory.TryWrite(0x2000, []));
+    }
+
+    // A page-aligned region must be accessible at both offset 0 and the final byte.
+    [Fact]
+    public void MappingAtPageBoundarySupportsOffsetZeroAndLastByte()
+    {
+        const ulong pageSize = 0x1000;
+        var memory = new VirtualMemory();
+        memory.Map(pageSize, pageSize, 0, [], ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+
+        Assert.True(memory.TryWrite(pageSize, [0x5A]));
+        Assert.True(memory.TryWrite(pageSize + pageSize - 1, [0xA5]));
+
+        Span<byte> head = stackalloc byte[1];
+        Span<byte> tail = stackalloc byte[1];
+        Assert.True(memory.TryRead(pageSize, head));
+        Assert.True(memory.TryRead(pageSize + pageSize - 1, tail));
+        Assert.Equal(0x5A, head[0]);
+        Assert.Equal(0xA5, tail[0]);
+    }
+
+    // A read/write that starts in one region but extends into the unmapped gap
+    // between two non-adjacent regions must fail across the entire range.
+    [Fact]
+    public void ReadWriteAcrossGapBetweenNonAdjacentRegionsReturnsFalse()
+    {
+        const ulong pageSize = 0x1000;
+        var memory = new VirtualMemory();
+        const ProgramHeaderFlags protection = ProgramHeaderFlags.Read | ProgramHeaderFlags.Write;
+        memory.Map(pageSize, pageSize, 0, [], protection);
+        memory.Map(pageSize * 3, pageSize, 0, [], protection);
+
+        Assert.False(memory.TryRead(pageSize, new byte[(int)pageSize * 2]));
+        Assert.False(memory.TryWrite(pageSize, new byte[(int)pageSize * 2]));
+    }
 }
