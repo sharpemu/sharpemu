@@ -35,10 +35,119 @@ public static partial class Gen5MslTranslator
     private const uint VectorRegisterFileCount = 256;
     private const uint LdsDwordCount = 8192;
     private const uint LdsDwordMask = LdsDwordCount - 1;
+    // Graphics stages model LDS as per-invocation scratch; a full 32 KB array
+    // per fragment/vertex invocation risks Metal compile limits, and
+    // per-invocation write-then-read correctness only needs deterministic
+    // address masking (mirrors the SPIR-V translator's Private-array choice).
+    private const uint PrivateLdsDwordCount = 2048;
     private const uint VccLoRegister = 106;
     private const uint VccHiRegister = 107;
     private const uint ExecLoRegister = 126;
     private const uint ExecHiRegister = 127;
+
+    public static bool TryCompilePixelShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        Gen5PixelOutputKind outputKind,
+        out Gen5MslShader shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int initialScalarBufferIndex = -1,
+        int pixelRenderTargetSlot = 0,
+        uint pixelInputEnable = 0,
+        uint pixelInputAddress = 0,
+        ulong storageBufferOffsetAlignment = 1) =>
+        TryCompilePixelShader(
+            state,
+            evaluation,
+            [new Gen5PixelOutputBinding((uint)pixelRenderTargetSlot, 0, outputKind)],
+            out shader,
+            out error,
+            globalBufferBase,
+            totalGlobalBufferCount,
+            imageBindingBase,
+            initialScalarBufferIndex,
+            pixelInputEnable,
+            pixelInputAddress,
+            storageBufferOffsetAlignment);
+
+    public static bool TryCompilePixelShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        IReadOnlyList<Gen5PixelOutputBinding> outputs,
+        out Gen5MslShader shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int initialScalarBufferIndex = -1,
+        uint pixelInputEnable = 0,
+        uint pixelInputAddress = 0,
+        ulong storageBufferOffsetAlignment = 1)
+    {
+        shader = default!;
+        error = string.Empty;
+        if (outputs.Count > 8)
+        {
+            error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
+            return false;
+        }
+
+        for (var index = 0; index < outputs.Count; index++)
+        {
+            if (outputs[index].GuestSlot > 7)
+            {
+                error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
+                return false;
+            }
+
+            for (var other = index + 1; other < outputs.Count; other++)
+            {
+                if (outputs[other].GuestSlot == outputs[index].GuestSlot ||
+                    outputs[other].HostLocation == outputs[index].HostLocation)
+                {
+                    error = "pixel output guest slots and host locations must be unique";
+                    return false;
+                }
+            }
+        }
+
+        // Host locations must be dense 0..N-1 so [[color(n)]] attachments match.
+        for (uint location = 0; location < outputs.Count; location++)
+        {
+            var found = false;
+            foreach (var output in outputs)
+            {
+                found |= output.HostLocation == location;
+            }
+
+            if (!found)
+            {
+                error = "pixel output host locations must be dense in the 0..N-1 range";
+                return false;
+            }
+        }
+
+        var context = new CompilationContext(
+            Gen5MslStage.Pixel,
+            state,
+            evaluation,
+            1,
+            1,
+            1,
+            globalBufferBase,
+            totalGlobalBufferCount,
+            initialScalarBufferIndex,
+            waveLaneCount: 32,
+            storageBufferOffsetAlignment,
+            pixelOutputBindings: outputs,
+            imageBindingBase: imageBindingBase,
+            pixelInputEnable: pixelInputEnable,
+            pixelInputAddress: pixelInputAddress);
+        return context.TryCompile(out shader, out error);
+    }
 
     public static bool TryCompileComputeShader(
         Gen5ShaderState state,
@@ -96,6 +205,13 @@ public static partial class Gen5MslTranslator
         private readonly uint _waveLaneCount;
         private readonly ulong _storageBufferOffsetAlignment;
         private readonly Dictionary<uint, long[]> _scalarDefinitionsBeforePc = [];
+        private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
+        private readonly int _imageBindingBase;
+        private readonly uint _pixelInputEnable;
+        private readonly uint _pixelInputAddress;
+        private readonly Dictionary<uint, int> _imageBindingByPc = [];
+        private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
+        private readonly SortedSet<uint> _pixelAttributes = [];
         private readonly StringBuilder _body = new();
         private int _indent;
         private int _nextTemp;
@@ -113,8 +229,16 @@ public static partial class Gen5MslTranslator
             int totalGlobalBufferCount,
             int initialScalarBufferIndex,
             uint waveLaneCount,
-            ulong storageBufferOffsetAlignment)
+            ulong storageBufferOffsetAlignment,
+            IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputBindings = null,
+            int imageBindingBase = 0,
+            uint pixelInputEnable = 0,
+            uint pixelInputAddress = 0)
         {
+            _pixelOutputBindings = pixelOutputBindings ?? [];
+            _imageBindingBase = imageBindingBase;
+            _pixelInputEnable = pixelInputEnable;
+            _pixelInputAddress = pixelInputAddress;
             _stage = stage;
             _state = state;
             _evaluation = evaluation;
@@ -164,10 +288,15 @@ public static partial class Gen5MslTranslator
                 }
 
                 BuildScalarDefinitionInfo(blocks, _state.Program.Instructions);
+                DeclareImageKinds();
                 foreach (var instruction in _state.Program.Instructions)
                 {
                     _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false };
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode);
+                    if (instruction.Control is Gen5InterpolationControl interpolationControl)
+                    {
+                        _pixelAttributes.Add(interpolationControl.Attribute);
+                    }
                 }
 
                 // Emit the dispatcher body first: block translation discovers
@@ -200,7 +329,9 @@ public static partial class Gen5MslTranslator
                     _stage,
                     _evaluation.GlobalMemoryBindings,
                     _evaluation.ImageBindings,
-                    AttributeCount: 0,
+                    AttributeCount: _stage == Gen5MslStage.Pixel
+                        ? (uint)_pixelAttributes.Count
+                        : 0,
                     VertexInputs: [],
                     _localSizeX,
                     _localSizeY,
@@ -251,7 +382,44 @@ public static partial class Gen5MslTranslator
             EmitPrelude(source);
             source.AppendLine();
 
-            source.AppendLine($"kernel void {EntryPointName}(");
+            if (_stage == Gen5MslStage.Pixel)
+            {
+                // Stage IO structs: interpolated attributes discovered from the
+                // program's V_INTERP controls, MRT outputs from the bindings.
+                source.AppendLine("struct Gen5PsIn");
+                source.AppendLine("{");
+                source.AppendLine("    float4 sharpemu_frag_coord [[position]];");
+                foreach (var attribute in _pixelAttributes)
+                {
+                    source.AppendLine($"    float4 attr{attribute} [[user(locn{attribute})]];");
+                }
+
+                source.AppendLine("};");
+                source.AppendLine();
+                source.AppendLine("struct Gen5PsOut");
+                source.AppendLine("{");
+                foreach (var binding in _pixelOutputBindings)
+                {
+                    var fieldType = binding.Kind switch
+                    {
+                        Gen5PixelOutputKind.Uint => "uint4",
+                        Gen5PixelOutputKind.Sint => "int4",
+                        _ => "float4",
+                    };
+                    source.AppendLine(
+                        $"    {fieldType} mrt{binding.GuestSlot} [[color({binding.HostLocation})]];");
+                }
+
+                source.AppendLine("};");
+                source.AppendLine();
+                source.AppendLine($"fragment Gen5PsOut {EntryPointName}(");
+                source.AppendLine("    Gen5PsIn sharpemu_in [[stage_in]],");
+            }
+            else
+            {
+                source.AppendLine($"kernel void {EntryPointName}(");
+            }
+
             for (var index = 0; index < _evaluation.GlobalMemoryBindings.Count; index++)
             {
                 source.AppendLine(
@@ -260,18 +428,42 @@ public static partial class Gen5MslTranslator
 
             source.AppendLine(
                 $"    constant SharpEmuUniforms& sharpemu_uniforms [[buffer({UniformsBufferIndex})]],");
-            source.AppendLine("    uint3 sharpemu_local_id [[thread_position_in_threadgroup]],");
-            source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
+            EmitImageArguments(source);
+            if (_stage == Gen5MslStage.Compute)
+            {
+                source.AppendLine("    uint3 sharpemu_local_id [[thread_position_in_threadgroup]],");
+                source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
+            }
+
+            // Wave ops use the invocation's real simdgroup in every stage;
+            // Apple fragment simdgroups make this the same model as compute
+            // (the SPIR-V translator instead emulates a single logical lane
+            // for graphics stages, which is equivalent for EXEC round trips).
             source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]])");
             source.AppendLine("{");
             if (_usesLds)
             {
-                // 32 KB of guest LDS as workgroup-shared memory (compute); the
-                // address is masked into bounds like the SPIR-V translator.
-                source.AppendLine($"    threadgroup uint sharpemu_lds[{LdsDwordCount}];");
+                if (_stage == Gen5MslStage.Compute)
+                {
+                    // 32 KB of guest LDS as workgroup-shared memory; the address
+                    // is masked into bounds like the SPIR-V translator.
+                    source.AppendLine($"    threadgroup uint sharpemu_lds[{LdsDwordCount}];");
+                }
+                else
+                {
+                    // Graphics stages model LDS as per-invocation scratch (the
+                    // SPIR-V translator's Private-array trick), sized smaller
+                    // because only write-then-read correctness is needed.
+                    source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}] = {{}};");
+                }
             }
 
             EmitRegisterFile(source);
+            if (_stage == Gen5MslStage.Pixel)
+            {
+                source.AppendLine("    Gen5PsOut sharpemu_out = {};");
+            }
+
             EmitInitialState(source);
             source.AppendLine();
             source.AppendLine("    while (active)");
@@ -292,6 +484,17 @@ public static partial class Gen5MslTranslator
             }
 
             source.AppendLine("    }");
+            if (_stage == Gen5MslStage.Pixel)
+            {
+                // A lane still removed from EXEC when the guest shader exits is
+                // a killed fragment; it must not contribute color or blending.
+                source.AppendLine("    if (!exec)");
+                source.AppendLine("    {");
+                source.AppendLine("        discard_fragment();");
+                source.AppendLine("    }");
+                source.AppendLine("    return sharpemu_out;");
+            }
+
             source.AppendLine("}");
         }
 
@@ -605,6 +808,10 @@ public static partial class Gen5MslTranslator
                     }
                 }
             }
+            else if (_stage == Gen5MslStage.Pixel)
+            {
+                EmitPixelInputState(source);
+            }
         }
 
         private static void EmitComputeSystemRegister(
@@ -745,6 +952,21 @@ public static partial class Gen5MslTranslator
                 case "SBarrier":
                     Line("threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);");
                     return true;
+            }
+
+            if (instruction.Control is Gen5ImageControl imageControl)
+            {
+                return TryEmitImage(instruction, imageControl, out error);
+            }
+
+            if (instruction.Control is Gen5ExportControl exportControl)
+            {
+                return TryEmitExport(instruction, exportControl, out error);
+            }
+
+            if (instruction.Control is Gen5InterpolationControl interpolationControl)
+            {
+                return TryEmitInterpolation(instruction, interpolationControl, out error);
             }
 
             if (instruction.Control is Gen5DataShareControl dataShare)
@@ -980,10 +1202,13 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            var ldsMask = _stage == Gen5MslStage.Compute
+                ? LdsDwordMask
+                : PrivateLdsDwordCount - 1;
             string LdsIndex(string address, uint offsetBytes) =>
                 offsetBytes == 0
-                    ? $"((({address}) >> 2) & {LdsDwordMask}u)"
-                    : $"(((({address}) + {offsetBytes}u) >> 2) & {LdsDwordMask}u)";
+                    ? $"((({address}) >> 2) & {ldsMask}u)"
+                    : $"(((({address}) + {offsetBytes}u) >> 2) & {ldsMask}u)";
 
             void StoreLds(string index, string value)
             {
