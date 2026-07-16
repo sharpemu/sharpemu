@@ -3342,15 +3342,7 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        // Unknown offset: return a zeroed result instead of NOT_FOUND
-        if (!ctx.TryWriteUInt64(infoAddress, 0) ||
-            !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), 0) ||
-            !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), 0))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
