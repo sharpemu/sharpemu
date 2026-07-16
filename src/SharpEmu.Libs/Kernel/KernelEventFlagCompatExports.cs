@@ -152,7 +152,7 @@ public static class KernelEventFlagCompatExports
 
         lock (state.Gate)
         {
-            state.Bits &= pattern;
+            state.Bits &= ~pattern;
             if (_traceEventFlag) TraceEventFlag($"clear handle=0x{handle:X16} mask=0x{pattern:X16} bits=0x{state.Bits:X16}");
         }
 
