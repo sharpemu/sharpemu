@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Posix;
 
 namespace SharpEmu.HLE;
 
@@ -52,7 +54,23 @@ public static unsafe class HostMemory
             return Win32VirtualAlloc(address, size, allocationType, protect);
         }
 
-        return Posix.Alloc(address, size, allocationType, protect);
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            // Native guest execution is x64-only, but architecture-neutral
+            // tests and tooling still use the compatibility facade on ARM64.
+            return Posix.Alloc(address, size, allocationType, protect);
+        }
+
+        if (allocationType is not (MEM_COMMIT or MEM_RESERVE or (MEM_COMMIT | MEM_RESERVE)))
+        {
+            return null;
+        }
+
+        // Keep the Win32-style raw protection word intact for Query callers.
+        // The typed interface intentionally normalizes it, so the compatibility
+        // facade uses the raw entry point on the same process-wide POSIX backend.
+        var memory = (PosixHostMemory)HostPlatform.Current.Memory;
+        return memory.AllocateRaw(address, size, allocationType, protect);
     }
 
     public static bool Free(void* address, nuint size, uint freeType)
@@ -62,7 +80,14 @@ public static unsafe class HostMemory
             return Win32VirtualFree(address, size, freeType);
         }
 
-        return Posix.Free(address, size, freeType);
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return Posix.Free(address, size, freeType);
+        }
+
+        _ = size;
+        _ = freeType;
+        return HostPlatform.Current.Memory.Free(unchecked((ulong)address));
     }
 
     public static bool Protect(void* address, nuint size, uint newProtect, out uint oldProtect)
@@ -72,7 +97,16 @@ public static unsafe class HostMemory
             return Win32VirtualProtect(address, size, newProtect, out oldProtect);
         }
 
-        return Posix.Protect(address, size, newProtect, out oldProtect);
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return Posix.Protect(address, size, newProtect, out oldProtect);
+        }
+
+        return HostPlatform.Current.Memory.ProtectRaw(
+            unchecked((ulong)address),
+            (ulong)size,
+            newProtect,
+            out oldProtect);
     }
 
     public static nuint Query(void* address, out BasicInfo info)
@@ -82,7 +116,28 @@ public static unsafe class HostMemory
             return Win32VirtualQuery(address, out info, (nuint)sizeof(BasicInfo));
         }
 
-        return Posix.Query(address, out info);
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return Posix.Query(address, out info);
+        }
+
+        if (!HostPlatform.Current.Memory.Query(unchecked((ulong)address), out var region))
+        {
+            info = default;
+            return 0;
+        }
+
+        info = new BasicInfo
+        {
+            BaseAddress = region.BaseAddress,
+            AllocationBase = region.AllocationBase,
+            AllocationProtect = region.RawAllocationProtection,
+            RegionSize = region.RegionSize,
+            State = region.RawState,
+            Protect = region.RawProtection,
+            Type = region.State == HostRegionState.Free ? 0 : MEM_PRIVATE,
+        };
+        return (nuint)sizeof(BasicInfo);
     }
 
     public static void FlushInstructionCache(void* address, nuint size)
@@ -93,10 +148,14 @@ public static unsafe class HostMemory
             return;
         }
 
-        // The emulator only executes x86-64 guest code, so a non-Windows host
-        // is either x86-64 (including Rosetta 2 translation) with a coherent
-        // instruction cache, or would need sys_icache_invalidate for a future
-        // arm64 recompiler. Nothing to do today.
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            // The ARM64 process never executes guest code directly. Preserve
+            // the compatibility facade's historical no-op for test/tooling use.
+            return;
+        }
+
+        HostPlatform.Current.Memory.FlushInstructionCache(unchecked((ulong)address), (ulong)size);
     }
 
     [DllImport("kernel32.dll", EntryPoint = "VirtualAlloc", SetLastError = true)]

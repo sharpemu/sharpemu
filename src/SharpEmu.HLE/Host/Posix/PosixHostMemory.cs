@@ -24,9 +24,11 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
     private const uint PAGE_NOACCESS = 0x01;
     private const uint PAGE_READONLY = 0x02;
     private const uint PAGE_READWRITE = 0x04;
+    private const uint PAGE_WRITECOPY = 0x08;
     private const uint PAGE_EXECUTE = 0x10;
     private const uint PAGE_EXECUTE_READ = 0x20;
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
+    private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
 
     private const ulong PageSize = 0x1000;
 
@@ -48,6 +50,11 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
             (nuint)size,
             MEM_COMMIT | MEM_RESERVE,
             ToNativeProtection(protection));
+    }
+
+    internal void* AllocateRaw(void* desiredAddress, nuint size, uint allocationType, uint protection)
+    {
+        return Posix.Alloc(desiredAddress, size, allocationType, protection);
     }
 
     public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection)
@@ -145,13 +152,15 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
         _ => throw new ArgumentOutOfRangeException(nameof(protection), protection, null),
     };
 
-    private static HostPageProtection ToHostProtection(uint protection) => protection switch
+    private static HostPageProtection ToHostProtection(uint protection) => (protection & 0xFF) switch
     {
         PAGE_READONLY => HostPageProtection.ReadOnly,
         PAGE_READWRITE => HostPageProtection.ReadWrite,
+        PAGE_WRITECOPY => HostPageProtection.ReadWrite,
         PAGE_EXECUTE => HostPageProtection.Execute,
         PAGE_EXECUTE_READ => HostPageProtection.ReadExecute,
         PAGE_EXECUTE_READWRITE => HostPageProtection.ReadWriteExecute,
+        PAGE_EXECUTE_WRITECOPY => HostPageProtection.ExecuteWriteCopy,
         _ => HostPageProtection.NoAccess,
     };
 
@@ -396,12 +405,39 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                 if (TryFindRegionLocked(pageAddress, out var region))
                 {
                     // Win32 VirtualQuery reports a run of pages sharing the
-                    // same protection, so stop the run where it changes.
-                    var protect = region.ProtectAt(pageAddress);
-                    var runEnd = pageAddress + PageSize;
-                    while (runEnd < region.End && region.ProtectAt(runEnd) == protect)
+                    // same protection, so stop the run where it changes. Do
+                    // not walk the whole mapping page-by-page here: PS5 GPU
+                    // apertures can span hundreds of GiB, while protection
+                    // overrides are sparse.
+                    var pageProtects = region.PageProtects;
+                    uint protect;
+                    ulong runEnd;
+                    if (pageProtects is null || pageProtects.Count == 0)
                     {
-                        runEnd += PageSize;
+                        protect = region.DefaultProtect;
+                        runEnd = region.End;
+                    }
+                    else if (pageProtects.TryGetValue(pageAddress, out protect))
+                    {
+                        runEnd = pageAddress + PageSize;
+                        while (runEnd < region.End &&
+                            pageProtects.TryGetValue(runEnd, out var nextProtect) &&
+                            nextProtect == protect)
+                        {
+                            runEnd += PageSize;
+                        }
+                    }
+                    else
+                    {
+                        protect = region.DefaultProtect;
+                        runEnd = region.End;
+                        foreach (var overrideAddress in pageProtects.Keys)
+                        {
+                            if (overrideAddress > pageAddress && overrideAddress < runEnd)
+                            {
+                                runEnd = overrideAddress;
+                            }
+                        }
                     }
 
                     info.BaseAddress = pageAddress;
@@ -509,14 +545,16 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static int ToPosixProtect(uint win32Protect)
         {
-            return win32Protect switch
+            // Modifier bits such as PAGE_GUARD are retained in the shadow
+            // table for raw Query round-trips but do not change POSIX access.
+            return (win32Protect & 0xFF) switch
             {
                 PAGE_NOACCESS => PROT_NONE,
                 PAGE_READONLY => PROT_READ,
-                PAGE_READWRITE => PROT_READ | PROT_WRITE,
+                PAGE_READWRITE or PAGE_WRITECOPY => PROT_READ | PROT_WRITE,
                 PAGE_EXECUTE => PROT_READ | PROT_EXEC,
                 PAGE_EXECUTE_READ => PROT_READ | PROT_EXEC,
-                PAGE_EXECUTE_READWRITE => PROT_READ | PROT_WRITE | PROT_EXEC,
+                PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY => PROT_READ | PROT_WRITE | PROT_EXEC,
                 _ => PROT_READ | PROT_WRITE
             };
         }
