@@ -170,6 +170,7 @@ public sealed partial class DirectExecutionBackend
 		var result = (destinationLow & ~destinationMask) |
 			((sourceLow & sourceMask) << bitIndex);
 		WriteCtxU64(contextRecord, destinationOffset, result);
+		WriteCtxU64(contextRecord, destinationOffset + sizeof(ulong), 0);
 		WriteCtxU64(contextRecord, 248, rip + (ulong)offset);
 
 		var count = Interlocked.Increment(ref _insertqEmulationCount);

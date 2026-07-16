@@ -6194,7 +6194,7 @@ internal static unsafe class VulkanVideoPresenter
 
             if (
                 !IsCompatibleGuestImageAlias(texture, source) ||
-                (!source.Initialized && !source.InitialUploadPending) ||
+                !source.Initialized ||
                 IsBlockCompressedFormat(source.Format) ||
                 IsBlockCompressedFormat(format))
             {

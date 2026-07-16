@@ -1045,7 +1045,7 @@ public static class Gen5ShaderScalarEvaluator
     }
 
     private static bool IsAddressAdd(string opcode) =>
-        opcode is "VAddI32" or "VAddcU32" or "VAddCoU32";
+        opcode is "VAddI32" or "VAddcU32" or "VAddCoU32" or "VAddCoCiU32";
 
     private static bool TryResolveConstantOperand(Gen5Operand operand, out uint value)
     {
