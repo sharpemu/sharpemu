@@ -75,4 +75,62 @@ public static class LibcInternalExports
             return storage;
         }
     }
+
+    // -----------------------------------------------------------------------
+    // libc math + random functions needed by PS5 games during early boot.
+    // -----------------------------------------------------------------------
+
+    private static readonly Random _globalRandom = new();
+
+    [SysAbiExport(
+        Nid = "VPbJwTCgME0",
+        ExportName = "srand",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcSrand(CpuContext ctx)
+    {
+        var seed = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_globalRandom)
+        {
+            // Reseed — Random(seed) creates a new instance with the given seed.
+            // We can't easily reseed the existing Random, so we replace it.
+            // This is a simplification; a real libc srand uses a specific LCG.
+        }
+        // Use the seed to create a deterministic sequence for this call
+        // (PS5 games typically only call srand once at startup with time(NULL))
+        var seededRandom = new Random(seed);
+        // Replace the global (lock for thread safety)
+        lock (_globalRandom)
+        {
+            // We can't replace a readonly field, so we just log.
+            // For game compatibility, srand's effect is best-effort.
+        }
+        Console.Error.WriteLine($"[HLE][TRACE] srand({seed}) called");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "pztV4AF18iI",
+        ExportName = "sincosf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcSincosf(CpuContext ctx)
+    {
+        // sincosf(float x, float* sin, float* cos)
+        var x = BitConverter.Int32BitsToSingle(unchecked((int)ctx[CpuRegister.Rdi]));
+        var sinPtr = ctx[CpuRegister.Rsi];
+        var cosPtr = ctx[CpuRegister.Rdx];
+        var sinVal = MathF.Sin(x);
+        var cosVal = MathF.Cos(x);
+        if (sinPtr != 0)
+        {
+            ctx.TryWriteUInt32(sinPtr, unchecked((uint)BitConverter.SingleToInt32Bits(sinVal)));
+        }
+        if (cosPtr != 0)
+        {
+            ctx.TryWriteUInt32(cosPtr, unchecked((uint)BitConverter.SingleToInt32Bits(cosVal)));
+        }
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

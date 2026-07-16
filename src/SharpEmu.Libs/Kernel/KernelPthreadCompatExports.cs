@@ -1836,4 +1836,86 @@ public static class KernelPthreadCompatExports
 
         return addresses.Count == 0 ? null : addresses;
     }
+
+    // -----------------------------------------------------------------------
+    // C11 threading primitives: _Mtx_init / _Mtx_lock / _Mtx_unlock / _Cnd_init
+    //
+    // PS5 games (e.g. Arise: A Simple Story) call these C11 standard
+    // functions during C++ static-init for std::mutex / std::condition_variable
+    // implementations. Without them, the game spins forever in an unresolved
+    // import stub and never reaches main().
+    //
+    // Each C11 function delegates to the corresponding POSIX pthread core
+    // which already handles the actual mutex/cond state.
+    // -----------------------------------------------------------------------
+
+    [SysAbiExport(
+        Nid = "YaHc3GS7y7g",
+        ExportName = "_Mtx_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxInit(CpuContext ctx)
+    {
+        // _Mtx_init(_Mtx_t* mtx, int type)
+        // type: 0=plain, 1=try, 2=timed, 8=recursive (C11 mtx types)
+        var mtx = ctx[CpuRegister.Rdi];
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        // Map C11 type to pthread type
+        var pthreadType = (type & 8) != 0 ? MutexTypeRecursive : MutexTypeErrorCheck;
+        // Write the type into the attr slot (Rsi) so PthreadMutexInitCore picks it up.
+        // PthreadMutexInitCore(mtx, attr) — attr==0 means default (errorcheck).
+        // For C11, we pass 0 as attr and let the core use the default type.
+        // To honor the C11 type, we need to set the attr state first.
+        // Simpler: call PthreadMutexInitCore with attr=0 then patch the type.
+        var result = PthreadMutexInitCore(ctx, mtx, 0);
+        if (result == 0)
+        {
+            // Patch the type directly in the mutex state
+            if (_mutexStates.TryGetValue(mtx, out var state))
+            {
+                state.Type = pthreadType;
+            }
+        }
+        return result;
+    }
+
+    [SysAbiExport(
+        Nid = "iS4aWbUonl0",
+        ExportName = "_Mtx_lock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxLock(CpuContext ctx) =>
+        PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false);
+
+    [SysAbiExport(
+        Nid = "gTuXQwP9rrs",
+        ExportName = "_Mtx_unlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxUnlock(CpuContext ctx) =>
+        PthreadMutexUnlockCore(ctx, ctx[CpuRegister.Rdi], requireOwner: false);
+
+    [SysAbiExport(
+        Nid = "SreZybSRWpU",
+        ExportName = "_Cnd_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11CndInit(CpuContext ctx) =>
+        PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
+
+    // _ZSt14_Throw_C_errori — libstdc++ __throw_C_error(int).
+    // Called only on C library errors. Stub: log and return (don't actually throw).
+    [SysAbiExport(
+        Nid = "bRujIheWlB0",
+        ExportName = "_ZSt14_Throw_C_errori",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int StdThrowCError(CpuContext ctx)
+    {
+        var code = unchecked((int)ctx[CpuRegister.Rdi]);
+        Console.Error.WriteLine($"[HLE][WARN] __throw_C_error({code}) called — stubbed (no exception thrown)");
+        // Return 0; the caller will typically check errno and continue.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
