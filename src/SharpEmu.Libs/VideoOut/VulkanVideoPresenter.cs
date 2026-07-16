@@ -1463,6 +1463,13 @@ internal static unsafe class VulkanVideoPresenter
     internal static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,
+        out VulkanRenderTargetFormat result) =>
+        TryDecodeRenderTargetFormat(dataFormat, numberType, componentSwap: 0, out result);
+
+    internal static bool TryDecodeRenderTargetFormat(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
         out VulkanRenderTargetFormat result)
     {
         var format = (dataFormat, numberType) switch
@@ -1474,7 +1481,13 @@ internal static unsafe class VulkanVideoPresenter
             (5, 5) => Format.R16G16Sint,
             (5, 7) => Format.R16G16Sfloat,
             (6, 7) or (7, 7) => Format.B10G11R11UfloatPack32,
-            (9, _) => Format.A2R10G10B10UnormPack32,
+            // CB_COLOR_INFO.COMP_SWAP is independent from FORMAT. For
+            // COLOR_2_10_10_10, STD exposes the low 10-bit component as R
+            // (A2B10G10R10 in Vulkan); ALT reverses R/B. Void Terrarium uses
+            // STD (CB_COLOR_INFO=0x00008024).
+            (9, _) when componentSwap == 0 => Format.A2B10G10R10UnormPack32,
+            (9, _) when componentSwap == 1 => Format.A2R10G10B10UnormPack32,
+            (9, _) => Format.Undefined,
             (10, 4) => Format.R8G8B8A8Uint,
             (10, 5) => Format.R8G8B8A8Sint,
             (10, 9) => Format.R8G8B8A8Srgb,
@@ -9356,7 +9369,11 @@ internal static unsafe class VulkanVideoPresenter
             for (var index = 0; index < targetFormats.Length; index++)
             {
                 var target = work.Targets[index];
-                if (!TryDecodeRenderTargetFormat(target.Format, target.NumberType, out targetFormats[index]) ||
+                if (!TryDecodeRenderTargetFormat(
+                        target.Format,
+                        target.NumberType,
+                        target.ComponentSwap,
+                        out targetFormats[index]) ||
                     !SupportsColorAttachment(targetFormats[index].Format))
                 {
                     Console.Error.WriteLine(

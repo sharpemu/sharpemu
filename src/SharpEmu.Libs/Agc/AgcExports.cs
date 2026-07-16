@@ -401,6 +401,7 @@ public static partial class AgcExports
         uint Height,
         uint Format,
         uint NumberType,
+        uint ComponentSwap,
         uint TileMode);
 
     private sealed record TranslatedGuestDraw(
@@ -3370,7 +3371,8 @@ public static partial class AgcExports
                             pendingDisplayTarget.Width,
                             pendingDisplayTarget.Height,
                             pendingDisplayTarget.Format,
-                            pendingDisplayTarget.NumberType)],
+                            pendingDisplayTarget.NumberType,
+                            ComponentSwap: pendingDisplayTarget.ComponentSwap)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -5779,6 +5781,7 @@ public static partial class AgcExports
             depthTarget.Height,
             Format: 0,
             NumberType: 0,
+            ComponentSwap: 0,
             TileMode: 0);
         var renderState = CreateRenderState(state.CxRegisters, syntheticTarget) with
         {
@@ -6145,7 +6148,8 @@ public static partial class AgcExports
                 renderTargets[index].Width,
                 renderTargets[index].Height,
                 renderTargets[index].Format,
-                renderTargets[index].NumberType);
+                renderTargets[index].NumberType,
+                ComponentSwap: renderTargets[index].ComponentSwap);
         }
 
         draw = new TranslatedGuestDraw(
@@ -6604,6 +6608,7 @@ public static partial class AgcExports
                 (attrib2 & 0x3FFFu) + 1,
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
+                (info >> 11) & 0x3u,
                 (attrib3 >> 14) & 0x1Fu));
         }
 
