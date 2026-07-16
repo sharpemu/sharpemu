@@ -20,6 +20,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
+using System.Net.Http.Headers;
 
 namespace SharpEmu.GUI;
 
@@ -77,6 +78,9 @@ public partial class MainWindow : Window
     private long _navRightNextAt;
     private long _navUpNextAt;
     private long _navDownNextAt;
+
+    //Github http client
+    private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
 
     public MainWindow()
     {
@@ -236,6 +240,79 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---- Github http client config ----
+    // This is for getting lash commit id
+    private static HttpClient CreateGithubHttpClient()
+    {
+        var client = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("SharpEmu/1.0");
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/vnd.github.sha"));
+
+        client.DefaultRequestHeaders.Add(
+            "X-GitHub-Api-Version",
+            "2026-03-10");
+
+        return client;
+    }
+    private async Task LoadLatestCommitAsync()
+    {
+        const string apiUrl =
+            "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
+
+        LatestCommitHashText.Text = "Loading…";
+
+        try
+        {
+            using var response = await GithubHttpClient.GetAsync(apiUrl);
+            var responseBody = (await response.Content.ReadAsStringAsync()).Trim();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                LatestCommitHashText.Text =
+                    $"HTTP {(int)response.StatusCode}";
+
+                ToolTip.SetTip(
+                    LatestCommitHashText,
+                    string.IsNullOrWhiteSpace(responseBody)
+                        ? response.ReasonPhrase
+                        : responseBody);
+
+                return;
+            }
+
+            // With application/vnd.github.sha, GitHub returns the SHA directly.
+            if (responseBody.Length < 7)
+            {
+                LatestCommitHashText.Text = "Invalid response";
+                ToolTip.SetTip(LatestCommitHashText, responseBody);
+                return;
+            }
+
+            LatestCommitHashText.Text = responseBody[..7];
+            ToolTip.SetTip(LatestCommitHashText, responseBody);
+        }
+        catch (TaskCanceledException ex)
+        {
+            LatestCommitHashText.Text = "Timeout";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+        }
+        catch (HttpRequestException ex)
+        {
+            LatestCommitHashText.Text = "Connection error";
+            ToolTip.SetTip(LatestCommitHashText, ex.ToString());
+        }
+        catch (Exception ex)
+        {
+            LatestCommitHashText.Text = "Error";
+            ToolTip.SetTip(LatestCommitHashText, ex.ToString());
+        }
+    }
+
     // ---- Controller navigation ----
 
     private void PollGamepad()
@@ -381,6 +458,8 @@ public partial class MainWindow : Window
         ApplySettingsToControls();
         LocateEmulator();
         UpdateDiscordPresence();
+        _ = LoadLatestCommitAsync();
+
         if (_settings.CheckForUpdatesOnStartup)
         {
             _ = CheckForUpdatesAsync();
