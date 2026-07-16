@@ -373,6 +373,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 VerticalAlignment="Center" />
                       </Grid>
 
+                      <!--Latest commit info-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                          <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
+                          <TextBlock Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                        </StackPanel>
+
+                        <TextBlock Grid.Column="1" x:Name="LatestCommitHashText" Text="Loading…"
+                          FontSize="12" FontFamily="Consolas,monospace" Foreground="{StaticResource MutedBrush}"
+                          VerticalAlignment="Center" 
+                        />
+
+                      </Grid>
+
                       <!--Discord-->
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0"
