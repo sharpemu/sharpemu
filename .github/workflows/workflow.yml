@@ -7,6 +7,8 @@ on:
   push:
     branches:
       - "**"
+    tags:
+      - "v*"
     paths-ignore:
       - "**/*.md"
       - "**/*.png"
@@ -52,6 +54,11 @@ jobs:
           version="$(python3 -c 'import sys, xml.etree.ElementTree as ET; version = ET.parse("Directory.Build.props").getroot().findtext(".//SharpEmuVersion"); sys.exit("Directory.Build.props is missing SharpEmuVersion") if not version or not version.strip() else print(version.strip())')"
           release_tag="v${version}"
           release_name="SharpEmu v${version}"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${release_tag}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match project version ${release_tag}." >&2
+            exit 1
+          fi
 
           {
             echo "short-sha=${short_sha}"
@@ -203,7 +210,9 @@ jobs:
       - init
       - build
       - build-posix
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Versioned releases are immutable and tag-driven. Branch and manual runs
+    # still produce Actions artifacts without modifying a published release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -213,7 +222,7 @@ jobs:
         with:
           path: release
 
-      - name: Create or update release
+      - name: Create release
         shell: bash
         env:
           GH_REPO: ${{ github.repository }}
@@ -231,26 +240,11 @@ jobs:
           notes="Automated SharpEmu v${VERSION} build for commit ${GITHUB_SHA}."
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
-            gh release edit "${RELEASE_TAG}" --title "${RELEASE_NAME}" --notes "${notes}"
-          else
-            gh release create "${RELEASE_TAG}" "${assets[@]}" \
-              --title "${RELEASE_NAME}" \
-              --notes "${notes}" \
-              --target "${GITHUB_SHA}"
+            echo "Release ${RELEASE_TAG} already exists and will not be modified." >&2
+            exit 1
           fi
 
-          keep=()
-          for asset_path in "${assets[@]}"; do
-            keep+=("$(basename "${asset_path}")")
-          done
-          mapfile -t release_assets < <(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort)
-          for asset in "${release_assets[@]}"; do
-            case "${asset}" in
-              sharpemu-${VERSION}-*.zip|sharpemu-${VERSION}-*.tar.gz)
-                if ! printf '%s\n' "${keep[@]}" | grep -Fxq "${asset}"; then
-                  gh release delete-asset "${RELEASE_TAG}" "${asset}" --yes
-                fi
-                ;;
-            esac
-          done
+          gh release create "${RELEASE_TAG}" "${assets[@]}" \
+            --verify-tag \
+            --title "${RELEASE_NAME}" \
+            --notes "${notes}"
