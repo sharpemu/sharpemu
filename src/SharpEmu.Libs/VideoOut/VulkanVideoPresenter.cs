@@ -3446,6 +3446,10 @@ internal static unsafe class VulkanVideoPresenter
 
         private void CreatePipelineCache()
         {
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var properties);
+            var pipelineCacheUuid = new ReadOnlySpan<byte>(
+                properties.PipelineCacheUuid,
+                VulkanPipelineCacheStorage.UuidSize);
             var cacheMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE");
             // Vulkan cache blobs carry the implementation's compatibility
             // header and are rejected/rebuilt below when the device or driver
@@ -3455,13 +3459,24 @@ internal static unsafe class VulkanVideoPresenter
             // Keep an explicit opt-out for diagnostics and read-only systems.
             var persistentCacheEnabled =
                 !string.Equals(cacheMode, "0", StringComparison.Ordinal);
-            _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
+            _pipelineCachePath = persistentCacheEnabled
+                ? GetPipelineCachePath(properties.VendorID, properties.DeviceID, pipelineCacheUuid)
+                : null;
             byte[] initialData = [];
             try
             {
                 if (_pipelineCachePath is not null && File.Exists(_pipelineCachePath))
                 {
-                    initialData = File.ReadAllBytes(_pipelineCachePath);
+                    if (!VulkanPipelineCacheStorage.TryReadCompatible(
+                            _pipelineCachePath,
+                            properties.VendorID,
+                            properties.DeviceID,
+                            pipelineCacheUuid,
+                            out initialData))
+                    {
+                        Console.Error.WriteLine(
+                            "[LOADER][WARN] Vulkan pipeline cache has an incompatible or invalid header; rebuilding it.");
+                    }
                 }
             }
             catch (Exception exception)
@@ -3525,7 +3540,10 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
-        private static string GetPipelineCachePath()
+        private static string GetPipelineCachePath(
+            uint vendorId,
+            uint deviceId,
+            ReadOnlySpan<byte> pipelineCacheUuid)
         {
             var configured = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH");
             if (!string.IsNullOrWhiteSpace(configured))
@@ -3540,7 +3558,10 @@ internal static unsafe class VulkanVideoPresenter
                     "Library",
                     "Caches")
                 : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            return Path.Combine(root, "SharpEmu", "vulkan-pipeline-cache.bin");
+            return Path.Combine(
+                root,
+                "SharpEmu",
+                VulkanPipelineCacheStorage.GetFileName(vendorId, deviceId, pipelineCacheUuid));
         }
 
         private void MarkPipelineCacheDirty()
@@ -3582,7 +3603,9 @@ internal static unsafe class VulkanVideoPresenter
                     _pipelineCache,
                     &size,
                     null);
-                if (result != Result.Success || size == 0 || size > 256u * 1024u * 1024u)
+                if (result != Result.Success ||
+                    size == 0 ||
+                    size > (nuint)VulkanPipelineCacheStorage.MaximumCacheSize)
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache query failed: result={result} size={size}");
