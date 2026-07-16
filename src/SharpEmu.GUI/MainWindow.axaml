@@ -505,6 +505,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch Grid.Column="1" x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_NATIVE_DEBUGGER" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvNativeDebuggerDesc"
+                                     Text="Run the emulator under Windows' debug API and log every native exception (code, address, registers) before it is passed through.&#10;Slower to start. Use when a game exits silently with no error in the log."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvNativeDebuggerToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
                     </StackPanel>
                   </Border>
 

@@ -37,6 +37,7 @@
   "Options.Env.LogDirectMemory.Desc": "Log direct memory allocations and failures to the console.\nUse when a game aborts or exits during boot.",
   "Options.Env.LogIo.Desc": "Log file open, read, and path-resolve activity to the console.\nUse when a game cannot find its data files during boot.",
   "Options.Env.LogNp.Desc": "Log NP (PlayStation Network) library calls to the console.",
+  "Options.Env.NativeDebugger.Desc": "Run the emulator under Windows' debug API and log every native exception (code, address, registers) before it is passed through.\nSlower to start. Use when a game exits silently with no error in the log.",
   "Options.Section.Emulation": "EMULATION",
   "Options.Section.Logging": "LOGGING",
   "Options.Section.Launcher": "LAUNCHER",

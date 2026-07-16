@@ -154,6 +154,8 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
+        EnvNativeDebuggerToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_NATIVE_DEBUGGER", EnvNativeDebuggerToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -447,6 +449,7 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryDesc.Text = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoDesc.Text = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpDesc.Text = loc.Get("Options.Env.LogNp.Desc");
+        EnvNativeDebuggerDesc.Text = loc.Get("Options.Env.NativeDebugger.Desc");
         EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
         LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
@@ -641,6 +644,7 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
+        EnvNativeDebuggerToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_NATIVE_DEBUGGER");
         UpdateLogFilePathText();
     }
 

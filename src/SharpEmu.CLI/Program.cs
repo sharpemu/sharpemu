@@ -464,6 +464,7 @@ internal static partial class Program
             childArgs[i + 1] = args[i];
         }
 
+        var useNativeDebugger = IsNativeDebuggerEnabled();
         var commandLine = BuildCommandLine(processPath, childArgs);
         var startupInfoEx = new STARTUPINFOEX();
         startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
@@ -512,13 +513,14 @@ internal static partial class Program
             var cmdLineBuilder = new StringBuilder(commandLine);
             nint jobHandle = 0;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+            var creationFlags = EXTENDED_STARTUPINFO_PRESENT | (useNativeDebugger ? DEBUG_ONLY_THIS_PROCESS : 0u);
             var created = CreateProcessW(
                 processPath,
                 cmdLineBuilder,
                 0,
                 0,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
+                creationFlags,
                 0,
                 Environment.CurrentDirectory,
                 ref startupInfoEx,
@@ -556,16 +558,26 @@ internal static partial class Program
                 Console.CancelKeyPress += cancelHandler;
                 AppDomain.CurrentDomain.ProcessExit += processExitHandler;
 
-                _ = WaitForSingleObject(processInfo.hProcess, INFINITE);
+                bool waitSucceeded;
+                if (useNativeDebugger)
+                {
+                    waitSucceeded = RunNativeDebugLoop((uint)processInfo.dwProcessId, processInfo.hThread, out childExitCode);
+                }
+                else
+                {
+                    _ = WaitForSingleObject(processInfo.hProcess, INFINITE);
+                    waitSucceeded = GetExitCodeProcess(processInfo.hProcess, out var rawExitCode);
+                    childExitCode = unchecked((int)rawExitCode);
+                }
+
                 Console.CancelKeyPress -= cancelHandler;
                 AppDomain.CurrentDomain.ProcessExit -= processExitHandler;
 
-                if (!GetExitCodeProcess(processInfo.hProcess, out var exitCode))
+                if (!waitSucceeded)
                 {
                     return false;
                 }
 
-                childExitCode = unchecked((int)exitCode);
                 Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
                 return true;
             }
