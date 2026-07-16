@@ -927,9 +927,6 @@ public static partial class Gen5SpirvTranslator
                         first,
                         second);
                     result = Ext(58, _uintType, vector);
-                    StorePackedHalf(
-                        destination,
-                        vector);
                     break;
                 }
                 case "VCvtPknormI16F32":

@@ -255,7 +255,6 @@ public static partial class Gen5SpirvTranslator
         private uint _runtimeBufferBiases;
         private uint _scalarRegisters;
         private uint _vectorRegisters;
-        private uint _packedHalfRegisters;
         private uint _scc;
         private uint _vcc;
         private uint _exec;
@@ -721,13 +720,10 @@ public static partial class Gen5SpirvTranslator
 
             var scalarArrayType = _module.TypeArray(_uintType, ScalarRegisterCount);
             var vectorArrayType = _module.TypeArray(_uintType, VectorRegisterCount);
-            var packedHalfArrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
             var privateScalarArrayPointer =
                 _module.TypePointer(SpirvStorageClass.Private, scalarArrayType);
             var privateVectorArrayPointer =
                 _module.TypePointer(SpirvStorageClass.Private, vectorArrayType);
-            var privatePackedHalfArrayPointer =
-                _module.TypePointer(SpirvStorageClass.Private, packedHalfArrayType);
             _scalarRegisters = _module.AddGlobalVariable(
                 privateScalarArrayPointer,
                 SpirvStorageClass.Private,
@@ -736,10 +732,6 @@ public static partial class Gen5SpirvTranslator
                 privateVectorArrayPointer,
                 SpirvStorageClass.Private,
                 _module.ConstantNull(vectorArrayType));
-            _packedHalfRegisters = _module.AddGlobalVariable(
-                privatePackedHalfArrayPointer,
-                SpirvStorageClass.Private,
-                _module.ConstantNull(packedHalfArrayType));
             _scc = _module.AddGlobalVariable(
                 _privateBoolPointer,
                 SpirvStorageClass.Private,
@@ -776,7 +768,6 @@ public static partial class Gen5SpirvTranslator
 
             _interfaces.Add(_scalarRegisters);
             _interfaces.Add(_vectorRegisters);
-            _interfaces.Add(_packedHalfRegisters);
             _interfaces.Add(_scc);
             _interfaces.Add(_vcc);
             _interfaces.Add(_exec);
@@ -785,7 +776,6 @@ public static partial class Gen5SpirvTranslator
             _interfaces.Add(_programActive);
             _module.AddName(_scalarRegisters, "sgpr");
             _module.AddName(_vectorRegisters, "vgpr");
-            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
 
             var runtimeBufferBiasCount =
                 _globalBufferBase + _evaluation.GlobalMemoryBindings.Count;
@@ -4629,14 +4619,6 @@ public static partial class Gen5SpirvTranslator
             Gen5ShaderInstruction instruction,
             int component)
         {
-            if (TryLoadPackedHalfExportComponent(
-                    instruction,
-                    component,
-                    out var shadowValue))
-            {
-                return shadowValue;
-            }
-
             var packed = LoadV(instruction.Sources[component >> 1].Value);
             var unpacked = Ext(62, _vec2Type, packed);
             return _module.AddInstruction(
@@ -4644,132 +4626,6 @@ public static partial class Gen5SpirvTranslator
                 _floatType,
                 unpacked,
                 (uint)(component & 1));
-        }
-
-        private bool TryLoadPackedHalfExportComponent(
-            Gen5ShaderInstruction exportInstruction,
-            int component,
-            out uint value)
-        {
-            value = 0;
-            var packedSource = exportInstruction.Sources[component >> 1];
-            var tracePackedExport =
-                Environment.GetEnvironmentVariable(
-                    "SHARPEMU_TRACE_PACKED_EXPORT") == "1" &&
-                _state.Program.Address == 0x0000000500781200ul;
-            if (tracePackedExport)
-            {
-                Console.Error.WriteLine(
-                    $"[AGC][PACKED-EXPORT] exp_pc=0x{exportInstruction.Pc:X} " +
-                    $"component={component} source={packedSource.Kind}:" +
-                    $"{packedSource.Value}");
-                if (component == 0 && exportInstruction.Pc == 0x630)
-                {
-                    foreach (var decoded in _state.Program.Instructions.Where(
-                                 static decoded => decoded.Pc <= 0x640))
-                    {
-                        Console.Error.WriteLine(
-                            $"[AGC][TITLE-IR] 0x{decoded.Pc:X4} " +
-                            $"{decoded.Opcode} dst=[" +
-                            string.Join(',', decoded.Destinations) +
-                            "] src=[" +
-                            string.Join(',', decoded.Sources) + "] words=[" +
-                            string.Join(',', decoded.Words.Select(static word => $"{word:X8}")) +
-                            "] ctrl=" + decoded.Control);
-                    }
-                }
-            }
-            if (packedSource.Kind != Gen5OperandKind.VectorRegister)
-            {
-                if (tracePackedExport)
-                {
-                    Console.Error.WriteLine(
-                        "[AGC][PACKED-EXPORT] rejected: source is not a VGPR");
-                }
-                return false;
-            }
-
-            for (var index = _state.Program.Instructions.Count - 1; index >= 0; index--)
-            {
-                var candidate = _state.Program.Instructions[index];
-                if (candidate.Pc >= exportInstruction.Pc)
-                {
-                    continue;
-                }
-
-                if (exportInstruction.Pc - candidate.Pc > 128)
-                {
-                    break;
-                }
-
-                if (!candidate.Destinations.Any(destination =>
-                        destination.Kind == Gen5OperandKind.VectorRegister &&
-                        destination.Value == packedSource.Value))
-                {
-                    continue;
-                }
-
-                if (tracePackedExport)
-                {
-                    Console.Error.WriteLine(
-                        $"[AGC][PACKED-EXPORT] nearest_pc=0x{candidate.Pc:X} " +
-                        $"opcode={candidate.Opcode} distance=" +
-                        $"{exportInstruction.Pc - candidate.Pc}");
-                }
-
-                if (candidate.Opcode != "VCvtPkrtzF16F32" ||
-                    candidate.Sources.Count < 2)
-                {
-                    if (tracePackedExport)
-                    {
-                        Console.Error.WriteLine(
-                            "[AGC][PACKED-EXPORT] rejected: nearest writer is " +
-                            candidate.Opcode);
-                    }
-                    return false;
-                }
-
-                var packedPointer = PackedHalfPointer(packedSource.Value);
-                if (Environment.GetEnvironmentVariable(
-                        "SHARPEMU_FORCE_PACKED_EXPORT_STORE_ONE") == "1" &&
-                    _state.Program.Address == 0x0000000500781200ul)
-                {
-                    Store(
-                        packedPointer,
-                        _module.AddInstruction(
-                            SpirvOp.CompositeConstruct,
-                            _vec2Type,
-                            Float(1f),
-                            Float(1f)));
-                }
-
-                var packedPair = Load(
-                    _vec2Type,
-                    packedPointer);
-                value = _module.AddInstruction(
-                    SpirvOp.CompositeExtract,
-                    _floatType,
-                    packedPair,
-                    (uint)(component & 1));
-                if (Environment.GetEnvironmentVariable(
-                        "SHARPEMU_FORCE_PACKED_EXPORT_ONE") == "1")
-                {
-                    value = Float(1f);
-                }
-                if (tracePackedExport)
-                {
-                    Console.Error.WriteLine(
-                        "[AGC][PACKED-EXPORT] selected shadow pair");
-                }
-                return true;
-            }
-
-            if (tracePackedExport)
-            {
-                Console.Error.WriteLine(
-                    "[AGC][PACKED-EXPORT] rejected: no nearby writer");
-            }
-            return false;
         }
 
         private uint GetPixelOutputType(Gen5PixelOutputKind kind) =>
@@ -4895,13 +4751,6 @@ public static partial class Gen5SpirvTranslator
                 _vectorRegisters,
                 UInt(register));
 
-        private uint PackedHalfPointer(uint register) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _privateVec2Pointer,
-                _packedHalfRegisters,
-                UInt(register));
-
         private uint LoadS(uint register) => Load(_uintType, ScalarPointer(register));
 
         private uint LoadV(uint register) => Load(_uintType, VectorPointer(register));
@@ -4934,42 +4783,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             Store(VectorPointer(register), value);
-        }
-
-        private void StorePackedHalf(uint register, uint value)
-        {
-            var active = Load(_boolType, _exec);
-            if (Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_PACKED_STORE_EXEC_VALUES") == "1" &&
-                _state.Program.Address == 0x0000000500781200ul)
-            {
-                var activePair = _module.AddInstruction(
-                    SpirvOp.CompositeConstruct,
-                    _vec2Type,
-                    Float(1f),
-                    Float(1f));
-                var inactivePair = _module.AddInstruction(
-                    SpirvOp.CompositeConstruct,
-                    _vec2Type,
-                    Float(0.5f),
-                    Float(0.5f));
-                value = _module.AddInstruction(
-                    SpirvOp.Select,
-                    _vec2Type,
-                    active,
-                    activePair,
-                    inactivePair);
-                Store(PackedHalfPointer(register), value);
-                return;
-            }
-
-            value = _module.AddInstruction(
-                SpirvOp.Select,
-                _vec2Type,
-                active,
-                value,
-                Load(_vec2Type, PackedHalfPointer(register)));
-            Store(PackedHalfPointer(register), value);
         }
 
         private uint Load(uint type, uint pointer)

@@ -2226,6 +2226,14 @@ internal static unsafe class VulkanVideoPresenter
         return keys;
     }
 
+    internal static bool ShouldAttachGuestDepth(
+        bool depthAttachmentsEnabled,
+        GuestDepthTarget? target,
+        GuestDepthState state) =>
+        depthAttachmentsEnabled &&
+        target is not null &&
+        (state.TestEnable || state.WriteEnable);
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -9469,9 +9477,11 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 GuestDepthResource? depth = null;
                 DepthFramebufferResource? depthFramebuffer = null;
-                if (work.DepthTarget is { } depthTarget &&
-                    (draw.RenderState.Depth.TestEnable ||
-                     draw.RenderState.Depth.WriteEnable))
+                if (ShouldAttachGuestDepth(
+                        _depthAttachmentsEnabled,
+                        work.DepthTarget,
+                        draw.RenderState.Depth) &&
+                    work.DepthTarget is { } depthTarget)
                 {
                     var effectiveDepthTarget = depthTarget;
                     if (depthTarget.Width < firstTarget.Width || depthTarget.Height < firstTarget.Height)
@@ -12831,6 +12841,16 @@ internal static unsafe class VulkanVideoPresenter
         private static readonly bool _traceDepthInitialization =
             string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEPTH_INIT"),
+                "1",
+                StringComparison.Ordinal);
+        // Guest depth attachments are still experimental: the presenter does
+        // not yet reproduce every guest clear/resolve transition. Attaching a
+        // stale host depth image can reject otherwise valid color draws, so
+        // preserve the established color path unless depth is explicitly
+        // requested for validation.
+        private static readonly bool _depthAttachmentsEnabled =
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_DEPTH"),
                 "1",
                 StringComparison.Ordinal);
         private static readonly long _traceGuestImageOccurrence =
