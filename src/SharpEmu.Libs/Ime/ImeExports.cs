@@ -43,4 +43,21 @@ public static class ImeExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "VkqLPArfFdc",
+        ExportName = "sceImeKeyboardGetInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceIme")]
+    public static int ImeKeyboardGetInfo(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        if (infoAddress != 0)
+        {
+            Span<byte> zero = stackalloc byte[0x40];
+            zero.Clear();
+            _ = ctx.Memory.TryWrite(infoAddress, zero);
+        }
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
+    }
 }
