@@ -58,6 +58,9 @@ internal static partial class GuestAddressSpaceReservation
         {
             // Reservation failed - the address space might already be taken.
             // PhysicalVirtualMemory will handle the failure gracefully.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Could not reserve guest address space at 0x{Ps5CriticalRegionBase:X16}; " +
+                "the .NET GC may already have reserved this region.");
             return;
         }
 
@@ -65,6 +68,9 @@ internal static partial class GuestAddressSpaceReservation
         if ((ulong)_reservedRegion != Ps5CriticalRegionBase)
         {
             // Got a different address - free it and let the loader handle it
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Guest address space reservation returned 0x{(ulong)_reservedRegion:X16} " +
+                $"instead of 0x{Ps5CriticalRegionBase:X16}; releasing it.");
             VirtualFree(_reservedRegion, UIntPtr.Zero, 0x00008000 /* MEM_RELEASE */);
             _reservedRegion = IntPtr.Zero;
         }
