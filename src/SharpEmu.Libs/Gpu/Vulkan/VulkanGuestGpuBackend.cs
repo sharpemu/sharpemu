@@ -343,6 +343,60 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         return false;
     }
 
+    public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
+        VulkanVideoPresenter.EnterGuestQueue(queueName, submissionId);
+
+    public long SubmitOrderedGuestAction(Action action, string debugName) =>
+        VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
+
+    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
+        VulkanVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
+
+    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) =>
+        VulkanVideoPresenter.WaitForGuestWork(workSequence, timeoutMilliseconds);
+
+    public long CurrentGuestWorkSequenceForDiagnostics =>
+        VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
+
+    public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
+        VulkanVideoPresenter.IsGuestImageUploadKnown(address, format, numberType);
+
+    public bool GuestImageWantsInitialData(ulong address) =>
+        VulkanVideoPresenter.GuestImageWantsInitialData(address);
+
+    public void ProvideGuestImageInitialData(ulong address, byte[] rgbaPixels) =>
+        VulkanVideoPresenter.ProvideGuestImageInitialData(address, rgbaPixels);
+
+    public void SubmitGuestImageFill(ulong address, uint fillValue) =>
+        VulkanVideoPresenter.SubmitGuestImageFill(address, fillValue);
+
+    public void SubmitGuestImageWrite(ulong address, byte[] pixels) =>
+        VulkanVideoPresenter.SubmitGuestImageWrite(address, pixels);
+
+    public bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount) =>
+        VulkanVideoPresenter.TryGetGuestImageExtent(address, out width, out height, out byteCount);
+
+    public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
+        VulkanVideoPresenter.GetGuestImageExtents();
+
+    public bool IsTextureContentCached(in TextureContentIdentity identity) =>
+        VulkanVideoPresenter.IsTextureContentCached(identity);
+
+    public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
+        VulkanVideoPresenter.AttachGuestMemory(memory);
+
+    public ulong GuestStorageBufferOffsetAlignment =>
+        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;
+
+    public void CountShaderCompilation() =>
+        VulkanVideoPresenter.CountSpirvCompilation();
+
+    public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() =>
+        VulkanVideoPresenter.ReadAndResetPerfCounters();
+
+    public void RequestClose() =>
+        VulkanVideoPresenter.RequestClose();
+
     private static byte[] Spirv(IGuestCompiledShader shader) =>
         shader is VulkanCompiledGuestShader vulkanShader
             ? vulkanShader.Spirv

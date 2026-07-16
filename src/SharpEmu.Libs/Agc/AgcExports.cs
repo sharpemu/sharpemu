@@ -14,6 +14,12 @@ namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
+    // The backend is a process-fixed singleton, so its offset-alignment
+    // requirement is snapshot once: several per-draw paths (shader-key
+    // hashing, buffer-offset alignment) read it in loops.
+    private static readonly ulong _storageBufferOffsetAlignment =
+        GuestGpu.Current.GuestStorageBufferOffsetAlignment;
+
 #if DEBUG
     static AgcExports()
     {
@@ -2666,7 +2672,7 @@ public static partial class AgcExports
             TraceAgc($"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} dwords={dwordCount}");
         }
 
-        VulkanVideoPresenter.AttachGuestMemory(ctx.Memory);
+        GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
@@ -2718,7 +2724,7 @@ public static partial class AgcExports
                 $"addr=0x{commandAddress:X16} dwords={dwordCount}");
         }
 
-        VulkanVideoPresenter.AttachGuestMemory(ctx.Memory);
+        GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
@@ -2946,7 +2952,7 @@ public static partial class AgcExports
         // guest-memory writes have finished. Put the notification on that same
         // logical graphics queue instead of approximating completion with a
         // timer, which can wake Unity while its upload data is still stale.
-        if (VulkanVideoPresenter.SubmitOrderedGuestAction(
+        if (GuestGpu.Current.SubmitOrderedGuestAction(
                 TriggerCompletionEvents,
                 $"agc submit completion {submissionId}") == 0)
         {
@@ -2970,11 +2976,11 @@ public static partial class AgcExports
             return false;
         }
 
-        using var guestQueueScope = VulkanVideoPresenter.EnterGuestQueue(
+        using var guestQueueScope = GuestGpu.Current.EnterGuestQueue(
             state.QueueName,
             state.ActiveSubmissionId);
         var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
-        var rented = VulkanVideoPresenter.GuestDataPool.Rent(windowByteCount);
+        var rented = GuestDataPool.Shared.Rent(windowByteCount);
         try
         {
             if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
@@ -2996,7 +3002,7 @@ public static partial class AgcExports
         {
             _dcbWindowBuffer = null;
             _dcbWindowByteLength = 0;
-            VulkanVideoPresenter.GuestDataPool.Return(rented);
+            GuestDataPool.Shared.Return(rented);
         }
     }
 
@@ -3317,7 +3323,7 @@ public static partial class AgcExports
                 TryReadUInt32(ctx, currentAddress + 4, out var waitVideoOutHandle) &&
                 TryReadUInt32(ctx, currentAddress + 8, out var waitDisplayBufferIndex))
             {
-                var waitSequence = VulkanVideoPresenter.SubmitOrderedGuestFlipWait(
+                var waitSequence = GuestGpu.Current.SubmitOrderedGuestFlipWait(
                     unchecked((int)waitVideoOutHandle),
                     unchecked((int)waitDisplayBufferIndex));
                 TraceAgcShader(
@@ -3677,7 +3683,7 @@ public static partial class AgcExports
             // wake another queue before that mirror is visible. Queue a
             // second same-queue ordered action after all immediate follow-up
             // writes; it fences those writes before publishing the producer.
-            if (VulkanVideoPresenter.SubmitOrderedGuestAction(
+            if (GuestGpu.Current.SubmitOrderedGuestAction(
                     CompleteAndWake,
                     $"{debugName} completion") == 0)
             {
@@ -3685,7 +3691,7 @@ public static partial class AgcExports
             }
         }
 
-        if (VulkanVideoPresenter.SubmitOrderedGuestAction(
+        if (GuestGpu.Current.SubmitOrderedGuestAction(
                 ApplyAndQueueCompletion,
                 debugName) == 0)
         {
@@ -3895,11 +3901,11 @@ public static partial class AgcExports
                 TraceAgc(
                     $"agc.acquire_mem_applied queue={queueName} " +
                     $"submission={submissionId} packet=0x{packetAddress:X16} " +
-                    $"work_sequence={VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics}");
+                    $"work_sequence={GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics}");
             }
         }
 
-        var sequence = VulkanVideoPresenter.SubmitOrderedGuestAction(
+        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(
             ApplyAcquire,
             debugName);
         if (sequence == 0)
@@ -4045,7 +4051,7 @@ public static partial class AgcExports
             return;
         }
 
-        foreach (var (address, width, height, byteCount) in VulkanVideoPresenter.GetGuestImageExtents())
+        foreach (var (address, width, height, byteCount) in GuestGpu.Current.GetGuestImageExtents())
         {
             if (scopeByteCount != ulong.MaxValue &&
                 !RangesOverlap(address, byteCount, scopeAddress, scopeByteCount))
@@ -4066,7 +4072,7 @@ public static partial class AgcExports
             var pixels = new byte[byteCount];
             if (ctx.Memory.TryRead(address, pixels))
             {
-                VulkanVideoPresenter.SubmitGuestImageWrite(address, pixels);
+                GuestGpu.Current.SubmitGuestImageWrite(address, pixels);
                 if (Interlocked.Increment(ref _guestImageSyncTraceCount) <= 64)
                 {
                     Console.Error.WriteLine(
@@ -4109,7 +4115,7 @@ public static partial class AgcExports
         ulong byteCount,
         uint? fillValue)
     {
-        var hasImage = VulkanVideoPresenter.TryGetGuestImageExtent(
+        var hasImage = GuestGpu.Current.TryGetGuestImageExtent(
             destinationAddress,
             out var width,
             out var height,
@@ -4133,14 +4139,14 @@ public static partial class AgcExports
 
         if (fillValue is { } fill)
         {
-            VulkanVideoPresenter.SubmitGuestImageFill(destinationAddress, fill);
+            GuestGpu.Current.SubmitGuestImageFill(destinationAddress, fill);
             return;
         }
 
         var pixels = new byte[imageBytes];
         if (ctx.Memory.TryRead(destinationAddress, pixels))
         {
-            VulkanVideoPresenter.SubmitGuestImageWrite(destinationAddress, pixels);
+            GuestGpu.Current.SubmitGuestImageWrite(destinationAddress, pixels);
         }
     }
 
@@ -5398,7 +5404,7 @@ public static partial class AgcExports
                 state.KnownRenderTargets[resolveSource.Address] = resolveSource;
                 state.KnownRenderTargets[resolveDestination.Address] = resolveDestination;
                 ProvideRenderTargetInitialData(ctx, resolveSource);
-                if (VulkanVideoPresenter.TrySubmitGuestImageBlit(
+                if (GuestGpu.Current.TrySubmitGuestImageBlit(
                         resolveSource.Address,
                         resolveSource.Width,
                         resolveSource.Height,
@@ -5709,7 +5715,7 @@ public static partial class AgcExports
         var cacheKey = (
             exportShaderAddress,
             exportFingerprint,
-            VulkanVideoPresenter.GuestStorageBufferOffsetAlignment);
+            _storageBufferOffsetAlignment);
         _depthOnlyVertexShaderCache.TryGetValue(cacheKey, out var vertexShader);
 
         if (vertexShader is null)
@@ -5734,7 +5740,7 @@ public static partial class AgcExports
                         : guestGlobalBufferCount + 1,
                     requiredVertexOutputCount: 0,
                     storageBufferOffsetAlignment:
-                        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
+                        _storageBufferOffsetAlignment))
             {
                 ReturnPooledEvaluationArrays(exportEvaluation);
                 return false;
@@ -5746,7 +5752,7 @@ public static partial class AgcExports
                 exportFingerprint,
                 vertexShader!,
                 exportState.Program);
-            VulkanVideoPresenter.CountSpirvCompilation();
+            GuestGpu.Current.CountShaderCompilation();
             _depthOnlyVertexShaderCache.TryAdd(cacheKey, vertexShader!);
         }
 
@@ -6030,7 +6036,7 @@ public static partial class AgcExports
             attributeCount,
             psInputEna,
             psInputAddr,
-            VulkanVideoPresenter.GuestStorageBufferOffsetAlignment);
+            _storageBufferOffsetAlignment);
 
         var guestGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
@@ -6066,7 +6072,7 @@ public static partial class AgcExports
                     pixelInputEnable: psInputEna,
                     pixelInputAddress: psInputAddr,
                     storageBufferOffsetAlignment:
-                        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment) ||
+                        _storageBufferOffsetAlignment) ||
                 !GuestGpu.Current.TryCompileVertexShader(
                     exportState,
                     exportEvaluation,
@@ -6078,7 +6084,7 @@ public static partial class AgcExports
                     scalarRegisterBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers + 1,
                     requiredVertexOutputCount: (int)GetInterpolatedAttributeCount(pixelState),
                     storageBufferOffsetAlignment:
-                        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
+                        _storageBufferOffsetAlignment))
             {
                 ReturnPooledEvaluationArrays(exportEvaluation);
                 ReturnPooledEvaluationArrays(pixelEvaluation);
@@ -6098,7 +6104,7 @@ public static partial class AgcExports
                 pixelStateFingerprint,
                 compiled.Pixel,
                 pixelState.Program);
-            VulkanVideoPresenter.CountSpirvCompilation();
+            GuestGpu.Current.CountShaderCompilation();
             _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
@@ -6369,7 +6375,7 @@ public static partial class AgcExports
         var bytesPerIndex = is32Bit ? sizeof(uint) : sizeof(ushort);
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
         var byteCount = checked((int)(indexCount * (uint)bytesPerIndex));
-        var data = VulkanVideoPresenter.GuestDataPool.Rent(byteCount);
+        var data = GuestDataPool.Shared.Rent(byteCount);
         var span = data.AsSpan(0, byteCount);
         var address = state.IndexBufferAddress + byteOffset;
         if (ctx.Memory.TryRead(address, span) ||
@@ -6378,7 +6384,7 @@ public static partial class AgcExports
             return new GuestIndexBuffer(data, byteCount, is32Bit, Pooled: true);
         }
 
-        VulkanVideoPresenter.GuestDataPool.Return(data);
+        GuestDataPool.Shared.Return(data);
         return null;
     }
 
@@ -6405,7 +6411,7 @@ public static partial class AgcExports
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
         var address = state.IndexBufferAddress + byteOffset;
         const int chunkBytes = 64 * 1024;
-        var scratch = VulkanVideoPresenter.GuestDataPool.Rent(chunkBytes);
+        var scratch = GuestDataPool.Shared.Rent(chunkBytes);
         var remaining = drawCount;
         var maxIndex = 0u;
         var sawIndex = false;
@@ -6447,7 +6453,7 @@ public static partial class AgcExports
         }
         finally
         {
-            VulkanVideoPresenter.GuestDataPool.Return(scratch);
+            GuestDataPool.Shared.Return(scratch);
         }
 
         var indexedRecords = sawIndex && maxIndex != uint.MaxValue
@@ -6571,7 +6577,7 @@ public static partial class AgcExports
         {
             hash = (hash ^ (
                 binding.BaseAddress &
-                (VulkanVideoPresenter.GuestStorageBufferOffsetAlignment - 1))) * prime;
+                (_storageBufferOffsetAlignment - 1))) * prime;
         }
 
         if (evaluation.ComputeSystemRegisters is { } computeSystemRegisters)
@@ -7311,7 +7317,7 @@ public static partial class AgcExports
         IReadOnlyList<uint> registers,
         IReadOnlyList<Gen5GlobalMemoryBinding> bindings)
     {
-        var bytes = VulkanVideoPresenter.GuestDataPool.Rent(
+        var bytes = GuestDataPool.Shared.Rent(
             GetRuntimeScalarBufferLength(bindings.Count));
         PackRuntimeScalarStateInto(bytes, registers, bindings);
         return bytes;
@@ -7337,7 +7343,7 @@ public static partial class AgcExports
         {
             var byteBias = checked((uint)(
                 bindings[index].BaseAddress &
-                (VulkanVideoPresenter.GuestStorageBufferOffsetAlignment - 1)));
+                (_storageBufferOffsetAlignment - 1)));
             BinaryPrimitives.WriteUInt32LittleEndian(
                 bytes.AsSpan(biasOffset + index * sizeof(uint), sizeof(uint)),
                 byteBias);
@@ -7378,7 +7384,7 @@ public static partial class AgcExports
         {
             if (binding.DataPooled)
             {
-                VulkanVideoPresenter.GuestDataPool.Return(binding.Data);
+                GuestDataPool.Shared.Return(binding.Data);
             }
         }
 
@@ -7388,7 +7394,7 @@ public static partial class AgcExports
             {
                 if (binding.DataPooled)
                 {
-                    VulkanVideoPresenter.GuestDataPool.Return(binding.Data);
+                    GuestDataPool.Shared.Return(binding.Data);
                 }
             }
         }
@@ -7412,7 +7418,7 @@ public static partial class AgcExports
             {
                 if (binding.DataPooled)
                 {
-                    VulkanVideoPresenter.GuestDataPool.Return(binding.Data);
+                    GuestDataPool.Shared.Return(binding.Data);
                 }
             }
         }
@@ -7423,14 +7429,14 @@ public static partial class AgcExports
             {
                 if (binding.DataPooled)
                 {
-                    VulkanVideoPresenter.GuestDataPool.Return(binding.Data);
+                    GuestDataPool.Shared.Return(binding.Data);
                 }
             }
         }
 
         if (index && draw.IndexBuffer is { Pooled: true } indexBuffer)
         {
-            VulkanVideoPresenter.GuestDataPool.Return(indexBuffer.Data);
+            GuestDataPool.Shared.Return(indexBuffer.Data);
         }
     }
 
@@ -7687,7 +7693,7 @@ public static partial class AgcExports
 
         if (!isStorage &&
             descriptor.Address != 0 &&
-            VulkanVideoPresenter.IsGuestImageAvailable(
+            GuestGpu.Current.IsGpuGuestImageAvailable(
                 descriptor.Address,
                 descriptor.Format,
                 descriptor.NumberType))
@@ -7716,7 +7722,7 @@ public static partial class AgcExports
         {
             var initialPixels = Array.Empty<byte>();
             var uploadKnown = descriptor.Address != 0 &&
-                VulkanVideoPresenter.IsGuestImageUploadKnown(
+                GuestGpu.Current.IsGuestImageUploadKnown(
                     descriptor.Address,
                     descriptor.Format,
                     descriptor.NumberType);
@@ -7797,8 +7803,8 @@ public static partial class AgcExports
         if (!_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
-            VulkanVideoPresenter.IsTextureContentCached(
-                new VulkanVideoPresenter.TextureContentIdentity(
+            GuestGpu.Current.IsTextureContentCached(
+                new TextureContentIdentity(
                     descriptor.Address,
                     descriptor.Width,
                     descriptor.Height,
@@ -7901,7 +7907,7 @@ public static partial class AgcExports
         CpuContext ctx,
         RenderTargetDescriptor target)
     {
-        if (!VulkanVideoPresenter.GuestImageWantsInitialData(target.Address))
+        if (!GuestGpu.Current.GuestImageWantsInitialData(target.Address))
         {
             return;
         }
@@ -7924,7 +7930,7 @@ public static partial class AgcExports
 
         if (nonZero)
         {
-            VulkanVideoPresenter.ProvideGuestImageInitialData(target.Address, initialData);
+            GuestGpu.Current.ProvideGuestImageInitialData(target.Address, initialData);
         }
     }
 
@@ -8605,7 +8611,7 @@ public static partial class AgcExports
             // still queued, so the clear could erase newly constructed CPU
             // objects.  Waiting on the work sequence also retires preceding
             // Vulkan writes before the next evaluator snapshot is captured.
-            if (!VulkanVideoPresenter.WaitForGuestWork(semanticCopySequence))
+            if (!GuestGpu.Current.WaitForGuestWork(semanticCopySequence))
             {
                 computeError =
                     $"semantic-global-write-sync-timeout sequence={semanticCopySequence}";
@@ -8623,7 +8629,7 @@ public static partial class AgcExports
                 localSizeY,
                 localSizeZ,
                 dispatch.WaveLaneCount,
-                VulkanVideoPresenter.GuestStorageBufferOffsetAlignment);
+                _storageBufferOffsetAlignment);
             var guestGlobalBufferCount = evaluation.GlobalMemoryBindings.Count;
             var totalGlobalBufferCount = _bakeScalars
                 ? guestGlobalBufferCount
@@ -8645,7 +8651,7 @@ public static partial class AgcExports
                         : guestGlobalBufferCount,
                     waveLaneCount: dispatch.WaveLaneCount,
                     storageBufferOffsetAlignment:
-                        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
+                        _storageBufferOffsetAlignment))
             {
                 DumpCompiledShader(
                     "cs",
@@ -8686,7 +8692,7 @@ public static partial class AgcExports
                     dispatch.ThreadCountZ);
                 gpuDispatch = true;
                 if (writesGlobalMemory &&
-                    !VulkanVideoPresenter.WaitForGuestWork(workSequence))
+                    !GuestGpu.Current.WaitForGuestWork(workSequence))
                 {
                     computeError = $"global-write-sync-timeout sequence={workSequence}";
                 }
@@ -8880,7 +8886,7 @@ public static partial class AgcExports
         }
 
         var destinationAddress = destination.BaseAddress;
-        workSequence = VulkanVideoPresenter.SubmitOrderedGuestAction(
+        workSequence = GuestGpu.Current.SubmitOrderedGuestAction(
             () =>
             {
                 if (!ctx.Memory.TryWrite(destinationAddress, output))
@@ -8894,7 +8900,7 @@ public static partial class AgcExports
                 GuestImageWriteTracker.Track(
                     destinationAddress,
                     (ulong)output.Length,
-                    VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
+                    GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics,
                     "agc.masked-dword-copy");
             },
             $"masked_dword_copy dst=0x{destinationAddress:X16} bytes={output.Length}");
@@ -9583,7 +9589,7 @@ public static partial class AgcExports
                                  pixelInputEnable: psInputEna,
                                  pixelInputAddress: psInputAddr,
                                  storageBufferOffsetAlignment:
-                                     VulkanVideoPresenter.GuestStorageBufferOffsetAlignment))
+                                     _storageBufferOffsetAlignment))
                         {
                             TraceAgcShader(
                                 $"agc.shader_spirv ps=0x{pixelShaderAddress:X16} " +

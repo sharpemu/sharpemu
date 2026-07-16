@@ -277,6 +277,79 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint threadCountY = uint.MaxValue,
         uint threadCountZ = uint.MaxValue) => throw PresenterNotReady();
 
+    // Guest work ordering and guest-image lifecycle — real implementations arrive
+    // with the Metal guest-image phase. Until then these answer exactly like a
+    // Vulkan presenter that never started: no work is enqueued (sequence 0 sends
+    // callers down their inline/CPU fallback) and no guest image is ever known.
+
+    private sealed class NoOpGuestQueueScope : IDisposable
+    {
+        public static NoOpGuestQueueScope Instance { get; } = new();
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private long _perfShaderCompilations;
+
+    public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
+        NoOpGuestQueueScope.Instance;
+
+    public long SubmitOrderedGuestAction(Action action, string debugName) => 0;
+
+    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) => 0;
+
+    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) => false;
+
+    public long CurrentGuestWorkSequenceForDiagnostics => 0;
+
+    public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) => false;
+
+    public bool GuestImageWantsInitialData(ulong address) => false;
+
+    public void ProvideGuestImageInitialData(ulong address, byte[] rgbaPixels)
+    {
+    }
+
+    public void SubmitGuestImageFill(ulong address, uint fillValue)
+    {
+    }
+
+    public void SubmitGuestImageWrite(ulong address, byte[] pixels)
+    {
+    }
+
+    public bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount)
+    {
+        width = 0;
+        height = 0;
+        byteCount = 0;
+        return false;
+    }
+
+    public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() => [];
+
+    public bool IsTextureContentCached(in TextureContentIdentity identity) => false;
+
+    public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory)
+    {
+        // No backend-side texel re-reads yet; the guest-image phase stores this.
+    }
+
+    // Over-alignment is always valid, and 256 covers every Metal buffer-offset
+    // requirement (Intel Macs need 256 for constant buffers; Apple GPUs less).
+    public ulong GuestStorageBufferOffsetAlignment => 256;
+
+    public void CountShaderCompilation() =>
+        Interlocked.Increment(ref _perfShaderCompilations);
+
+    public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() =>
+        (0, 0, 0, Interlocked.Exchange(ref _perfShaderCompilations, 0));
+
+    public void RequestClose() =>
+        MetalVideoPresenter.RequestClose();
+
     private static NotSupportedException PresenterNotReady() => new(
         "the Metal backend does not submit guest draws or compute yet; " +
         "unset SHARPEMU_GPU_BACKEND to use the Vulkan backend");

@@ -109,15 +109,6 @@ internal static unsafe class VulkanVideoPresenter
     // thread's physical-device query) gives shader translation and descriptor
     // creation one stable aliasing contract on every conformant device.
     internal const ulong GuestStorageBufferOffsetAlignment = 256;
-    // Guest draw snapshots churn through a small set of 128 KiB-16 MiB size
-    // classes thousands of times per second. The process-wide shared pool
-    // trims and repartitions those large arrays aggressively under GC load,
-    // causing hundreds of MiB/s of replacement byte[] allocations. Keep a
-    // bounded, non-shared pool for AGC-to-presenter ownership transfers.
-    internal static System.Buffers.ArrayPool<byte> GuestDataPool { get; } =
-        System.Buffers.ArrayPool<byte>.Create(
-            maxArrayLength: 16 * 1024 * 1024,
-            maxArraysPerBucket: 96);
     // The pending queue and per-render drain budget bound how much guest GPU
     // work can be buffered ahead of the presenter. Draws are batched into
     // shared command buffers, so draining a large batch per render tick is
@@ -1464,17 +1455,6 @@ internal static unsafe class VulkanVideoPresenter
     // mutations.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<
         TextureContentIdentity, byte> _cachedTextureIdentities = new();
-
-    internal readonly record struct TextureContentIdentity(
-        ulong Address,
-        uint Width,
-        uint Height,
-        uint Format,
-        uint NumberType,
-        uint DstSelect,
-        uint TileMode,
-        uint Pitch,
-        GuestSampler Sampler);
 
     // Guest memory handle for render-thread self-healing: when a draw whose
     // texel copy was skipped misses the texture cache (eviction, cache
@@ -5116,7 +5096,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (buffer.Pooled)
                 {
-                    GuestDataPool.Return(buffer.Data);
+                    GuestDataPool.Shared.Return(buffer.Data);
                 }
             }
 
@@ -5124,13 +5104,13 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (buffer.Pooled)
                 {
-                    GuestDataPool.Return(buffer.Data);
+                    GuestDataPool.Shared.Return(buffer.Data);
                 }
             }
 
             if (draw.IndexBuffer is { Pooled: true } indexBuffer)
             {
-                GuestDataPool.Return(indexBuffer.Data);
+                GuestDataPool.Shared.Return(indexBuffer.Data);
             }
         }
 
@@ -5732,7 +5712,7 @@ internal static unsafe class VulkanVideoPresenter
                     resources.Index32Bit = indexBuffer.Is32Bit;
                     if (indexBuffer.Pooled)
                     {
-                        GuestDataPool.Return(indexBuffer.Data);
+                        GuestDataPool.Shared.Return(indexBuffer.Data);
                     }
                 }
 
@@ -5761,7 +5741,7 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     if (vertex.Pooled && returnedVertexData.Add(vertex.Data))
                     {
-                        GuestDataPool.Return(vertex.Data);
+                        GuestDataPool.Shared.Return(vertex.Data);
                     }
                 }
             }
@@ -8016,7 +7996,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (guestBuffer.Pooled)
             {
-                GuestDataPool.Return(guestBuffer.Data);
+                GuestDataPool.Shared.Return(guestBuffer.Data);
             }
 
             return new GlobalBufferResource
@@ -8045,7 +8025,7 @@ internal static unsafe class VulkanVideoPresenter
                 out var mapped);
             if (guestBuffer.Pooled)
             {
-                GuestDataPool.Return(guestBuffer.Data);
+                GuestDataPool.Shared.Return(guestBuffer.Data);
             }
 
             return new GlobalBufferResource
@@ -9445,7 +9425,7 @@ internal static unsafe class VulkanVideoPresenter
                     // into millions of writes for alternating output patterns.
                     const int pageSize = 4096;
                     const int unreadableMergeGap = 16;
-                    var livePageBuffer = GuestDataPool.Rent(pageSize);
+                    var livePageBuffer = GuestDataPool.Shared.Rent(pageSize);
                     var pageRuns = new List<(int Start, int Length)>(64);
                     try
                     {
@@ -9615,7 +9595,7 @@ internal static unsafe class VulkanVideoPresenter
                     }
                     finally
                     {
-                        GuestDataPool.Return(livePageBuffer);
+                        GuestDataPool.Shared.Return(livePageBuffer);
                     }
 
                     var probe = mappedBytes[..Math.Min(mappedBytes.Length, 256)];

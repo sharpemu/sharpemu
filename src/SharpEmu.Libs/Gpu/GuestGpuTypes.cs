@@ -36,6 +36,20 @@ internal readonly record struct GuestSampler(
     uint Word2,
     uint Word3);
 
+/// <summary>Identity of a texture's content in a backend texture cache, keyed
+/// entirely on raw guest descriptor values; the AGC layer uses it to skip texel
+/// copies for content the backend already holds.</summary>
+internal readonly record struct TextureContentIdentity(
+    ulong Address,
+    uint Width,
+    uint Height,
+    uint Format,
+    uint NumberType,
+    uint DstSelect,
+    uint TileMode,
+    uint Pitch,
+    GuestSampler Sampler);
+
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,
     byte[] Data,

@@ -162,11 +162,12 @@ public static class VideoOutExports
         HostSessionControl.RequestShutdown(reason);
 
         // A hosted game can still be issuing AGC work after it requests its
-        // own shutdown. Keep the Vulkan resources alive until the GUI session
-        // reaches its guest-safe exit path and disposes the host surface.
+        // own shutdown. Keep the presenter's resources alive until the GUI
+        // session reaches its guest-safe exit path and disposes the host
+        // surface.
         if (!embedded)
         {
-            VulkanVideoPresenter.RequestClose();
+            GuestGpu.Current.RequestClose();
         }
 
         // The embedded GUI owns the process lifetime. A guest shutdown should
@@ -1165,7 +1166,7 @@ public static class VideoOutExports
         {
             TriggerFlipEvents();
         }
-        else if (VulkanVideoPresenter.SubmitOrderedGuestAction(
+        else if (GuestGpu.Current.SubmitOrderedGuestAction(
                      TriggerFlipEvents,
                      $"videoout flip complete handle={handle} index={bufferIndex}") == 0)
         {
@@ -1219,7 +1220,7 @@ public static class VideoOutExports
         var elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
         var submitted = Interlocked.Exchange(ref _submittedFrameCount, 0);
         var presentedCount = Interlocked.Exchange(ref _presentedFrameCount, 0);
-        var (draws, drawMs, pipelines, spirvCompiles) = VulkanVideoPresenter.ReadAndResetPerfCounters();
+        var (draws, drawMs, pipelines, spirvCompiles) = GuestGpu.Current.ReadAndResetPerfCounters();
         Console.Error.WriteLine(
             $"[LOADER][PERF] videoout submitted_fps={submitted / elapsedSeconds:F1} " +
             $"presented_fps={presentedCount / elapsedSeconds:F1} " +
@@ -1658,7 +1659,7 @@ public static class VideoOutExports
             SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq;
 
     // Maps the PS5 VideoOut pixel format space to the AGC "guest texture format" tags
-    // the backend keys its guest-image registry on (see VulkanVideoPresenter.
+    // the backend keys its guest-image registry on (see the presenter's
     // GetGuestTextureFormat: format=10 => 56 for 8-bit RGBA variants, format=9 => 9 for 10-bit).
     // Unknown formats default to 56 (8-bit RGBA) with a logged warning so games
     // display something rather than silently failing the flip pipeline.
