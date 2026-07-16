@@ -81,6 +81,15 @@ internal struct MtlViewport
 /// </summary>
 internal static partial class MetalNative
 {
+    private const string CoreFoundation =
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+
+    [LibraryImport(CoreFoundation)]
+    public static partial nint CFRunLoopGetMain();
+
+    [LibraryImport(CoreFoundation)]
+    public static partial void CFRunLoopStop(nint runLoop);
+
     private const string ObjCLibrary = "/usr/lib/libobjc.A.dylib";
     private const string MetalFramework = "/System/Library/Frameworks/Metal.framework/Metal";
     private const string AppKitFramework = "/System/Library/Frameworks/AppKit.framework/AppKit";
@@ -113,6 +122,16 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
     private static partial nint sel_registerName(string name);
 
+    [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial nint objc_allocateClassPair(nint superclass, string name, nuint extraBytes);
+
+    [LibraryImport(ObjCLibrary)]
+    public static partial void objc_registerClassPair(nint cls);
+
+    [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static partial bool class_addMethod(nint cls, nint name, nint imp, string types);
+
     [LibraryImport(ObjCLibrary)]
     public static partial nint objc_autoreleasePoolPush();
 
@@ -124,6 +143,7 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument);
+
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument, ref nint error);
@@ -137,6 +157,7 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     [return: MarshalAs(UnmanagedType.I1)]
     public static partial bool SendBool(nint receiver, nint selector);
+
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial double SendDouble(nint receiver, nint selector);
@@ -155,6 +176,9 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidSize(nint receiver, nint selector, CGSize size);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidRect(nint receiver, nint selector, CGRect rect);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidClearColor(nint receiver, nint selector, MtlClearColor color);
@@ -203,6 +227,16 @@ internal static partial class MetalNative
         nint indexBuffer,
         nuint indexBufferOffset,
         nuint instanceCount);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendTimer(
+        nint receiver,
+        nint selector,
+        double interval,
+        nint target,
+        nint timerSelector,
+        nint userInfo,
+        [MarshalAs(UnmanagedType.I1)] bool repeats);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendInitWindow(
