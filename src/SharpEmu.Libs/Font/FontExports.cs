@@ -75,6 +75,85 @@ public static class FontExports
         CreateOpaqueHandle(ctx, ctx[CpuRegister.Rcx], 0x100, magic: 0x0F07);
 
     [SysAbiExport(
+        Nid = "3OdRkSjOcog",
+        ExportName = "sceFontBindRenderer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int BindRenderer(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "N1EBMeGhf7E",
+        ExportName = "sceFontSetScalePixel",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetScalePixel(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "TMtqoFQjjbA",
+        ExportName = "sceFontSetEffectSlant",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetEffectSlant(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "v0phZwa4R5o",
+        ExportName = "sceFontSetEffectWeight",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetEffectWeight(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "6vGCkkQJOcI",
+        ExportName = "sceFontSetupRenderScalePixel",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetupRenderScalePixel(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "lz9y9UFO2UU",
+        ExportName = "sceFontSetupRenderEffectSlant",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetupRenderEffectSlant(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "XIGorvLusDQ",
+        ExportName = "sceFontSetupRenderEffectWeight",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetupRenderEffectWeight(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "imxVx8lm+KM",
+        ExportName = "sceFontGetHorizontalLayout",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetHorizontalLayout(CpuContext ctx)
+    {
+        var layoutAddress = ctx[CpuRegister.Rsi];
+        if (layoutAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Baseline, line advance, decoration extent: the same invented geometry
+        // as GetRenderCharGlyphMetrics.
+        var values = new[] { 12.0f, 16.0f, 0.0f };
+        for (var index = 0; index < values.Length; index++)
+        {
+            if (!TryWriteUInt32(
+                    ctx,
+                    layoutAddress + (ulong)(index * sizeof(float)),
+                    BitConverter.SingleToUInt32Bits(values[index])))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetSuccess(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "cKYtVmeSTcw",
         ExportName = "sceFontOpenFontSet",
         Target = Generation.Gen5,
