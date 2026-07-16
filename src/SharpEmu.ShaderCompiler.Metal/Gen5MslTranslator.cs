@@ -239,6 +239,7 @@ public static partial class Gen5MslTranslator
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly Dictionary<uint, int> _imageBindingByPc = [];
+        private readonly Dictionary<uint, int> _bufferBindingByPc = [];
         private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
         private readonly SortedSet<uint> _pixelAttributes = [];
         private readonly SortedSet<uint> _vertexOutputs = [];
@@ -1512,7 +1513,11 @@ public static partial class Gen5MslTranslator
             uint registerCount,
             out int bindingIndex)
         {
-            bindingIndex = -1;
+            if (_bufferBindingByPc.TryGetValue(pc, out bindingIndex))
+            {
+                return true;
+            }
+
             var candidates = _evaluation.GlobalMemoryBindings;
             for (var index = 0; index < candidates.Count; index++)
             {
@@ -1522,21 +1527,16 @@ public static partial class Gen5MslTranslator
                     if (bindingPc == pc)
                     {
                         bindingIndex = index;
+                        _bufferBindingByPc.Add(pc, index);
                         return true;
                     }
                 }
             }
 
-            // No direct PC match: fall back to the most recent binding whose
-            // descriptor registers are untouched between its defining load and
-            // this instruction (the scalar-definition dataflow the SPIR-V
-            // translator uses for shared descriptors).
-            if (scalarAddress >= ScalarRegisterFileCount ||
-                !_scalarDefinitionsBeforePc.TryGetValue(pc, out var definitions))
-            {
-                return false;
-            }
-
+            // No direct PC match: accept a binding only when the descriptor
+            // registers hold the exact same definitions here as at one of the
+            // binding's own access points — the scalar-definition dataflow the
+            // SPIR-V translator uses for descriptors shared across sites.
             for (var index = 0; index < candidates.Count; index++)
             {
                 var binding = candidates[index];
@@ -1545,25 +1545,20 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
-                var consistent = true;
-                for (uint register = 0; register < registerCount; register++)
+                foreach (var candidatePc in binding.InstructionPcs)
                 {
-                    var value = scalarAddress + register;
-                    if (value >= ScalarRegisterFileCount ||
-                        definitions[value] == ConflictingScalarDefinition)
+                    if (!HasSameScalarDefinitions(candidatePc, pc, scalarAddress, registerCount))
                     {
-                        consistent = false;
-                        break;
+                        continue;
                     }
-                }
 
-                if (consistent)
-                {
                     bindingIndex = index;
+                    _bufferBindingByPc.Add(pc, index);
                     return true;
                 }
             }
 
+            bindingIndex = -1;
             return false;
         }
 

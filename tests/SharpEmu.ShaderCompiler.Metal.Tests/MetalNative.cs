@@ -123,16 +123,18 @@ internal static partial class MetalNative
     }
 
     /// <summary>
-    /// Runs one thread of a compute kernel with the guest data buffer bound at index 0
-    /// and the SharpEmuUniforms constant buffer (dispatch limit + buffer byte lengths,
-    /// per the Gen5MslTranslator contract) at index 1, then returns the data buffer
-    /// contents after completion.
+    /// Runs one thread of a compute kernel with the guest data buffer and the
+    /// SharpEmuUniforms constant buffer bound at the caller-supplied indices
+    /// (per the Gen5MslTranslator contract the uniforms index equals the
+    /// global-buffer count), then returns the data buffer contents.
     /// </summary>
     public static bool TryExecuteSingleThread(
         nint library,
         string entryPoint,
         byte[] bufferContents,
         byte[] uniformsContents,
+        nuint dataIndex,
+        nuint uniformsIndex,
         out byte[] result,
         out string error)
     {
@@ -197,8 +199,8 @@ internal static partial class MetalNative
         var commandBuffer = Send(queue, Selector("commandBuffer"));
         var encoder = Send(commandBuffer, Selector("computeCommandEncoder"));
         SendVoid(encoder, Selector("setComputePipelineState:"), pipeline);
-        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, 0);
-        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), uniforms, 0, 1);
+        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, dataIndex);
+        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), uniforms, 0, uniformsIndex);
         var one = new MtlSize { Width = 1, Height = 1, Depth = 1 };
         SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), one, one);
         SendVoid(encoder, Selector("endEncoding"));
