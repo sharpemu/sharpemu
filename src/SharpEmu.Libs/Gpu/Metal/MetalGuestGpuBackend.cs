@@ -211,11 +211,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
             destinationFormat,
             destinationNumberType);
 
-    // Draw and compute submission — implemented by later phases. Failing loudly
-    // beats silently swallowing guest work while the backend is opt-in via
-    // SHARPEMU_GPU_BACKEND=metal.
-
-    public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) => throw PresenterNotReady();
+    public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) =>
+        MetalVideoPresenter.SubmitGuestDraw(drawKind, width, height);
 
     public void SubmitTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -230,7 +227,21 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint primitiveType = 4,
         GuestIndexBuffer? indexBuffer = null,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null) => throw PresenterNotReady();
+        GuestRenderState? renderState = null) =>
+        MetalVideoPresenter.SubmitTranslatedDraw(
+            Msl(pixelShader),
+            textures,
+            globalMemoryBuffers,
+            width,
+            height,
+            attributeCount,
+            vertexShader is null ? null : Msl(vertexShader),
+            vertexCount,
+            instanceCount,
+            primitiveType,
+            indexBuffer,
+            vertexBuffers,
+            renderState);
 
     public void SubmitDepthOnlyTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -245,7 +256,21 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         GuestIndexBuffer? indexBuffer = null,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
-        ulong shaderAddress = 0) => throw PresenterNotReady();
+        ulong shaderAddress = 0) =>
+        MetalVideoPresenter.SubmitDepthOnlyTranslatedDraw(
+            Msl(pixelShader),
+            textures,
+            globalMemoryBuffers,
+            attributeCount,
+            depthTarget,
+            vertexShader is null ? null : Msl(vertexShader),
+            vertexCount,
+            instanceCount,
+            primitiveType,
+            indexBuffer,
+            vertexBuffers,
+            renderState,
+            shaderAddress);
 
     public void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -261,7 +286,22 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
-        ulong shaderAddress = 0) => throw PresenterNotReady();
+        ulong shaderAddress = 0) =>
+        MetalVideoPresenter.SubmitOffscreenTranslatedDraw(
+            Msl(pixelShader),
+            textures,
+            globalMemoryBuffers,
+            attributeCount,
+            targets,
+            vertexShader is null ? null : Msl(vertexShader),
+            vertexCount,
+            instanceCount,
+            primitiveType,
+            indexBuffer,
+            vertexBuffers,
+            renderState,
+            depthTarget,
+            shaderAddress);
 
     public void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -270,7 +310,20 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint attributeCount,
         uint width,
         uint height,
-        ulong shaderAddress = 0) => throw PresenterNotReady();
+        ulong shaderAddress = 0) =>
+        MetalVideoPresenter.SubmitStorageTranslatedDraw(
+            Msl(pixelShader),
+            textures,
+            globalMemoryBuffers,
+            attributeCount,
+            width,
+            height,
+            shaderAddress);
+
+    private static MetalCompiledGuestShader Msl(IGuestCompiledShader shader) =>
+        shader as MetalCompiledGuestShader ??
+        throw new InvalidOperationException(
+            $"shader handle of type {shader.GetType().Name} was not compiled by the Metal backend");
 
     public long SubmitComputeDispatch(
         ulong shaderAddress,
@@ -343,8 +396,11 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public void CountShaderCompilation() =>
         Interlocked.Increment(ref _perfShaderCompilations);
 
-    public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() =>
-        (0, 0, 0, Interlocked.Exchange(ref _perfShaderCompilations, 0));
+    public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters()
+    {
+        var (draws, drawMs, pipelines) = MetalVideoPresenter.ReadAndResetDrawPerfCounters();
+        return (draws, drawMs, pipelines, Interlocked.Exchange(ref _perfShaderCompilations, 0));
+    }
 
     public void RequestClose() =>
         MetalVideoPresenter.RequestClose();

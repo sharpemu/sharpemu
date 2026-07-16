@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
 namespace SharpEmu.Libs.Gpu.Metal;
@@ -26,6 +27,7 @@ internal static partial class MetalVideoPresenter
     private const nuint WindowStyleMask = 1 | 2 | 4;
     private const nuint BackingStoreBuffered = 2;
     private const nuint PixelFormatBgra8Unorm = (nuint)MtlPixelFormat.Bgra8Unorm;
+    private const nuint LoadActionLoad = 1;
     private const nuint LoadActionClear = 2;
     private const nuint StoreActionStore = 1;
     private const nuint PrimitiveTypeTriangle = 3;
@@ -40,7 +42,9 @@ internal static partial class MetalVideoPresenter
         ulong GuestImageAddress = 0,
         long GuestImageVersion = 0,
         uint GuestImagePitch = 0,
-        long RequiredGuestWorkSequence = 0);
+        long RequiredGuestWorkSequence = 0,
+        TranslatedGuestDraw? TranslatedDraw = null,
+        GuestDrawKind DrawKind = GuestDrawKind.None);
 
     private static readonly object _gate = new();
     private static Thread? _thread;
@@ -316,6 +320,26 @@ internal static partial class MetalVideoPresenter
                             ref presentTextureHeight,
                             ref ownedVersionTexture);
                         presentGuestAddress = 0;
+                    }
+                    else if (presentation.TranslatedDraw is not null ||
+                             presentation.DrawKind != GuestDrawKind.None)
+                    {
+                        var drawTarget = ExecutePresentationDraw(device, queue, presentation);
+                        if (drawTarget != 0)
+                        {
+                            // Transient targets are pooled by the presenter; the
+                            // present source borrows them.
+                            SwitchPresentSource(
+                                drawTarget,
+                                presentation.Width,
+                                presentation.Height,
+                                ownsTexture: false,
+                                ref presentTexture,
+                                ref presentTextureWidth,
+                                ref presentTextureHeight,
+                                ref ownedVersionTexture);
+                            presentGuestAddress = 0;
+                        }
                     }
                     else if (TryResolveGuestPresentation(
                                  device,

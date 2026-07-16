@@ -46,6 +46,15 @@ internal struct MtlRegion
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct MtlScissorRect
+{
+    public nuint X;
+    public nuint Y;
+    public nuint Width;
+    public nuint Height;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct MtlViewport
 {
     public double OriginX;
@@ -150,6 +159,35 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidCopyTexture(nint receiver, nint selector, nint source, nint destination);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendBuffer(nint receiver, nint selector, nint bytes, nuint length, nuint options);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidScissor(nint receiver, nint selector, MtlScissorRect rect);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawPrimitivesInstanced(
+        nint receiver,
+        nint selector,
+        nuint primitiveType,
+        nuint vertexStart,
+        nuint vertexCount,
+        nuint instanceCount);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDrawIndexedPrimitives(
+        nint receiver,
+        nint selector,
+        nuint primitiveType,
+        nuint indexCount,
+        nuint indexType,
+        nint indexBuffer,
+        nuint indexBufferOffset,
+        nuint instanceCount);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendInitWindow(

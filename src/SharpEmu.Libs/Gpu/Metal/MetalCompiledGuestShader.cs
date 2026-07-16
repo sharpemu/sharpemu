@@ -18,6 +18,10 @@ internal sealed class MetalCompiledGuestShader(Gen5MslShader shader) : IGuestCom
 
     public Gen5MslShader Shader { get; } = shader;
 
+    /// <summary>MTLLibrary handle cached by the presenter after the first
+    /// runtime compile; the render loop is its only reader and writer.</summary>
+    internal nint CachedLibrary;
+
     public byte[] Payload => _payload ??= Encoding.UTF8.GetBytes(Shader.Source);
 
     public string PayloadFileExtension => "msl";

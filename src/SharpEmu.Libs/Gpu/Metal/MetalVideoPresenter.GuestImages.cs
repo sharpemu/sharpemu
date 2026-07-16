@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Metal;
 
@@ -547,6 +548,7 @@ internal static partial class MetalVideoPresenter
     {
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks;
         var completedWork = 0;
+        _drawSnapshotQueue = queue;
         while (completedWork < MaxGuestWorkPerRender)
         {
             if (!TryTakeGuestWork(out var pendingGuestWork))
@@ -579,6 +581,9 @@ internal static partial class MetalVideoPresenter
                         break;
                     case GuestImageBlit blit:
                         ExecuteGuestImageBlit(queue, blit);
+                        break;
+                    case OffscreenGuestDraw offscreenDraw:
+                        ExecuteOffscreenDraw(device, queue, offscreenDraw);
                         break;
                 }
             }
@@ -886,7 +891,9 @@ internal static partial class MetalVideoPresenter
 
             if (_latestPresentation is { } latest &&
                 latest.Sequence > presentedSequence &&
-                latest.Pixels is not null)
+                (latest.Pixels is not null ||
+                 (latest.TranslatedDraw is not null || latest.DrawKind != GuestDrawKind.None) &&
+                 IsGuestWorkCompletedLocked(latest.RequiredGuestWorkSequence)))
             {
                 presentation = latest;
                 return true;
