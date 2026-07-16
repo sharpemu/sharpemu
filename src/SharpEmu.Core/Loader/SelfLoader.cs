@@ -197,8 +197,13 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
-                    throw new InvalidOperationException(
-                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}).");
+                    // The exact base may be occupied by the .NET GC or other
+                    // host mappings (common on Windows). PS5 executables are
+                    // position-independent, so relocating the main image to any
+                    // available address is safe.
+                    allocatedBase = physicalVm.AllocateAt(imageBase, totalImageSize, executable: true, allowAlternative: true);
+                    Console.WriteLine(
+                        $"[LOADER] Could not allocate main image at exact base 0x{imageBase:X16}; loaded at 0x{allocatedBase:X16} instead.");
                 }
 
                 imageBase = allocatedBase;
