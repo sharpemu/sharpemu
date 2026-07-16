@@ -380,10 +380,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
                         </StackPanel>
 
-                        <TextBlock Grid.Column="1" x:Name="LatestCommitHashText" Text="Loading…"
-                          FontSize="12" FontFamily="Consolas,monospace" Foreground="{StaticResource MutedBrush}"
-                          VerticalAlignment="Center" 
-                        />
+                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
+                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
+                          VerticalAlignment="Center" IsEnabled="False" />
 
                       </Grid>
 

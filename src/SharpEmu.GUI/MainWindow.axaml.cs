@@ -79,8 +79,9 @@ public partial class MainWindow : Window
     private long _navUpNextAt;
     private long _navDownNextAt;
 
-    //Github http client
+    //Github http client for latest commit
     private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
+    private string? _latestCommitSha;
 
     public MainWindow()
     {
@@ -199,6 +200,21 @@ public partial class MainWindow : Window
                 UseShellExecute = true
             });
         };
+
+        LatestCommitHashText.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_latestCommitSha))
+            {
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName =
+                    $"https://github.com/sharpemu/sharpemu/commit/{_latestCommitSha}",
+                UseShellExecute = true
+            });
+        };
     }
 
     /// <summary>
@@ -264,16 +280,19 @@ public partial class MainWindow : Window
         const string apiUrl =
             "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
 
-        LatestCommitHashText.Text = "Loading…";
+        _latestCommitSha = null;
+        LatestCommitHashText.Content = "Loading…";
+        LatestCommitHashText.IsEnabled = false;
 
         try
         {
             using var response = await GithubHttpClient.GetAsync(apiUrl);
-            var responseBody = (await response.Content.ReadAsStringAsync()).Trim();
+            var responseBody =
+                (await response.Content.ReadAsStringAsync()).Trim();
 
             if (!response.IsSuccessStatusCode)
             {
-                LatestCommitHashText.Text =
+                LatestCommitHashText.Content =
                     $"HTTP {(int)response.StatusCode}";
 
                 ToolTip.SetTip(
@@ -285,31 +304,40 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // With application/vnd.github.sha, GitHub returns the SHA directly.
             if (responseBody.Length < 7)
             {
-                LatestCommitHashText.Text = "Invalid response";
+                LatestCommitHashText.Content = "Invalid response";
                 ToolTip.SetTip(LatestCommitHashText, responseBody);
                 return;
             }
 
-            LatestCommitHashText.Text = responseBody[..7];
-            ToolTip.SetTip(LatestCommitHashText, responseBody);
+            // Keep the complete SHA for the URL.
+            _latestCommitSha = responseBody;
+
+            // Display only the short SHA.
+            LatestCommitHashText.Content =
+                responseBody[..Math.Min(7, responseBody.Length)];
+
+            LatestCommitHashText.IsEnabled = true;
+
+            ToolTip.SetTip(
+                LatestCommitHashText,
+                $"Open commit {_latestCommitSha}");
         }
         catch (TaskCanceledException ex)
         {
-            LatestCommitHashText.Text = "Timeout";
+            LatestCommitHashText.Content = "Timeout";
             ToolTip.SetTip(LatestCommitHashText, ex.Message);
         }
         catch (HttpRequestException ex)
         {
-            LatestCommitHashText.Text = "Connection error";
-            ToolTip.SetTip(LatestCommitHashText, ex.ToString());
+            LatestCommitHashText.Content = "Connection error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
         }
         catch (Exception ex)
         {
-            LatestCommitHashText.Text = "Error";
-            ToolTip.SetTip(LatestCommitHashText, ex.ToString());
+            LatestCommitHashText.Content = "Error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
         }
     }
 
@@ -595,8 +623,8 @@ public partial class MainWindow : Window
         GithubButton.Content = loc.Get("About.GithubButton");
         DiscordButton.Content = loc.Get("About.DiscordButton");
         UpdateLabel.Text = loc.Get("Updater.Label");
-        LatestCommitLabel.Text = loc.Get("Github.LatestCommitLabel");
-        LatestCommitDescription.Text = loc.Get("Github.LatestCommitDescription");
+        LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
+        LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
         RefreshUpdateText();
 
         UpdateEmptyStateTexts();
