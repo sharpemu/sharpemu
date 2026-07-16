@@ -367,8 +367,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
 
-        // macOS needs alignment over-allocation; Linux uses exact-address search.
-        if (OperatingSystem.IsMacOS())
+        // POSIX treats the requested address as a hint, and Rosetta may
+        // relocate whole guest windows. Over-allocate once so the returned
+        // host range always contains an aligned guest-visible start.
+        if (!OperatingSystem.IsWindows())
         {
             var reserveSize = effectiveAlignment > PageSize
                 ? alignedSize + effectiveAlignment
