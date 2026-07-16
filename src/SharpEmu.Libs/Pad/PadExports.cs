@@ -65,6 +65,32 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadOpenExt(CpuContext ctx) => PadOpenCore(ctx, extended: true);
 
+    [SysAbiExport(
+        Nid = "u1GRHp+oWoY",
+        ExportName = "scePadGetHandle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetHandle(CpuContext ctx)
+    {
+        // On real hardware this walks the opened pad list; we own a single
+        // standard DualSense on port 0.
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var index = unchecked((int)ctx[CpuRegister.Rdx]);
+
+        if (!_initialized)
+        {
+            return ctx.SetReturn(OrbisPadErrorNotInitialized);
+        }
+
+        if (type == StandardPortType && index == 0 && userId == PrimaryUserId)
+        {
+            return ctx.SetReturn(PrimaryPadHandle);
+        }
+
+        return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
+    }
+
     // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
     // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
     private static int PadOpenCore(CpuContext ctx, bool extended)
@@ -210,6 +236,39 @@ public static class PadExports
         information[0x1C] = 0;   // deviceClass: 0 = standard controller / DualSense
         information[0x1D] = 1;   // connected (ext)
         information[0x1E] = 0;   // connectionType: local
+
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "AcslpN1jHR8",
+        ExportName = "scePadDeviceClassGetExtendedInformation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadDeviceClassGetExtendedInformation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var informationAddress = ctx[CpuRegister.Rsi];
+        if (handle != PrimaryPadHandle)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (informationAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadDeviceClassExtendedInformation:
+        //   ScePadDeviceClass deviceClass (4 bytes)
+        //   uint8_t reserved[4] (4 bytes)
+        //   union classData (12 bytes)
+        // Report a standard DualSense with no extended class data.
+        Span<byte> information = stackalloc byte[20];
+        information.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(information[0x00..], 0); // deviceClass = STANDARD
 
         return ctx.Memory.TryWrite(informationAddress, information)
             ? ctx.SetReturn(0)

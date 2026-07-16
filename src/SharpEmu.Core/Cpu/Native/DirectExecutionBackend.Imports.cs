@@ -588,6 +588,25 @@ public sealed partial class DirectExecutionBackend
 			cpuContext[CpuRegister.R15] = value8;
 			cpuContext[CpuRegister.Rdi] = value;
 			cpuContext[CpuRegister.Rsi] = value2;
+			
+			// Track main thread activity for diagnostics
+			if (Environment.CurrentManagedThreadId == HostMainThread.GetManagedThreadId() && !GuestThreadExecution.IsGuestThread)
+			{
+				HostMainThread.SetLastRip(num7); // return address
+				HostMainThread.SetLastImportNid(importStubEntry.Nid);
+				
+				// Log synchronization operations from main thread
+				if (importStubEntry.Nid == "Zxa0VhQVTsk" || // sceKernelWaitSema
+				    importStubEntry.Nid == "4czppHBiriw" || // sceKernelSignalSema
+				    importStubEntry.Nid == "188x57JYp0g")   // sceKernelCreateSema
+				{
+					Console.Error.WriteLine(
+						$"[MAIN_THREAD] Import#{num} {importStubEntry.Nid} " +
+						$"ret=0x{num7:X16} rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} " +
+						$"result={orbisGen2Result}");
+				}
+			}
+			
 			if (GuestThreadExecution.TryConsumeCurrentContextTransfer(out var transferTarget))
 			{
 				if (!TryPrepareGuestContextTransfer(
@@ -636,20 +655,31 @@ public sealed partial class DirectExecutionBackend
 					out var hasBlockContinuation,
 					out var blockWakeKey,
 					out var blockWaiter,
-					out var blockDeadlineTimestamp) &&
-				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
+					out var blockDeadlineTimestamp))
 			{
-				if (hasBlockContinuation)
+				// Race-condition guard: a signal may have arrived between
+				// RequestCurrentThreadBlock (in the import handler) and this
+				// point.  Re-evaluate the wake predicate; if the waiter is
+				// already satisfied, skip the yield so the thread keeps
+				// running with the value already set by the import handler.
+				if (blockWaiter is not null && blockWaiter.TryWake())
 				{
-					RegisterBlockedGuestThreadContinuation(
-						GuestThreadExecution.CurrentGuestThreadHandle,
-						blockContinuation,
-						blockWakeKey,
-						blockWaiter,
-						blockDeadlineTimestamp);
+					cpuContext[CpuRegister.Rax] = unchecked((ulong)blockWaiter.Resume());
 				}
+				else if (TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
+				{
+					if (hasBlockContinuation)
+					{
+						RegisterBlockedGuestThreadContinuation(
+							GuestThreadExecution.CurrentGuestThreadHandle,
+							blockContinuation,
+							blockWakeKey,
+							blockWaiter,
+							blockDeadlineTimestamp);
+					}
 
-				cpuContext[CpuRegister.Rax] = 0uL;
+					cpuContext[CpuRegister.Rax] = 0uL;
+				}
 			}
 			if (flag || flag2 || flag3)
 			{
@@ -1352,20 +1382,39 @@ public sealed partial class DirectExecutionBackend
 				out var blockWakeKey,
 				out var blockWaiter,
 				out var blockDeadlineTimestamp);
-		if (consumedThreadBlock &&
-			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
+		if (consumedThreadBlock)
 		{
-			if (hasBlockContinuation)
+			// Race-condition guard: a signal may have arrived between
+			// RequestCurrentThreadBlock and this point.  Re-evaluate the
+			// wake handler; if already satisfied, skip the yield.
+			if (blockWakeHandler is not null && blockWakeHandler())
 			{
+<<<<<<< HEAD
 				RegisterBlockedGuestThreadContinuation(
 					GuestThreadExecution.CurrentGuestThreadHandle,
 					blockContinuation,
 					blockWakeKey,
 					blockWaiter,
 					blockDeadlineTimestamp);
+=======
+				cpuContext[CpuRegister.Rax] = unchecked((ulong)(blockResumeHandler is not null ? blockResumeHandler() : 0));
+>>>>>>> 9ba1cdb (feat: import missing pad/ngs2 HLE exports + race condition fix)
 			}
+			else if (TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
+			{
+				if (hasBlockContinuation)
+				{
+					RegisterBlockedGuestThreadContinuation(
+						GuestThreadExecution.CurrentGuestThreadHandle,
+						blockContinuation,
+						blockWakeKey,
+						blockResumeHandler,
+						blockWakeHandler,
+						blockDeadlineTimestamp);
+				}
 
-			cpuContext[CpuRegister.Rax] = 0uL;
+				cpuContext[CpuRegister.Rax] = 0uL;
+			}
 		}
 		if (probeLeafReturn)
 		{
