@@ -248,6 +248,7 @@ internal static partial class MetalVideoPresenter
             if (image is not null)
             {
                 image.Initialized = true;
+                image.GpuWritten = true;
             }
         }
 
@@ -311,6 +312,7 @@ internal static partial class MetalVideoPresenter
             ReplaceTextureContents(
                 image.Texture, descriptor.Width, descriptor.Height, descriptor.RgbaPixels, pitch, bytesPerPixel);
             image.Initialized = true;
+            image.GpuWritten = true;
         }
 
         lock (_gate)

@@ -509,6 +509,7 @@ internal static partial class MetalVideoPresenter
             if (publishedTargets[index] is { } published)
             {
                 published.Initialized = true;
+                published.GpuWritten = true;
             }
         }
 
@@ -602,15 +603,28 @@ internal static partial class MetalVideoPresenter
     {
         if (renderState.Viewport is { } viewport)
         {
+            // Guests program Vulkan-style negative-height viewports to get y-up
+            // rendering out of Vulkan's y-down NDC. Metal's NDC is already
+            // y-up and rejects negative heights (the draw rasterizes nothing),
+            // so the equivalent is the normalized rect with the same on-screen
+            // mapping.
+            double originY = viewport.Y;
+            double height = viewport.Height;
+            if (height < 0)
+            {
+                originY += height;
+                height = -height;
+            }
+
             MetalNative.SendVoidViewport(
                 encoder,
                 MetalNative.Selector("setViewport:"),
                 new MtlViewport
                 {
                     OriginX = viewport.X,
-                    OriginY = viewport.Y,
+                    OriginY = originY,
                     Width = viewport.Width,
-                    Height = viewport.Height,
+                    Height = height,
                     ZNear = viewport.MinDepth,
                     ZFar = viewport.MaxDepth,
                 });

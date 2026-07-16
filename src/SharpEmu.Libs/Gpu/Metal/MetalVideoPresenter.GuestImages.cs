@@ -61,6 +61,11 @@ internal static partial class MetalVideoPresenter
         public uint Height;
         public MtlPixelFormat Format;
         public bool Initialized;
+
+        /// <summary>True once GPU work (draw, blit, dispatch) or an explicit
+        /// guest write produced this content; false while it only holds a
+        /// speculative guest-memory seed. Flips prefer produced content.</summary>
+        public bool GpuWritten;
     }
 
     // PS5 exposes independent graphics and asynchronous-compute queues; keep FIFO
@@ -670,11 +675,22 @@ internal static partial class MetalVideoPresenter
         }
 
         image.Initialized = true;
+        image.GpuWritten = true;
     }
 
     private static void ExecuteOrderedGuestFlip(nint device, nint queue, OrderedGuestFlip flip)
     {
-        var image = EnsureGuestImage(device, flip.Address, flip.Width, flip.Height, flip.PitchInPixel);
+        // The flipped VideoOut address is the display buffer's start, but games
+        // render into the pixel surface, which sits past the buffer's surface
+        // metadata (64KB+ on PS5). Prefer a drawn image inside the buffer's
+        // extent over seeding a new (empty) image at the exact start address.
+        GuestImage? image;
+        lock (_gate)
+        {
+            image = FindGuestImageForFlipLocked(flip.Address, flip.Width, flip.Height);
+        }
+
+        image ??= EnsureGuestImage(device, flip.Address, flip.Width, flip.Height, flip.PitchInPixel);
         if (image is null || !image.Initialized)
         {
             return;
@@ -757,6 +773,61 @@ internal static partial class MetalVideoPresenter
 
         CopyTexture(queue, source.Texture, destination.Texture);
         destination.Initialized = true;
+        destination.GpuWritten = true;
+    }
+
+    private static bool _tracedFlipAlias;
+
+    /// <summary>Resolves a flip to produced content: the exact-address image when
+    /// GPU work wrote it, else the nearest same-extent produced image within the
+    /// display buffer's plausible metadata window above the start address (games
+    /// render into the pixel surface past the buffer's metadata block), else the
+    /// exact-address image even if it only holds a speculative seed.</summary>
+    private static GuestImage? FindGuestImageForFlipLocked(ulong address, uint width, uint height)
+    {
+        _guestImages.TryGetValue(address, out var exact);
+        if (exact is { Initialized: true, GpuWritten: true })
+        {
+            return exact;
+        }
+
+        GuestImage? best = null;
+        var bestDelta = ulong.MaxValue;
+        ulong bestAddress = 0;
+        foreach (var entry in _guestImages)
+        {
+            if (entry.Key <= address)
+            {
+                continue;
+            }
+
+            var delta = entry.Key - address;
+            if (delta <= 0x20_0000 &&
+                delta < bestDelta &&
+                entry.Value.Width == width &&
+                entry.Value.Height == height &&
+                entry.Value is { Initialized: true, GpuWritten: true })
+            {
+                best = entry.Value;
+                bestDelta = delta;
+                bestAddress = entry.Key;
+            }
+        }
+
+        if (best is not null)
+        {
+            if (!_tracedFlipAlias)
+            {
+                _tracedFlipAlias = true;
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Metal flip alias: display buffer 0x{address:X16} " +
+                    $"presents drawn surface 0x{bestAddress:X16} (+0x{bestDelta:X}).");
+            }
+
+            return best;
+        }
+
+        return exact is { Initialized: true } ? exact : null;
     }
 
     /// <summary>Returns the mutable image for a guest address, creating and seeding
