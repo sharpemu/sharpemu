@@ -1,0 +1,32 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- The Metal runtime harness pins buffers and uses source-generated interop. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Deliberately self-contained: this project is the model for how per-backend shader
+       codegen gets tested, so it depends only on the codegen under test (which brings
+       the shared decoder and HLE contract transitively) — never on other test projects
+       or the CLI tools. Helpers that exist elsewhere are copied, not referenced. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Goldens\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
