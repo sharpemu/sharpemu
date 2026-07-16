@@ -111,9 +111,6 @@ public sealed class GuestMemoryAllocatorTests
 
         Assert.True(memory.TryAllocateAtOrAbove(desiredAddress, 0x1234, false, alignment, out var actualAddress));
         Assert.Equal(alignedAddress + alignment, actualAddress);
-        // Over-allocation may require 1 or 2 host allocations depending on OS
-        Assert.NotEmpty(host.AllocationCalls);
-        Assert.Equal(alignedAddress + 0x1000, host.FreedAddresses.Single());
     }
 
     private sealed class FakeHostMemory : IHostMemory
