@@ -1760,14 +1760,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frameAddress = 0;
 		transferStub = 0;
 		error = null;
-		if (target.Rip < 65536 || target.Rsp == 0)
+		if (ActiveCpuContext is not { } activeContext)
 		{
-			error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
+			error = "guest context transfer without an active CPU context";
 			return false;
 		}
-		if (target.Rsp < sizeof(ulong) ||
-			ActiveCpuContext is not { } activeContext ||
-			!activeContext.TryWriteUInt64(target.Rsp - sizeof(ulong), target.Rip))
+		if (!TryValidateGuestContextTransferTarget(activeContext.Memory, target, out error))
+		{
+			return false;
+		}
+		if (!activeContext.TryWriteUInt64(target.Rsp - sizeof(ulong), target.Rip))
 		{
 			error = $"guest context transfer slot is not writable at 0x{target.Rsp - sizeof(ulong):X16}";
 			return false;
@@ -1808,6 +1810,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
 		frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
 		frame[19] = target.RestoreFullFpuState ? 1u : 0u;
+		return true;
+	}
+
+	internal static bool TryValidateGuestContextTransferTarget(
+		ICpuMemory memory,
+		in GuestCpuContinuation target,
+		out string? error)
+	{
+		if (target.Rip < 65536 || target.Rsp < sizeof(ulong))
+		{
+			error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
+			return false;
+		}
+
+		Span<byte> ripProbe = stackalloc byte[1];
+		if (!memory.TryRead(target.Rip, ripProbe))
+		{
+			error =
+				$"guest context transfer target rip=0x{target.Rip:X16} is not mapped guest memory " +
+				$"(rsp=0x{target.Rsp:X16})";
+			return false;
+		}
+
+		error = null;
 		return true;
 	}
 
