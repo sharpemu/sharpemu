@@ -146,6 +146,20 @@ public static partial class KernelMemoryCompatExports
     private static string? _cachedApp0Root;
     private static string? _cachedDownload0Root;
 
+    internal static void ResetDirectMemoryForTests()
+    {
+        lock (_memoryGate)
+        {
+            _directAllocations.Clear();
+            _mappedRegions.Clear();
+            _mappedRegionNames.Clear();
+            _nextPhysicalAddress = 0;
+            _nextVirtualAddress = 0;
+            _mainDirectMemoryPoolBase = UnsetMainDirectMemoryPoolBase;
+            _allocatedFlexibleBytes = 0;
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryBasicInformation
     {
@@ -2827,34 +2841,11 @@ public static partial class KernelMemoryCompatExports
 
                 if (!reserved)
                 {
-                    // Rosetta places the x86-64 process stack in the low
-                    // address window used by some fixed PS5 mappings. Do not
-                    // clobber that host memory: relocate the mapping and
-                    // return the actual address through the in/out pointer.
-                    if (OperatingSystem.IsMacOS())
-                    {
-                        var fallbackAddress = AlignUp(
-                            _nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress,
-                            effectiveAlignment);
-                        reserved = TryReserveGuestVirtualRange(
-                            ctx,
-                            fallbackAddress,
-                            length,
-                            protection,
-                            effectiveAlignment,
-                            out mappedAddress);
-
-                        if (reserved && ShouldTraceDirectMemory())
-                        {
-                            Console.Error.WriteLine(
-                                $"[LOADER][WARN] map_direct relocated fixed mapping: requested=0x{requestedAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16}");
-                        }
-                    }
-
-                    if (!reserved)
-                    {
-                        mappedAddress = 0;
-                    }
+                    // MAP_FIXED is an exact-address contract. Relocating it
+                    // leaves the guest using the requested address while the
+                    // host backs an unrelated range, so report the failed
+                    // reservation without changing the in/out address.
+                    mappedAddress = 0;
                 }
             }
             else
