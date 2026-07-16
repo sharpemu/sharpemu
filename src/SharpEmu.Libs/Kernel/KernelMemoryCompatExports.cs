@@ -4033,7 +4033,7 @@ public static partial class KernelMemoryCompatExports
                             _ => unchecked((int)argumentSource.NextGpArg())
                         };
 
-                        var formatted = value.ToString();
+                        var formatted = value.ToString(CultureInfo.InvariantCulture);
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;
                         else if (spaceForSign && value >= 0)
@@ -4053,7 +4053,7 @@ public static partial class KernelMemoryCompatExports
                             _ => (uint)argumentSource.NextGpArg()
                         };
 
-                        var formatted = value.ToString();
+                        var formatted = value.ToString(CultureInfo.InvariantCulture);
                         sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
                     }
                     break;
@@ -4070,8 +4070,8 @@ public static partial class KernelMemoryCompatExports
                         };
 
                         var formatted = specifier == 'x'
-                            ? value.ToString("x")
-                            : value.ToString("X");
+                            ? value.ToString("x", CultureInfo.InvariantCulture)
+                            : value.ToString("X", CultureInfo.InvariantCulture);
 
                         if (alternateForm && value != 0)
                             formatted = specifier == 'x' ? "0x" + formatted : "0X" + formatted;
@@ -4175,7 +4175,10 @@ public static partial class KernelMemoryCompatExports
                         var formatStr = precision >= 0
                             ? $"{{0:{specifier}{precision}}}"
                             : $"{{0:{specifier}}}";
-                        var formatted = string.Format(formatStr, value);
+                        var formatted = string.Format(
+                            CultureInfo.InvariantCulture,
+                            formatStr,
+                            value);
 
                         if (showSign && value >= 0)
                             formatted = "+" + formatted;
