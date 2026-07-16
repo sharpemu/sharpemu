@@ -602,27 +602,13 @@ internal static partial class MetalVideoPresenter
             textureHeight = presentation.Height;
         }
 
-        unsafe
-        {
-            fixed (byte* pixels = presentation.Pixels)
-            {
-                MetalNative.SendReplaceRegion(
-                    frameTexture,
-                    MetalNative.Selector("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
-                    new MtlRegion
-                    {
-                        X = 0,
-                        Y = 0,
-                        Z = 0,
-                        Width = presentation.Width,
-                        Height = presentation.Height,
-                        Depth = 1,
-                    },
-                    0,
-                    (nint)pixels,
-                    presentation.Width * 4);
-            }
-        }
+        ReplaceTextureContents(
+            frameTexture,
+            presentation.Width,
+            presentation.Height,
+            presentation.Pixels!,
+            presentation.Width,
+            bytesPerPixel: 4);
     }
 
     private static nint CreateClearPass(nint targetTexture, MtlClearColor clearColor)

@@ -300,19 +300,17 @@ internal static partial class MetalVideoPresenter
             return null;
         }
 
-        if (descriptor.RgbaPixels.Length > 0)
+        var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(format);
+        // Snapshot copies arrive in the image's native texel layout; only
+        // 4-byte texels can be RGBA8 verbatim, wider ones carry native bytes.
+        if ((ulong)descriptor.RgbaPixels.Length >= (ulong)descriptor.Width * bytesPerPixel)
         {
             var pitch = descriptor.Pitch != 0
                 ? Math.Max(descriptor.Pitch, descriptor.Width)
                 : descriptor.Width;
-            var rows = Math.Min(
-                descriptor.Height,
-                (uint)((ulong)descriptor.RgbaPixels.Length / (pitch * 4UL)));
-            if (rows > 0)
-            {
-                ReplaceTextureContents(image.Texture, descriptor.Width, rows, descriptor.RgbaPixels, pitch);
-                image.Initialized = true;
-            }
+            ReplaceTextureContents(
+                image.Texture, descriptor.Width, descriptor.Height, descriptor.RgbaPixels, pitch, bytesPerPixel);
+            image.Initialized = true;
         }
 
         lock (_gate)
@@ -325,7 +323,7 @@ internal static partial class MetalVideoPresenter
 
             _guestImages[descriptor.Address] = image;
             _guestImageExtents[descriptor.Address] =
-                (descriptor.Width, descriptor.Height, (ulong)descriptor.Width * descriptor.Height * 4);
+                (descriptor.Width, descriptor.Height, (ulong)descriptor.Width * descriptor.Height * bytesPerPixel);
         }
 
         return image;

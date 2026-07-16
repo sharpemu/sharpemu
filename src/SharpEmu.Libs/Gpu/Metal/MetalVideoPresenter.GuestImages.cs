@@ -429,6 +429,10 @@ internal static partial class MetalVideoPresenter
                !_closed &&
                _thread is not null &&
                (_pendingGuestWorkCount >= MaxPendingGuestWork ||
+                // Always admit one item when no payload is outstanding, even
+                // when that single item exceeds the configured budget: with
+                // nothing left to drain, waiting for room would never return.
+                // The budget bounds the normal multi-item backlog.
                 (_pendingGuestWorkBytes != 0 &&
                  payloadBytes > MaxPendingGuestWorkBytes -
                      Math.Min(_pendingGuestWorkBytes, MaxPendingGuestWorkBytes))))
@@ -640,7 +644,8 @@ internal static partial class MetalVideoPresenter
 
         if (write.Pixels is { } pixels)
         {
-            if ((ulong)pixels.Length < (ulong)image.Width * image.Height * 4)
+            var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(image.Format);
+            if ((ulong)pixels.Length < (ulong)image.Width * image.Height * bytesPerPixel)
             {
                 return;
             }
@@ -654,7 +659,7 @@ internal static partial class MetalVideoPresenter
                 return;
             }
 
-            ReplaceTextureContents(replacement, image.Width, image.Height, pixels, image.Width);
+            ReplaceTextureContents(replacement, image.Width, image.Height, pixels, image.Width, bytesPerPixel);
             var previous = image.Texture;
             image.Texture = replacement;
             MetalNative.SendVoid(previous, MetalNative.Selector("release"));
@@ -799,23 +804,28 @@ internal static partial class MetalVideoPresenter
         }
 
         var pitch = pitchInPixel == 0 ? width : Math.Max(pitchInPixel, width);
+        var bytesPerPixel = MetalRenderTargetFormat.GetBytesPerPixel(format);
         if (initialData is not null &&
+            bytesPerPixel == 4 &&
             (ulong)initialData.Length >= (ulong)width * height * 4)
         {
-            ReplaceTextureContents(image.Texture, width, height, initialData, width);
+            // Pending initial data is RGBA8; only 4-byte-texel images can take
+            // it verbatim. Wider formats seed from guest memory below, whose
+            // layout is the image's native one.
+            ReplaceTextureContents(image.Texture, width, height, initialData, width, bytesPerPixel);
             image.Initialized = true;
         }
         else if (_guestMemory is { } memory)
         {
             // PS5 render targets alias guest memory: CPU-prefilled pixels are
             // visible before the first draw, so the first use seeds from there.
-            var byteCount = checked((int)((ulong)pitch * height * 4));
+            var byteCount = checked((int)((ulong)pitch * height * bytesPerPixel));
             var guestPixels = GuestDataPool.Shared.Rent(byteCount);
             try
             {
                 if (memory.TryRead(address, guestPixels.AsSpan(0, byteCount)))
                 {
-                    ReplaceTextureContents(image.Texture, width, height, guestPixels, pitch);
+                    ReplaceTextureContents(image.Texture, width, height, guestPixels, pitch, bytesPerPixel);
                     image.Initialized = true;
                 }
             }
@@ -828,7 +838,7 @@ internal static partial class MetalVideoPresenter
         lock (_gate)
         {
             _guestImages[address] = image;
-            _guestImageExtents[address] = (width, height, (ulong)pitch * height * 4);
+            _guestImageExtents[address] = (width, height, (ulong)pitch * height * bytesPerPixel);
         }
 
         return image;
@@ -1004,13 +1014,31 @@ internal static partial class MetalVideoPresenter
         return MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
     }
 
+    /// <summary>Uploads pixel rows sized by the texture's real texel width. The
+    /// row count is clamped to what <paramref name="pixels"/> actually holds, so
+    /// replaceRegion can never read past the managed buffer.</summary>
     private static void ReplaceTextureContents(
         nint texture,
         uint width,
         uint height,
         byte[] pixels,
-        uint pitchInPixel)
+        uint pitchInPixel,
+        uint bytesPerPixel)
     {
+        var bytesPerRow = (ulong)Math.Max(pitchInPixel, width) * bytesPerPixel;
+        var lastRowBytes = (ulong)width * bytesPerPixel;
+        if (lastRowBytes == 0 || (ulong)pixels.Length < lastRowBytes)
+        {
+            return;
+        }
+
+        var maxRows = (((ulong)pixels.Length - lastRowBytes) / bytesPerRow) + 1;
+        var rows = (uint)Math.Min(height, maxRows);
+        if (rows == 0)
+        {
+            return;
+        }
+
         unsafe
         {
             fixed (byte* source = pixels)
@@ -1018,10 +1046,10 @@ internal static partial class MetalVideoPresenter
                 MetalNative.SendReplaceRegion(
                     texture,
                     MetalNative.Selector("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
-                    new MtlRegion { X = 0, Y = 0, Z = 0, Width = width, Height = height, Depth = 1 },
+                    new MtlRegion { X = 0, Y = 0, Z = 0, Width = width, Height = rows, Depth = 1 },
                     0,
                     (nint)source,
-                    pitchInPixel * 4);
+                    (nuint)bytesPerRow);
             }
         }
     }

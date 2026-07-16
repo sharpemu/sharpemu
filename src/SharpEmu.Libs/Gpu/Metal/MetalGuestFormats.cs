@@ -42,7 +42,20 @@ internal enum MtlPixelFormat : uint
 
 internal readonly record struct MetalRenderTargetFormat(
     MtlPixelFormat Format,
-    Gen5PixelOutputKind OutputKind);
+    Gen5PixelOutputKind OutputKind)
+{
+    public static uint GetBytesPerPixel(MtlPixelFormat format) =>
+        format switch
+        {
+            MtlPixelFormat.R8Unorm or MtlPixelFormat.R8Uint => 1,
+            MtlPixelFormat.Rg8Unorm => 2,
+            MtlPixelFormat.Rg32Float => 8,
+            MtlPixelFormat.Rgba16Unorm or MtlPixelFormat.Rgba16Uint or
+                MtlPixelFormat.Rgba16Sint or MtlPixelFormat.Rgba16Float => 8,
+            MtlPixelFormat.Rgba32Float => 16,
+            _ => 4,
+        };
+}
 
 /// <summary>
 /// Guest texture-descriptor codes to Metal formats, mirroring the Vulkan

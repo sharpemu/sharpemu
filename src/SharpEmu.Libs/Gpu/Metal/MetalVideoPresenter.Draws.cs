@@ -1123,10 +1123,13 @@ internal static partial class MetalVideoPresenter
             _guestImageExtents[target.Address] = (target.Width, target.Height, (ulong)target.Width * target.Height * 4);
         }
 
+        // Pending initial data is RGBA8; only 4-byte-texel targets take it verbatim.
         if (initialData is not null &&
+            MetalRenderTargetFormat.GetBytesPerPixel(format) == 4 &&
             (ulong)initialData.Length >= (ulong)target.Width * target.Height * 4)
         {
-            ReplaceTextureContents(image.Texture, target.Width, target.Height, initialData, target.Width);
+            ReplaceTextureContents(
+                image.Texture, target.Width, target.Height, initialData, target.Width, bytesPerPixel: 4);
             image.Initialized = true;
         }
 
@@ -1255,14 +1258,10 @@ internal static partial class MetalVideoPresenter
         if (handle != 0)
         {
             var pitch = texture.Pitch != 0 ? Math.Max(texture.Pitch, texture.Width) : texture.Width;
-            var rows = Math.Min(texture.Height, (uint)((ulong)texture.RgbaPixels.Length / (pitch * 4UL)));
-            if (rows == 0)
-            {
-                MetalNative.SendVoid(handle, MetalNative.Selector("release"));
-                return 0;
-            }
-
-            ReplaceTextureContents(handle, texture.Width, rows, texture.RgbaPixels, pitch);
+            // AGC always supplies RGBA8 texel copies, matching the Rgba8Unorm
+            // texture created above; row clamping happens in the helper.
+            ReplaceTextureContents(
+                handle, texture.Width, texture.Height, texture.RgbaPixels, pitch, bytesPerPixel: 4);
         }
 
         return handle;
