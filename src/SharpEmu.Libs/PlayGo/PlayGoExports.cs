@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace SharpEmu.Libs.PlayGo;
 
@@ -423,7 +424,10 @@ public static class PlayGoExports
                 // Titles rely on this as an enumeration terminator: Monster Truck
                 // scans ids 0,1,2,... until BAD_CHUNK_ID, and answering OK for every
                 // id makes that scan wrap the ushort range and spin forever.
-                return OrbisPlayGoErrorBadChunkId;
+                loci[i] = PlayGoLocusNotDownloaded;
+                return ctx.Memory.TryWrite(outLoci, loci)
+                    ? OrbisPlayGoErrorBadChunkId
+                    : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
             loci[i] = PlayGoLocusLocalFast;
@@ -669,7 +673,8 @@ public static class PlayGoExports
     {
         lock (_stateGate)
         {
-            return Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
+            return _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Unknown ||
+                Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
         }
     }
 
@@ -680,7 +685,10 @@ public static class PlayGoExports
         {
             // No app0 override to probe for sidecar files: same fully-installed
             // single-chunk fallback as below, or scePlayGoOpen fails fatally.
-            return new PlayGoMetadata(true, [(ushort)0]);
+            return new PlayGoMetadata(
+                true,
+                [(ushort)0],
+                PlayGoChunkIdKnowledge.Authoritative);
         }
 
         var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
@@ -695,19 +703,19 @@ public static class PlayGoExports
             // init failure for UE titles); chunk 0 reports LocalFast and every other id
             // returns BAD_CHUNK_ID, terminating title-side chunk enumeration.
             TracePlayGo("metadata_missing; fully-installed single chunk");
-            return new PlayGoMetadata(true, [(ushort)0]);
+            return new PlayGoMetadata(
+                true,
+                [(ushort)0],
+                PlayGoChunkIdKnowledge.Authoritative);
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);
-        if (chunkIds.Length == 0)
-        {
-            // Unreadable/empty sidecar: fall back to chunk 0, not an empty set
-            // (which IsKnownChunkId would treat as "every id valid").
-            TracePlayGo("metadata_unreadable; fully-installed single chunk");
-            return new PlayGoMetadata(true, [(ushort)0]);
-        }
-
-        return new PlayGoMetadata(true, chunkIds);
+        return new PlayGoMetadata(
+            true,
+            chunkIds,
+            chunkIds.Length == 0
+                ? PlayGoChunkIdKnowledge.Unknown
+                : PlayGoChunkIdKnowledge.Authoritative);
     }
 
     private static ushort[] LoadChunkIds(string chunkDefsXml)
@@ -720,6 +728,8 @@ public static class PlayGoExports
         try
         {
             var xml = File.ReadAllText(chunkDefsXml);
+            _ = XDocument.Parse(xml, LoadOptions.None);
+
             var chunkIds = new HashSet<ushort>();
             AddChunkIds(xml, DefaultChunkPattern, chunkIds);
             AddChunkIds(xml, ChunkIdPattern, chunkIds);
@@ -733,6 +743,10 @@ public static class PlayGoExports
             return Array.Empty<ushort>();
         }
         catch (UnauthorizedAccessException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (System.Xml.XmlException)
         {
             return Array.Empty<ushort>();
         }
@@ -774,8 +788,35 @@ public static class PlayGoExports
         }
     }
 
-    private sealed record PlayGoMetadata(bool Available, ushort[] ChunkIds)
+    internal static void ResetForTests()
     {
-        public static readonly PlayGoMetadata Empty = new(false, Array.Empty<ushort>());
+        lock (_stateGate)
+        {
+            _initialized = false;
+            _opened = false;
+            _metadata = PlayGoMetadata.Empty;
+            _installSpeed = PlayGoInstallSpeedTrickle;
+            _languageMask = ulong.MaxValue;
+        }
+
+        Interlocked.Exchange(ref _unknownChunkDiagnostics, 0);
+        Interlocked.Exchange(ref _locusTraceDiagnostics, 0);
+    }
+
+    private enum PlayGoChunkIdKnowledge
+    {
+        Unknown,
+        Authoritative,
+    }
+
+    private sealed record PlayGoMetadata(
+        bool Available,
+        ushort[] ChunkIds,
+        PlayGoChunkIdKnowledge ChunkIdKnowledge)
+    {
+        public static readonly PlayGoMetadata Empty = new(
+            false,
+            Array.Empty<ushort>(),
+            PlayGoChunkIdKnowledge.Unknown);
     }
 }

@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using System.Globalization;
 using System.Text;
 using Xunit;
 
@@ -44,12 +45,22 @@ public sealed class KernelMemoryCompatExportsTests
             unchecked((ulong)BitConverter.DoubleToInt64Bits(0.5576)),
             0);
 
-        var result = KernelMemoryCompatExports.Sprintf(context);
+        var previousCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("es-ES");
 
-        Assert.Equal(0, result);
-        Assert.Equal(6UL, context[CpuRegister.Rax]);
-        Span<byte> output = stackalloc byte[7];
-        Assert.True(memory.TryRead(destinationAddress, output));
-        Assert.Equal("0.5576\0", Encoding.UTF8.GetString(output));
+            var result = KernelMemoryCompatExports.Sprintf(context);
+
+            Assert.Equal(0, result);
+            Assert.Equal(6UL, context[CpuRegister.Rax]);
+            Span<byte> output = stackalloc byte[7];
+            Assert.True(memory.TryRead(destinationAddress, output));
+            Assert.Equal("0.5576\0", Encoding.UTF8.GetString(output));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+        }
     }
 }

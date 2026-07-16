@@ -1045,10 +1045,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
         /// <summary>
         /// Maps a placeholder RW region at the hardcoded GPU address 0x1FE000000.
-        /// Many PS5 games write to this address during GPU initialization (it's a
-        /// hardcoded GPU register/framebuffer base in the game's own code). Without
-        /// this mapping, the game crashes with SIGSEGV during GPU init.
-        /// This is a temporary workaround — a real GPU memory model is needed later.
+        /// Many PS5 games write to this address during GPU initialization.
         /// </summary>
         private void MapGpuPlaceholderMemory(CpuContext context)
         {
@@ -1067,19 +1064,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
                                 vm = trackedInner;
                         }
 
-                        if (vm == null)
-                        {
-                                Console.Error.WriteLine($"[LOADER][WARN] GPU placeholder: context.Memory is {context.Memory?.GetType().Name}, not IVirtualMemory");
-                                return;
-                        }
+                        if (vm == null) return;
 
                         foreach (var r in vm.SnapshotRegions())
                         {
                                 if (GpuBase >= r.VirtualAddress && GpuBase < r.VirtualAddress + r.MemorySize)
-                                {
-                                        Console.Error.WriteLine($"[LOADER][INFO] GPU placeholder already mapped at 0x{GpuBase:X16}");
                                         return;
-                                }
                         }
                         vm.Map(GpuBase, GpuSize, 0, ReadOnlySpan<byte>.Empty,
                                 SharpEmu.Core.Loader.ProgramHeaderFlags.Read | SharpEmu.Core.Loader.ProgramHeaderFlags.Write);
@@ -1820,14 +1810,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
                 frameAddress = 0;
                 transferStub = 0;
                 error = null;
-                if (target.Rip < 65536 || target.Rsp == 0)
+                if (ActiveCpuContext is not { } activeContext)
                 {
-                        error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
+                        error = "guest context transfer without an active CPU context";
                         return false;
                 }
-                if (target.Rsp < sizeof(ulong) ||
-                        ActiveCpuContext is not { } activeContext ||
-                        !activeContext.TryWriteUInt64(target.Rsp - sizeof(ulong), target.Rip))
+                if (!TryValidateGuestContextTransferTarget(activeContext.Memory, target, out error))
+                {
+                        return false;
+                }
+                if (!activeContext.TryWriteUInt64(target.Rsp - sizeof(ulong), target.Rip))
                 {
                         error = $"guest context transfer slot is not writable at 0x{target.Rsp - sizeof(ulong):X16}";
                         return false;
@@ -1868,6 +1860,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
                 frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
                 frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
                 frame[19] = target.RestoreFullFpuState ? 1u : 0u;
+                return true;
+        }
+
+        internal static bool TryValidateGuestContextTransferTarget(
+                ICpuMemory memory,
+                in GuestCpuContinuation target,
+                out string? error)
+        {
+                if (target.Rip < 65536 || target.Rsp < sizeof(ulong))
+                {
+                        error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
+                        return false;
+                }
+
+                Span<byte> ripProbe = stackalloc byte[1];
+                if (!memory.TryRead(target.Rip, ripProbe))
+                {
+                        error =
+                                $"guest context transfer target rip=0x{target.Rip:X16} is not mapped guest memory " +
+                                $"(rsp=0x{target.Rsp:X16})";
+                        return false;
+                }
+
+                error = null;
                 return true;
         }
 
