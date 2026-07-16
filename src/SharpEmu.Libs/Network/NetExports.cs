@@ -345,7 +345,7 @@ public static class NetExports
     {
         var value = unchecked((uint)ctx[CpuRegister.Rdi]);
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -357,7 +357,7 @@ public static class NetExports
     {
         var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -369,7 +369,7 @@ public static class NetExports
     {
         var value = unchecked((uint)ctx[CpuRegister.Rdi]);
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -381,7 +381,7 @@ public static class NetExports
     {
         var value = unchecked((ushort)ctx[CpuRegister.Rdi]);
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
-        return ctx.SetReturn(0);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
