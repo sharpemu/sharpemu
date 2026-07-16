@@ -33,6 +33,8 @@ public static partial class Gen5MslTranslator
 {
     private const uint ScalarRegisterFileCount = 128;
     private const uint VectorRegisterFileCount = 256;
+    private const uint LdsDwordCount = 8192;
+    private const uint LdsDwordMask = LdsDwordCount - 1;
     private const uint VccLoRegister = 106;
     private const uint VccHiRegister = 107;
     private const uint ExecLoRegister = 126;
@@ -97,6 +99,8 @@ public static partial class Gen5MslTranslator
         private readonly StringBuilder _body = new();
         private int _indent;
         private int _nextTemp;
+        private bool _usesLds;
+        private bool _usesFormatLoads;
 
         public CompilationContext(
             Gen5MslStage stage,
@@ -160,6 +164,11 @@ public static partial class Gen5MslTranslator
                 }
 
                 BuildScalarDefinitionInfo(blocks, _state.Program.Instructions);
+                foreach (var instruction in _state.Program.Instructions)
+                {
+                    _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false };
+                    _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode);
+                }
 
                 // Emit the dispatcher body first: block translation discovers
                 // nothing that changes the signature in the compute stage, but
@@ -225,6 +234,11 @@ public static partial class Gen5MslTranslator
             // Uniforms: dispatch bounds plus per-buffer byte lengths. Metal has
             // no OpArrayLength equivalent, so buffer extents travel with the
             // dispatch instead of being queried in-shader.
+            if (_usesFormatLoads)
+            {
+                EmitFormatLoadPrelude(source);
+            }
+
             source.AppendLine("struct SharpEmuUniforms");
             source.AppendLine("{");
             source.AppendLine("    uint dispatch_limit_x;");
@@ -250,6 +264,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]])");
             source.AppendLine("{");
+            if (_usesLds)
+            {
+                // 32 KB of guest LDS as workgroup-shared memory (compute); the
+                // address is masked into bounds like the SPIR-V translator.
+                source.AppendLine($"    threadgroup uint sharpemu_lds[{LdsDwordCount}];");
+            }
+
             EmitRegisterFile(source);
             EmitInitialState(source);
             source.AppendLine();
@@ -341,6 +362,159 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,");
             source.AppendLine("    -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,");
             source.AppendLine("};");
+        }
+
+        private static void EmitFormatLoadPrelude(StringBuilder source)
+        {
+            // The GFX10 unified-format table, baked from the same authoritative
+            // decoder descriptor evaluation uses (dataFormat | numberFormat << 8).
+            // The descriptor is read at execution time, so decoding stays dynamic:
+            // compiled shaders may be reused with new SRDs.
+            source.Append("static constant uint sharpemu_gfx10_formats[128] = {");
+            for (uint format = 0; format < 128; format++)
+            {
+                Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat);
+                if ((format & 15) == 0)
+                {
+                    source.AppendLine();
+                    source.Append("   ");
+                }
+
+                source.Append($" 0x{dataFormat | (numberFormat << 8):X}u,");
+            }
+
+            source.AppendLine();
+            source.AppendLine("};");
+            source.AppendLine();
+
+            // Component layout for the legacy DATA_FORMAT values: byte offset,
+            // bit offset within that dword, and bit count (0 = absent).
+            source.AppendLine("static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint& byteOff, thread uint& bitOff, thread uint& bits)");
+            source.AppendLine("{");
+            source.AppendLine("    byteOff = 0u; bitOff = 0u; bits = 0u;");
+            source.AppendLine("    switch (component * 16u + dfmt)");
+            source.AppendLine("    {");
+            foreach (var (component, format, bytes, bitOffset, bitCount) in FormatComponentLayouts())
+            {
+                source.AppendLine(
+                    $"    case {component * 16 + format}u: byteOff = {bytes}u; bitOff = {bitOffset}u; bits = {bitCount}u; break;");
+            }
+
+            source.AppendLine("    default: break;");
+            source.AppendLine("    }");
+            source.AppendLine("}");
+            source.AppendLine();
+
+            // Unsigned mini-float (10/11-bit shared-exponent style) to f32 bits.
+            source.AppendLine("static inline uint sharpemu_minifloat(uint raw, uint bits)");
+            source.AppendLine("{");
+            source.AppendLine("    uint mantissaBits = bits - 5u;");
+            source.AppendLine("    uint mantissa = raw & ((1u << mantissaBits) - 1u);");
+            source.AppendLine("    uint exponent = (raw >> mantissaBits) & 0x1Fu;");
+            source.AppendLine("    uint shift = 23u - mantissaBits;");
+            source.AppendLine("    if (exponent == 31u)");
+            source.AppendLine("    {");
+            source.AppendLine("        return 0x7F800000u | (mantissa << shift);");
+            source.AppendLine("    }");
+            source.AppendLine("    if (exponent == 0u)");
+            source.AppendLine("    {");
+            source.AppendLine("        float scale = mantissaBits == 6u ? (1.0f / 1048576.0f) : (1.0f / 524288.0f);");
+            source.AppendLine("        return as_type<uint>((float)mantissa * scale);");
+            source.AppendLine("    }");
+            source.AppendLine("    return ((exponent + 112u) << 23) | (mantissa << shift);");
+            source.AppendLine("}");
+            source.AppendLine();
+
+            source.AppendLine("static inline uint sharpemu_format_one(uint nfmt)");
+            source.AppendLine("{");
+            source.AppendLine("    return (nfmt == 4u || nfmt == 5u) ? 1u : 0x3F800000u;");
+            source.AppendLine("}");
+            source.AppendLine();
+
+            // NUM_FORMAT conversion of one extracted component to register bits.
+            source.AppendLine("static inline uint sharpemu_format_convert(uint raw, uint bits, uint nfmt, uint dfmt)");
+            source.AppendLine("{");
+            source.AppendLine("    uint lowMask = bits >= 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);");
+            source.AppendLine("    int signedRaw = extract_bits(as_type<int>(raw), 0u, bits);");
+            source.AppendLine("    switch (nfmt)");
+            source.AppendLine("    {");
+            source.AppendLine("    case 0u: return as_type<uint>((float)raw / (float)lowMask);");
+            source.AppendLine("    case 1u:");
+            source.AppendLine("    {");
+            source.AppendLine("        float snorm = (float)signedRaw / (float)(lowMask >> 1);");
+            source.AppendLine("        return as_type<uint>(fmax(snorm, -1.0f));");
+            source.AppendLine("    }");
+            source.AppendLine("    case 2u: return as_type<uint>((float)raw);");
+            source.AppendLine("    case 3u: return as_type<uint>((float)signedRaw);");
+            source.AppendLine("    case 5u: return (uint)signedRaw;");
+            source.AppendLine("    case 7u:");
+            source.AppendLine("    {");
+            source.AppendLine("        // 10_11_11/11_11_10 packed floats are unsigned mini-floats.");
+            source.AppendLine("        if (dfmt == 6u || dfmt == 7u)");
+            source.AppendLine("        {");
+            source.AppendLine("            return sharpemu_minifloat(raw, bits);");
+            source.AppendLine("        }");
+            source.AppendLine("        if (bits == 16u)");
+            source.AppendLine("        {");
+            source.AppendLine("            return as_type<uint>((float)as_type<half>((ushort)(raw & 0xFFFFu)));");
+            source.AppendLine("        }");
+            source.AppendLine("        return raw;");
+            source.AppendLine("    }");
+            source.AppendLine("    default: return raw;");
+            source.AppendLine("    }");
+            source.AppendLine("}");
+            source.AppendLine();
+        }
+
+        /// <summary>
+        /// The legacy DATA_FORMAT component layouts the SPIR-V translator encodes
+        /// in LoadGfx10BufferFormatComponent, as (component, format, byteOffset,
+        /// bitOffset, bitCount) tuples.
+        /// </summary>
+        private static IEnumerable<(uint Component, uint Format, uint Bytes, uint BitOffset, uint BitCount)> FormatComponentLayouts()
+        {
+            // Component 0.
+            yield return (0, 1, 0, 0, 8);
+            yield return (0, 2, 0, 0, 16);
+            yield return (0, 3, 0, 0, 8);
+            yield return (0, 4, 0, 0, 32);
+            yield return (0, 5, 0, 0, 16);
+            yield return (0, 6, 0, 0, 10);
+            yield return (0, 7, 0, 0, 11);
+            yield return (0, 8, 0, 0, 10);
+            yield return (0, 9, 0, 0, 2);
+            yield return (0, 10, 0, 0, 8);
+            yield return (0, 11, 0, 0, 32);
+            yield return (0, 12, 0, 0, 16);
+            yield return (0, 13, 0, 0, 32);
+            yield return (0, 14, 0, 0, 32);
+            // Component 1.
+            yield return (1, 3, 1, 0, 8);
+            yield return (1, 5, 2, 0, 16);
+            yield return (1, 6, 0, 10, 11);
+            yield return (1, 7, 0, 11, 11);
+            yield return (1, 8, 0, 10, 10);
+            yield return (1, 9, 0, 2, 10);
+            yield return (1, 10, 1, 0, 8);
+            yield return (1, 11, 4, 0, 32);
+            yield return (1, 12, 2, 0, 16);
+            yield return (1, 13, 4, 0, 32);
+            yield return (1, 14, 4, 0, 32);
+            // Component 2.
+            yield return (2, 6, 0, 21, 11);
+            yield return (2, 7, 0, 22, 10);
+            yield return (2, 8, 0, 20, 10);
+            yield return (2, 9, 0, 12, 10);
+            yield return (2, 10, 2, 0, 8);
+            yield return (2, 12, 4, 0, 16);
+            yield return (2, 13, 8, 0, 32);
+            yield return (2, 14, 8, 0, 32);
+            // Component 3.
+            yield return (3, 8, 0, 30, 2);
+            yield return (3, 9, 0, 22, 10);
+            yield return (3, 10, 3, 0, 8);
+            yield return (3, 12, 6, 0, 16);
+            yield return (3, 14, 12, 0, 32);
         }
 
         private void EmitRegisterFile(StringBuilder source)
@@ -573,6 +747,11 @@ public static partial class Gen5MslTranslator
                     return true;
             }
 
+            if (instruction.Control is Gen5DataShareControl dataShare)
+            {
+                return TryEmitDataShare(instruction, dataShare, out error);
+            }
+
             if (instruction.Control is Gen5ScalarMemoryControl scalarMemory)
             {
                 return TryEmitScalarMemory(instruction, scalarMemory, out error);
@@ -701,15 +880,6 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            if (IsFormatBufferLoad(instruction.Opcode) ||
-                instruction.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal))
-            {
-                // Typed MUBUF/MTBUF format conversion arrives with the memory
-                // phase that ports EmitBufferFormatLoad.
-                error = $"format buffer access {instruction.Opcode} is not translated yet";
-                return false;
-            }
-
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
                 : "0u";
@@ -725,6 +895,21 @@ public static partial class Gen5MslTranslator
                 ApplyByteBias(
                     bindingIndex,
                     $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {stride}))"));
+            // Typed MUBUF/MTBUF loads convert through the descriptor's unified
+            // format; raw dword loads and every store take the byte path below
+            // (format stores write raw dwords, matching the SPIR-V translator).
+            if (IsFormatBufferLoad(instruction.Opcode) &&
+                !instruction.Opcode.StartsWith("BufferStore", StringComparison.Ordinal))
+            {
+                EmitBufferFormatLoad(
+                    bindingIndex,
+                    address,
+                    control.ScalarResource,
+                    control.VectorData,
+                    control.DwordCount);
+                return true;
+            }
+
             return TryEmitResolvedMemoryAccess(
                 instruction.Opcode,
                 bindingIndex,
@@ -734,6 +919,187 @@ public static partial class Gen5MslTranslator
                 control.Glc,
                 out error);
         }
+
+        private void EmitBufferFormatLoad(
+            int bindingIndex,
+            string byteAddress,
+            uint scalarResource,
+            uint vectorData,
+            uint componentCount)
+        {
+            // Format and destination swizzle come from descriptor word 3 at
+            // execution time; the prelude table decodes the unified format the
+            // same way descriptor evaluation does.
+            var word3 = Temp("uint", ScalarExpression(scalarResource + 3));
+            var entry = Temp("uint", $"sharpemu_gfx10_formats[({word3} >> 12) & 0x7Fu]");
+            var dataFormat = Temp("uint", $"{entry} & 0xFFu");
+            var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
+            var canonical = new string[4];
+            for (var component = 0; component < 4; component++)
+            {
+                var byteOff = Temp("uint", "0u");
+                var bitOff = Temp("uint", "0u");
+                var bits = Temp("uint", "0u");
+                Line($"sharpemu_format_layout({dataFormat}, {component}u, {byteOff}, {bitOff}, {bits});");
+                var packed = Temp(
+                    "uint",
+                    LoadWord(bindingIndex, $"({byteAddress} + {byteOff})"));
+                var raw = Temp(
+                    "uint",
+                    $"{bits} == 0u ? 0u : extract_bits({packed}, {bitOff}, {bits})");
+                var missing = component == 3
+                    ? $"sharpemu_format_one({numberFormat})"
+                    : "0u";
+                canonical[component] = Temp(
+                    "uint",
+                    $"{bits} == 0u ? {missing} : sharpemu_format_convert({raw}, {bits}, {numberFormat}, {dataFormat})");
+            }
+
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = Temp("uint", $"({word3} >> {destination * 3}u) & 7u");
+                StoreVector(
+                    vectorData + destination,
+                    $"{selector} == 1u ? sharpemu_format_one({numberFormat}) : " +
+                    $"{selector} == 4u ? {canonical[0]} : " +
+                    $"{selector} == 5u ? {canonical[1]} : " +
+                    $"{selector} == 6u ? {canonical[2]} : " +
+                    $"{selector} == 7u ? {canonical[3]} : 0u");
+            }
+        }
+
+        private bool TryEmitDataShare(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (control.Gds)
+            {
+                error = "GDS data share is not implemented";
+                return false;
+            }
+
+            string LdsIndex(string address, uint offsetBytes) =>
+                offsetBytes == 0
+                    ? $"((({address}) >> 2) & {LdsDwordMask}u)"
+                    : $"(((({address}) + {offsetBytes}u) >> 2) & {LdsDwordMask}u)";
+
+            void StoreLds(string index, string value)
+            {
+                // Exec-guarded like every other lane-visible write.
+                Line($"if (exec) {{ sharpemu_lds[{index}] = {value}; }}");
+            }
+
+            switch (instruction.Opcode)
+            {
+                case "DsAddU32":
+                {
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    var value = Temp("uint", RawSource(instruction, 1));
+                    Line("if (exec)");
+                    Line("{");
+                    _indent++;
+                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.Offset0)}], {value}, memory_order_relaxed);");
+                    _indent--;
+                    Line("}");
+                    return true;
+                }
+                case "DsWriteB32":
+                {
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
+                    return true;
+                }
+                case "DsWriteB64":
+                {
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
+                    StoreLds(LdsIndex(address, control.Offset0 + sizeof(uint)), RawSource(instruction, 2));
+                    return true;
+                }
+                case "DsWriteB96":
+                case "DsWriteB128":
+                {
+                    var dwordCount = instruction.Opcode == "DsWriteB128" ? 4 : 3;
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    for (var dword = 0; dword < dwordCount; dword++)
+                    {
+                        StoreLds(
+                            LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint))),
+                            RawSource(instruction, 1 + dword));
+                    }
+
+                    return true;
+                }
+                case "DsWrite2B32":
+                case "DsWrite2St64B32":
+                {
+                    var st64 = instruction.Opcode == "DsWrite2St64B32";
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    StoreLds(
+                        LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset0, st64)),
+                        RawSource(instruction, 1));
+                    StoreLds(
+                        LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset1, st64)),
+                        RawSource(instruction, 2));
+                    return true;
+                }
+                case "DsReadB32":
+                {
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"sharpemu_lds[{LdsIndex(address, control.Offset0)}]");
+                    return true;
+                }
+                case "DsReadB96":
+                case "DsReadB128":
+                {
+                    var dwordCount = instruction.Opcode == "DsReadB128" ? 4 : 3;
+                    if (instruction.Destinations.Count < dwordCount)
+                    {
+                        error = "missing LDS read operand";
+                        return false;
+                    }
+
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    for (var dword = 0; dword < dwordCount; dword++)
+                    {
+                        StoreVector(
+                            instruction.Destinations[dword].Value,
+                            $"sharpemu_lds[{LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint)))}]");
+                    }
+
+                    return true;
+                }
+                case "DsRead2B32":
+                case "DsRead2St64B32":
+                {
+                    if (instruction.Destinations.Count < 2)
+                    {
+                        error = "missing LDS read2 operand";
+                        return false;
+                    }
+
+                    var st64 = instruction.Opcode == "DsRead2St64B32";
+                    var address = Temp("uint", RawSource(instruction, 0));
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"sharpemu_lds[{LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset0, st64))}]");
+                    StoreVector(
+                        instruction.Destinations[1].Value,
+                        $"sharpemu_lds[{LdsIndex(address, EffectiveDsPairOffsetBytes(control.Offset1, st64))}]");
+                    return true;
+                }
+                default:
+                    error = $"unsupported LDS opcode {instruction.Opcode}";
+                    return false;
+            }
+        }
+
+        private static uint EffectiveDsPairOffsetBytes(uint offset, bool st64) =>
+            offset * (st64 ? 256u : sizeof(uint));
 
         private bool TryEmitResolvedMemoryAccess(
             string opcode,
@@ -778,9 +1144,12 @@ public static partial class Gen5MslTranslator
                 Line("if (exec)");
                 Line("{");
                 _indent++;
-                if (TryGetSubdwordStoreInfo(opcode, out var storeBytes))
+                if (TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift))
                 {
-                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, v[{vectorData}], {storeBytes}u);");
+                    var source = sourceShift == 0
+                        ? $"v[{vectorData}]"
+                        : $"(v[{vectorData}] >> {sourceShift})";
+                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {source}, {storeBytes}u);");
                 }
                 else
                 {
@@ -795,11 +1164,23 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
-            if (TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend))
+            if (TryGetSubdwordLoadInfo(opcode, out var loadBytes, out var signExtend, out var d16, out var d16High))
             {
+                var loaded = Temp(
+                    "uint",
+                    $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {loadBytes}u, {(signExtend ? "true" : "false")})");
+                if (!d16)
+                {
+                    StoreVector(vectorData, loaded);
+                    return true;
+                }
+
+                // D16 loads merge into one half of the destination register.
                 StoreVector(
                     vectorData,
-                    $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {loadBytes}u, {(signExtend ? "true" : "false")})");
+                    d16High
+                        ? $"(v[{vectorData}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                        : $"(v[{vectorData}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
                 return true;
             }
 
@@ -823,28 +1204,31 @@ public static partial class Gen5MslTranslator
         private static bool TryGetSubdwordLoadInfo(
             string opcode,
             out uint byteCount,
-            out bool signExtend)
+            out bool signExtend,
+            out bool d16,
+            out bool d16High)
         {
-            (byteCount, signExtend) = opcode switch
-            {
-                "GlobalLoadUbyte" or "BufferLoadUbyte" => (1u, false),
-                "GlobalLoadSbyte" or "BufferLoadSbyte" => (1u, true),
-                "GlobalLoadUshort" or "BufferLoadUshort" => (2u, false),
-                "GlobalLoadSshort" or "BufferLoadSshort" => (2u, true),
-                _ => (0u, false),
-            };
-            return byteCount != 0;
+            byteCount = opcode.Contains("byte", StringComparison.OrdinalIgnoreCase) ? 1u : 2u;
+            signExtend = opcode.Contains("Sbyte", StringComparison.Ordinal) ||
+                opcode.Contains("Sshort", StringComparison.Ordinal);
+            d16 = opcode.Contains("D16", StringComparison.Ordinal);
+            d16High = opcode.EndsWith("D16Hi", StringComparison.Ordinal);
+            return opcode.Contains("LoadUbyte", StringComparison.Ordinal) ||
+                opcode.Contains("LoadSbyte", StringComparison.Ordinal) ||
+                opcode.Contains("LoadUshort", StringComparison.Ordinal) ||
+                opcode.Contains("LoadSshort", StringComparison.Ordinal) ||
+                opcode.Contains("LoadShortD16", StringComparison.Ordinal);
         }
 
-        private static bool TryGetSubdwordStoreInfo(string opcode, out uint byteCount)
+        private static bool TryGetSubdwordStoreInfo(
+            string opcode,
+            out uint byteCount,
+            out uint sourceShift)
         {
-            byteCount = opcode switch
-            {
-                "GlobalStoreByte" or "BufferStoreByte" => 1u,
-                "GlobalStoreShort" or "BufferStoreShort" => 2u,
-                _ => 0u,
-            };
-            return byteCount != 0;
+            byteCount = opcode.Contains("StoreByte", StringComparison.Ordinal) ? 1u : 2u;
+            sourceShift = opcode.EndsWith("D16Hi", StringComparison.Ordinal) ? 16u : 0u;
+            return opcode.Contains("StoreByte", StringComparison.Ordinal) ||
+                opcode.Contains("StoreShort", StringComparison.Ordinal);
         }
 
         private static bool IsFormatBufferLoad(string opcode) =>

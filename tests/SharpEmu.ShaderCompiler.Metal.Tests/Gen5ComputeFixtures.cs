@@ -94,7 +94,23 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
-    public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop];
+    // LDS round trip: write a literal through workgroup-shared memory, barrier,
+    // read it back, and store it to buffer 0.
+    public static readonly Gen5ComputeFixture Lds = new(
+        "lds",
+        [
+            0x7E000280,             // v_mov_b32 v0, 0            (LDS byte address)
+            0x7E0402FF, 0x00001234, // v_mov_b32 v2, 0x1234
+            0xD8340000, 0x00000200, // ds_write_b32 v0, v2
+            0xBF8A0000,             // s_barrier
+            0xD8D80000, 0x03000000, // ds_read_b32 v3, v0
+            0xE0700000, 0x80020300, // buffer_store_dword v3, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
+    public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop, Lds];
 
     /// <summary>Drives the real decoder and the MSL emitter for one fixture.</summary>
     public static Gen5MslShader CompileOrThrow(Gen5ComputeFixture fixture)

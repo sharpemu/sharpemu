@@ -85,6 +85,21 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.Equal(15u, ReadDword(result, 0));
     }
 
+    [Fact]
+    public void LdsRoundTripExecutesThroughThreadgroupMemory()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; execution test skipped.");
+            return;
+        }
+
+        var result = ExecuteOrThrow(Gen5ComputeFixtures.Lds, new byte[16]);
+
+        // Written to LDS, barriered, read back, stored to the buffer.
+        Assert.Equal(0x1234u, ReadDword(result, 0));
+    }
+
     private static byte[] ExecuteOrThrow(Gen5ComputeFixture fixture, byte[] buffer)
     {
         var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
