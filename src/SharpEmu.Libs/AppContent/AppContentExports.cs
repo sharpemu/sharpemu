@@ -229,4 +229,12 @@ public static class AppContentExports
         Environment.SetEnvironmentVariable(temp0VariableName, root);
         return root;
     }
+
+    [SysAbiExport(
+        Nid = "Gl6w5i0JokY",
+        ExportName = "sceAppContentDownloadDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentDownloadDataGetAvailableSpaceKb(CpuContext ctx) =>
+        ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
 }

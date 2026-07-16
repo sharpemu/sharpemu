@@ -2035,7 +2035,8 @@ public static partial class KernelMemoryCompatExports
 
         if (stream is null)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         long positionBefore;
