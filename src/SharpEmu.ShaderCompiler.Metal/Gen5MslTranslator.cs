@@ -335,6 +335,12 @@ public static partial class Gen5MslTranslator
             source.AppendLine("{");
             source.AppendLine("    return (uint)(uint64_t)simd_ballot(value);");
             source.AppendLine("}");
+            source.AppendLine();
+            source.AppendLine("static constant float sharpemu_off_i4_table[16] =");
+            source.AppendLine("{");
+            source.AppendLine("    0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,");
+            source.AppendLine("    -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,");
+            source.AppendLine("};");
         }
 
         private void EmitRegisterFile(StringBuilder source)
@@ -997,6 +1003,22 @@ public static partial class Gen5MslTranslator
                 case Gen5OperandKind.LiteralConstant:
                     return FormatUInt(operand.Value);
                 case Gen5OperandKind.EncodedConstant:
+                    // 251/252/253 read the VCCZ/EXECZ/SCC status bits as data.
+                    if (operand.Value == 251)
+                    {
+                        return "(sharpemu_ballot(vcc) == 0u ? 1u : 0u)";
+                    }
+
+                    if (operand.Value == 252)
+                    {
+                        return "(sharpemu_ballot(exec) == 0u ? 1u : 0u)";
+                    }
+
+                    if (operand.Value == 253)
+                    {
+                        return "(scc ? 1u : 0u)";
+                    }
+
                     if (Gen5InlineConstants.TryDecode(operand.Value, out var constant))
                     {
                         return FormatUInt(constant);
