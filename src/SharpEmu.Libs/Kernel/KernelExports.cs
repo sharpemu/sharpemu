@@ -14,6 +14,11 @@ public static class KernelExports
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
 
+    // Guest printf output is relayed through a collapser so a chatty guest cannot
+    // flood the log with the same line repeated thousands of times. See
+    // GuestLogCollapser.
+    private static readonly GuestLogCollapser _printfLog = new("[DEBUG][PRINF] ");
+
     private readonly record struct CxaDestructorEntry(
         ulong Function,
         ulong Argument,
@@ -55,6 +60,7 @@ public static class KernelExports
     public static int Exit(CpuContext ctx)
     {
         var status = unchecked((int)ctx[CpuRegister.Rdi]);
+        _printfLog.Flush();
         Console.Error.WriteLine($"[LOADER][INFO] exit(status={status})");
         GuestThreadExecution.RequestCurrentEntryExit("exit", status);
         ctx[CpuRegister.Rax] = unchecked((ulong)status);
@@ -69,6 +75,7 @@ public static class KernelExports
     public static int CatchReturnFromMain(CpuContext ctx)
     {
         var status = unchecked((int)ctx[CpuRegister.Rdi]);
+        _printfLog.Flush();
         Console.Error.WriteLine($"[LOADER][INFO] catchReturnFromMain(status={status})");
         GuestThreadExecution.RequestCurrentEntryExit("catchReturnFromMain", status);
         ctx[CpuRegister.Rax] = unchecked((ulong)status);
@@ -175,6 +182,7 @@ public static class KernelExports
     public static int UnderscoreExit(CpuContext ctx)
     {
         _ = ctx;
+        _printfLog.Flush();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -388,15 +396,7 @@ public static class KernelExports
         ulong fmtPtr = ctx[CpuRegister.Rdi];
         string fmt = ReadCString(ctx, fmtPtr, 4096);
         string outStr = KernelMemoryCompatExports.FormatStringFromVarArgs(ctx, fmt, firstGpArgIndex: 1);
-        if (outStr.EndsWith('\n') || outStr.EndsWith('\r'))
-        {
-            Console.Write($"[DEBUG][PRINF] {outStr}");
-        }
-        else
-        {
-            Console.WriteLine($"[DEBUG][PRINF] {outStr}");
-        }
-
+        _printfLog.Write(outStr);
         ctx[CpuRegister.Rax] = (ulong)System.Text.Encoding.UTF8.GetByteCount(outStr);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
