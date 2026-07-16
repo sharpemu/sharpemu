@@ -81,6 +81,8 @@ internal static partial class Program
         sb.AppendLine(SharpEmu.Diagnostics.MissingNidReporter.Instance.RenderReport());
         sb.AppendLine();
         sb.AppendLine(SharpEmu.Diagnostics.ApiStateValidator.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.PointerOriginTracker.Instance.RenderReport());
 
         var path = Path.Combine(reportDir, "diagnostics_report.txt");
         File.WriteAllText(path, sb.ToString());

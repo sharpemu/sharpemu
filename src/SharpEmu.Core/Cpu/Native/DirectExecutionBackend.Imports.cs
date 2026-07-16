@@ -530,7 +530,7 @@ public sealed partial class DirectExecutionBackend
                                 CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
                         StoreImportVectorReturn(cpuContext, argPackPtr);
 
-                        // ====== DIAGNOSTICS: Return Value Analyzer + Missing NID Reporter ======
+                        // ====== DIAGNOSTICS: Return Value Analyzer + Missing NID Reporter + Pointer Origin ======
                         try
                         {
                                 var fnName = matchedExport != null
@@ -544,15 +544,23 @@ public sealed partial class DirectExecutionBackend
                                         SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RecordFailure(
                                                 num, importStubEntry.Nid, fnName, "UNRESOLVED", num7);
                                 }
-                                else if (orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK)
-                                {
-                                        SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RecordSuccess(
-                                                num, importStubEntry.Nid, fnName, num7);
-                                }
                                 else
                                 {
-                                        SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RecordFailure(
-                                                num, importStubEntry.Nid, fnName, orbisGen2Result.ToString(), num7);
+                                        var rax = cpuContext[CpuRegister.Rax];
+                                        if (orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK)
+                                        {
+                                                SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RecordSuccess(
+                                                        num, importStubEntry.Nid, fnName, num7);
+                                        }
+                                        else
+                                        {
+                                                SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RecordFailure(
+                                                        num, importStubEntry.Nid, fnName, orbisGen2Result.ToString(), num7);
+                                        }
+                                        // Track pointer origins — who returned this address?
+                                        SharpEmu.Diagnostics.PointerOriginTracker.Instance.RecordReturn(
+                                                fnName ?? importStubEntry.Nid, rax, num7,
+                                                value, value2, num3, num);
                                 }
                         }
                         catch { }
