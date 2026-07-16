@@ -3514,6 +3514,11 @@ public static partial class KernelMemoryCompatExports
         {
             if (!TryFindVirtualQueryRegionLocked(queryAddress, findNext: (flags & 0x1) != 0, out region))
             {
+                // Boehm GC sizes its root/heap sections from these queries; a miss
+                // here shows up later as a mark-phase scan past a mapping's end.
+                Console.Error.WriteLine(
+                    $"[LOADER][DEBUG] sceKernelVirtualQuery: addr=0x{queryAddress:X16} flags=0x{flags:X} -> NOT_FOUND " +
+                    $"(regions={_mappedRegions.Count})");
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
@@ -3522,6 +3527,11 @@ public static partial class KernelMemoryCompatExports
                 memoryType = allocation.MemoryType;
             }
         }
+
+        Console.Error.WriteLine(
+            $"[LOADER][DEBUG] sceKernelVirtualQuery: addr=0x{queryAddress:X16} flags=0x{flags:X} -> " +
+            $"[0x{region.Address:X16}..0x{region.Address + region.Length:X16}) prot=0x{region.Protection:X} " +
+            $"flexible={region.IsFlexible} direct={region.IsDirect}");
 
         Span<byte> payload = stackalloc byte[OrbisVirtualQueryInfoSize];
         payload.Clear();
@@ -3650,8 +3660,15 @@ public static partial class KernelMemoryCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
 
+                Console.Error.WriteLine(
+                    $"[LOADER][DEBUG] sceKernelDirectMemoryQuery: offset=0x{offset:X16} -> " +
+                    $"[0x{block.Start:X16}..0x{block.Start + block.Length:X16}) type={block.MemoryType}");
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
+
+            Console.Error.WriteLine(
+                $"[LOADER][DEBUG] sceKernelDirectMemoryQuery: offset=0x{offset:X16} -> NOT_FOUND " +
+                $"(allocations={_directAllocations.Count})");
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;

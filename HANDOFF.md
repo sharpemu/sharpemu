@@ -275,15 +275,38 @@ the pending-signal-on-GuestThreadState + wake + handler-before-resume design
 (single `BlockedContinuation` slot insufficient; needs a nested continuation
 path).
 
+**Seventh run — signal delivery WORKED; boot advanced to a new blocker.**
+Log showed the full expected sequence: `queued signo=30 for thread=0x...64DB0
+(from=0x...62D90)` → Boehm's own `thread not found in gc_threads` (harmless:
+main isn't registered during the startup delivery self-test) → `delivered
+pending signo=30 on thread=0x...64DB0` → boot continued past GC init. The
+seven-run stop-the-world blocker is resolved.
+
+**New blocker: AV in the GC mark phase past mapped memory.** Main thread
+(inside `scriptingGetMem` → GC module `ofCYJWmnAYE#L#A`) faulted READING
+0x101003C0; the free region starts at 0x10100000 (state=MEM_FREE up to
+0x7FFE0000). The conservative mark scan pointer walked past the end of the
+last mapping — Boehm's notion of a section end exceeds what is actually
+backed. Two suspects: (1) `sceKernelVirtualQuery`/`sceKernelDirectMemoryQuery`
+returned NOT_FOUND early in boot (0x600100000 find-next / offset 0x10000000) —
+Boehm sizes root/heap sections from these; loader module segments and stacks
+are NOT in `_mappedRegions`, so find-next can't see them; (2) the game may
+install a signo=11 (SIGSEGV) handler and expect fault-probing delivery, which
+the VEH currently treats as fatal. Diagnostics added this commit: VirtualQuery
+and DirectMemoryQuery now log args+result, InstallExceptionHandler /
+RemoveExceptionHandler log signo+handler.
+
 **Next steps:**
-1. Rebuild, re-run. Expect `queued signo=30 for thread=...` followed within
-   ~1 ms by `delivered pending signo=30 on thread=...`. Then either the world
-   stops/restarts and boot proceeds, or the handler faults reading the zeroed
-   context buffer — the fault offset recovers the `mcontext_t` layout the
-   handler wants.
-2. If a stall follows a `delivery deferred until it next runs` line, the GC is
-   signalling parked scheduler guest threads and the nested-continuation
-   design above becomes the next task.
+1. Re-run with env `HYPER5_LOG_DIRECT_MEMORY=1` (adds map_flexible/map_direct
+   traces) and collect the log. Key questions: does the game install a
+   signo=11 handler at boot? What did VirtualQuery return for the addresses
+   Boehm queried? What flexible mappings back 0x100xxxxx and do their recorded
+   bounds match the AV region dump?
+2. Fix accordingly: register loader segments (and stacks) as queryable
+   regions so find-next works, correct any mis-recorded mapping length, or —
+   if a signo=11 handler exists — route guest AVs from the VEH to the guest
+   handler instead of dying (fault-probing is normal Boehm behavior on real
+   hardware).
 
 ## Suggested next steps, in priority order
 

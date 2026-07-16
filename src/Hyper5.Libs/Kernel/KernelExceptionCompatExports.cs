@@ -46,6 +46,9 @@ public static class KernelExceptionCompatExports
             _installedHandlers[signum] = handler;
         }
 
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] sceKernelInstallExceptionHandler: signo={signum} handler=0x{handler:X16}");
+
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -68,6 +71,8 @@ public static class KernelExceptionCompatExports
         {
             _installedHandlers.Remove(signum);
         }
+
+        Console.Error.WriteLine($"[LOADER][INFO] sceKernelRemoveExceptionHandler: signo={signum}");
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
