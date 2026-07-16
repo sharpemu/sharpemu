@@ -585,6 +585,9 @@ internal static partial class MetalVideoPresenter
                     case OffscreenGuestDraw offscreenDraw:
                         ExecuteOffscreenDraw(device, queue, offscreenDraw);
                         break;
+                    case ComputeGuestDispatch computeDispatch:
+                        ExecuteComputeDispatch(device, queue, computeDispatch);
+                        break;
                 }
             }
             catch (Exception exception)

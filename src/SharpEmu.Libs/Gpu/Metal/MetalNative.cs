@@ -46,6 +46,14 @@ internal struct MtlRegion
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct MtlSize
+{
+    public nuint Width;
+    public nuint Height;
+    public nuint Depth;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct MtlScissorRect
 {
     public nuint X;
@@ -162,6 +170,13 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendBuffer(nint receiver, nint selector, nint bytes, nuint length, nuint options);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendDispatch(
+        nint receiver,
+        nint selector,
+        MtlSize threadgroups,
+        MtlSize threadsPerThreadgroup);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);

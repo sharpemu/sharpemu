@@ -8,10 +8,9 @@ namespace SharpEmu.Libs.Gpu.Metal;
 
 /// <summary>
 /// Metal backend for the guest-GPU seam: MSL codegen via
-/// SharpEmu.ShaderCompiler.Metal, rendering via the Metal presenter. Shader
-/// compilation and format decoding are complete; the presenter arrives in
-/// follow-up phases, so submission methods currently fail loudly rather than
-/// silently dropping frames.
+/// SharpEmu.ShaderCompiler.Metal, rendering via the Metal presenter — the full
+/// surface (presentation, guest images, ordered flips, translated draws, and
+/// compute) with no Vulkan, MoltenVK, or windowing-library dependency.
 /// </summary>
 internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
 {
@@ -343,7 +342,30 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         bool writesGlobalMemory,
         uint threadCountX = uint.MaxValue,
         uint threadCountY = uint.MaxValue,
-        uint threadCountZ = uint.MaxValue) => throw PresenterNotReady();
+        uint threadCountZ = uint.MaxValue)
+    {
+        // The translated kernel bakes its threadgroup size; localSize and
+        // isIndirect are already folded in by the AGC layer before submission.
+        _ = localSizeX;
+        _ = localSizeY;
+        _ = localSizeZ;
+        _ = isIndirect;
+        return MetalVideoPresenter.SubmitComputeDispatch(
+            shaderAddress,
+            Msl(computeShader),
+            textures,
+            globalMemoryBuffers,
+            groupCountX,
+            groupCountY,
+            groupCountZ,
+            baseGroupX,
+            baseGroupY,
+            baseGroupZ,
+            writesGlobalMemory,
+            threadCountX,
+            threadCountY,
+            threadCountZ);
+    }
 
     private long _perfShaderCompilations;
 
@@ -405,7 +427,4 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public void RequestClose() =>
         MetalVideoPresenter.RequestClose();
 
-    private static NotSupportedException PresenterNotReady() => new(
-        "the Metal backend does not submit guest draws or compute yet; " +
-        "unset SHARPEMU_GPU_BACKEND to use the Vulkan backend");
 }
