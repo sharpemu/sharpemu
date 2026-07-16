@@ -11,12 +11,19 @@ namespace SharpEmu.Libs.SaveData;
 public static class SaveDataExports
 {
     private const int OrbisSaveDataErrorParameter = unchecked((int)0x809F0000);
+    private const int OrbisSaveDataErrorBusy = unchecked((int)0x809F0003);
+    private const int OrbisSaveDataErrorNotMounted = unchecked((int)0x809F0004);
     private const int OrbisSaveDataErrorExists = unchecked((int)0x809F0007);
     private const int OrbisSaveDataErrorNotFound = unchecked((int)0x809F0008);
     private const int OrbisSaveDataErrorInternal = unchecked((int)0x809F000B);
     private const int SaveDataTitleIdSize = 10;
     private const int SaveDataDirNameSize = 32;
     private const int SaveDataParamSize = 0x530;
+    private const int SaveDataParamTitleOffset = 0x00;
+    private const int SaveDataParamSubTitleOffset = 0x80;
+    private const int SaveDataParamDetailOffset = 0x100;
+    private const int SaveDataParamUserParamOffset = 0x500;
+    private const int SaveDataParamMtimeOffset = 0x508;
     private const int SaveDataSearchInfoSize = 0x30;
     private const ulong ResultHitNumOffset = 0x00;
     private const ulong ResultDirNamesOffset = 0x08;
@@ -31,14 +38,24 @@ public static class SaveDataExports
     private const int MountResultSize = 0x40;
     private static readonly object _stateGate = new();
     private static readonly HashSet<int> _preparedTransactionResources = [];
+    private static readonly Dictionary<string, string> _mountedSavePaths = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly StringComparison _hostPathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
     private static string? _titleId;
 
     public static void ConfigureApplicationInfo(string? titleId)
     {
         lock (_stateGate)
         {
+            foreach (var mountPoint in _mountedSavePaths.Keys)
+            {
+                KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            }
+
             _titleId = string.IsNullOrWhiteSpace(titleId) ? null : SanitizePathSegment(titleId.Trim());
             _preparedTransactionResources.Clear();
+            _mountedSavePaths.Clear();
         }
     }
 
@@ -191,46 +208,52 @@ public static class SaveDataExports
 
         try
         {
-            var titleId = ResolveConfiguredTitleId();
-            var savePath = Path.Combine(
-                ResolveTitleSaveRoot(userId, titleId),
-                SanitizePathSegment(dirName));
-            var existed = Directory.Exists(savePath);
-            var create = (mountMode & MountModeCreate) != 0;
-            var createIfMissing = (mountMode & MountModeCreate2) != 0;
-
-            if (!existed && !create && !createIfMissing)
+            lock (_stateGate)
             {
-                return SetReturn(ctx, OrbisSaveDataErrorNotFound);
+                var titleId = ResolveConfiguredTitleId();
+                if (!TryResolveSavePath(userId, titleId, dirName, out var savePath))
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorParameter);
+                }
+
+                const string mountPoint = "/savedata0";
+                var existed = Directory.Exists(savePath);
+                var create = (mountMode & MountModeCreate) != 0;
+                var createIfMissing = (mountMode & MountModeCreate2) != 0;
+
+                if (!existed && !create && !createIfMissing)
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorNotFound);
+                }
+
+                if (existed && create)
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorExists);
+                }
+
+                if (!existed)
+                {
+                    Directory.CreateDirectory(savePath);
+                }
+
+                Span<byte> result = stackalloc byte[MountResultSize];
+                result.Clear();
+                WriteAscii(result[..16], mountPoint);
+                BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
+                if (!ctx.Memory.TryWrite(resultAddress, result))
+                {
+                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
+                _mountedSavePaths[mountPoint] = savePath;
+
+                TraceSaveData(
+                    $"mount3 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
+                    $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
+                    $"mount_point={mountPoint} created={!existed} root='{savePath}'");
+                return SetReturn(ctx, 0);
             }
-
-            if (existed && create)
-            {
-                return SetReturn(ctx, OrbisSaveDataErrorExists);
-            }
-
-            if (!existed)
-            {
-                Directory.CreateDirectory(savePath);
-            }
-
-            const string mountPoint = "/savedata0";
-            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
-
-            Span<byte> result = stackalloc byte[MountResultSize];
-            result.Clear();
-            WriteAscii(result[..16], mountPoint);
-            BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
-            if (!ctx.Memory.TryWrite(resultAddress, result))
-            {
-                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
-
-            TraceSaveData(
-                $"mount3 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
-                $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
-                $"mount_point={mountPoint} created={!existed} root='{savePath}'");
-            return SetReturn(ctx, 0);
         }
         catch (IOException)
         {
@@ -243,6 +266,183 @@ public static class SaveDataExports
         catch (ArgumentException)
         {
             return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "85zul--eGXs",
+        ExportName = "sceSaveDataSetParam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataSetParam(CpuContext ctx)
+    {
+        var mountPointAddress = ctx[CpuRegister.Rdi];
+        var paramType = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var paramAddress = ctx[CpuRegister.Rdx];
+        var paramSize = ctx[CpuRegister.Rcx];
+        if (mountPointAddress == 0 || paramAddress == 0 || paramType > 4)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadFixedAscii(ctx, mountPointAddress, 16, out var mountPoint))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var fieldCapacity = paramType switch
+        {
+            0 => SaveDataParamSize,
+            1 or 2 => 128,
+            3 => 1024,
+            4 => sizeof(uint),
+            _ => 0,
+        };
+        var inputSize = paramType is 1 or 2 or 3
+            ? checked((int)Math.Min(paramSize, (ulong)fieldCapacity))
+            : fieldCapacity;
+        if (paramSize < (ulong)inputSize ||
+            inputSize == 0 ||
+            (paramType is 0 or 4 && paramSize < (ulong)fieldCapacity))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        var input = new byte[inputSize];
+        if (!ctx.Memory.TryRead(paramAddress, input))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+        if (paramType is 1 or 2 or 3 && !input.Contains((byte)0))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        try
+        {
+            lock (_stateGate)
+            {
+                if (!_mountedSavePaths.TryGetValue(mountPoint, out var savePath))
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorNotMounted);
+                }
+
+                var param = LoadSavedParam(savePath) ?? CreateDefaultParam(savePath);
+                switch (paramType)
+                {
+                    case 0:
+                        input.CopyTo(param, 0);
+                        break;
+                    case 1:
+                        ReplaceParamField(param, SaveDataParamTitleOffset, 128, input);
+                        break;
+                    case 2:
+                        ReplaceParamField(param, SaveDataParamSubTitleOffset, 128, input);
+                        break;
+                    case 3:
+                        ReplaceParamField(param, SaveDataParamDetailOffset, 1024, input);
+                        break;
+                    case 4:
+                        input.CopyTo(param, SaveDataParamUserParamOffset);
+                        break;
+                }
+
+                WriteSavedParam(savePath, param);
+                TraceSaveData(
+                    $"set_param mount_point={mountPoint} type={paramType} size={inputSize} root='{savePath}'");
+                return SetReturn(ctx, 0);
+            }
+        }
+        catch (IOException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "S1GkePI17zQ",
+        ExportName = "sceSaveDataDelete",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataDelete(CpuContext ctx)
+    {
+        var deleteAddress = ctx[CpuRegister.Rdi];
+        if (deleteAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadInt32(ctx, deleteAddress, out var userId) ||
+            !ctx.TryReadUInt64(deleteAddress + 0x08, out var titleIdAddress) ||
+            !ctx.TryReadUInt64(deleteAddress + 0x10, out var dirNameAddress))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (userId < 0 || dirNameAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var useConfiguredTitleId = titleIdAddress == 0;
+        var titleId = string.Empty;
+        if (!useConfiguredTitleId &&
+            !TryReadFixedAscii(ctx, titleIdAddress, SaveDataTitleIdSize, out titleId))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        try
+        {
+            lock (_stateGate)
+            {
+                if (useConfiguredTitleId)
+                {
+                    titleId = ResolveConfiguredTitleId();
+                }
+
+                if (!TryResolveSavePath(userId, titleId, dirName, out var savePath))
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorParameter);
+                }
+
+                if (_mountedSavePaths.Values.Any(path =>
+                        string.Equals(path, savePath, _hostPathComparison)))
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorBusy);
+                }
+
+                if (Directory.Exists(savePath))
+                {
+                    Directory.Delete(savePath, recursive: true);
+                }
+
+                var metadataPath = ResolveParamMetadataPath(savePath);
+                if (File.Exists(metadataPath))
+                {
+                    File.Delete(metadataPath);
+                }
+
+                TraceSaveData($"delete user={userId} title={titleId} dir={dirName} root='{savePath}'");
+                return SetReturn(ctx, 0);
+            }
+        }
+        catch (IOException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
 
@@ -316,7 +516,21 @@ public static class SaveDataExports
         // Unmounting a save directory always succeeds in the stub filesystem;
         // returning an error here makes the game's save flow stall before it
         // hands control to the title/gameplay state.
-        TraceSaveData($"umount2 user={unchecked((int)ctx[CpuRegister.Rdi])}");
+        var mountPointAddress = ctx[CpuRegister.Rdi];
+        var mountPoint = string.Empty;
+        if (mountPointAddress != 0 &&
+            TryReadFixedAscii(ctx, mountPointAddress, 16, out mountPoint))
+        {
+            lock (_stateGate)
+            {
+                if (_mountedSavePaths.Remove(mountPoint))
+                {
+                    KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+                }
+            }
+        }
+
+        TraceSaveData($"umount2 mount_point={mountPoint}");
         return SetReturn(ctx, 0);
     }
 
@@ -375,7 +589,7 @@ public static class SaveDataExports
             }
 
             var info = new DirectoryInfo(directory);
-            entries.Add(new SaveEntry(name, directory, info.LastWriteTimeUtc));
+            entries.Add(new SaveEntry(name, directory, ResolveSaveMtimeUtc(directory, info.LastWriteTimeUtc)));
         }
 
         return entries;
@@ -400,13 +614,104 @@ public static class SaveDataExports
 
     private static bool TryWriteParam(CpuContext ctx, ulong address, SaveEntry entry)
     {
-        var param = new byte[SaveDataParamSize];
-        WriteAscii(param.AsSpan(0x00, 128), "Saved Data");
-        WriteAscii(param.AsSpan(0x100, 1024), entry.Name);
-        BinaryPrimitives.WriteInt64LittleEndian(
-            param.AsSpan(0x508, sizeof(long)),
-            new DateTimeOffset(entry.LastWriteUtc).ToUnixTimeSeconds());
+        var param = LoadSavedParam(entry.Path);
+        if (param is null)
+        {
+            param = new byte[SaveDataParamSize];
+            WriteAscii(param.AsSpan(SaveDataParamTitleOffset, 128), "Saved Data");
+            WriteAscii(param.AsSpan(SaveDataParamDetailOffset, 1024), entry.Name);
+            BinaryPrimitives.WriteInt64LittleEndian(
+                param.AsSpan(SaveDataParamMtimeOffset, sizeof(long)),
+                new DateTimeOffset(entry.LastWriteUtc).ToUnixTimeSeconds());
+        }
+
         return ctx.Memory.TryWrite(address, param);
+    }
+
+    private static byte[]? LoadSavedParam(string savePath)
+    {
+        var metadataPath = ResolveParamMetadataPath(savePath);
+        if (!File.Exists(metadataPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var param = File.ReadAllBytes(metadataPath);
+            return param.Length == SaveDataParamSize ? param : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static byte[] CreateDefaultParam(string savePath)
+    {
+        var param = new byte[SaveDataParamSize];
+        var mtime = Directory.Exists(savePath)
+            ? Directory.GetLastWriteTimeUtc(savePath)
+            : DateTime.UtcNow;
+        BinaryPrimitives.WriteInt64LittleEndian(
+            param.AsSpan(SaveDataParamMtimeOffset, sizeof(long)),
+            new DateTimeOffset(mtime).ToUnixTimeSeconds());
+        return param;
+    }
+
+    private static string ResolveParamMetadataPath(string savePath)
+    {
+        var titleRoot = Directory.GetParent(savePath)?.FullName ?? ResolveSaveDataRoot();
+        var dirName = Path.GetFileName(Path.TrimEndingDirectorySeparator(savePath));
+        return Path.Combine(titleRoot, "sce_params", $"{dirName}.bin");
+    }
+
+    private static void WriteSavedParam(string savePath, byte[] param)
+    {
+        var metadataPath = ResolveParamMetadataPath(savePath);
+        var metadataRoot = Path.GetDirectoryName(metadataPath)!;
+        Directory.CreateDirectory(metadataRoot);
+        var temporaryPath = Path.Combine(metadataRoot, $".{Path.GetFileName(metadataPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporaryPath, param);
+            File.Move(temporaryPath, metadataPath, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporaryPath);
+        }
+    }
+
+    private static DateTime ResolveSaveMtimeUtc(string savePath, DateTime fallback)
+    {
+        var param = LoadSavedParam(savePath);
+        if (param is null)
+        {
+            return fallback;
+        }
+
+        var seconds = BinaryPrimitives.ReadInt64LittleEndian(
+            param.AsSpan(SaveDataParamMtimeOffset, sizeof(long)));
+        try
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return fallback;
+        }
+    }
+
+    private static void ReplaceParamField(byte[] param, int offset, int length, byte[] value)
+    {
+        var field = param.AsSpan(offset, length);
+        field.Clear();
+        value.AsSpan(0, Math.Min(value.Length, field.Length)).CopyTo(field);
     }
 
     private static bool TryWriteSearchInfo(CpuContext ctx, ulong address, SaveEntry entry)
@@ -470,7 +775,34 @@ public static class SaveDataExports
     }
 
     private static string ResolveTitleSaveRoot(int userId, string titleId) =>
-        Path.Combine(ResolveSaveDataRoot(), userId.ToString(), SanitizePathSegment(titleId));
+        Path.GetFullPath(Path.Combine(ResolveSaveDataRoot(), userId.ToString(), SanitizePathSegment(titleId)));
+
+    private static bool TryResolveSavePath(int userId, string titleId, string dirName, out string savePath)
+    {
+        savePath = string.Empty;
+        if (!IsGuestPathSegment(titleId) || !IsGuestPathSegment(dirName))
+        {
+            return false;
+        }
+
+        var titleRoot = ResolveTitleSaveRoot(userId, titleId);
+        var candidate = Path.GetFullPath(Path.Combine(titleRoot, SanitizePathSegment(dirName)));
+        var rootWithSeparator = Path.TrimEndingDirectorySeparator(titleRoot) + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(rootWithSeparator, _hostPathComparison))
+        {
+            return false;
+        }
+
+        savePath = candidate;
+        return true;
+    }
+
+    private static bool IsGuestPathSegment(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !string.Equals(value, ".", StringComparison.Ordinal) &&
+        !string.Equals(value, "..", StringComparison.Ordinal) &&
+        !value.Contains('/') &&
+        !value.Contains('\\');
 
     private static string ResolveSaveDataRoot()
     {
@@ -511,7 +843,7 @@ public static class SaveDataExports
     {
         var invalid = Path.GetInvalidFileNameChars();
         var sanitized = new string(value.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
-        return string.IsNullOrWhiteSpace(sanitized) ? "default" : sanitized;
+        return string.IsNullOrWhiteSpace(sanitized) || sanitized is "." or ".." ? "default" : sanitized;
     }
 
     private static bool TryReadFixedAscii(CpuContext ctx, ulong address, int length, out string value)

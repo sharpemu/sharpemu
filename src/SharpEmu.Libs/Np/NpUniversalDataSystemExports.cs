@@ -169,6 +169,27 @@ public static class NpUniversalDataSystemExports
     }
 
     [SysAbiExport(
+        Nid = "4llLk7YJRTE",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetString",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetString(CpuContext ctx)
+    {
+        // Telemetry is optional for local emulation. Dreaming Sarah passes a
+        // null destination while constructing its new-game event, so preserve
+        // the value-pointer validation without making telemetry block gameplay.
+        var valueAddress = ctx[CpuRegister.Rsi];
+        if (valueAddress == 0)
+        {
+            return ctx.SetReturn(NpUniversalDataSystemErrorInvalidArgument, typeof(long));
+        }
+
+        return ctx.TryReadNullTerminatedUtf8(valueAddress, 4096, out _)
+            ? ctx.SetReturn(0, typeof(long))
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, typeof(long));
+    }
+
+    [SysAbiExport(
         Nid = "CzkKf7ahIyU",
         ExportName = "sceNpUniversalDataSystemPostEvent",
         Target = Generation.Gen4 | Generation.Gen5,
