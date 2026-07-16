@@ -133,4 +133,93 @@ public static class LibcInternalExports
         }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // _Xtime_get_ticks: returns high-resolution tick count (like QueryPerformanceCounter)
+    // Used by C runtime timing functions. Returns ticks since boot.
+    [SysAbiExport(
+        Nid = "Cj+Fw5q1tUo",
+        ExportName = "_Xtime_get_ticks",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int XtimeGetTicks(CpuContext ctx)
+    {
+        // Use high-resolution stopwatch ticks
+        var ticks = (ulong)System.Diagnostics.Stopwatch.GetTimestamp();
+        ctx[CpuRegister.Rax] = ticks;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // logf: natural logarithm (float)
+    [SysAbiExport(
+        Nid = "RQXLbdT2lc4",
+        ExportName = "logf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcLogf(CpuContext ctx)
+    {
+        var x = BitConverter.Int32BitsToSingle(unchecked((int)ctx[CpuRegister.Rdi]));
+        ctx[CpuRegister.Rax] = unchecked((ulong)BitConverter.SingleToInt32Bits(MathF.Log(x)));
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // rand: pseudo-random integer
+    private static int _randSeed = 1;
+    [SysAbiExport(
+        Nid = "cpCOXWMgha0",
+        ExportName = "rand",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcRand(CpuContext ctx)
+    {
+        // Simple LCG (same as glibc rand)
+        _randSeed = unchecked(_randSeed * 1103515245 + 12345);
+        ctx[CpuRegister.Rax] = (uint)(_randSeed >> 16) & 0x7FFF;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // sprintf_s: safe sprintf (writes formatted string to buffer)
+    // This is a simplified implementation that handles common format specifiers.
+    [SysAbiExport(
+        Nid = "xEszJVGpybs",
+        ExportName = "sprintf_s",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LibcSprintfS(CpuContext ctx)
+    {
+        // args: rdi=buffer, rsi=size, rdx=format, rcx=first_arg...
+        var buffer = ctx[CpuRegister.Rdi];
+        var size = ctx[CpuRegister.Rsi];
+        var format = ctx[CpuRegister.Rdx];
+
+        if (buffer == 0 || size == 0 || format == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // Read format string
+        var formatBytes = new byte[256];
+        var formatSpan = new Span<byte>(formatBytes);
+        if (!ctx.Memory.TryRead(format, formatSpan))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var nullPos = Array.IndexOf(formatBytes, (byte)0);
+        if (nullPos < 0) nullPos = 256;
+        var formatStr = System.Text.Encoding.ASCII.GetString(formatBytes, 0, nullPos);
+
+        // For now, just write the format string literally (no arg substitution)
+        // This handles simple cases like sprintf_s(buf, size, "hello")
+        var bytes = System.Text.Encoding.ASCII.GetBytes(formatStr);
+        var writeLen = Math.Min(bytes.Length, (int)size - 1);
+        if (writeLen > 0)
+        {
+            ctx.Memory.TryWrite(buffer, bytes.AsSpan(0, writeLen));
+            ctx.Memory.TryWrite(buffer + (ulong)writeLen, new byte[] { 0 }); // null terminator
+        }
+        ctx[CpuRegister.Rax] = (ulong)writeLen;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

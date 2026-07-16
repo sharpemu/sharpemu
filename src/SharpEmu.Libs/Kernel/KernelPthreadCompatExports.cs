@@ -1903,6 +1903,20 @@ public static class KernelPthreadCompatExports
     public static int C11CndInit(CpuContext ctx) =>
         PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
 
+    // _Cnd_timedwait: C11 condition variable timed wait.
+    // Delegates to the existing pthread_cond_timedwait implementation.
+    [SysAbiExport(
+        Nid = "McaImWKXong",
+        ExportName = "_Cnd_timedwait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11CndTimedwait(CpuContext ctx)
+    {
+        // args: rdi=cnd*, rsi=mtx*, rdx=timespec*
+        // Delegate to the existing PthreadCondTimedwait which reads the same args
+        return PthreadCondTimedwait(ctx);
+    }
+
     // _ZSt14_Throw_C_errori — libstdc++ __throw_C_error(int).
     // Called only on C library errors. Stub: log and return (don't actually throw).
     [SysAbiExport(
