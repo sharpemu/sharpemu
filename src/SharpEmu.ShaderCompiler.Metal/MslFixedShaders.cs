@@ -45,6 +45,13 @@ public static class MslFixedShaders
     /// <summary>Samples texture 0 at the interpolated location-0 UV.</summary>
     public static string CreateCopyFragment() => MslTemplates.Render("copy_fragment");
 
+    /// <summary>
+    /// The presenter's blit stage: samples texture 0 with V flipped, because
+    /// pairing the shared fullscreen triangle with Metal's y-up NDC puts UV
+    /// (0,0) at the bottom of the screen while textures keep v=0 at the top.
+    /// </summary>
+    public static string CreatePresentFragment() => MslTemplates.Render("present_fragment");
+
     public static string CreateSolidFragment(float red, float green, float blue, float alpha) =>
         MslTemplates.Render(
             "solid_fragment",

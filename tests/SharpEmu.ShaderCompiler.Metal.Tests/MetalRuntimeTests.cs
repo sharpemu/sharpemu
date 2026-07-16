@@ -128,6 +128,7 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         {
             ("fullscreen", MslFixedShaders.CreateFullscreenVertex(3)),
             ("copy", MslFixedShaders.CreateCopyFragment()),
+            ("present", MslFixedShaders.CreatePresentFragment()),
             ("solid", MslFixedShaders.CreateSolidFragment(0.25f, 0.5f, 0.75f, 1f)),
             ("attribute", MslFixedShaders.CreateAttributeFragment(1)),
             ("depth-only", MslFixedShaders.CreateDepthOnlyFragment()),

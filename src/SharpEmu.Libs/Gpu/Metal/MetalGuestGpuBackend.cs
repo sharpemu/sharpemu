@@ -151,15 +151,54 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         return false;
     }
 
-    // Presenter surface — implemented by the Metal presenter in follow-up
-    // phases. Failing loudly here beats silently swallowing guest frames while
-    // the backend is opt-in via SHARPEMU_GPU_BACKEND=metal.
+    public void EnsureStarted(uint width, uint height) =>
+        MetalVideoPresenter.EnsureStarted(width, height);
 
-    public void EnsureStarted(uint width, uint height) => throw PresenterNotReady();
+    public void HideSplashScreen() =>
+        MetalVideoPresenter.HideSplashScreen();
 
-    public void HideSplashScreen() => throw PresenterNotReady();
+    public void Submit(byte[] bgraFrame, uint width, uint height) =>
+        MetalVideoPresenter.Submit(bgraFrame, width, height);
 
-    public void Submit(byte[] bgraFrame, uint width, uint height) => throw PresenterNotReady();
+    // Guest-image submission arrives in a later phase; returning false routes
+    // callers onto their CPU-readback fallback, which the presenter can show.
+
+    public bool TrySubmitGuestImage(
+        ulong address,
+        uint width,
+        uint height,
+        uint pitchInPixel) => false;
+
+    public bool TrySubmitOrderedGuestImageFlip(
+        int videoOutHandle,
+        int displayBufferIndex,
+        ulong address,
+        uint width,
+        uint height,
+        uint pitchInPixel) => false;
+
+    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
+    {
+        // No GPU-side guest-image tracking yet; the CPU fallback needs no registry.
+    }
+
+    public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) => false;
+
+    public bool TrySubmitGuestImageBlit(
+        ulong sourceAddress,
+        uint sourceWidth,
+        uint sourceHeight,
+        uint sourceFormat,
+        uint sourceNumberType,
+        ulong destinationAddress,
+        uint destinationWidth,
+        uint destinationHeight,
+        uint destinationFormat,
+        uint destinationNumberType) => false;
+
+    // Draw and compute submission — implemented by later phases. Failing loudly
+    // beats silently swallowing guest work while the backend is opt-in via
+    // SHARPEMU_GPU_BACKEND=metal.
 
     public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) => throw PresenterNotReady();
 
@@ -238,36 +277,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint threadCountY = uint.MaxValue,
         uint threadCountZ = uint.MaxValue) => throw PresenterNotReady();
 
-    public bool TrySubmitGuestImage(
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel) => throw PresenterNotReady();
-
-    public bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel) => throw PresenterNotReady();
-
-    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) => throw PresenterNotReady();
-
-    public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) => throw PresenterNotReady();
-
-    public bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType) => throw PresenterNotReady();
-
     private static NotSupportedException PresenterNotReady() => new(
-        "the Metal presenter is not implemented yet; unset SHARPEMU_GPU_BACKEND to use the Vulkan backend");
+        "the Metal backend does not submit guest draws or compute yet; " +
+        "unset SHARPEMU_GPU_BACKEND to use the Vulkan backend");
 }
