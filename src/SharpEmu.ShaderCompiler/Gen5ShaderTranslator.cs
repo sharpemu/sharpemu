@@ -1872,8 +1872,9 @@ public static class Gen5ShaderTranslator
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
                 {
-                    // The scalar destination lives in the low vdst byte (bits 0-7);
-                    // bits 8-14 are the VOP3B carry-out sdst, which readlane lacks.
+                    // V_READLANE uses the VOP3A vdst byte even though the
+                    // destination register is scalar. Bits 8-14 are the
+                    // distinct sdst field used by VOP3B encodings.
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
