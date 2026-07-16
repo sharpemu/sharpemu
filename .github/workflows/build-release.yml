@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -42,6 +45,8 @@ jobs:
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     steps:
     - uses: actions/download-artifact@v4
       with:
@@ -49,7 +54,8 @@ jobs:
     - uses: actions/download-artifact@v4
       with:
         name: SharpEmu-linux-x64
-    - uses: softprops/action-gh-release@v2
+    - name: Upload to release
+      uses: softprops/action-gh-release@v2
       with:
         files: |
           SharpEmu-win-x64.zip
