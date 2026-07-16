@@ -104,6 +104,10 @@ const ulong ProgramAddress = 0x100000;
         0xBFA30000,             // s_waitcnt_depctr 0x0
         0xBF810000,             // s_endpgm
     ]),
+    ("ds-write-addtid", true, [
+        0xDAC01234, 0x00002A11, // ds_write_addtid_b32 v42 offset:0x1234
+        0xBF810000,             // s_endpgm
+    ]),
     // s_round_mode / s_denorm_mode write the FP MODE state and must keep
     // failing decode loudly until their semantics are modeled (see #108);
     // this program pins that behavior.
@@ -233,6 +237,30 @@ foreach (var (name, expectTranslate, words) in testPrograms)
     {
         failures++;
         Console.WriteLine($"[{name}] compute emit: FAILED ({computeError})");
+    }
+
+    if (name == "ds-write-addtid")
+    {
+        if (Gen5SpirvTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                64,
+                1,
+                1,
+                out var wave64Shader,
+                out var wave64Error,
+                waveLaneCount: 64))
+        {
+            var path = Path.Combine(outputDirectory, $"{name}-wave64-cs.spv");
+            File.WriteAllBytes(path, wave64Shader.Spirv);
+            Console.WriteLine(
+                $"[{name}] wave64 compute emit: success, {wave64Shader.Spirv.Length} bytes -> {path}");
+        }
+        else
+        {
+            failures++;
+            Console.WriteLine($"[{name}] wave64 compute emit: FAILED ({wave64Error})");
+        }
     }
 
     if (name.StartsWith("mrt", StringComparison.Ordinal))

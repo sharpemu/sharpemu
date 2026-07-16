@@ -682,6 +682,10 @@ public static partial class Gen5SpirvTranslator
             if (UsesSubgroupOperations())
             {
                 _module.AddCapability(SpirvCapability.GroupNonUniform);
+                // Declaring the subgroup lane input also makes initial EXEC/VCC
+                // state use OpGroupNonUniformBallot, regardless of which guest
+                // opcode first required subgroup support.
+                _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
                 if (UsesSubgroupShuffle())
                 {
                     _module.AddCapability(SpirvCapability.GroupNonUniformShuffle);
@@ -692,10 +696,6 @@ public static partial class Gen5SpirvTranslator
                     _module.AddCapability(SpirvCapability.GroupNonUniformVote);
                 }
 
-                if (UsesSubgroupBroadcast() || UsesWaveControl())
-                {
-                    _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
-                }
             }
 
             _glsl = _module.ImportExtInst("GLSL.std.450");
@@ -1813,6 +1813,25 @@ public static partial class Gen5SpirvTranslator
                     var address = GetRawSource(instruction, 0);
                     StoreLds(
                         LdsPointer(address, control.Offset0),
+                        GetRawSource(instruction, 1));
+                    return true;
+                }
+                case "DsWriteAddtidB32":
+                {
+                    if (instruction.Sources.Count < 2)
+                    {
+                        error = "missing LDS add-thread-id write source";
+                        return false;
+                    }
+
+                    // RDNA2 DS_WRITE_ADDTID_B32 has no address VGPR. Its byte
+                    // address is M0[15:0] + {offset1, offset0} + lane * 4.
+                    var m0 = BitwiseAnd(GetRawSource(instruction, 0), UInt(ushort.MaxValue));
+                    var laneOffset = ShiftLeftLogical(GuestWaveLane(), UInt(2));
+                    var address = IAdd(m0, laneOffset);
+                    var instructionOffset = (control.Offset1 << 8) | control.Offset0;
+                    StoreLds(
+                        LdsPointer(address, instructionOffset),
                         GetRawSource(instruction, 1));
                     return true;
                 }
@@ -5285,7 +5304,10 @@ public static partial class Gen5SpirvTranslator
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
              _state.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32"));
+                 instruction.Opcode is
+                     "VMbcntLoU32B32" or
+                     "VMbcntHiU32B32" or
+                     "DsWriteAddtidB32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
