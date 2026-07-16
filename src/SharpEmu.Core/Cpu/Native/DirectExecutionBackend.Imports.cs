@@ -1292,7 +1292,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		int returnValue;
-		if (IsNoBlockLeafImport(importStubEntry.Nid))
+		if (importStubEntry.IsNoBlockLeaf)
 		{
 			cpuContext.ClearRaxWriteFlag();
 			returnValue = export.Function(cpuContext);

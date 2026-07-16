@@ -48,6 +48,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// hashing are hoisted to stub-setup time.
 		public bool IsLeaf { get; }
 
+		public bool IsNoBlockLeaf { get; }
+
 		public bool SuppressStrlenTrace { get; }
 
 		public bool IsLoopGuardBoundary { get; }
@@ -59,6 +61,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			string nid,
 			ExportedFunction? export,
 			bool isLeaf,
+			bool isNoBlockLeaf,
 			bool suppressStrlenTrace,
 			bool isLoopGuardBoundary,
 			ulong nidHash)
@@ -67,6 +70,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Nid = nid;
 			Export = export;
 			IsLeaf = isLeaf;
+			IsNoBlockLeaf = isNoBlockLeaf;
 			SuppressStrlenTrace = suppressStrlenTrace;
 			IsLoopGuardBoundary = isLoopGuardBoundary;
 			NidHash = nidHash;
@@ -1164,6 +1168,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				text2,
 				resolvedExport,
 				IsLeafImport(text2),
+				IsNoBlockLeafImport(text2),
 				ShouldSuppressStrlenTrace(text2),
 				IsImportLoopGuardBoundary(text2),
 				StableHash64(text2));
