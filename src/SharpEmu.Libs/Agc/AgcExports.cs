@@ -3729,13 +3729,16 @@ public static partial class AgcExports
             _labelProducers.Add(producer);
         }
 
-        foreach (var waiting in GpuWaitRegistry.SnapshotInRange(memory, address, length))
+        if (_traceAgc)
         {
-            TraceAgc(
-                $"agc.wait_producer_scheduled label=0x{waiting.Address:X16} " +
-                $"waiters={waiting.Count} producer_seq={producer.Sequence} " +
-                $"queue={producer.QueueName} submission={producer.SubmissionId} " +
-                $"packet=0x{packetAddress:X16} action='{debugName}'");
+            foreach (var waiting in GpuWaitRegistry.SnapshotInRange(memory, address, length))
+            {
+                TraceAgc(
+                    $"agc.wait_producer_scheduled label=0x{waiting.Address:X16} " +
+                    $"waiters={waiting.Count} producer_seq={producer.Sequence} " +
+                    $"queue={producer.QueueName} submission={producer.SubmissionId} " +
+                    $"packet=0x{packetAddress:X16} action='{debugName}'");
+            }
         }
 
         return producer;
@@ -3753,16 +3756,19 @@ public static partial class AgcExports
             producer.Completed = true;
         }
 
-        foreach (var waiting in GpuWaitRegistry.SnapshotInRange(
-                     producer.Memory,
-                     producer.Address,
-                     producer.Length))
+        if (_traceAgc)
         {
-            TraceAgc(
-                $"agc.wait_producer_completed label=0x{waiting.Address:X16} " +
-                $"waiters={waiting.Count} producer_seq={producer.Sequence} " +
-                $"queue={producer.QueueName} submission={producer.SubmissionId} " +
-                $"action='{producer.DebugName}'");
+            foreach (var waiting in GpuWaitRegistry.SnapshotInRange(
+                         producer.Memory,
+                         producer.Address,
+                         producer.Length))
+            {
+                TraceAgc(
+                    $"agc.wait_producer_completed label=0x{waiting.Address:X16} " +
+                    $"waiters={waiting.Count} producer_seq={producer.Sequence} " +
+                    $"queue={producer.QueueName} submission={producer.SubmissionId} " +
+                    $"action='{producer.DebugName}'");
+            }
         }
     }
 
@@ -3805,6 +3811,14 @@ public static partial class AgcExports
             {
                 return;
             }
+        }
+
+        // Producer-backed waits are trace-only. Keep the producer lookup above
+        // because producerless waits are always warned, but do not build the
+        // detailed condition strings when AGC tracing is disabled.
+        if (producer is not null && !_traceAgc)
+        {
+            return;
         }
 
         var prefix = stale ? "agc.wait_stale" : "agc.wait_suspended";
@@ -6088,54 +6102,39 @@ public static partial class AgcExports
             _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
-        var imageBindings = pixelEvaluation.ImageBindings
-            .Concat(exportEvaluation.ImageBindings);
         var textures = new List<TranslatedImageBinding>(
             pixelEvaluation.ImageBindings.Count +
             exportEvaluation.ImageBindings.Count);
-        foreach (var binding in imageBindings)
+        if (!TryAppendTranslatedImageBindings(
+                pixelEvaluation.ImageBindings,
+                textures,
+                pixelShaderAddress,
+                exportShaderAddress,
+                out error) ||
+            !TryAppendTranslatedImageBindings(
+                exportEvaluation.ImageBindings,
+                textures,
+                pixelShaderAddress,
+                exportShaderAddress,
+                out error))
         {
-            if (!TryDecodeTextureDescriptor(binding.ResourceDescriptor, out var texture))
-            {
-                // A garbage/zeroed texture descriptor (from a per-draw descriptor
-                // setup race — the same root as scalar-load-failed) would drop
-                // the whole draw, so Demon's Souls' deferred-lighting/composite
-                // passes that produce the composite's feeder targets never run
-                // and the frame stays black. Substitute a 1x1 fallback binding so
-                // the pass still renders (that one sampled texture reads black)
-                // rather than dropping it entirely. STRICT reverts.
-                if (_strictShaderDescriptors)
-                {
-                    error = $"invalid texture descriptor at pc=0x{binding.Pc:X}";
-                    ReturnPooledEvaluationArrays(exportEvaluation);
-                    ReturnPooledEvaluationArrays(pixelEvaluation);
-                    return false;
-                }
-
-                texture = new TextureDescriptor(
-                    0, 1, 1, Gen5TextureFormatR8G8B8A8Unorm, 0, 0, 0, 0, 0, 1, 0xFAC);
-            }
-
-            if (_traceAgcShader || _tracePixelShaderAddress == pixelShaderAddress)
-            {
-                Console.Error.WriteLine(
-                    "[LOADER][TRACE] " +
-                    $"agc.texture_binding ps=0x{pixelShaderAddress:X16} es=0x{exportShaderAddress:X16} " +
-                    $"pc=0x{binding.Pc:X} op={binding.Opcode} storage={(Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode) ? 1 : 0)} " +
-                    $"decoded={FormatTextureDescriptor(texture)} " +
-                    $"raw={FormatShaderDwords(binding.ResourceDescriptor)} sampler={FormatShaderDwords(binding.SamplerDescriptor)}");
-            }
-            textures.Add(
-                new TranslatedImageBinding(
-                    texture,
-                    Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode),
-                    binding.MipLevel ?? 0,
-                    binding.SamplerDescriptor));
+            ReturnPooledEvaluationArrays(exportEvaluation);
+            ReturnPooledEvaluationArrays(pixelEvaluation);
+            return false;
         }
 
-        var globalMemoryBindings = pixelEvaluation.GlobalMemoryBindings
-            .Concat(exportEvaluation.GlobalMemoryBindings)
-            .ToArray();
+        var globalMemoryBindings = new Gen5GlobalMemoryBinding[
+            pixelEvaluation.GlobalMemoryBindings.Count +
+            exportEvaluation.GlobalMemoryBindings.Count];
+        for (var index = 0; index < pixelEvaluation.GlobalMemoryBindings.Count; index++)
+        {
+            globalMemoryBindings[index] = pixelEvaluation.GlobalMemoryBindings[index];
+        }
+        for (var index = 0; index < exportEvaluation.GlobalMemoryBindings.Count; index++)
+        {
+            globalMemoryBindings[pixelEvaluation.GlobalMemoryBindings.Count + index] =
+                exportEvaluation.GlobalMemoryBindings[index];
+        }
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
             exportEvaluation.VertexInputs ?? [];
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
@@ -6148,6 +6147,13 @@ public static partial class AgcExports
                 renderTargets[index].Height,
                 renderTargets[index].Format,
                 renderTargets[index].NumberType);
+        }
+
+        var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);
+        var pixelUserData = new uint[pixelUserDataCount];
+        for (var index = 0; index < pixelUserDataCount; index++)
+        {
+            pixelUserData[index] = pixelEvaluation.InitialScalarRegisters[index];
         }
 
         draw = new TranslatedGuestDraw(
@@ -6171,7 +6177,7 @@ public static partial class AgcExports
                 textures,
                 vertexInputs,
                 pixelEvaluation.InitialScalarRegisters),
-            pixelEvaluation.InitialScalarRegisters.Take(8).ToArray(),
+            pixelUserData,
             state.CxRegisters.TryGetValue(CbBlend0Control, out var rawBlend) ? rawBlend : 0,
             state.CxRegisters.TryGetValue(
                 CbColor0Info + renderTargets.FirstOrDefault().Slot * CbColorRegisterStride,
@@ -6180,6 +6186,55 @@ public static partial class AgcExports
                 : 0,
             pixelEvaluation.InitialScalarRegisters,
             exportEvaluation.InitialScalarRegisters);
+        return true;
+    }
+
+    private static bool TryAppendTranslatedImageBindings(
+        IReadOnlyList<Gen5ImageBinding> bindings,
+        List<TranslatedImageBinding> textures,
+        ulong pixelShaderAddress,
+        ulong exportShaderAddress,
+        out string error)
+    {
+        foreach (var binding in bindings)
+        {
+            if (!TryDecodeTextureDescriptor(binding.ResourceDescriptor, out var texture))
+            {
+                // A garbage/zeroed texture descriptor (from a per-draw descriptor
+                // setup race — the same root as scalar-load-failed) would drop
+                // the whole draw, so deferred-lighting/composite passes that
+                // produce the composite's feeder targets never run. Keep the
+                // existing 1x1 fallback unless strict diagnostics are requested.
+                if (_strictShaderDescriptors)
+                {
+                    error = $"invalid texture descriptor at pc=0x{binding.Pc:X}";
+                    return false;
+                }
+
+                texture = new TextureDescriptor(
+                    0, 1, 1, Gen5TextureFormatR8G8B8A8Unorm, 0, 0, 0, 0, 0, 1, 0xFAC);
+            }
+
+            var isStorage =
+                Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
+            if (_traceAgcShader || _tracePixelShaderAddress == pixelShaderAddress)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][TRACE] " +
+                    $"agc.texture_binding ps=0x{pixelShaderAddress:X16} es=0x{exportShaderAddress:X16} " +
+                    $"pc=0x{binding.Pc:X} op={binding.Opcode} storage={(isStorage ? 1 : 0)} " +
+                    $"decoded={FormatTextureDescriptor(texture)} " +
+                    $"raw={FormatShaderDwords(binding.ResourceDescriptor)} sampler={FormatShaderDwords(binding.SamplerDescriptor)}");
+            }
+            textures.Add(
+                new TranslatedImageBinding(
+                    texture,
+                    isStorage,
+                    binding.MipLevel ?? 0,
+                    binding.SamplerDescriptor));
+        }
+
+        error = string.Empty;
         return true;
     }
 
@@ -6621,16 +6676,21 @@ public static partial class AgcExports
 
         var target = targets[0];
         var scissor = DecodeScissor(registers, target.Width, target.Height);
-        return new GuestRenderState(
-            targets.Select(target =>
+        var blends = new GuestBlendState[targets.Count];
+        for (var index = 0; index < targets.Count; index++)
+        {
+            var blend = DecodeBlendState(registers, targets[index].Slot);
+            blends[index] = blend with
             {
-                var blend = DecodeBlendState(registers, target.Slot);
-                return blend with
-                {
-                    WriteMask = blend.WriteMask &
-                        GetPixelColorExportMask(pixelColorExportMasks, target.Slot),
-                };
-            }).ToArray(),
+                WriteMask = blend.WriteMask &
+                    GetPixelColorExportMask(
+                        pixelColorExportMasks,
+                        targets[index].Slot),
+            };
+        }
+
+        return new GuestRenderState(
+            blends,
             scissor,
             DecodeViewport(registers, target.Width, target.Height, scissor),
             DecodeRasterState(registers),
