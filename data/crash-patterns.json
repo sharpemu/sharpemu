@@ -1,0 +1,120 @@
+{
+  "_description": "SharpEmu Crash Pattern Database — automatic crash classification rules",
+  "_version": 1,
+  "patterns": [
+    {
+      "id": "NULL_POINTER_DEREF",
+      "condition": {
+        "fault_address_lt": "0x10000",
+        "or": [
+          {"register_is_zero": "RDI"},
+          {"register_is_zero": "RSI"},
+          {"register_is_zero": "RAX"},
+          {"register_is_zero": "RBX"},
+          {"register_is_zero": "RCX"},
+          {"register_is_zero": "RDX"},
+          {"register_is_zero": "R12"},
+          {"register_is_zero": "R13"},
+          {"register_is_zero": "R14"},
+          {"register_is_zero": "R15"}
+        ]
+      },
+      "type": "NULL_POINTER",
+      "confidence": 0.95,
+      "description": "A NULL pointer was dereferenced. A game object or HLE return value was not initialized.",
+      "suggested_actions": [
+        "Check which HLE call should have set the NULL register",
+        "Look at the first failure in Return Analyzer",
+        "Check if any missing NIDs were called before the crash"
+      ]
+    },
+    {
+      "id": "GPU_ADDRESS_ACCESS",
+      "condition": {
+        "fault_address_range": ["0x1FE000000", "0x200000000"]
+      },
+      "type": "GPU_ADDRESS_ACCESS",
+      "confidence": 0.90,
+      "description": "Game accessed a hardcoded GPU memory address that is not mapped.",
+      "suggested_actions": [
+        "Ensure GPU placeholder memory is mapped at 0x1FE000000",
+        "Check if sceKernelMapDirectMemory was called for this range"
+      ]
+    },
+    {
+      "id": "HOST_POINTER_LEAK",
+      "condition": {
+        "fault_address_range": ["0x7F0000000000", "0x800000000000"]
+      },
+      "type": "HOST_POINTER_LEAK",
+      "confidence": 0.85,
+      "description": "A host memory address was leaked into guest code. This happens when Marshal.AllocHGlobal addresses are returned to the game.",
+      "suggested_actions": [
+        "Check PointerOriginTracker for HOST_RANGE pointers",
+        "Ensure HLE functions use guest memory allocator instead of Marshal.AllocHGlobal",
+        "Use TryReadCompat/TryWriteCompat for host-pointer fallback"
+      ]
+    },
+    {
+      "id": "GAME_STARTUP_CODE",
+      "condition": {
+        "rip_range": ["0x800000070", "0x800010000"]
+      },
+      "type": "STARTUP_CODE",
+      "confidence": 0.70,
+      "description": "Crash in early game startup code (near _start entry point).",
+      "suggested_actions": [
+        "Check DT_INIT and init_array execution",
+        "Verify TLS layout is correct",
+        "Check if all critical HLE exports (libc, pthread) are implemented"
+      ]
+    },
+    {
+      "id": "CXX_RUNTIME_FAILURE",
+      "condition": {
+        "or": [
+          {"missing_nid_contains": "call_once"},
+          {"missing_nid_contains": "Execute_once"},
+          {"missing_nid_contains": "__cxa"},
+          {"missing_nid_contains": "dynamic_cast"},
+          {"missing_nid_contains": "_Pad"},
+          {"missing_nid_contains": "_Atomic"}
+        ]
+      },
+      "type": "CXX_RUNTIME",
+      "confidence": 0.85,
+      "description": "C++ runtime function is missing. The game's C++ standard library needs this function.",
+      "suggested_actions": [
+        "Implement the missing C++ runtime function",
+        "Check if it can delegate to an existing pthread/libc implementation"
+      ]
+    },
+    {
+      "id": "AGC_ORDERING_VIOLATION",
+      "condition": {
+        "api_state_violation_contains": "Agc"
+      },
+      "type": "API_ORDERING",
+      "confidence": 0.90,
+      "description": "AGC API was called in wrong order (e.g., RegisterOwner before InitResourceRegistration).",
+      "suggested_actions": [
+        "Auto-initialize AGC state with defaults",
+        "Or implement the missing initialization call"
+      ]
+    },
+    {
+      "id": "MISSING_NID_CRASH",
+      "condition": {
+        "unresolved_nids_before_crash_gt": 0
+      },
+      "type": "MISSING_HLE",
+      "confidence": 0.80,
+      "description": "One or more NIDs were unresolved before the crash. The game may have proceeded with NULL return values.",
+      "suggested_actions": [
+        "Look up the missing NID in aerolib.bin",
+        "Implement a stub that returns a reasonable default",
+        "Check if the missing function is from libc, libKernel, or libSceAgc"
+      ]
+    }
+  ]
+}

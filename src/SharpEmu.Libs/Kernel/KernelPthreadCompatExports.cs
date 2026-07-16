@@ -1928,7 +1928,101 @@ public static class KernelPthreadCompatExports
     {
         var code = unchecked((int)ctx[CpuRegister.Rdi]);
         Console.Error.WriteLine($"[HLE][WARN] __throw_C_error({code}) called — stubbed (no exception thrown)");
-        // Return 0; the caller will typically check errno and continue.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // std::call_once — _ZSt13_Execute_onceRSt9once_flagPFiPv
+    // NID: DiGVep5yB5w
+    // This is the C++ std::call_once implementation. It delegates to pthread_once
+    // which is already implemented. The once_flag structure is compatible with
+    // pthread_once_t on PS5 (both are 4-byte integers).
+    [SysAbiExport(
+        Nid = "DiGVep5yB5w",
+        ExportName = "_ZSt13_Execute_onceRSt9once_flagPFiPv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int StdExecuteOnce(CpuContext ctx)
+    {
+        // args: rdi=once_flag*, rsi=init_func, rdx=arg
+        var onceFlagAddress = ctx[CpuRegister.Rdi];
+        var initFunc = ctx[CpuRegister.Rsi];
+        var arg = ctx[CpuRegister.Rdx];
+
+        if (onceFlagAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Read current once_flag value
+        if (!ctx.TryReadInt32(onceFlagAddress, out var onceValue))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // PthreadOnceDone = 2 (already executed)
+        if (onceValue == PthreadOnceDone)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        // Mark as in progress
+        if (!ctx.TryWriteInt32(onceFlagAddress, PthreadOnceInProgress))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // Call the init function with the argument
+        if (initFunc != 0)
+        {
+            try
+            {
+                var scheduler = GuestThreadExecution.Scheduler;
+                string? error = null;
+                if (scheduler != null &&
+                    scheduler.TryCallGuestFunction(ctx, initFunc, arg, 0, 0, 0, "std::call_once", out error))
+                {
+                    // Success — mark as done
+                    ctx.TryWriteInt32(onceFlagAddress, PthreadOnceDone);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+                }
+                else
+                {
+                    // Failed — reset to uninitialized
+                    ctx.TryWriteInt32(onceFlagAddress, PthreadOnceUninitialized);
+                    Console.Error.WriteLine($"[HLE][WARN] std::call_once init function failed: {error}");
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+                }
+            }
+            catch (Exception ex)
+            {
+                ctx.TryWriteInt32(onceFlagAddress, PthreadOnceUninitialized);
+                Console.Error.WriteLine($"[HLE][ERROR] std::call_once exception: {ex.Message}");
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+            }
+        }
+
+        // No init function — just mark as done
+        ctx.TryWriteInt32(onceFlagAddress, PthreadOnceDone);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // __cxa_decrement_exception_refcount — C++ exception handling
+    // NID: MQFPAqQPt1s
+    // Decrements the reference count of an exception object. When it reaches
+    // zero, the exception is freed. For now, we stub this as a no-op since
+    // we don't fully implement C++ exception handling.
+    [SysAbiExport(
+        Nid = "MQFPAqQPt1s",
+        ExportName = "__cxa_decrement_exception_refcount",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int CxaDecrementExceptionRefcount(CpuContext ctx)
+    {
+        // rdi = exception header pointer
+        var exceptionPtr = ctx[CpuRegister.Rdi];
+        // Stub: do nothing. In a full implementation, we would decrement
+        // the refcount and potentially free the exception object.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
