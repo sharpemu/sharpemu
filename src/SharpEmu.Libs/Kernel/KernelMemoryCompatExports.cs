@@ -1995,7 +1995,9 @@ public static partial class KernelMemoryCompatExports
             }
             else
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                // Unknown fd (PFS handles, etc.): treat as no-op close
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
         }
 
@@ -6452,9 +6454,12 @@ public static partial class KernelMemoryCompatExports
             }
 
             LogIoTrace("fstat", hostPath!, $"fd={fd} size={size} dir={(isDirectory ? 1 : 0)}");
+            return TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
         }
 
-        return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
+        // Unknown fd (PFS handles, etc.): return a default regular-file stat
+        var fallbackNow = DateTime.UtcNow;
+        return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0, fallbackNow, fallbackNow, fallbackNow, $"fallback:{fd}");
     }
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
