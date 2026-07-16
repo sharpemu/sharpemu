@@ -8514,7 +8514,32 @@ internal static unsafe class VulkanVideoPresenter
                 (17, 0) => Format.R5G5B5A1UnormPack16,
                 (19, 0) => Format.R4G4B4A4UnormPack16,
                 (34, 7) => Format.E5B9G9R9UfloatPack32,
-                _ => ToVkFloatVertexFormat(componentCount),
+                _ => Gen5VertexInputFormat.ResolveKind(numberFormat) switch
+                {
+                    Gen5VertexInputKind.Uint => ToVkUnsignedVertexFormat(componentCount),
+                    Gen5VertexInputKind.Sint => ToVkSignedVertexFormat(componentCount),
+                    _ => ToVkFloatVertexFormat(componentCount),
+                },
+            };
+
+        private static Format ToVkUnsignedVertexFormat(uint componentCount) =>
+            componentCount switch
+            {
+                1 => Format.R32Uint,
+                2 => Format.R32G32Uint,
+                3 => Format.R32G32B32Uint,
+                4 => Format.R32G32B32A32Uint,
+                _ => Format.R32Uint,
+            };
+
+        private static Format ToVkSignedVertexFormat(uint componentCount) =>
+            componentCount switch
+            {
+                1 => Format.R32Sint,
+                2 => Format.R32G32Sint,
+                3 => Format.R32G32B32Sint,
+                4 => Format.R32G32B32A32Sint,
+                _ => Format.R32Sint,
             };
 
         private static Format ToVkFloatVertexFormat(uint componentCount) =>

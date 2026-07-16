@@ -49,6 +49,24 @@ public enum Gen5PixelOutputKind
     Sint,
 }
 
+public enum Gen5VertexInputKind
+{
+    Float,
+    Uint,
+    Sint,
+}
+
+public static class Gen5VertexInputFormat
+{
+    public static Gen5VertexInputKind ResolveKind(uint numberFormat) =>
+        numberFormat switch
+        {
+            4 => Gen5VertexInputKind.Uint,
+            5 => Gen5VertexInputKind.Sint,
+            _ => Gen5VertexInputKind.Float,
+        };
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,

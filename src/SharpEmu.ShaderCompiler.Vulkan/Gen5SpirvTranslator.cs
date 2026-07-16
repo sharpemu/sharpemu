@@ -305,7 +305,8 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvVertexInput(
             uint Variable,
             uint Type,
-            uint ComponentCount);
+            uint ComponentCount,
+            Gen5VertexInputKind Kind);
 
         private readonly record struct SpirvPixelOutput(
             uint Variable,
@@ -1266,12 +1267,18 @@ public static partial class Gen5SpirvTranslator
         {
             foreach (var input in _evaluation.VertexInputs ?? [])
             {
+                var kind = Gen5VertexInputFormat.ResolveKind(input.NumberFormat);
+                var componentType = kind switch
+                {
+                    Gen5VertexInputKind.Uint => _uintType,
+                    Gen5VertexInputKind.Sint => _intType,
+                    _ => _floatType,
+                };
                 var type = input.ComponentCount switch
                 {
-                    1u => _floatType,
-                    2u => _vec2Type,
-                    3u => _vec3Type,
-                    4u => _vec4Type,
+                    1u => componentType,
+                    >= 2u and <= 4u =>
+                        _module.TypeVector(componentType, input.ComponentCount),
                     _ => 0u,
                 };
                 if (type == 0)
@@ -1293,7 +1300,8 @@ public static partial class Gen5SpirvTranslator
                     new SpirvVertexInput(
                         variable,
                         type,
-                        input.ComponentCount));
+                        input.ComponentCount,
+                        kind));
                 _interfaces.Add(variable);
             }
         }
@@ -3167,16 +3175,25 @@ public static partial class Gen5SpirvTranslator
             }
 
             var loaded = Load(input.Type, input.Variable);
+            var componentType = input.Kind switch
+            {
+                Gen5VertexInputKind.Uint => _uintType,
+                Gen5VertexInputKind.Sint => _intType,
+                _ => _floatType,
+            };
             for (uint component = 0; component < control.DwordCount; component++)
             {
                 var value = input.ComponentCount == 1
                     ? loaded
                     : _module.AddInstruction(
                         SpirvOp.CompositeExtract,
-                        _floatType,
+                        componentType,
                         loaded,
                         component);
-                StoreV(control.VectorData + component, Bitcast(_uintType, value));
+                var raw = input.Kind == Gen5VertexInputKind.Uint
+                    ? value
+                    : Bitcast(_uintType, value);
+                StoreV(control.VectorData + component, raw);
             }
 
             return true;
