@@ -14,10 +14,11 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static class GuestTlsTemplate
 {
-    // Must match CpuDispatcher/DirectExecutionBackend's mapped prefix. PS5
-    // modules can require more than one host page of Variant II static TLS;
-    // Dreaming Sarah's startup image, for example, reaches 0x1870 bytes.
-    public const ulong StartupStaticTlsReservation = 0x10000UL;
+    // Keep a useful baseline for ordinary titles, but grow the actual mapped
+    // prefix from the registered startup layout. Large executables such as
+    // GTA V require more than 64 KiB of Variant II static TLS.
+    public const ulong MinimumStartupStaticTlsReservation = 0x10000UL;
+    private const ulong GuestPageSize = 0x1000UL;
     private static readonly object _gate = new();
     private static readonly SortedDictionary<ulong, ModuleTemplate> _modules = new();
     private static readonly Dictionary<ulong, ThreadDtv> _threadDtvs = new();
@@ -102,6 +103,23 @@ public static class GuestTlsTemplate
         get { lock (_gate) { return _staticTlsSize; } }
     }
 
+    /// <summary>
+    /// Page-aligned prefix that new thread mappings must reserve below the
+    /// thread pointer for all modules registered before execution starts.
+    /// </summary>
+    public static ulong StartupStaticTlsReservation
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return Math.Max(
+                    MinimumStartupStaticTlsReservation,
+                    AlignUp(_staticTlsSize, GuestPageSize));
+            }
+        }
+    }
+
     /// <summary>Largest PT_TLS alignment required by the registered modules.</summary>
     public static ulong MaximumAlignment
     {
@@ -171,11 +189,10 @@ public static class GuestTlsTemplate
                 memorySize,
                 normalizedAlignment,
                 alignmentBias);
-            if (staticOffset > StartupStaticTlsReservation)
+            if (staticOffset > int.MaxValue)
             {
-                throw new InvalidOperationException(
-                    $"Static TLS requires 0x{staticOffset:X} bytes, but startup maps only " +
-                    $"0x{StartupStaticTlsReservation:X} bytes below the thread pointer.");
+                throw new InvalidDataException(
+                    $"Aggregate static TLS span 0x{staticOffset:X} exceeds the supported process limit.");
             }
             _modules.Add(moduleId, new ModuleTemplate
             {
