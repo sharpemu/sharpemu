@@ -16,7 +16,7 @@ namespace SharpEmu.Libs.Gpu.Metal;
 /// This phase presents CPU-produced BGRA frames and the splash; guest draws, guest
 /// images, and compute arrive in later phases.
 /// </summary>
-internal static class MetalVideoPresenter
+internal static partial class MetalVideoPresenter
 {
     private const uint DefaultWindowWidth = 1280;
     private const uint DefaultWindowHeight = 720;
@@ -36,7 +36,11 @@ internal static class MetalVideoPresenter
         uint Width,
         uint Height,
         long Sequence,
-        bool IsSplash);
+        bool IsSplash,
+        ulong GuestImageAddress = 0,
+        long GuestImageVersion = 0,
+        uint GuestImagePitch = 0,
+        long RequiredGuestWorkSequence = 0);
 
     private static readonly object _gate = new();
     private static Thread? _thread;
@@ -171,6 +175,9 @@ internal static class MetalVideoPresenter
             {
                 _closed = true;
                 _thread = null;
+                // Wake guest-work waiters and backpressured producers so close
+                // never strands a blocked guest thread.
+                Monitor.PulseAll(_gate);
             }
         }
     }
@@ -244,6 +251,10 @@ internal static class MetalVideoPresenter
 
         nint frameTexture = 0;
         uint frameTextureWidth = 0, frameTextureHeight = 0;
+        nint presentTexture = 0;
+        uint presentTextureWidth = 0, presentTextureHeight = 0;
+        nint ownedVersionTexture = 0;
+        ulong presentGuestAddress = 0;
         long presentedSequence = -1;
         var userClosed = false;
 
@@ -282,21 +293,69 @@ internal static class MetalVideoPresenter
                     break;
                 }
 
-                Presentation? presentation;
-                lock (_gate)
+                DrainGuestWork(device, queue);
+
+                if (TryTakePresentation(presentedSequence, out var presentation))
                 {
-                    presentation = _latestPresentation;
+                    presentedSequence = presentation.Sequence;
+                    if (presentation.Pixels is not null)
+                    {
+                        UploadFrame(
+                            device,
+                            presentation,
+                            ref frameTexture,
+                            ref frameTextureWidth,
+                            ref frameTextureHeight);
+                        SwitchPresentSource(
+                            frameTexture,
+                            frameTextureWidth,
+                            frameTextureHeight,
+                            ownsTexture: false,
+                            ref presentTexture,
+                            ref presentTextureWidth,
+                            ref presentTextureHeight,
+                            ref ownedVersionTexture);
+                        presentGuestAddress = 0;
+                    }
+                    else if (TryResolveGuestPresentation(
+                                 device,
+                                 presentation,
+                                 out var guestTexture,
+                                 out var guestWidth,
+                                 out var guestHeight,
+                                 out var ownsGuestTexture))
+                    {
+                        // Captured versions are immutable and owned here; mutable
+                        // address-keyed images are re-resolved at encode time so a
+                        // write swapping the texture never leaves a stale handle.
+                        SwitchPresentSource(
+                            ownsGuestTexture ? guestTexture : 0,
+                            guestWidth,
+                            guestHeight,
+                            ownsGuestTexture,
+                            ref presentTexture,
+                            ref presentTextureWidth,
+                            ref presentTextureHeight,
+                            ref ownedVersionTexture);
+                        presentGuestAddress = ownsGuestTexture ? 0 : presentation.GuestImageAddress;
+                    }
                 }
 
-                if (presentation is { Pixels: not null } && presentation.Sequence != presentedSequence)
+                if (presentGuestAddress != 0)
                 {
-                    UploadFrame(
-                        device,
-                        presentation,
-                        ref frameTexture,
-                        ref frameTextureWidth,
-                        ref frameTextureHeight);
-                    presentedSequence = presentation.Sequence;
+                    // Re-resolve every frame: a guest-image write swaps the
+                    // texture behind the address.
+                    presentTexture = 0;
+                    lock (_gate)
+                    {
+                        if (_guestImages.TryGetValue(presentGuestAddress, out var borrowed) &&
+                            borrowed.Initialized)
+                        {
+                            presentTexture = borrowed.Texture;
+                            presentTextureWidth = borrowed.Width;
+                            presentTextureHeight = borrowed.Height;
+                        }
+                    }
                 }
 
                 // nextDrawable blocks until the layer has a free drawable, which paces
@@ -310,17 +369,19 @@ internal static class MetalVideoPresenter
 
                 var drawableTexture = MetalNative.Send(drawable, selTexture);
                 var commandBuffer = MetalNative.Send(queue, selCommandBuffer);
-                var pass = CreateClearPass(drawableTexture);
+                var pass = CreateClearPass(
+                    drawableTexture,
+                    new MtlClearColor { Red = 0, Green = 0, Blue = 0, Alpha = 1 });
                 var encoder = MetalNative.Send(commandBuffer, selRenderEncoder, pass);
-                if (frameTexture != 0)
+                if (presentTexture != 0)
                 {
                     EncodePresent(
                         encoder,
                         pipeline,
                         sampler,
-                        frameTexture,
-                        frameTextureWidth,
-                        frameTextureHeight,
+                        presentTexture,
+                        presentTextureWidth,
+                        presentTextureHeight,
                         drawableWidth,
                         drawableHeight);
                 }
@@ -540,7 +601,7 @@ internal static class MetalVideoPresenter
         }
     }
 
-    private static nint CreateClearPass(nint drawableTexture)
+    private static nint CreateClearPass(nint targetTexture, MtlClearColor clearColor)
     {
         var pass = MetalNative.Send(
             MetalNative.Class("MTLRenderPassDescriptor"),
@@ -549,13 +610,13 @@ internal static class MetalVideoPresenter
             MetalNative.Send(pass, MetalNative.Selector("colorAttachments")),
             MetalNative.Selector("objectAtIndexedSubscript:"),
             0);
-        MetalNative.SendVoid(colorAttachment, MetalNative.Selector("setTexture:"), drawableTexture);
+        MetalNative.SendVoid(colorAttachment, MetalNative.Selector("setTexture:"), targetTexture);
         MetalNative.Send(colorAttachment, MetalNative.Selector("setLoadAction:"), (nint)LoadActionClear);
         MetalNative.Send(colorAttachment, MetalNative.Selector("setStoreAction:"), (nint)StoreActionStore);
         MetalNative.SendVoidClearColor(
             colorAttachment,
             MetalNative.Selector("setClearColor:"),
-            new MtlClearColor { Red = 0, Green = 0, Blue = 0, Alpha = 1 });
+            clearColor);
         return pass;
     }
 

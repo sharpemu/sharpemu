@@ -149,6 +149,9 @@ internal static partial class MetalNative
     public static partial void SendSetAtIndex(nint receiver, nint selector, nint value, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidCopyTexture(nint receiver, nint selector, nint source, nint destination);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendInitWindow(
         nint receiver,
         nint selector,

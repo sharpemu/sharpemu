@@ -160,14 +160,12 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public void Submit(byte[] bgraFrame, uint width, uint height) =>
         MetalVideoPresenter.Submit(bgraFrame, width, height);
 
-    // Guest-image submission arrives in a later phase; returning false routes
-    // callers onto their CPU-readback fallback, which the presenter can show.
-
     public bool TrySubmitGuestImage(
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) => false;
+        uint pitchInPixel) =>
+        MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
 
     public bool TrySubmitOrderedGuestImageFlip(
         int videoOutHandle,
@@ -175,14 +173,20 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) => false;
+        uint pitchInPixel) =>
+        MetalVideoPresenter.TrySubmitOrderedGuestImageFlip(
+            videoOutHandle,
+            displayBufferIndex,
+            address,
+            width,
+            height,
+            pitchInPixel);
 
-    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
-    {
-        // No GPU-side guest-image tracking yet; the CPU fallback needs no registry.
-    }
+    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
+        MetalVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
 
-    public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) => false;
+    public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
+        MetalVideoPresenter.IsGuestImageAvailable(address, format, numberType);
 
     public bool TrySubmitGuestImageBlit(
         ulong sourceAddress,
@@ -194,7 +198,18 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint destinationWidth,
         uint destinationHeight,
         uint destinationFormat,
-        uint destinationNumberType) => false;
+        uint destinationNumberType) =>
+        MetalVideoPresenter.TrySubmitGuestImageBlit(
+            sourceAddress,
+            sourceWidth,
+            sourceHeight,
+            sourceFormat,
+            sourceNumberType,
+            destinationAddress,
+            destinationWidth,
+            destinationHeight,
+            destinationFormat,
+            destinationNumberType);
 
     // Draw and compute submission — implemented by later phases. Failing loudly
     // beats silently swallowing guest work while the backend is opt-in via
@@ -277,65 +292,49 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         uint threadCountY = uint.MaxValue,
         uint threadCountZ = uint.MaxValue) => throw PresenterNotReady();
 
-    // Guest work ordering and guest-image lifecycle — real implementations arrive
-    // with the Metal guest-image phase. Until then these answer exactly like a
-    // Vulkan presenter that never started: no work is enqueued (sequence 0 sends
-    // callers down their inline/CPU fallback) and no guest image is ever known.
-
-    private sealed class NoOpGuestQueueScope : IDisposable
-    {
-        public static NoOpGuestQueueScope Instance { get; } = new();
-
-        public void Dispose()
-        {
-        }
-    }
-
     private long _perfShaderCompilations;
 
     public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
-        NoOpGuestQueueScope.Instance;
+        MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
 
-    public long SubmitOrderedGuestAction(Action action, string debugName) => 0;
+    public long SubmitOrderedGuestAction(Action action, string debugName) =>
+        MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
-    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) => 0;
+    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
+        MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
 
-    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) => false;
+    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) =>
+        MetalVideoPresenter.WaitForGuestWork(workSequence, timeoutMilliseconds);
 
-    public long CurrentGuestWorkSequenceForDiagnostics => 0;
+    public long CurrentGuestWorkSequenceForDiagnostics =>
+        MetalVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
 
-    public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) => false;
+    public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
+        MetalVideoPresenter.IsGuestImageUploadKnown(address, format, numberType);
 
-    public bool GuestImageWantsInitialData(ulong address) => false;
+    public bool GuestImageWantsInitialData(ulong address) =>
+        MetalVideoPresenter.GuestImageWantsInitialData(address);
 
-    public void ProvideGuestImageInitialData(ulong address, byte[] rgbaPixels)
-    {
-    }
+    public void ProvideGuestImageInitialData(ulong address, byte[] rgbaPixels) =>
+        MetalVideoPresenter.ProvideGuestImageInitialData(address, rgbaPixels);
 
-    public void SubmitGuestImageFill(ulong address, uint fillValue)
-    {
-    }
+    public void SubmitGuestImageFill(ulong address, uint fillValue) =>
+        MetalVideoPresenter.SubmitGuestImageFill(address, fillValue);
 
-    public void SubmitGuestImageWrite(ulong address, byte[] pixels)
-    {
-    }
+    public void SubmitGuestImageWrite(ulong address, byte[] pixels) =>
+        MetalVideoPresenter.SubmitGuestImageWrite(address, pixels);
 
-    public bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount)
-    {
-        width = 0;
-        height = 0;
-        byteCount = 0;
-        return false;
-    }
+    public bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount) =>
+        MetalVideoPresenter.TryGetGuestImageExtent(address, out width, out height, out byteCount);
 
-    public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() => [];
+    public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
+        MetalVideoPresenter.GetGuestImageExtents();
 
+    // No backend texture cache until the translated-draw phase.
     public bool IsTextureContentCached(in TextureContentIdentity identity) => false;
 
-    public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory)
-    {
-        // No backend-side texel re-reads yet; the guest-image phase stores this.
-    }
+    public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
+        MetalVideoPresenter.AttachGuestMemory(memory);
 
     // Over-alignment is always valid, and 256 covers every Metal buffer-offset
     // requirement (Intel Macs need 256 for constant buffers; Apple GPUs less).
