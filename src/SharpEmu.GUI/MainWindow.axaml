@@ -333,6 +333,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 Classes="sectionTitle"
                                 Text="ABOUT" />
 
+                      <!--Latest commit info-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                          <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
+                          <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                        </StackPanel>
+
+                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
+                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
+                          VerticalAlignment="Center" IsEnabled="False" />
+
+                      </Grid>
+
+                      <!--Update-->
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                           <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
@@ -371,19 +385,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 Classes="ghost"
                                 Content="Open"
                                 VerticalAlignment="Center" />
-                      </Grid>
-
-                      <!--Latest commit info-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                          <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
-                          <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                        </StackPanel>
-
-                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
-                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
-                          VerticalAlignment="Center" IsEnabled="False" />
-
                       </Grid>
 
                       <!--Discord-->
