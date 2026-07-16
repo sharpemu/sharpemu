@@ -124,6 +124,45 @@ internal static class Gen5ComputeFixtures
         0xBF810000,             // s_endpgm
     ];
 
+    // Minimal vertex program: constant position export plus one param output.
+    public static readonly uint[] VertexWords =
+    [
+        0x7E000280,             // v_mov_b32 v0, 0
+        0x7E0202F2,             // v_mov_b32 v1, 1.0
+        0xF80008CF, 0x01000000, // exp pos0 v0, v0, v0, v1 done
+        0xF800020F, 0x01000101, // exp param0 v1, v1, v0, v1
+        0xBF810000,             // s_endpgm
+    ];
+
+    public static Gen5MslShader CompileVertexOrThrow(int requiredVertexOutputCount = 0)
+    {
+        var memory = new FakeGuestMemory();
+        memory.AddRegion(ProgramAddress, VertexWords);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
+        {
+            throw new InvalidOperationException($"[vertex] decode failed: {decodeError}");
+        }
+
+        var state = new Gen5ShaderState(program!, new uint[16], Metadata: null);
+        var evaluation = new Gen5ShaderEvaluation(
+            new uint[128],
+            new uint[128],
+            Array.Empty<Gen5ImageBinding>(),
+            Array.Empty<Gen5GlobalMemoryBinding>());
+        if (!Gen5MslTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var shader,
+                out var compileError,
+                requiredVertexOutputCount: requiredVertexOutputCount))
+        {
+            throw new InvalidOperationException($"[vertex] MSL emit failed: {compileError}");
+        }
+
+        return shader;
+    }
+
     public static Gen5MslShader CompilePixelOrThrow(
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
     {

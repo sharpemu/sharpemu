@@ -31,6 +31,13 @@ public sealed class MslGoldenTests
         AssertMatchesGolden("pixel", shader.Source);
     }
 
+    [Fact]
+    public void VertexShaderMatchesGolden()
+    {
+        var shader = Gen5ComputeFixtures.CompileVertexOrThrow(requiredVertexOutputCount: 1);
+        AssertMatchesGolden("vertex", shader.Source);
+    }
+
     [Theory]
     [MemberData(nameof(FixtureNames))]
     public void EmittedMslMatchesGolden(string name)

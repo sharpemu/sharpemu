@@ -149,6 +149,35 @@ public static partial class Gen5MslTranslator
         return context.TryCompile(out shader, out error);
     }
 
+    public static bool TryCompileVertexShader(
+        Gen5ShaderState state,
+        Gen5ShaderEvaluation evaluation,
+        out Gen5MslShader shader,
+        out string error,
+        int globalBufferBase = 0,
+        int totalGlobalBufferCount = -1,
+        int imageBindingBase = 0,
+        int initialScalarBufferIndex = -1,
+        int requiredVertexOutputCount = 0,
+        ulong storageBufferOffsetAlignment = 1)
+    {
+        var context = new CompilationContext(
+            Gen5MslStage.Vertex,
+            state,
+            evaluation,
+            1,
+            1,
+            1,
+            globalBufferBase,
+            totalGlobalBufferCount,
+            initialScalarBufferIndex,
+            waveLaneCount: 32,
+            storageBufferOffsetAlignment,
+            imageBindingBase: imageBindingBase,
+            requiredVertexOutputCount: requiredVertexOutputCount);
+        return context.TryCompile(out shader, out error);
+    }
+
     public static bool TryCompileComputeShader(
         Gen5ShaderState state,
         Gen5ShaderEvaluation evaluation,
@@ -212,6 +241,9 @@ public static partial class Gen5MslTranslator
         private readonly Dictionary<uint, int> _imageBindingByPc = [];
         private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
         private readonly SortedSet<uint> _pixelAttributes = [];
+        private readonly SortedSet<uint> _vertexOutputs = [];
+        private readonly Dictionary<uint, Gen5VertexInputBinding> _vertexInputsByPc = [];
+        private readonly int _requiredVertexOutputCount;
         private readonly StringBuilder _body = new();
         private int _indent;
         private int _nextTemp;
@@ -233,12 +265,14 @@ public static partial class Gen5MslTranslator
             IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputBindings = null,
             int imageBindingBase = 0,
             uint pixelInputEnable = 0,
-            uint pixelInputAddress = 0)
+            uint pixelInputAddress = 0,
+            int requiredVertexOutputCount = 0)
         {
             _pixelOutputBindings = pixelOutputBindings ?? [];
             _imageBindingBase = imageBindingBase;
             _pixelInputEnable = pixelInputEnable;
             _pixelInputAddress = pixelInputAddress;
+            _requiredVertexOutputCount = requiredVertexOutputCount;
             _stage = stage;
             _state = state;
             _evaluation = evaluation;
@@ -297,6 +331,32 @@ public static partial class Gen5MslTranslator
                     {
                         _pixelAttributes.Add(interpolationControl.Attribute);
                     }
+
+                    if (_stage == Gen5MslStage.Vertex &&
+                        instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 } vertexExport)
+                    {
+                        _vertexOutputs.Add(vertexExport.Target - 32);
+                    }
+                }
+
+                if (_stage == Gen5MslStage.Vertex)
+                {
+                    // Cover every location the paired fragment shader reads,
+                    // even ones this vertex program never exports, so Metal's
+                    // exact vertex-out/fragment-in interface match succeeds.
+                    // Extras stay zero-filled.
+                    for (uint location = 0; location < _requiredVertexOutputCount; location++)
+                    {
+                        _vertexOutputs.Add(location);
+                    }
+
+                    foreach (var input in _evaluation.VertexInputs ?? [])
+                    {
+                        if (input.ComponentCount is >= 1 and <= 4)
+                        {
+                            _vertexInputsByPc.TryAdd(input.Pc, input);
+                        }
+                    }
                 }
 
                 // Emit the dispatcher body first: block translation discovers
@@ -329,10 +389,15 @@ public static partial class Gen5MslTranslator
                     _stage,
                     _evaluation.GlobalMemoryBindings,
                     _evaluation.ImageBindings,
-                    AttributeCount: _stage == Gen5MslStage.Pixel
-                        ? (uint)_pixelAttributes.Count
-                        : 0,
-                    VertexInputs: [],
+                    AttributeCount: _stage switch
+                    {
+                        Gen5MslStage.Pixel => (uint)_pixelAttributes.Count,
+                        Gen5MslStage.Vertex => (uint)_vertexOutputs.Count,
+                        _ => 0,
+                    },
+                    VertexInputs: _stage == Gen5MslStage.Vertex
+                        ? _evaluation.VertexInputs ?? []
+                        : [],
                     _localSizeX,
                     _localSizeY,
                     _localSizeZ);
@@ -382,7 +447,51 @@ public static partial class Gen5MslTranslator
             EmitPrelude(source);
             source.AppendLine();
 
-            if (_stage == Gen5MslStage.Pixel)
+            if (_stage == Gen5MslStage.Vertex)
+            {
+                // Stage IO structs: fetched attributes from the evaluated vertex
+                // inputs (bound via MTLVertexDescriptor), position plus the
+                // param outputs the paired fragment shader reads.
+                if (_vertexInputsByPc.Count != 0)
+                {
+                    source.AppendLine("struct Gen5VsIn");
+                    source.AppendLine("{");
+                    var declared = new HashSet<uint>();
+                    foreach (var input in _vertexInputsByPc.Values)
+                    {
+                        if (!declared.Add(input.Location))
+                        {
+                            continue;
+                        }
+
+                        var fieldType = input.ComponentCount == 1
+                            ? "float"
+                            : $"float{input.ComponentCount}";
+                        source.AppendLine(
+                            $"    {fieldType} in{input.Location} [[attribute({input.Location})]];");
+                    }
+
+                    source.AppendLine("};");
+                    source.AppendLine();
+                }
+
+                source.AppendLine("struct Gen5VsOut");
+                source.AppendLine("{");
+                source.AppendLine("    float4 sharpemu_position [[position]];");
+                foreach (var location in _vertexOutputs)
+                {
+                    source.AppendLine($"    float4 param{location} [[user(locn{location})]];");
+                }
+
+                source.AppendLine("};");
+                source.AppendLine();
+                source.AppendLine($"vertex Gen5VsOut {EntryPointName}(");
+                if (_vertexInputsByPc.Count != 0)
+                {
+                    source.AppendLine("    Gen5VsIn sharpemu_vin [[stage_in]],");
+                }
+            }
+            else if (_stage == Gen5MslStage.Pixel)
             {
                 // Stage IO structs: interpolated attributes discovered from the
                 // program's V_INTERP controls, MRT outputs from the bindings.
@@ -435,12 +544,27 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint3 sharpemu_group_id [[threadgroup_position_in_grid]],");
             }
 
-            // Wave ops use the invocation's real simdgroup in every stage;
-            // Apple fragment simdgroups make this the same model as compute
-            // (the SPIR-V translator instead emulates a single logical lane
-            // for graphics stages, which is equivalent for EXEC round trips).
-            source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]])");
-            source.AppendLine("{");
+            if (_stage == Gen5MslStage.Vertex)
+            {
+                // MSL vertex functions have no simdgroup attributes: the vertex
+                // stage models a single logical wave lane like the SPIR-V
+                // translator's graphics path (ballot degrades to 0/1 in the
+                // prelude; lane-shuffle ops would fail Metal compilation
+                // loudly, which no real guest vertex shader hits).
+                source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
+                source.AppendLine("    uint sharpemu_instance_id [[instance_id]])");
+                source.AppendLine("{");
+                source.AppendLine("    const uint sharpemu_lane = 0u;");
+            }
+            else
+            {
+                // Wave ops use the invocation's real simdgroup; Apple fragment
+                // simdgroups make this the same model as compute (the SPIR-V
+                // translator instead emulates a single logical lane for
+                // graphics stages, which is equivalent for EXEC round trips).
+                source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]])");
+                source.AppendLine("{");
+            }
             if (_usesLds)
             {
                 if (_stage == Gen5MslStage.Compute)
@@ -462,6 +586,12 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Pixel)
             {
                 source.AppendLine("    Gen5PsOut sharpemu_out = {};");
+            }
+            else if (_stage == Gen5MslStage.Vertex)
+            {
+                // Zero-initialized: param outputs the program never exports
+                // stay (0,0,0,0) to satisfy the fragment interface.
+                source.AppendLine("    Gen5VsOut sharpemu_out = {};");
             }
 
             EmitInitialState(source);
@@ -494,11 +624,15 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    }");
                 source.AppendLine("    return sharpemu_out;");
             }
+            else if (_stage == Gen5MslStage.Vertex)
+            {
+                source.AppendLine("    return sharpemu_out;");
+            }
 
             source.AppendLine("}");
         }
 
-        private static void EmitPrelude(StringBuilder source)
+        private void EmitPrelude(StringBuilder source)
         {
             // Shared helpers: MSL allows free functions, so unaligned and
             // subdword access is a byte-pointer cast instead of the manual
@@ -555,10 +689,21 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    }");
             source.AppendLine("}");
             source.AppendLine();
-            source.AppendLine("static inline uint sharpemu_ballot(bool value)");
-            source.AppendLine("{");
-            source.AppendLine("    return (uint)(uint64_t)simd_ballot(value);");
-            source.AppendLine("}");
+            if (_stage == Gen5MslStage.Vertex)
+            {
+                // Single logical wave lane: the mask is this lane's bit.
+                source.AppendLine("static inline uint sharpemu_ballot(bool value)");
+                source.AppendLine("{");
+                source.AppendLine("    return value ? 1u : 0u;");
+                source.AppendLine("}");
+            }
+            else
+            {
+                source.AppendLine("static inline uint sharpemu_ballot(bool value)");
+                source.AppendLine("{");
+                source.AppendLine("    return (uint)(uint64_t)simd_ballot(value);");
+                source.AppendLine("}");
+            }
             source.AppendLine();
             source.AppendLine("static constant float sharpemu_off_i4_table[16] =");
             source.AppendLine("{");
@@ -811,6 +956,12 @@ public static partial class Gen5MslTranslator
             else if (_stage == Gen5MslStage.Pixel)
             {
                 EmitPixelInputState(source);
+            }
+            else if (_stage == Gen5MslStage.Vertex)
+            {
+                // Hardware-selected VGPRs for the vertex and instance indices.
+                source.AppendLine("    v[5] = sharpemu_vertex_id;");
+                source.AppendLine("    v[8] = sharpemu_instance_id;");
             }
         }
 
@@ -1092,6 +1243,12 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (_stage == Gen5MslStage.Vertex &&
+                _vertexInputsByPc.TryGetValue(instruction.Pc, out var vertexInput))
+            {
+                return TryEmitVertexInputFetch(control, vertexInput, out error);
+            }
+
             if (!TryResolveDominatingBufferBinding(
                     instruction.Pc,
                     control.ScalarResource,
