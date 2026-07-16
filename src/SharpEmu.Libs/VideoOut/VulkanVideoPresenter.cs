@@ -1633,16 +1633,12 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        // If DISPLAY is set (X11/Xvfb available), force X11 backend.
+        // This is needed even when WAYLAND_DISPLAY is not set, because
+        // GLFW's auto-detection may fail in headless/container environments.
+        var display = Environment.GetEnvironmentVariable("DISPLAY");
+        if (string.IsNullOrEmpty(display))
         {
-            return;
-        }
-
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY")))
-        {
-            Console.Error.WriteLine(
-                "[LOADER][WARN] Wayland session without an X server (DISPLAY unset); " +
-                "cannot steer GLFW to XWayland. Set SHARPEMU_ENABLE_WAYLAND=1 to use native Wayland.");
             return;
         }
 
@@ -1657,7 +1653,7 @@ internal static unsafe class VulkanVideoPresenter
                 System.Runtime.InteropServices.NativeLibrary.GetExport(glfw, "glfwInitHint");
             initHint(GlfwPlatformHint, GlfwPlatformX11);
             Console.Error.WriteLine(
-                "[LOADER][INFO] Wayland session detected; requested GLFW X11/XWayland backend.");
+                "[LOADER][INFO] X11 display detected; requested GLFW X11 backend.");
         }
         catch (Exception exception)
         {
@@ -1770,7 +1766,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (_latestPresentation is { } rej &&
                     rej.GuestImageAddress != 0 &&
-					rej.Sequence != presentedSequence &&
+                                        rej.Sequence != presentedSequence &&
                     _tracedGuestImagePresentRejections.Add(rej.Sequence))
                 {
                     var reason = rej.Sequence == presentedSequence
@@ -1814,14 +1810,14 @@ internal static unsafe class VulkanVideoPresenter
 
     private static readonly HashSet<long> _tracedGuestImagePresentRejections = new();
 
-	private static bool HasPendingGuestPresentation(long presentedSequence)
-	{
-		lock (_gate)
-		{
-			return _pendingGuestImagePresentations.Count > 0 ||
-				_latestPresentation is { } latest && latest.Sequence > presentedSequence;
-		}
-	}
+        private static bool HasPendingGuestPresentation(long presentedSequence)
+        {
+                lock (_gate)
+                {
+                        return _pendingGuestImagePresentations.Count > 0 ||
+                                _latestPresentation is { } latest && latest.Sequence > presentedSequence;
+                }
+        }
 
     private static long EnqueueGuestWorkLocked(object work)
     {
@@ -11303,10 +11299,10 @@ internal static unsafe class VulkanVideoPresenter
 
             if (!TryTakePresentation(_presentedSequence, out var presentation))
             {
-				// A render-loop tick with no newer flip is normal. Warn only when
-				// an actual queued presentation is waiting on unfinished guest work.
+                                // A render-loop tick with no newer flip is normal. Warn only when
+                                // an actual queued presentation is waiting on unfinished guest work.
                 if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-					HasPendingGuestPresentation(_presentedSequence) &&
+                                        HasPendingGuestPresentation(_presentedSequence) &&
                     _presentNotTakenLoggedSequence != _presentedSequence)
                 {
                     _presentNotTakenLoggedSequence = _presentedSequence;
@@ -13544,15 +13540,15 @@ internal static unsafe class VulkanVideoPresenter
                         $"present-{seq:D4}-{_extent.Width}x{_extent.Height}-{_swapchainFormat}.bgra");
                     File.WriteAllBytes(path, bytes.ToArray());
                     Console.Error.WriteLine($"[LOADER][TRACE] vk.swapchain_dump path={path}");
-					// Continuous readback is intentionally opt-in: each 1080p frame
-					// is several megabytes and synchronously waits for the GPU.
-					if (string.Equals(
-							Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_DUMP_CONTINUOUS"),
-							"1",
-							StringComparison.Ordinal))
-					{
-						_tracedPresentedSwapchain = false;
-					}
+                                        // Continuous readback is intentionally opt-in: each 1080p frame
+                                        // is several megabytes and synchronously waits for the GPU.
+                                        if (string.Equals(
+                                                        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_DUMP_CONTINUOUS"),
+                                                        "1",
+                                                        StringComparison.Ordinal))
+                                        {
+                                                _tracedPresentedSwapchain = false;
+                                        }
                 }
             }
             finally

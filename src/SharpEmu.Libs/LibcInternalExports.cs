@@ -222,4 +222,98 @@ public static class LibcInternalExports
         ctx[CpuRegister.Rax] = (ulong)writeLen;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // _Atomic_fetch_add_4: atomic fetch-and-add for 32-bit integers
+    // Returns the OLD value, then adds.
+    [SysAbiExport(
+        Nid = "iPBqs+YUUFw",
+        ExportName = "_Atomic_fetch_add_4",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int AtomicFetchAdd4(CpuContext ctx)
+    {
+        // rdi = ptr to 32-bit atomic, rsi = value to add
+        var ptr = ctx[CpuRegister.Rdi];
+        var addend = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (ptr == 0 || !ctx.TryReadUInt32(ptr, out var oldVal))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+        var newVal = unchecked(oldVal + addend);
+        ctx.TryWriteUInt32(ptr, unchecked((uint)newVal));
+        ctx[CpuRegister.Rax] = oldVal; // return old value
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // _Atomic_fetch_sub_4: atomic fetch-and-subtract for 32-bit integers
+    [SysAbiExport(
+        Nid = "2HnmKiLmV6s",
+        ExportName = "_Atomic_fetch_sub_4",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int AtomicFetchSub4(CpuContext ctx)
+    {
+        var ptr = ctx[CpuRegister.Rdi];
+        var subtrahend = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (ptr == 0 || !ctx.TryReadUInt32(ptr, out var oldVal))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+        var newVal = unchecked(oldVal - subtrahend);
+        ctx.TryWriteUInt32(ptr, unchecked((uint)newVal));
+        ctx[CpuRegister.Rax] = oldVal;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // std::Pad constructor (_ZNSt4_PadC2Ev)
+    // std::Pad is a C++ threading utility for launching detached threads.
+    // Stub: just zero-initialize the object (16 bytes typically).
+    [SysAbiExport(
+        Nid = "dGYo9mE8K2A",
+        ExportName = "_ZNSt4_PadC2Ev",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int StdPadCtor(CpuContext ctx)
+    {
+        var thisPtr = ctx[CpuRegister.Rdi];
+        if (thisPtr != 0)
+        {
+            // Zero-initialize the Pad object (typically 8-16 bytes)
+            ctx.Memory.TryWrite(thisPtr, new byte[16]);
+        }
+        ctx[CpuRegister.Rax] = thisPtr;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // std::Pad::_Launch (_ZNSt4_Pad7_LaunchEPP7pthread)
+    // Launches a detached thread. Stub: do nothing (the callback is in args).
+    [SysAbiExport(
+        Nid = "xZqiZvmcp9k",
+        ExportName = "_ZNSt4_Pad7_LaunchEPP7pthread",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int StdPadLaunch(CpuContext ctx)
+    {
+        // rdi = this, rsi = pthread**, rdx = callback
+        // For now, just return OK without actually launching the thread.
+        // This is a stub — the game may hang if it waits for the thread.
+        Console.Error.WriteLine("[HLE][TRACE] std::Pad::_Launch called (stubbed — no thread launched)");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // std::Pad destructor (_ZNSt4_PadD2Ev)
+    [SysAbiExport(
+        Nid = "gjLRZgfb3i0",
+        ExportName = "_ZNSt4_PadD2Ev",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int StdPadDtor(CpuContext ctx)
+    {
+        // No-op for the stub
+        var thisPtr = ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = thisPtr;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
