@@ -56,6 +56,7 @@ internal static partial class Program
         }
         finally
         {
+            DrainConsoleCollapsing();
             DropConsoleFileMirror();
             SharpEmuLog.Shutdown();
         }
@@ -84,6 +85,12 @@ internal static partial class Program
         {
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
+
+        // Funnel all console output through one collapser so repeated log lines
+        // (guest printf floods, per-call import-result warnings) fold to a single
+        // line plus a summary instead of drowning the log. Installed last, over
+        // any file mirror, so the log file is collapsed too.
+        InstallConsoleCollapsing();
 
         if (!CheckHostArchitecture())
         {
@@ -1201,6 +1208,28 @@ internal static partial class Program
         public nuint JobMemoryLimit;
         public nuint PeakProcessMemoryUsed;
         public nuint PeakJobMemoryUsed;
+    }
+
+    private static CollapsingTextWriter? _outCollapser;
+    private static CollapsingTextWriter? _errCollapser;
+
+    // Wrap Console.Out/Console.Error so every write funnels through one collapser.
+    // References are kept so the collapsers can be drained at shutdown even after
+    // a file mirror later wraps Console.Out in a TeeTextWriter.
+    private static void InstallConsoleCollapsing()
+    {
+        _outCollapser = new CollapsingTextWriter(Console.Out);
+        _errCollapser = new CollapsingTextWriter(Console.Error);
+        Console.SetOut(_outCollapser);
+        Console.SetError(_errCollapser);
+    }
+
+    // Emit any pending "(previous message repeated N more times)" summary before
+    // the process exits, so a trailing run of duplicates is not lost.
+    private static void DrainConsoleCollapsing()
+    {
+        _outCollapser?.Drain();
+        _errCollapser?.Drain();
     }
 
     private sealed class TeeTextWriter : TextWriter
