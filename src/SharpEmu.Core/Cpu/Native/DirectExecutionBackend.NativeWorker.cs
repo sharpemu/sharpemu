@@ -62,7 +62,7 @@ public sealed partial class DirectExecutionBackend
 		if (worker is null)
 		{
 			TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
-			return CallNativeEntry(entryStub);
+			return unchecked((int)CallNativeEntry(entryStub));
 		}
 		try
 		{

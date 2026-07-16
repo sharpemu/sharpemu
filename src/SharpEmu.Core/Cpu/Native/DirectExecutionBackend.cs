@@ -871,10 +871,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return *(ulong*)((byte*)contextRecord + offset);
 	}
 
-	private unsafe static int CallNativeEntry(void* entry)
+	private unsafe static ulong CallNativeEntry(void* entry)
 	{
-		var nativeEntry = (delegate* unmanaged[Cdecl]<int>)entry;
+		var nativeEntry = (delegate* unmanaged[Cdecl]<ulong>)entry;
 		return nativeEntry();
+	}
+
+	private static void StoreCompletedGuestNativeReturn(CpuContext context, ulong returnValue)
+	{
+		context[CpuRegister.Rax] = returnValue;
+	}
+
+	private static bool ShouldTraceGuestCallbackReturn(string name)
+	{
+		var filter = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_CALLBACK_RETURNS");
+		return string.Equals(filter, "1", StringComparison.Ordinal) ||
+			(!string.IsNullOrWhiteSpace(filter) && name.Contains(filter, StringComparison.Ordinal));
 	}
 
 	private unsafe static void WriteCtxU64(void* contextRecord, int offset, ulong value)
@@ -5078,7 +5090,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					reason = LastError ?? "guest thread forced exit";
 					return GuestNativeCallExitReason.ForcedExit;
 				}
-				reason = $"returned 0x{nativeReturn:X8}";
+				if (ShouldTraceGuestCallbackReturn(name))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][TRACE] guest_native.return name='{name}' " +
+						$"native=0x{nativeReturn:X16} context=0x{context[CpuRegister.Rax]:X16}");
+				}
+				StoreCompletedGuestNativeReturn(context, nativeReturn);
+				reason = $"returned 0x{nativeReturn:X16}";
 				return GuestNativeCallExitReason.Returned;
 			}
 			catch (AccessViolationException ex)
@@ -5233,7 +5252,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					reason = LastError ?? "guest thread forced exit";
 					return GuestNativeCallExitReason.ForcedExit;
 				}
-				reason = $"returned 0x{nativeReturn:X8}";
+				if (ShouldTraceGuestCallbackReturn(name))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][TRACE] guest_native.return name='{name}' " +
+						$"native=0x{nativeReturn:X16} context=0x{context[CpuRegister.Rax]:X16}");
+				}
+				StoreCompletedGuestNativeReturn(context, nativeReturn);
+				reason = $"returned 0x{nativeReturn:X16}";
 				return GuestNativeCallExitReason.Returned;
 			}
 			catch (AccessViolationException ex)
@@ -5552,7 +5578,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			int num6 = -1;
 			try
 			{
-				num6 = CallNativeEntry(ptr);
+				num6 = unchecked((int)CallNativeEntry(ptr));
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest
 				// continuations here can re-enter a blocked HLE call after its owner
