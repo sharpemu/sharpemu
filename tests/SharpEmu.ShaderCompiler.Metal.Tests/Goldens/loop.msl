@@ -106,6 +106,7 @@ kernel void gen5_cs(
             uint t0 = (s[0] - 1u);
             s[0] = t0;
             scc = ((((s[0] ^ 1u)) & (s[0] ^ (s[0] - 1u))) >> 31) != 0u;
+            scc = s[0] != 0u;
             pc = (scc) ? 1u : 2u;
         }
         break;
