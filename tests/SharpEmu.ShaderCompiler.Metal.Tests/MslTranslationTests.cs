@@ -101,6 +101,49 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void VertexStageEmitsVertexInterface()
+    {
+        var shader = Gen5ComputeFixtures.CompileVertexOrThrow();
+
+        Assert.Equal(Gen5MslStage.Vertex, shader.Stage);
+        Assert.Equal("gen5_vs", shader.EntryPoint);
+        Assert.Equal(1u, shader.AttributeCount);
+        Assert.Contains("vertex Gen5VsOut gen5_vs(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 sharpemu_position [[position]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 param0 [[user(locn0)]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("uint sharpemu_vertex_id [[vertex_id]],", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v[5] = sharpemu_vertex_id;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("v[8] = sharpemu_instance_id;", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.sharpemu_position = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_out.param0 = exec ?", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("return sharpemu_out;", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RequiredVertexOutputsAreZeroFilledDeclarations()
+    {
+        // The paired fragment shader reads locations 0..2; the program only
+        // exports param0, so 1 and 2 must still be declared (zero-filled).
+        var shader = Gen5ComputeFixtures.CompileVertexOrThrow(requiredVertexOutputCount: 3);
+        Assert.Equal(3u, shader.AttributeCount);
+        Assert.Contains("float4 param1 [[user(locn1)]];", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("float4 param2 [[user(locn2)]];", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FixedShadersCoverThePresenterSurface()
+    {
+        var fullscreen = MslFixedShaders.CreateFullscreenVertex(2);
+        Assert.Contains("vertex FullscreenOut fullscreen_vs(", fullscreen, StringComparison.Ordinal);
+        Assert.Contains("float4 attr1 [[user(locn1)]];", fullscreen, StringComparison.Ordinal);
+
+        Assert.Contains("tex0.sample(smp0, in.attr0.xy)", MslFixedShaders.CreateCopyFragment(), StringComparison.Ordinal);
+        Assert.Contains("float4(1.0f, 0.0f, 1.0f, 1.0f)", MslFixedShaders.CreateSolidFragment(1f, 0f, 1f, 1f), StringComparison.Ordinal);
+        Assert.Contains("return in.attr3;", MslFixedShaders.CreateAttributeFragment(3), StringComparison.Ordinal);
+        Assert.Contains("fragment void depth_only_fs()", MslFixedShaders.CreateDepthOnlyFragment(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void UnsupportedOpcodeFailsLoudlyWithPc()
     {
         // v_cubeid_f32 is real but outside the phase-1 ALU set: the translator

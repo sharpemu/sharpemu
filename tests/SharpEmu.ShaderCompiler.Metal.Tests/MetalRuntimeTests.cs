@@ -101,6 +101,46 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void VertexShaderCompilesWithTheRuntimeMetalCompiler()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; compile validation skipped.");
+            return;
+        }
+
+        var shader = Gen5ComputeFixtures.CompileVertexOrThrow(requiredVertexOutputCount: 2);
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+            $"[vertex] Metal rejected the emitted MSL: {error}\n{shader.Source}");
+    }
+
+    [Fact]
+    public void FixedShadersCompileWithTheRuntimeMetalCompiler()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; compile validation skipped.");
+            return;
+        }
+
+        var sources = new (string Name, string Source)[]
+        {
+            ("fullscreen", MslFixedShaders.CreateFullscreenVertex(3)),
+            ("copy", MslFixedShaders.CreateCopyFragment()),
+            ("solid", MslFixedShaders.CreateSolidFragment(0.25f, 0.5f, 0.75f, 1f)),
+            ("attribute", MslFixedShaders.CreateAttributeFragment(1)),
+            ("depth-only", MslFixedShaders.CreateDepthOnlyFragment()),
+        };
+        foreach (var (name, source) in sources)
+        {
+            Assert.True(
+                MetalNative.TryCompileLibrary(source, out _, out var error),
+                $"[{name}] Metal rejected the fixed shader: {error}\n{source}");
+        }
+    }
+
+    [Fact]
     public void LdsRoundTripExecutesThroughThreadgroupMemory()
     {
         if (!MetalNative.IsAvailable)

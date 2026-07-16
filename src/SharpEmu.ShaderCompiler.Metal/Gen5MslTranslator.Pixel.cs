@@ -563,10 +563,14 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (_stage == Gen5MslStage.Vertex)
+            {
+                return TryEmitVertexExport(instruction, export);
+            }
+
             if (_stage != Gen5MslStage.Pixel)
             {
-                // Vertex export targets arrive with the vertex stage; compute
-                // programs have no export interface.
+                // Compute programs have no export interface.
                 return true;
             }
 
@@ -626,6 +630,80 @@ public static partial class Gen5MslTranslator
             // A lane removed from EXEC keeps the previous output value; killed
             // fragments are discarded in the epilogue.
             Line($"{field} = exec ? vec<{componentType}, 4>({values[0]}, {values[1]}, {values[2]}, {values[3]}) : {field};");
+            return true;
+        }
+
+        private bool TryEmitVertexExport(
+            Gen5ShaderInstruction instruction,
+            Gen5ExportControl export)
+        {
+            // Target 12 is POS0; 32..63 are the param outputs. Everything else
+            // (other position slots, MRTZ) is ignored like the SPIR-V side.
+            string field;
+            if (export.Target == 12)
+            {
+                field = "sharpemu_out.sharpemu_position";
+            }
+            else if (export.Target is >= 32 and < 64 &&
+                     _vertexOutputs.Contains(export.Target - 32))
+            {
+                field = $"sharpemu_out.param{export.Target - 32}";
+            }
+            else
+            {
+                return true;
+            }
+
+            var values = new string[4];
+            for (var component = 0; component < 4; component++)
+            {
+                if ((export.EnableMask & (1u << component)) == 0)
+                {
+                    values[component] = component == 3 ? "1.0f" : "0.0f";
+                    continue;
+                }
+
+                if (export.Compressed)
+                {
+                    var packed = $"v[{instruction.Sources[component >> 1].Value}]";
+                    values[component] = $"(float)as_type<half2>({packed})[{component & 1}]";
+                    continue;
+                }
+
+                values[component] = $"as_type<float>(v[{instruction.Sources[component].Value}])";
+            }
+
+            Line($"{field} = exec ? float4({values[0]}, {values[1]}, {values[2]}, {values[3]}) : {field};");
+            return true;
+        }
+
+        /// <summary>
+        /// Vertex attribute fetch: the evaluator captured this buffer load as a
+        /// fixed-function vertex input, so read the stage_in field instead of
+        /// guest memory (bound via MTLVertexDescriptor by the backend).
+        /// </summary>
+        private bool TryEmitVertexInputFetch(
+            Gen5BufferMemoryControl control,
+            Gen5VertexInputBinding input,
+            out string error)
+        {
+            error = string.Empty;
+            if (control.DwordCount == 0 || control.DwordCount > input.ComponentCount)
+            {
+                error =
+                    $"invalid vertex input fetch components={control.DwordCount} " +
+                    $"input={input.ComponentCount}";
+                return false;
+            }
+
+            for (uint component = 0; component < control.DwordCount; component++)
+            {
+                var value = input.ComponentCount == 1
+                    ? $"sharpemu_vin.in{input.Location}"
+                    : $"sharpemu_vin.in{input.Location}[{component}]";
+                StoreVector(control.VectorData + component, AsUInt(value));
+            }
+
             return true;
         }
 
