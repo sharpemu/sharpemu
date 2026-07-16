@@ -2213,6 +2213,12 @@ internal static unsafe class VulkanVideoPresenter
         return keys;
     }
 
+    internal static bool ShouldAttachGuestDepth(
+        GuestDepthTarget? target,
+        GuestDepthState state) =>
+        target is not null &&
+        (state.TestEnable || state.WriteEnable || state.ClearEnable);
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -9440,6 +9446,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 var extent = new Extent2D(firstTarget.Width, firstTarget.Height);
                 var draw = work.Draw;
+                var clearDepthForDraw = draw.RenderState.Depth.ClearEnable;
                 if (work.DepthTarget?.ReadOnly == true && draw.RenderState.Depth.WriteEnable)
                 {
                     draw = draw with
@@ -9452,9 +9459,10 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 GuestDepthResource? depth = null;
                 DepthFramebufferResource? depthFramebuffer = null;
-                if (work.DepthTarget is { } depthTarget &&
-                    (draw.RenderState.Depth.TestEnable ||
-                     draw.RenderState.Depth.WriteEnable))
+                if (ShouldAttachGuestDepth(
+                        work.DepthTarget,
+                        draw.RenderState.Depth) &&
+                    work.DepthTarget is { } depthTarget)
                 {
                     var effectiveDepthTarget = depthTarget;
                     if (depthTarget.Width < firstTarget.Width || depthTarget.Height < firstTarget.Height)
@@ -9501,10 +9509,34 @@ internal static unsafe class VulkanVideoPresenter
 
                     depth = GetOrCreateGuestDepth(effectiveDepthTarget);
                     PrepareFirstUseDepth(depth, draw.RenderState.Depth);
+                    if (clearDepthForDraw)
+                    {
+                        depth.GuestClearDepth = effectiveDepthTarget.ClearDepth;
+                        depth.ClearDepth = effectiveDepthTarget.ClearDepth;
+                    }
                     if (targets.Length == 1)
                     {
                         depthFramebuffer = GetOrCreateDepthFramebuffer(firstTarget, depth);
                     }
+                }
+
+                if (clearDepthForDraw)
+                {
+                    // DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE makes this a DB
+                    // clear operation. The draw still produces color, but its
+                    // interpolated vertex Z is not the guest clear value.
+                    draw = draw with
+                    {
+                        RenderState = draw.RenderState with
+                        {
+                            Depth = draw.RenderState.Depth with
+                            {
+                                TestEnable = false,
+                                WriteEnable = false,
+                                ClearEnable = false,
+                            },
+                        },
+                    };
                 }
 
                 var renderPass = depthFramebuffer is null
@@ -9512,10 +9544,10 @@ internal static unsafe class VulkanVideoPresenter
                         ? firstTarget.RenderPass
                         : firstTarget.InitialRenderPass
                     : firstTarget.Initialized
-                        ? depth!.Initialized
+                        ? depth!.Initialized && !clearDepthForDraw
                             ? depthFramebuffer.LoadRenderPass
                             : depthFramebuffer.DepthClearRenderPass
-                        : depth!.Initialized
+                        : depth!.Initialized && !clearDepthForDraw
                             ? depthFramebuffer.ColorClearRenderPass
                             : depthFramebuffer.BothClearRenderPass;
                 var framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
@@ -9531,7 +9563,7 @@ internal static unsafe class VulkanVideoPresenter
                         targets.Select(target =>
                             target.Initialized || target.InitialUploadPending).ToArray(),
                         depth,
-                        depth?.Initialized == true);
+                        depth?.Initialized == true && !clearDepthForDraw);
                     transientRenderPass = renderPass;
                     transientFramebuffer = framebuffer;
                 }
@@ -9719,7 +9751,12 @@ internal static unsafe class VulkanVideoPresenter
                 if (depth is not null)
                 {
                     depth.Initialized = true;
-                    if (draw.RenderState.Depth.WriteEnable)
+                    depth.Layout = ImageLayout.DepthStencilAttachmentOptimal;
+                    if (clearDepthForDraw)
+                    {
+                        depth.InitializationSource = "guest-depth-clear";
+                    }
+                    else if (draw.RenderState.Depth.WriteEnable)
                     {
                         depth.InitializationSource = "translated-depth-write";
                     }

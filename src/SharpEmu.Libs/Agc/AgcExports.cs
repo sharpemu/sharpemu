@@ -121,6 +121,7 @@ public static partial class AgcExports
     private const uint CbBlend0Control = 0x1E0;
     private const uint PaScModeCntl0 = 0x292;
     // GFX10 DB context registers (register byte address minus 0x28000, / 4).
+    private const uint DbRenderControl = 0x000;
     private const uint DbDepthView = 0x002;
     private const uint DbDepthSizeXy = 0x007;
     private const uint DbDepthClear = 0x00B;
@@ -5291,7 +5292,7 @@ public static partial class AgcExports
         var hasDepthOnlyCandidate = hasExportShader &&
             !hasPixelShader &&
             depthTarget is not null &&
-            (depthState.TestEnable || depthState.WriteEnable);
+            (depthState.TestEnable || depthState.WriteEnable || depthState.ClearEnable);
         if (hasDepthOnlyCandidate &&
             TryCreateTranslatedDepthOnlyGuestDraw(
                 ctx,
@@ -6652,27 +6653,30 @@ public static partial class AgcExports
 
     // DB_DEPTH_CONTROL (context register 0x200): Z_ENABLE bit1, Z_WRITE_ENABLE
     // bit2, ZFUNC bits[6:4] (GCN compare, matches Vulkan CompareOp ordering).
+    // DB_RENDER_CONTROL (context register 0x000): DEPTH_CLEAR_ENABLE bit0.
     private const uint DbDepthControl = 0x200;
 
-    private static GuestDepthState DecodeDepthState(
+    internal static GuestDepthState DecodeDepthState(
         IReadOnlyDictionary<uint, uint> registers)
     {
-        if (!registers.TryGetValue(DbDepthControl, out var control))
-        {
-            return GuestDepthState.Default;
-        }
-
+        var hasDepthControl = registers.TryGetValue(DbDepthControl, out var control);
+        registers.TryGetValue(DbRenderControl, out var renderControl);
         var testEnable = (control & 0x2u) != 0;
         var writeEnable = (control & 0x4u) != 0;
-        var compareOp = (control >> 4) & 0x7u;
-        return new GuestDepthState(testEnable, writeEnable, compareOp);
+        var compareOp = hasDepthControl
+            ? (control >> 4) & 0x7u
+            : GuestDepthState.Default.CompareOp;
+        var clearEnable = (renderControl & 0x1u) != 0;
+        return new GuestDepthState(testEnable, writeEnable, compareOp, clearEnable);
     }
 
     private static GuestDepthTarget? DecodeDepthTarget(
         IReadOnlyDictionary<uint, uint> registers)
     {
         var depthState = DecodeDepthState(registers);
-        if (!depthState.TestEnable && !depthState.WriteEnable)
+        if (!depthState.TestEnable &&
+            !depthState.WriteEnable &&
+            !depthState.ClearEnable)
         {
             return null;
         }

@@ -91,9 +91,10 @@ internal readonly record struct GuestRasterState(
 internal readonly record struct GuestDepthState(
     bool TestEnable,
     bool WriteEnable,
-    uint CompareOp)
+    uint CompareOp,
+    bool ClearEnable = false)
 {
-    public static GuestDepthState Default { get; } = new(false, false, 7);
+    public static GuestDepthState Default { get; } = new(false, false, 7, false);
 }
 
 /// <summary>Factors/funcs are raw guest CB_BLEND*_CONTROL register bitfields; the
