@@ -393,19 +393,6 @@ public static class LibcInternalExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // il2cpp_api_register_symbol — IL2CPP runtime symbol registration (stub)
-    [SysAbiExport(
-        Nid = "cJ2Y4E-t258",
-        ExportName = "il2cpp_api_register_symbol",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libil2cpp")]
-    public static int Il2cppRegisterSymbol(CpuContext ctx)
-    {
-        // Stub: just return success
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
     // unity_mono_set_user_malloc_mutex — Unity mono runtime (stub)
     [SysAbiExport(
         Nid = "-pnj3-7a6QA",

@@ -365,6 +365,27 @@ public sealed unsafe partial class DirectExecutionBackend
                                 System.IO.File.WriteAllText(System.IO.Path.Combine(reportDir, "crash_snapshot.txt"), sb.ToString());
                                 Console.Error.WriteLine("[CRASH_SNAPSHOT] Written to /home/z/my-project/download/crashes/crash_snapshot.txt");
                                 Console.Error.Flush();
+
+                                // ====== AI DEBUG PACKAGE ======
+                                try
+                                {
+                                        var rdi = ReadCtxU64(contextRecord, CTX_RDI);
+                                        var rsi = ReadCtxU64(contextRecord, CTX_RSI);
+                                        var firstFailure = SharpEmu.Diagnostics.ReturnAnalyzer.Instance.GetFirstFailure();
+                                        var missingNids = SharpEmu.Diagnostics.MissingNidReporter.Instance.GetMissing()
+                                                .Select(m => m.Nid).ToArray();
+                                        var lastImports = SharpEmu.Diagnostics.ReturnAnalyzer.Instance.GetRecentCalls(20)
+                                                .Select(c => $"#{c.Sequence} {c.Status} {c.FunctionName ?? c.Nid}").ToArray();
+                                        var gameId = "PPSA00000"; // would be from game profile
+                                        SharpEmu.Diagnostics.BootDiagnostics.GenerateAiDebugPackage(
+                                                reportDir, gameId, faultAddr, rip, rax, rdi, rsi,
+                                                firstFailure?.FunctionName, missingNids, lastImports);
+                                }
+                                catch (Exception ex)
+                                {
+                                        Console.Error.WriteLine($"[AI_DEBUG] Failed: {ex.Message}");
+                                }
+                                // ====== END AI DEBUG PACKAGE ======
                         }
                         catch (Exception ex)
                         {

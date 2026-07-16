@@ -530,13 +530,15 @@ public sealed partial class DirectExecutionBackend
                                 CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
                         StoreImportVectorReturn(cpuContext, argPackPtr);
 
-                        // ====== DIAGNOSTICS: Return Value Analyzer + Missing NID Reporter + Pointer Origin ======
+                        // ====== DIAGNOSTICS: Return Value Analyzer + Missing NID Reporter + Pointer Origin + Boot Diagnostics ======
                         try
                         {
                                 var fnName = matchedExport != null
                                         ? $"{matchedExport.LibraryName}:{matchedExport.Name}"
                                         : null;
                                 var libName = matchedExport?.LibraryName;
+                                // Track for engine detection
+                                SharpEmu.Diagnostics.BootDiagnostics.TrackImport(libName);
                                 if (!dispatchResolved)
                                 {
                                         SharpEmu.Diagnostics.MissingNidReporter.Instance.RecordUnresolved(
@@ -2154,8 +2156,24 @@ public sealed partial class DirectExecutionBackend
                         return true;
                 }
 
-                return Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
-                        TryResolveRuntimeSymbolAddress(symbol.Nid, out address);
+                if (Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
+                        TryResolveRuntimeSymbolAddress(symbol.Nid, out address))
+                {
+                        return true;
+                }
+
+                // Fallback: return a fake function pointer for all il2cpp_* symbols.
+                // The game will call this pointer, which hits an unresolved import stub
+                // and returns 0 (success). This allows the game to proceed past
+                // IL2CPP initialization.
+                if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal))
+                {
+                        address = _unresolvedReturnStub != 0 ? (ulong)_unresolvedReturnStub : 0x10000;
+                        Console.Error.WriteLine($"[HLE][IL2CPP] Resolved '{symbolName}' -> 0x{address:X16} (stub)");
+                        return true;
+                }
+
+                return false;
         }
 
         private OrbisGen2Result DispatchBootstrapBridge()
