@@ -1714,7 +1714,7 @@ internal static unsafe class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_CAPTURE"),
             "1", StringComparison.Ordinal);
         var frameCount = 0;
-        var dumpDir = "/home/z/my-project/download/frames";
+        var dumpDir = System.IO.Path.Combine(System.AppContext.BaseDirectory, "frames");
         if (dumpFrames)
         {
             Directory.CreateDirectory(dumpDir);

@@ -539,6 +539,15 @@ public sealed partial class DirectExecutionBackend
                                 var libName = matchedExport?.LibraryName;
                                 // Track for engine detection
                                 SharpEmu.Diagnostics.BootDiagnostics.TrackImport(libName);
+                                // Loop detection
+                                var (isLoop, loopStats) = SharpEmu.Diagnostics.ImportLoopDetector.Instance.CheckLoop(
+                                        importStubEntry.Nid, num7);
+                                if (isLoop && loopStats.HasValue && loopStats.Value.CallCount == SharpEmu.Diagnostics.ImportLoopDetector.LoopThreshold)
+                                {
+                                        Console.Error.WriteLine(
+                                                $"[LOOP_WARN] {fnName ?? importStubEntry.Nid} called {loopStats.Value.CallCount:N0} times — possible infinite loop. " +
+                                                $"Consider changing stub return value.");
+                                }
                                 if (!dispatchResolved)
                                 {
                                         SharpEmu.Diagnostics.MissingNidReporter.Instance.RecordUnresolved(

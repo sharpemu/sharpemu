@@ -444,6 +444,7 @@ public static class LibcInternalExports
     }
 
     // Unknown NID: zlqfTyrQSPk — not in aerolib, called in a loop (likely logging)
+    // Return -1 to avoid infinite retry loops (0 causes Unity to retry)
     [SysAbiExport(
         Nid = "zlqfTyrQSPk",
         ExportName = "unknown_zlqfTyrQSPk",
@@ -451,7 +452,8 @@ public static class LibcInternalExports
         LibraryName = "libunity")]
     public static int UnknownNid2(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
+        // Return -1 (0xFFFFFFFF) instead of 0 to avoid Unity retry loops
+        ctx[CpuRegister.Rax] = unchecked((ulong)-1L);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 }

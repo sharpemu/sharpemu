@@ -339,7 +339,7 @@ public sealed unsafe partial class DirectExecutionBackend
                                         Console.Error.WriteLine($"[CRASH_SNAPSHOT] FaultAddr origin: {o.FunctionName} returned 0x{o.Value:X16} at import#{o.ImportSequence}");
                                 }
 
-                                var reportDir = "/home/z/my-project/download/crashes";
+                                var reportDir = System.IO.Path.Combine(System.AppContext.BaseDirectory, "reports");
                                 System.IO.Directory.CreateDirectory(reportDir);
                                 var sb = new System.Text.StringBuilder();
                                 sb.AppendLine($"========== CRASH SNAPSHOT ==========");
@@ -363,7 +363,7 @@ public sealed unsafe partial class DirectExecutionBackend
                                 sb.AppendLine(SharpEmu.Diagnostics.PointerOriginTracker.Instance.RenderReport());
 
                                 System.IO.File.WriteAllText(System.IO.Path.Combine(reportDir, "crash_snapshot.txt"), sb.ToString());
-                                Console.Error.WriteLine("[CRASH_SNAPSHOT] Written to /home/z/my-project/download/crashes/crash_snapshot.txt");
+                                Console.Error.WriteLine($"[CRASH_SNAPSHOT] Written to {System.IO.Path.Combine(reportDir, "crash_snapshot.txt")}");
                                 Console.Error.Flush();
 
                                 // ====== AI DEBUG PACKAGE ======
