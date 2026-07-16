@@ -66,6 +66,12 @@ static inline uint sharpemu_ballot(bool value)
     return (uint)(uint64_t)simd_ballot(value);
 }
 
+static constant float sharpemu_off_i4_table[16] =
+{
+    0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,
+    -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,
+};
+
 kernel void gen5_cs(
     device uint* b0 [[buffer(0)]],
     constant SharpEmuUniforms& sharpemu_uniforms [[buffer(1)]],
@@ -95,27 +101,34 @@ kernel void gen5_cs(
         {
         case 0u:
         {
-            s[0] = 5u;
-            if (exec) { v[1] = 0u; }
+            uint t0 = 5u;
+            s[0] = t0;
+            uint t1 = 0u;
+            if (exec) { v[1] = t1; }
             pc = 1u;
         }
         break;
         case 1u:
         {
-            if (exec) { v[1] = (s[0] + v[1]); }
-            uint t0 = (s[0] - 1u);
-            s[0] = t0;
-            scc = ((((s[0] ^ 1u)) & (s[0] ^ (s[0] - 1u))) >> 31) != 0u;
-            scc = s[0] != 0u;
+            uint t2 = ((s[0]) + (v[1]));
+            if (exec) { v[1] = t2; }
+            uint t3 = s[0];
+            uint t4 = 1u;
+            uint t5 = (t3 - t4);
+            s[0] = t5;
+            scc = ((((t3 ^ t4)) & (t3 ^ t5)) >> 31) != 0u;
+            uint t6 = s[0];
+            uint t7 = 0u;
+            scc = (t6) != (t7);
             pc = (scc) ? 1u : 2u;
         }
         break;
         case 2u:
         {
-            uint t1 = ((0x0u + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
+            uint t8 = ((0x0u + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
             if (exec)
             {
-                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t1 + 0u, v[1], 4u);
+                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t8 + 0u, v[1], 4u);
             }
             active = false;
         }

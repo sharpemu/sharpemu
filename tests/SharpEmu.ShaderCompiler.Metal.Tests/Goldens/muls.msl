@@ -66,6 +66,12 @@ static inline uint sharpemu_ballot(bool value)
     return (uint)(uint64_t)simd_ballot(value);
 }
 
+static constant float sharpemu_off_i4_table[16] =
+{
+    0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,
+    -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,
+};
+
 kernel void gen5_cs(
     constant SharpEmuUniforms& sharpemu_uniforms [[buffer(0)]],
     uint3 sharpemu_local_id [[thread_position_in_threadgroup]],
@@ -94,10 +100,14 @@ kernel void gen5_cs(
         {
         case 0u:
         {
-            if (exec) { v[5] = (v[1] * v[2]); }
-            if (exec) { v[5] = mulhi(v[1], v[2]); }
-            if (exec) { v[5] = (v[1] * v[2]); }
-            if (exec) { v[5] = as_type<uint>(mulhi(as_type<int>(v[1]), as_type<int>(v[2]))); }
+            uint t0 = ((v[1]) * (v[2]));
+            if (exec) { v[5] = t0; }
+            uint t1 = mulhi(v[1], v[2]);
+            if (exec) { v[5] = t1; }
+            uint t2 = ((v[1]) * (v[2]));
+            if (exec) { v[5] = t2; }
+            uint t3 = as_type<uint>(mulhi(as_type<int>(v[1]), as_type<int>(v[2])));
+            if (exec) { v[5] = t3; }
             active = false;
         }
         break;
