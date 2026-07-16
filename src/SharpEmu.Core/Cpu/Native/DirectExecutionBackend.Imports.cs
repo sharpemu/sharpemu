@@ -598,7 +598,7 @@ public sealed partial class DirectExecutionBackend
 				}
 
 				*(ulong*)(argPackPtr + 96) = unchecked((ulong)transferStub);
-				if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER"), "1", StringComparison.Ordinal))
+				if (_logFiber)
 				{
 					Console.Error.WriteLine(
 						$"[LOADER][TRACE] fiber.context-transfer rip=0x{transferTarget.Rip:X16} " +
