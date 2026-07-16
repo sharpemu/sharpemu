@@ -55,6 +55,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Padding" Value="10,3" />
     </Style>
 
+    <Style Selector="Button.pill">
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+    </Style>
+    <Style Selector="Button.pill:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
+    </Style>
+    <Style Selector="Button.pill:disabled">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+
     <Style Selector="TextBlock.sectionTitle">
       <Setter Property="FontSize" Value="11" />
       <Setter Property="FontWeight" Value="SemiBold" />

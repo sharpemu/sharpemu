@@ -27,6 +27,9 @@ public static class BuildInfo
     /// <summary>URL of the GitHub Actions workflow run that produced the build, or <c>null</c>.</summary>
     public static string? WorkflowRunUrl { get; }
 
+    /// <summary>URL of the exact commit used to produce the build, or <c>null</c>.</summary>
+    public static string? CommitUrl { get; }
+
     /// <summary>Build configuration (e.g. <c>Debug</c> or <c>Release</c>), or <c>null</c>.</summary>
     public static string? Configuration { get; }
 
@@ -43,7 +46,8 @@ public static class BuildInfo
     {
         var metadata = ReadMetadata();
 
-        CommitSha = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildSha"));
+        var fullCommitSha = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildSha"));
+        CommitSha = fullCommitSha;
         if (CommitSha is { Length: > 7 })
         {
             CommitSha = CommitSha[..7];
@@ -55,6 +59,11 @@ public static class BuildInfo
 
         var serverUrl = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildServerUrl"));
         var runId = Normalize(metadata.GetValueOrDefault("SharpEmu.BuildRunId"));
+        if (serverUrl is not null && Repository is not null && fullCommitSha is not null)
+        {
+            CommitUrl = $"{serverUrl.TrimEnd('/')}/{Repository}/commit/{fullCommitSha}";
+        }
+
         if (serverUrl is not null && Repository is not null && runId is not null)
         {
             WorkflowRunUrl = $"{serverUrl.TrimEnd('/')}/{Repository}/actions/runs/{runId}";

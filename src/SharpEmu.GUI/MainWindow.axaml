@@ -49,9 +49,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
         <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
-        <Border Classes="pill">
+        <Button x:Name="VersionButton" Classes="pill" IsEnabled="False">
           <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
-        </Border>
+        </Button>
       </StackPanel>
     </Grid>
 

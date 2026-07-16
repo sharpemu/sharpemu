@@ -155,6 +155,17 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
+        VersionButton.Click += (_, _) =>
+        {
+            if (BuildInfo.CommitUrl is not null)
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = BuildInfo.CommitUrl,
+                    UseShellExecute = true,
+                });
+            }
+        };
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
@@ -372,7 +383,8 @@ public partial class MainWindow : Window
                 : $" · UNOFFICIAL {BuildInfo.CommitSha}";
         VersionText.Text = display;
         Title = $"SharpEmu {display}";
-        ToolTip.SetTip(VersionText, BuildInfo.Banner);
+        VersionButton.IsEnabled = BuildInfo.CommitUrl is not null;
+        ToolTip.SetTip(VersionButton, BuildInfo.Banner);
 
         _settings = GuiSettings.Load();
         Localization.Instance.Load(_settings.Language);
@@ -606,6 +618,12 @@ public partial class MainWindow : Window
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (e.Source is Visual source &&
+            (source is Button || source.FindAncestorOfType<Button>() is not null))
+        {
+            return;
+        }
+
         if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
         {
             BeginMoveDrag(e);
