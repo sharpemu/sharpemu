@@ -536,6 +536,15 @@ public static partial class Gen5MslTranslator
                     $"    device uint* b{index} [[buffer({_globalBufferBase + index})]],");
             }
 
+            if (_initialScalarBufferIndex >= 0)
+            {
+                // The per-dispatch scalar-state buffer sits at its flat slot,
+                // past every stage's global bindings; the shader only reads it.
+                source.AppendLine(
+                    $"    const device uint* b{_initialScalarBufferIndex} " +
+                    $"[[buffer({_initialScalarBufferIndex})]],");
+            }
+
             source.AppendLine(
                 $"    constant SharpEmuUniforms& sharpemu_uniforms [[buffer({UniformsBufferIndex})]],");
             EmitImageArguments(source);
@@ -978,6 +987,10 @@ public static partial class Gen5MslTranslator
                 case "STtraceData":
                 case "SClause":
                 case "VNop":
+                // NGG shaders bracket their exports with s_sendmsg
+                // (GS_ALLOC_REQ/DEALLOC) to reserve hardware export space;
+                // exports are translated directly, so the message is moot.
+                case "SSendmsg":
                     return true;
                 case "SBarrier":
                     Line("threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);");

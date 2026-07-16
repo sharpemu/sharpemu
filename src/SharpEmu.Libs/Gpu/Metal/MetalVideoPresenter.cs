@@ -52,6 +52,7 @@ internal static partial class MetalVideoPresenter
     private static bool _splashHidden;
     private static bool _closeRequested;
     private static Presentation? _latestPresentation;
+    private static bool _loggedFirstPresentedFrame;
     private static uint _windowWidth;
     private static uint _windowHeight;
 
@@ -389,6 +390,13 @@ internal static partial class MetalVideoPresenter
                 {
                     Thread.Sleep(8);
                     continue;
+                }
+
+                if (presentTexture != 0 && !_loggedFirstPresentedFrame)
+                {
+                    _loggedFirstPresentedFrame = true;
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] Metal VideoOut presenting {presentTextureWidth}x{presentTextureHeight}.");
                 }
 
                 var drawableTexture = MetalNative.Send(drawable, selTexture);
