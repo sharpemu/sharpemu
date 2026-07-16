@@ -17,4 +17,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Static MSL blocks (prelude helpers, fixed shaders) authored as real
+         Metal source; the emitter renders them with placeholder substitution. -->
+    <EmbeddedResource Include="Templates\**\*.msl" />
+  </ItemGroup>
+
 </Project>

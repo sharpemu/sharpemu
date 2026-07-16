@@ -8,6 +8,7 @@ path = [
     "**/packages.lock.json",
     "scripts/ps5_names.txt",
     "src/SharpEmu.GUI/Languages/**",
+    "src/SharpEmu.ShaderCompiler.Metal/Templates/**",
     "_logs/**",
     ".github/images/**",
     ".github/pull_request_template.md",

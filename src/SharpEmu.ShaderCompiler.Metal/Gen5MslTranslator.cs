@@ -632,186 +632,64 @@ public static partial class Gen5MslTranslator
             source.AppendLine("}");
         }
 
-        private void EmitPrelude(StringBuilder source)
-        {
-            // Shared helpers: MSL allows free functions, so unaligned and
-            // subdword access is a byte-pointer cast instead of the manual
-            // word-combining the SPIR-V translator inlines at every site. All
-            // access is range-checked against the binding's byte length; loads
-            // outside the buffer produce zero and stores are dropped, matching
-            // the SPIR-V translator's robust-access behavior.
-            source.AppendLine("static inline uint sharpemu_load_word(device uint* b, uint bytes, uint addr)");
-            source.AppendLine("{");
-            source.AppendLine("    if ((addr & 3u) == 0u)");
-            source.AppendLine("    {");
-            source.AppendLine("        return addr + 4u <= bytes ? b[addr >> 2] : 0u;");
-            source.AppendLine("    }");
-            source.AppendLine("    uint value = 0u;");
-            source.AppendLine("    device const uchar* p = (device const uchar*)b;");
-            source.AppendLine("    for (uint i = 0u; i < 4u; i++)");
-            source.AppendLine("    {");
-            source.AppendLine("        if (addr + i < bytes)");
-            source.AppendLine("        {");
-            source.AppendLine("            value |= (uint)p[addr + i] << (i * 8u);");
-            source.AppendLine("        }");
-            source.AppendLine("    }");
-            source.AppendLine("    return value;");
-            source.AppendLine("}");
-            source.AppendLine();
-            source.AppendLine("static inline uint sharpemu_load_bytes(device uint* b, uint bytes, uint addr, uint count, bool signExtend)");
-            source.AppendLine("{");
-            source.AppendLine("    uint value = 0u;");
-            source.AppendLine("    device const uchar* p = (device const uchar*)b;");
-            source.AppendLine("    for (uint i = 0u; i < count; i++)");
-            source.AppendLine("    {");
-            source.AppendLine("        if (addr + i < bytes)");
-            source.AppendLine("        {");
-            source.AppendLine("            value |= (uint)p[addr + i] << (i * 8u);");
-            source.AppendLine("        }");
-            source.AppendLine("    }");
-            source.AppendLine("    if (signExtend && count < 4u)");
-            source.AppendLine("    {");
-            source.AppendLine("        uint shift = 32u - (count * 8u);");
-            source.AppendLine("        value = (uint)(((int)(value << shift)) >> shift);");
-            source.AppendLine("    }");
-            source.AppendLine("    return value;");
-            source.AppendLine("}");
-            source.AppendLine();
-            source.AppendLine("static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, uint value, uint count)");
-            source.AppendLine("{");
-            source.AppendLine("    device uchar* p = (device uchar*)b;");
-            source.AppendLine("    for (uint i = 0u; i < count; i++)");
-            source.AppendLine("    {");
-            source.AppendLine("        if (addr + i < bytes)");
-            source.AppendLine("        {");
-            source.AppendLine("            p[addr + i] = (uchar)((value >> (i * 8u)) & 0xFFu);");
-            source.AppendLine("        }");
-            source.AppendLine("    }");
-            source.AppendLine("}");
-            source.AppendLine();
-            if (_stage == Gen5MslStage.Vertex)
-            {
-                // Single logical wave lane: the mask is this lane's bit.
-                source.AppendLine("static inline uint sharpemu_ballot(bool value)");
-                source.AppendLine("{");
-                source.AppendLine("    return value ? 1u : 0u;");
-                source.AppendLine("}");
-            }
-            else
-            {
-                source.AppendLine("static inline uint sharpemu_ballot(bool value)");
-                source.AppendLine("{");
-                source.AppendLine("    return (uint)(uint64_t)simd_ballot(value);");
-                source.AppendLine("}");
-            }
-            source.AppendLine();
-            source.AppendLine("static constant float sharpemu_off_i4_table[16] =");
-            source.AppendLine("{");
-            source.AppendLine("    0.0f, 0.0625f, 0.1250f, 0.1875f, 0.2500f, 0.3125f, 0.3750f, 0.4375f,");
-            source.AppendLine("    -0.5000f, -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,");
-            source.AppendLine("};");
-        }
+        // Shared helpers: MSL allows free functions, so unaligned and subdword
+        // access is a byte-pointer cast instead of the manual word-combining
+        // the SPIR-V translator inlines at every site. All access is
+        // range-checked against the binding's byte length; loads outside the
+        // buffer produce zero and stores are dropped, matching the SPIR-V
+        // translator's robust-access behavior. The static text lives in
+        // Templates/prelude.msl; only the wave-ballot expression varies —
+        // vertex functions have no simdgroup attributes, so that stage models
+        // a single logical wave lane whose mask is its own bit.
+        private void EmitPrelude(StringBuilder source) =>
+            source.Append(MslTemplates.Render(
+                "prelude",
+                ("ballot_return", _stage == Gen5MslStage.Vertex
+                    ? "value ? 1u : 0u"
+                    : "(uint)(uint64_t)simd_ballot(value)")));
 
+        // The GFX10 unified-format table is baked from the same authoritative
+        // decoder descriptor evaluation uses (dataFormat | numberFormat << 8);
+        // the descriptor is read at execution time, so decoding stays dynamic —
+        // compiled shaders may be reused with new SRDs. The static conversion
+        // functions live in Templates/format_prelude.msl.
         private static void EmitFormatLoadPrelude(StringBuilder source)
         {
-            // The GFX10 unified-format table, baked from the same authoritative
-            // decoder descriptor evaluation uses (dataFormat | numberFormat << 8).
-            // The descriptor is read at execution time, so decoding stays dynamic:
-            // compiled shaders may be reused with new SRDs.
-            source.Append("static constant uint sharpemu_gfx10_formats[128] = {");
+            var table = new StringBuilder();
             for (uint format = 0; format < 128; format++)
             {
                 Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat);
                 if ((format & 15) == 0)
                 {
-                    source.AppendLine();
-                    source.Append("   ");
+                    if (format != 0)
+                    {
+                        table.AppendLine();
+                    }
+
+                    table.Append("   ");
                 }
 
-                source.Append($" 0x{dataFormat | (numberFormat << 8):X}u,");
+                table.Append($" 0x{dataFormat | (numberFormat << 8):X}u,");
             }
 
-            source.AppendLine();
-            source.AppendLine("};");
-            source.AppendLine();
-
-            // Component layout for the legacy DATA_FORMAT values: byte offset,
-            // bit offset within that dword, and bit count (0 = absent).
-            source.AppendLine("static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint& byteOff, thread uint& bitOff, thread uint& bits)");
-            source.AppendLine("{");
-            source.AppendLine("    byteOff = 0u; bitOff = 0u; bits = 0u;");
-            source.AppendLine("    switch (component * 16u + dfmt)");
-            source.AppendLine("    {");
+            var layoutCases = new StringBuilder();
+            var first = true;
             foreach (var (component, format, bytes, bitOffset, bitCount) in FormatComponentLayouts())
             {
-                source.AppendLine(
+                if (!first)
+                {
+                    layoutCases.AppendLine();
+                }
+
+                first = false;
+                layoutCases.Append(
                     $"    case {component * 16 + format}u: byteOff = {bytes}u; bitOff = {bitOffset}u; bits = {bitCount}u; break;");
             }
 
-            source.AppendLine("    default: break;");
-            source.AppendLine("    }");
-            source.AppendLine("}");
-            source.AppendLine();
-
-            // Unsigned mini-float (10/11-bit shared-exponent style) to f32 bits.
-            source.AppendLine("static inline uint sharpemu_minifloat(uint raw, uint bits)");
-            source.AppendLine("{");
-            source.AppendLine("    uint mantissaBits = bits - 5u;");
-            source.AppendLine("    uint mantissa = raw & ((1u << mantissaBits) - 1u);");
-            source.AppendLine("    uint exponent = (raw >> mantissaBits) & 0x1Fu;");
-            source.AppendLine("    uint shift = 23u - mantissaBits;");
-            source.AppendLine("    if (exponent == 31u)");
-            source.AppendLine("    {");
-            source.AppendLine("        return 0x7F800000u | (mantissa << shift);");
-            source.AppendLine("    }");
-            source.AppendLine("    if (exponent == 0u)");
-            source.AppendLine("    {");
-            source.AppendLine("        float scale = mantissaBits == 6u ? (1.0f / 1048576.0f) : (1.0f / 524288.0f);");
-            source.AppendLine("        return as_type<uint>((float)mantissa * scale);");
-            source.AppendLine("    }");
-            source.AppendLine("    return ((exponent + 112u) << 23) | (mantissa << shift);");
-            source.AppendLine("}");
-            source.AppendLine();
-
-            source.AppendLine("static inline uint sharpemu_format_one(uint nfmt)");
-            source.AppendLine("{");
-            source.AppendLine("    return (nfmt == 4u || nfmt == 5u) ? 1u : 0x3F800000u;");
-            source.AppendLine("}");
-            source.AppendLine();
-
-            // NUM_FORMAT conversion of one extracted component to register bits.
-            source.AppendLine("static inline uint sharpemu_format_convert(uint raw, uint bits, uint nfmt, uint dfmt)");
-            source.AppendLine("{");
-            source.AppendLine("    uint lowMask = bits >= 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);");
-            source.AppendLine("    int signedRaw = extract_bits(as_type<int>(raw), 0u, bits);");
-            source.AppendLine("    switch (nfmt)");
-            source.AppendLine("    {");
-            source.AppendLine("    case 0u: return as_type<uint>((float)raw / (float)lowMask);");
-            source.AppendLine("    case 1u:");
-            source.AppendLine("    {");
-            source.AppendLine("        float snorm = (float)signedRaw / (float)(lowMask >> 1);");
-            source.AppendLine("        return as_type<uint>(fmax(snorm, -1.0f));");
-            source.AppendLine("    }");
-            source.AppendLine("    case 2u: return as_type<uint>((float)raw);");
-            source.AppendLine("    case 3u: return as_type<uint>((float)signedRaw);");
-            source.AppendLine("    case 5u: return (uint)signedRaw;");
-            source.AppendLine("    case 7u:");
-            source.AppendLine("    {");
-            source.AppendLine("        // 10_11_11/11_11_10 packed floats are unsigned mini-floats.");
-            source.AppendLine("        if (dfmt == 6u || dfmt == 7u)");
-            source.AppendLine("        {");
-            source.AppendLine("            return sharpemu_minifloat(raw, bits);");
-            source.AppendLine("        }");
-            source.AppendLine("        if (bits == 16u)");
-            source.AppendLine("        {");
-            source.AppendLine("            return as_type<uint>((float)as_type<half>((ushort)(raw & 0xFFFFu)));");
-            source.AppendLine("        }");
-            source.AppendLine("        return raw;");
-            source.AppendLine("    }");
-            source.AppendLine("    default: return raw;");
-            source.AppendLine("    }");
-            source.AppendLine("}");
-            source.AppendLine();
+            source.AppendLine(MslTemplates.Render(
+                "format_prelude",
+                ("format_table", table.ToString()),
+                ("layout_cases", layoutCases.ToString())));
         }
 
         /// <summary>

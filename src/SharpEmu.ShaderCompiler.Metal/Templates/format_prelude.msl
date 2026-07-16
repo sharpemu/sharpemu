@@ -1,0 +1,68 @@
+static constant uint sharpemu_gfx10_formats[128] = {
+{{format_table}}
+};
+
+static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint& byteOff, thread uint& bitOff, thread uint& bits)
+{
+    byteOff = 0u; bitOff = 0u; bits = 0u;
+    switch (component * 16u + dfmt)
+    {
+{{layout_cases}}
+    default: break;
+    }
+}
+
+static inline uint sharpemu_minifloat(uint raw, uint bits)
+{
+    uint mantissaBits = bits - 5u;
+    uint mantissa = raw & ((1u << mantissaBits) - 1u);
+    uint exponent = (raw >> mantissaBits) & 0x1Fu;
+    uint shift = 23u - mantissaBits;
+    if (exponent == 31u)
+    {
+        return 0x7F800000u | (mantissa << shift);
+    }
+    if (exponent == 0u)
+    {
+        float scale = mantissaBits == 6u ? (1.0f / 1048576.0f) : (1.0f / 524288.0f);
+        return as_type<uint>((float)mantissa * scale);
+    }
+    return ((exponent + 112u) << 23) | (mantissa << shift);
+}
+
+static inline uint sharpemu_format_one(uint nfmt)
+{
+    return (nfmt == 4u || nfmt == 5u) ? 1u : 0x3F800000u;
+}
+
+static inline uint sharpemu_format_convert(uint raw, uint bits, uint nfmt, uint dfmt)
+{
+    uint lowMask = bits >= 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+    int signedRaw = extract_bits(as_type<int>(raw), 0u, bits);
+    switch (nfmt)
+    {
+    case 0u: return as_type<uint>((float)raw / (float)lowMask);
+    case 1u:
+    {
+        float snorm = (float)signedRaw / (float)(lowMask >> 1);
+        return as_type<uint>(fmax(snorm, -1.0f));
+    }
+    case 2u: return as_type<uint>((float)raw);
+    case 3u: return as_type<uint>((float)signedRaw);
+    case 5u: return (uint)signedRaw;
+    case 7u:
+    {
+        // 10_11_11/11_11_10 packed floats are unsigned mini-floats.
+        if (dfmt == 6u || dfmt == 7u)
+        {
+            return sharpemu_minifloat(raw, bits);
+        }
+        if (bits == 16u)
+        {
+            return as_type<uint>((float)as_type<half>((ushort)(raw & 0xFFFFu)));
+        }
+        return raw;
+    }
+    default: return raw;
+    }
+}
