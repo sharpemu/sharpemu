@@ -9,6 +9,7 @@ path = [
     "scripts/ps5_names.txt",
     "src/SharpEmu.GUI/Languages/**",
     "src/SharpEmu.ShaderCompiler.Metal/Templates/**",
+    "tests/SharpEmu.ShaderCompiler.Metal.Tests/Goldens/**",
     "_logs/**",
     ".github/images/**",
     ".github/pull_request_template.md",
