@@ -5430,6 +5430,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] ExecuteEntry starting at 0x{entryPoint:X16}");
 		Console.Error.WriteLine($"[LOADER][INFO] RSP=0x{context[CpuRegister.Rsp]:X16}, RDI=0x{context[CpuRegister.Rdi]:X16}");
+		
+		// Capture main thread ID for diagnostics
+		if (HostMainThread.GetManagedThreadId() == -1)
+		{
+			HostMainThread.SetManagedThreadId(Environment.CurrentManagedThreadId);
+			Console.Error.WriteLine($"[LOADER][INFO] Main thread managed ID: {HostMainThread.GetManagedThreadId()}");
+		}
+		
 		ulong num = context[CpuRegister.Rsp];
 		if (num == 0)
 		{
@@ -6109,6 +6117,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						break;
 					}
 				}
+			}
+			
+			// Add main thread state to stall snapshot
+			if (HostMainThread.GetManagedThreadId() != -1)
+			{
+				var mainThreadState = HostMainThread.IsBlocked() ? "Blocked" : "Running";
+				var mainThreadBlockReason = HostMainThread.GetBlockReason() ?? "none";
+				var mainThreadLastImport = HostMainThread.GetLastImportNid() ?? "none";
+				var mainThreadLastRip = HostMainThread.GetLastRip();
+				
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] Stall main-thread: managed_id={HostMainThread.GetManagedThreadId()} " +
+					$"state={mainThreadState} block={mainThreadBlockReason} " +
+					$"last_import={mainThreadLastImport} last_rip=0x{mainThreadLastRip:X16}");
 			}
 		}
 		catch
