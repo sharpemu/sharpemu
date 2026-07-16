@@ -10,6 +10,7 @@ namespace SharpEmu.Libs.Pad;
 
 public static class PadExports
 {
+    private const int OrbisPadErrorInvalidArgument = unchecked((int)0x80920001);
     private const int OrbisPadErrorInvalidHandle = unchecked((int)0x80920003);
     private const int OrbisPadErrorNotInitialized = unchecked((int)0x80920005);
     private const int OrbisPadErrorDeviceNotConnected = unchecked((int)0x80920007);
@@ -22,6 +23,7 @@ public static class PadExports
     private const int StandardPortType = 0;
     private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;
+    private const int DeviceClassExtendedInformationSize = 0x14;
     private const int PadDataSize = 0x78;
 
     // Real firmware hands out small non-negative handles; 0 is valid. Some titles
@@ -112,6 +114,32 @@ public static class PadExports
         return IsPrimaryPadHandle(handle)
             ? ctx.SetReturn(0)
             : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+    }
+
+    [SysAbiExport(
+        Nid = "AcslpN1jHR8",
+        ExportName = "scePadDeviceClassGetExtendedInformation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadDeviceClassGetExtendedInformation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var informationAddress = ctx[CpuRegister.Rsi];
+        if (!IsPrimaryPadHandle(handle))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (informationAddress == 0)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
+        }
+
+        Span<byte> information = stackalloc byte[DeviceClassExtendedInformationSize];
+        information.Clear();
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
