@@ -192,6 +192,15 @@ internal static partial class MetalNative
     public static partial void SendVoidClearColor(nint receiver, nint selector, MtlClearColor color);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidBlendColor(
+        nint receiver,
+        nint selector,
+        float red,
+        float green,
+        float blue,
+        float alpha);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidViewport(nint receiver, nint selector, MtlViewport viewport);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]

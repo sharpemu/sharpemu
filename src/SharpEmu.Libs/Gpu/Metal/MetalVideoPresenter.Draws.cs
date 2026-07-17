@@ -618,6 +618,18 @@ internal static partial class MetalVideoPresenter
         uint targetWidth,
         uint targetHeight)
     {
+        // CB_BLEND_RED..ALPHA feed the CONSTANT_COLOR / CONSTANT_ALPHA blend
+        // factors; encoder state, so set unconditionally like the Vulkan
+        // presenter's dynamic blend constants.
+        var blendConstant = renderState.BlendConstant;
+        MetalNative.SendVoidBlendColor(
+            encoder,
+            MetalNative.Selector("setBlendColorRed:green:blue:alpha:"),
+            blendConstant.Red,
+            blendConstant.Green,
+            blendConstant.Blue,
+            blendConstant.Alpha);
+
         if (renderState.Viewport is { } viewport)
         {
             // Guests program Vulkan-style negative-height viewports to get y-up

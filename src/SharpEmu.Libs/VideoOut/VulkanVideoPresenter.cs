@@ -2656,6 +2656,7 @@ internal static unsafe class VulkanVideoPresenter
             public uint InstanceCount = 1;
             public PrimitiveTopology Topology = PrimitiveTopology.TriangleList;
             public GuestBlendState[] Blends = [GuestBlendState.Default];
+            public GuestBlendConstant BlendConstant;
             // Vulkan format of this draw's color target. Needed to suppress
             // blending on formats Metal cannot blend (integer / 32-bit float),
             // which otherwise makes vkCreateGraphicsPipelines fail and can
@@ -5577,6 +5578,7 @@ internal static unsafe class VulkanVideoPresenter
                 InstanceCount = Math.Max(draw.InstanceCount, 1),
                 Topology = GetPrimitiveTopology(draw.PrimitiveType),
                 Blends = draw.RenderState.Blends.ToArray(),
+                BlendConstant = draw.RenderState.BlendConstant,
                 Scissor = draw.RenderState.Scissor,
                 Viewport = draw.RenderState.Viewport,
                 Raster = draw.RenderState.Raster,
@@ -6237,13 +6239,16 @@ internal static unsafe class VulkanVideoPresenter
                         AttachmentCount = (uint)resources.Blends.Length,
                         PAttachments = colorBlendAttachments,
                     };
-                    var dynamicStateValues = stackalloc DynamicState[2];
+                    var dynamicStateValues = stackalloc DynamicState[3];
                     dynamicStateValues[0] = DynamicState.Viewport;
                     dynamicStateValues[1] = DynamicState.Scissor;
+                    // CB_BLEND_RED..ALPHA vary per draw without a pipeline
+                    // identity change, so the constant stays dynamic.
+                    dynamicStateValues[2] = DynamicState.BlendConstants;
                     var dynamicState = new PipelineDynamicStateCreateInfo
                     {
                         SType = StructureType.PipelineDynamicStateCreateInfo,
-                        DynamicStateCount = 2,
+                        DynamicStateCount = 3,
                         PDynamicStates = dynamicStateValues,
                     };
                     var depth = resources.Depth;
@@ -13608,6 +13613,15 @@ internal static unsafe class VulkanVideoPresenter
                 drawViewport.Y += ViewportDebugEpsilon;
             }
             _vk.CmdSetViewport(_commandBuffer, 0, 1, &drawViewport);
+            // CB_BLEND_RED..ALPHA feed the CONSTANT_COLOR/CONSTANT_ALPHA factors.
+            var blendConstants = stackalloc float[4]
+            {
+                resources.BlendConstant.Red,
+                resources.BlendConstant.Green,
+                resources.BlendConstant.Blue,
+                resources.BlendConstant.Alpha,
+            };
+            _vk.CmdSetBlendConstants(_commandBuffer, blendConstants);
             if (resources.VertexBuffers.Length != 0)
             {
                 var buffers = stackalloc VkBuffer[resources.VertexBuffers.Length];

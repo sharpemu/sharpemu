@@ -136,12 +136,22 @@ internal readonly record struct GuestBlendState(
         WriteMask: 0xFu);
 }
 
+/// <summary>CB_BLEND_RED..ALPHA: the constant color referenced by the
+/// CONSTANT_COLOR / CONSTANT_ALPHA blend factors. One constant serves every
+/// render target of a draw; the hardware reset value is transparent black.</summary>
+internal readonly record struct GuestBlendConstant(
+    float Red,
+    float Green,
+    float Blue,
+    float Alpha);
+
 internal sealed record GuestRenderState(
     IReadOnlyList<GuestBlendState> Blends,
     GuestRect? Scissor,
     GuestViewport? Viewport,
     GuestRasterState Raster,
-    GuestDepthState Depth)
+    GuestDepthState Depth,
+    GuestBlendConstant BlendConstant = default)
 {
     public static GuestRenderState Default { get; } = new(
         [GuestBlendState.Default],

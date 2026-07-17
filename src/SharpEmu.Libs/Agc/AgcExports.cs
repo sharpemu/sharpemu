@@ -6667,7 +6667,8 @@ public static partial class AgcExports
             scissor,
             DecodeViewport(registers, target.Width, target.Height, scissor),
             DecodeRasterState(registers),
-            DecodeDepthState(registers));
+            DecodeDepthState(registers),
+            DecodeBlendConstant(registers));
     }
 
     private static GuestRenderState CreateRenderState(
@@ -6700,7 +6701,8 @@ public static partial class AgcExports
             scissor,
             DecodeViewport(registers, target.Width, target.Height, scissor),
             DecodeRasterState(registers),
-            DecodeDepthState(registers));
+            DecodeDepthState(registers),
+            DecodeBlendConstant(registers));
     }
 
     // DB_DEPTH_CONTROL (context register 0x200): Z_ENABLE bit1, Z_WRITE_ENABLE
@@ -6803,6 +6805,22 @@ public static partial class AgcExports
         // POLY_MODE != 0 with a line front primitive type renders wireframe.
         var wireframe = polyMode != 0 && frontPtype == 1;
         return new GuestRasterState(cullFront, cullBack, frontFaceClockwise, wireframe);
+    }
+
+    /// <summary>CB_BLEND_RED..ALPHA carry the constant blend color as raw
+    /// float bits; unwritten registers read as the reset value (0.0).</summary>
+    private static GuestBlendConstant DecodeBlendConstant(
+        IReadOnlyDictionary<uint, uint> registers)
+    {
+        registers.TryGetValue(CbBlendRed, out var red);
+        registers.TryGetValue(CbBlendGreen, out var green);
+        registers.TryGetValue(CbBlendBlue, out var blue);
+        registers.TryGetValue(CbBlendAlpha, out var alpha);
+        return new GuestBlendConstant(
+            BitConverter.Int32BitsToSingle(unchecked((int)red)),
+            BitConverter.Int32BitsToSingle(unchecked((int)green)),
+            BitConverter.Int32BitsToSingle(unchecked((int)blue)),
+            BitConverter.Int32BitsToSingle(unchecked((int)alpha)));
     }
 
     private static GuestBlendState DecodeBlendState(
