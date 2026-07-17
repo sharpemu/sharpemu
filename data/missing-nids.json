@@ -1,0 +1,139 @@
+{
+  "_description": "SharpEmu Missing NID Database — tracks all unresolved NIDs across games",
+  "_format": "Each entry: nid -> { name, library, games[], status, first_seen, notes }",
+  "_copyright": "NO game files. Only metadata, NID strings, and debug info.",
+
+  "DiGVep5yB5w": {
+    "name": "_ZSt13_Execute_onceRSt9once_flagPFiPv",
+    "common_name": "std::call_once / __cxa_once",
+    "library": "libc",
+    "games": ["PPSA14677"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "caller_rip": "0x00000008007F4029",
+    "notes": "C++ std::call_once implementation. Critical for all C++ games with static initialization."
+  },
+
+  "MQFPAqQPt1s": {
+    "name": "__cxa_decrement_exception_refcount",
+    "common_name": "C++ exception reference counting",
+    "library": "libc",
+    "games": ["PPSA14677"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "caller_rip": "0x00000008007F4041",
+    "notes": "Part of C++ exception handling. Usually paired with __cxa_increment_exception_refcount."
+  },
+
+  "L51FfEMZa4o": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 9,
+    "notes": "Not found in standard aerolib. Possibly game-internal or from a non-standard library."
+  },
+
+  "GqL992msUmo": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 4,
+    "notes": "Not found in standard aerolib. Possibly game-internal."
+  },
+
+  "y2ybsIQ073A": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 2,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "527zZ46M9IM": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 2,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "o2hcK6F8Ih4": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "iILsKSo5Syg": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "MjQ5oH6b620": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "4AQlc0jE9PQ": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "MPBXfoxd+eo": {
+    "name": "unknown",
+    "common_name": "unknown — not in aerolib",
+    "library": "unknown",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Not found in standard aerolib."
+  },
+
+  "M3wFXbYQtAA": {
+    "name": "sceNpUnregisterStateCallbackA",
+    "common_name": "NP state callback unregister",
+    "library": "libSceNp",
+    "games": ["PPSA06328"],
+    "status": "missing",
+    "first_seen": "2026-07-16",
+    "calls_observed": 1,
+    "notes": "Network platform service. Can be stubbed with return OK."
+  }
+}

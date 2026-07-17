@@ -1,0 +1,13 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+</Project>
