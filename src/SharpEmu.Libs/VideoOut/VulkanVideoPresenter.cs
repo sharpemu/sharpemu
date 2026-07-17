@@ -271,6 +271,22 @@ internal static unsafe class VulkanVideoPresenter
     private static bool _presenterCloseRequested;
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
     private const uint NvidiaVendorId = 0x10DE;
+
+    // Base ranking used when picking a Vulkan adapter, before the vendor bonus in ScorePhysicalDevice.
+    // A software rasterizer (Mesa lavapipe and similar ICDs enumerate as Cpu) has to rank below every
+    // real GPU. #97 pushed integrated GPUs down to -100 so they are only chosen as a last resort among
+    // real devices; Cpu sits below even that, so an integrated GPU still wins whenever both are present.
+    // Cpu stays above the int.MinValue seed in the selection loop, so it is still picked when it is the
+    // only adapter that can present.
+    internal static int ScoreDeviceType(PhysicalDeviceType deviceType) => deviceType switch
+    {
+        PhysicalDeviceType.DiscreteGpu => 300,
+        PhysicalDeviceType.VirtualGpu => 100,
+        PhysicalDeviceType.IntegratedGpu => -100,
+        PhysicalDeviceType.Cpu => -200,
+        _ => 10,
+    };
+
     private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
     private const int GlfwPlatformHint = 0x00050003;
@@ -3210,14 +3226,7 @@ internal static unsafe class VulkanVideoPresenter
                 return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
             }
 
-            var score = properties.DeviceType switch
-            {
-                PhysicalDeviceType.DiscreteGpu => 300,
-                PhysicalDeviceType.VirtualGpu => 100,
-                PhysicalDeviceType.Cpu => 50,
-                PhysicalDeviceType.IntegratedGpu => -100,
-                _ => 10,
-            };
+            var score = ScoreDeviceType(properties.DeviceType);
 
             if (properties.VendorID == NvidiaVendorId)
             {
