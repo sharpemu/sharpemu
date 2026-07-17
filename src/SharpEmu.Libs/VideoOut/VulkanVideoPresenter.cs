@@ -3214,7 +3214,11 @@ internal static unsafe class VulkanVideoPresenter
             {
                 PhysicalDeviceType.DiscreteGpu => 300,
                 PhysicalDeviceType.VirtualGpu => 100,
-                PhysicalDeviceType.Cpu => 50,
+                // Integrated GPU penalised to -100 as a workaround for
+                // an AMD driver crash in vkCreateGraphicsPipelines (#97).
+                // The CPU (software rasterizer) is placed below even that
+                // so no real GPU ever loses to Lavapipe / SwiftShader / WARP.
+                PhysicalDeviceType.Cpu => -200,
                 PhysicalDeviceType.IntegratedGpu => -100,
                 _ => 10,
             };
