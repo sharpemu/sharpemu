@@ -14,6 +14,8 @@ namespace SharpEmu.Libs.Gpu.Metal;
 /// </summary>
 internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
 {
+    public string BackendName => "Metal";
+
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new MetalCompiledGuestShader(new Gen5MslShader(
             MslFixedShaders.CreateDepthOnlyFragment(),

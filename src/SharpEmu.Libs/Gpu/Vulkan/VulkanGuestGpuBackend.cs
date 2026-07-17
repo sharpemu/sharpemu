@@ -15,6 +15,8 @@ namespace SharpEmu.Libs.Gpu.Vulkan;
 /// </summary>
 internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
+    public string BackendName => "Vulkan";
+
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
 

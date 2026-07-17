@@ -18,6 +18,10 @@ namespace SharpEmu.Libs.Gpu;
 /// </summary>
 internal interface IGuestGpuBackend
 {
+    /// <summary>Human-readable name of this backend ("Metal", "Vulkan"), shown in
+    /// the window title on macOS where either backend can run.</summary>
+    string BackendName { get; }
+
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 
