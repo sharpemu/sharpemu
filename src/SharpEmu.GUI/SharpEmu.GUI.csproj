@@ -42,15 +42,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 
 
-  <!-- The controller readers (DualSense raw HID + Xbox XInput) are shared
-       with the emulator's host input backend. They are dependency-free, so
-       they are compiled in directly rather than pulling a reference to all
-       of SharpEmu.HLE into the launcher. -->
+  <!-- The controller readers are shared with the emulator's host input
+       backend. They are dependency-free, so they are compiled in directly
+       rather than pulling a reference to all of SharpEmu.HLE into the
+       launcher. Every platform's transport is compiled on every platform —
+       each one is guarded by an OS check at runtime, so the launcher stays a
+       single portable build. -->
   <ItemGroup>
     <Compile Include="..\SharpEmu.HLE\Host\HostGamepadState.cs" Link="Input/HostGamepadState.cs" />
-    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsHidNative.cs" Link="Input/WindowsHidNative.cs" />
-    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsDualSenseReader.cs" Link="Input/WindowsDualSenseReader.cs" />
-    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsXInputReader.cs" Link="Input/WindowsXInputReader.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\HostGamepad.cs" Link="Input/HostGamepad.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\DualSense\DualSenseProtocol.cs" Link="Input/DualSense/DualSenseProtocol.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\DualSense\DualSenseTransport.cs" Link="Input/DualSense/DualSenseTransport.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\DualSense\DualSenseReader.cs" Link="Input/DualSense/DualSenseReader.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsHidNative.cs" Link="Input/Windows/WindowsHidNative.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsDualSenseTransport.cs" Link="Input/Windows/WindowsDualSenseTransport.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Windows\WindowsXInputReader.cs" Link="Input/Windows/WindowsXInputReader.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Linux\LinuxHidRawNative.cs" Link="Input/Linux/LinuxHidRawNative.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Linux\LinuxDualSenseTransport.cs" Link="Input/Linux/LinuxDualSenseTransport.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Mac\MacHidNative.cs" Link="Input/Mac/MacHidNative.cs" />
+    <Compile Include="..\SharpEmu.HLE\Host\Mac\MacDualSenseTransport.cs" Link="Input/Mac/MacDualSenseTransport.cs" />
   </ItemGroup>
 
 </Project>

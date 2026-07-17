@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host.DualSense;
 
 namespace SharpEmu.HLE.Host.Windows;
 
@@ -14,14 +15,14 @@ internal sealed partial class WindowsHostInput : IHostInput
 {
     public void EnsureStarted()
     {
-        WindowsDualSenseReader.EnsureStarted();
+        DualSenseReader.EnsureStarted();
         WindowsXInputReader.EnsureStarted();
     }
 
     public int GetGamepadStates(Span<HostGamepadState> destination)
     {
         var count = 0;
-        if (count < destination.Length && WindowsDualSenseReader.TryGetState(out var dualSense))
+        if (count < destination.Length && DualSenseReader.TryGetState(out var dualSense))
         {
             destination[count++] = dualSense;
         }
@@ -36,7 +37,7 @@ internal sealed partial class WindowsHostInput : IHostInput
 
     public string? DescribeConnectedGamepad()
     {
-        if (WindowsDualSenseReader.TryGetState(out _))
+        if (DualSenseReader.TryGetState(out _))
         {
             return "DualSense";
         }
@@ -46,7 +47,7 @@ internal sealed partial class WindowsHostInput : IHostInput
 
     public void SetRumble(byte largeMotor, byte smallMotor)
     {
-        WindowsDualSenseReader.SetRumble(largeMotor, smallMotor);
+        DualSenseReader.SetRumble(largeMotor, smallMotor);
         WindowsXInputReader.SetRumble(largeMotor, smallMotor);
     }
 
@@ -54,9 +55,9 @@ internal sealed partial class WindowsHostInput : IHostInput
         WindowsXInputReader.SetTriggerRumble(leftTrigger, rightTrigger);
 
     public void SetLightbar(byte red, byte green, byte blue) =>
-        WindowsDualSenseReader.SetLightbar(red, green, blue);
+        DualSenseReader.SetLightbar(red, green, blue);
 
-    public void ResetLightbar() => WindowsDualSenseReader.ResetLightbar();
+    public void ResetLightbar() => DualSenseReader.ResetLightbar();
 
     public bool IsHostWindowFocused()
     {

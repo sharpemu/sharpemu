@@ -13,7 +13,6 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Logging;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
@@ -169,8 +168,7 @@ public partial class MainWindow : Window
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
 
-        WindowsDualSenseReader.EnsureStarted();
-        WindowsXInputReader.EnsureStarted();
+        HostGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -260,10 +258,7 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        // DualSense wins when both are connected; XInput covers Xbox pads.
-        var isDualSense = WindowsDualSenseReader.TryGetState(out var pad);
-        var connected = isDualSense || WindowsXInputReader.TryGetState(out pad);
-        var padName = isDualSense ? "DualSense" : connected ? "Xbox controller" : null;
+        var connected = HostGamepad.TryGetState(out var pad, out var padName);
 
         // Feed the live tester whenever its tab is on screen, connected or not.
         if (IsActive && OptionsPage.IsVisible && ControllerTabItem.IsSelected)
@@ -385,7 +380,11 @@ public partial class MainWindow : Window
         {
             ControllerStatusDot.Fill = DisconnectedBrush;
             ControllerStatusText.Text = "No controller connected";
+            // A pad the host can see but refuses to open (hidraw permissions
+            // on Linux, Input Monitoring on macOS) is a fixable problem, not
+            // an absent controller — say which one it is.
             ControllerStatusDetail.Text =
+                HostGamepad.UnavailableReason ??
                 "Connect a DualSense or Xbox controller — it is detected automatically.";
         }
 
@@ -425,16 +424,14 @@ public partial class MainWindow : Window
 
     private async Task TestRumbleAsync()
     {
-        WindowsDualSenseReader.SetRumble(210, 190);
-        WindowsXInputReader.SetRumble(210, 190);
+        HostGamepad.SetRumble(210, 190);
         try
         {
             await Task.Delay(450);
         }
         finally
         {
-            WindowsDualSenseReader.SetRumble(0, 0);
-            WindowsXInputReader.SetRumble(0, 0);
+            HostGamepad.SetRumble(0, 0);
         }
     }
 
