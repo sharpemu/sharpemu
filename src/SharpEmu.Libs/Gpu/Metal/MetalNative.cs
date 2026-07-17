@@ -239,6 +239,9 @@ internal static partial class MetalNative
         [MarshalAs(UnmanagedType.I1)] bool repeats);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendInitFrame(nint receiver, nint selector, CGRect frame);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendInitWindow(
         nint receiver,
         nint selector,
@@ -299,6 +302,18 @@ internal static partial class MetalNative
         {
             Marshal.FreeCoTaskMem(utf8);
         }
+    }
+
+    /// <summary>Reads an NSString's UTF-8 contents, or null if the handle is nil.</summary>
+    public static string? ReadNsString(nint nsString)
+    {
+        if (nsString == 0)
+        {
+            return null;
+        }
+
+        var utf8 = Send(nsString, Selector("UTF8String"));
+        return utf8 == 0 ? null : Marshal.PtrToStringUTF8(utf8);
     }
 
     public static string DescribeError(nint error)

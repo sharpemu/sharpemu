@@ -55,6 +55,14 @@ internal static partial class MetalVideoPresenter
     private static bool _closeRequested;
     private static Presentation? _latestPresentation;
     private static bool _loggedFirstPresentedFrame;
+    private static int _titleRefreshCounter;
+    private static string? _lastWindowTitle;
+
+    // CPU-rasterized perf HUD (F1), blitted over the frame like the Vulkan
+    // presenter does; the panel texture lives for the window's lifetime.
+    private static nint _overlayTexture;
+    private static readonly byte[] _overlayPixels =
+        new byte[PerfOverlay.PanelWidth * PerfOverlay.PanelHeight * 4];
 
     // Presenter objects and per-frame present state, shared between window setup
     // and the display-link RenderFrame callback (both on the main thread).
@@ -224,6 +232,16 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
+        // Mirror the Vulkan presenter: fold the selected GPU's name into the
+        // window title. Without this the Metal title never gains the "· <GPU>"
+        // suffix the Vulkan path shows.
+        var deviceName = MetalNative.ReadNsString(
+            MetalNative.Send(_device, MetalNative.Selector("name")));
+        if (!string.IsNullOrEmpty(deviceName))
+        {
+            VideoOutExports.SetSelectedGpuName(deviceName);
+        }
+
         // Fixed window like the Vulkan presenter: guest frames letterbox into
         // it. Sizing the window from the guest's display mode (4K) exceeds the
         // screen — macOS clamps the window while the layer keeps the requested
@@ -241,6 +259,15 @@ internal static partial class MetalVideoPresenter
             MetalNative.SendVoid(_application, MetalNative.Selector("finishLaunching"));
 
             _window = CreateWindow(width, height);
+
+            // Swap in the key-capturing view before the metal layer attaches so
+            // the layer lands on the input-aware content view.
+            var keyView = MetalNative.SendInitFrame(
+                MetalNative.Send(CreateKeyViewClass(), MetalNative.Selector("alloc")),
+                MetalNative.Selector("initWithFrame:"),
+                new CGRect { X = 0, Y = 0, Width = width, Height = height });
+            MetalNative.SendVoid(_window, MetalNative.Selector("setContentView:"), keyView);
+
             _metalLayer = CreateLayer(_device, _window, out _drawableWidth, out _drawableHeight);
             _commandQueue = MetalNative.Send(_device, MetalNative.Selector("newCommandQueue"));
             if (!TryCreatePresentPipeline(_device, out _presentPipeline, out var pipelineError))
@@ -254,6 +281,8 @@ internal static partial class MetalVideoPresenter
             MetalNative.SendVoid(_window, MetalNative.Selector("makeKeyAndOrderFront:"), 0);
             MetalNative.SendVoidBool(
                 _application, MetalNative.Selector("activateIgnoringOtherApps:"), true);
+            MetalNative.SendVoid(_window, MetalNative.Selector("makeFirstResponder:"), keyView);
+            MetalHostInput.Attach();
 
             // A repeating NSTimer on this (main) run loop fires onFrame: at the
             // display rate. CADisplayLink (NSView.displayLinkWithTarget:selector:)
@@ -306,6 +335,65 @@ internal static partial class MetalVideoPresenter
         }
     }
 
+    /// <summary>
+    /// An NSView subclass that records key events for pad emulation. Overriding
+    /// keyDown:/keyUp: (instead of an event monitor) needs no ObjC blocks, and
+    /// swallowing the events also silences the system alert beep AppKit plays
+    /// for unhandled keys. Registered once per process.
+    /// </summary>
+    private static unsafe nint CreateKeyViewClass()
+    {
+        var cls = MetalNative.objc_allocateClassPair(
+            MetalNative.Class("NSView"), "SharpEmuMetalView", 0);
+        if (cls == 0)
+        {
+            return MetalNative.Class("SharpEmuMetalView");
+        }
+
+        var keyDown = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnKeyDown;
+        MetalNative.class_addMethod(cls, MetalNative.Selector("keyDown:"), keyDown, "v@:@");
+        var keyUp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnKeyUp;
+        MetalNative.class_addMethod(cls, MetalNative.Selector("keyUp:"), keyUp, "v@:@");
+        // First responder status is what routes key events to this view.
+        var accepts = (nint)(delegate* unmanaged[Cdecl]<nint, nint, byte>)&AcceptsFirstResponder;
+        MetalNative.class_addMethod(
+            cls, MetalNative.Selector("acceptsFirstResponder"), accepts, "c@:");
+        MetalNative.objc_registerClassPair(cls);
+        return cls;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnKeyDown(nint self, nint cmd, nint nsEvent)
+    {
+        try
+        {
+            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
+            var isRepeat = MetalNative.SendBool(nsEvent, MetalNative.Selector("isARepeat"));
+            MetalHostInput.KeyDown(keyCode, isRepeat);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Metal key-down handler failed: {exception.Message}");
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnKeyUp(nint self, nint cmd, nint nsEvent)
+    {
+        try
+        {
+            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
+            MetalHostInput.KeyUp(keyCode);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Metal key-up handler failed: {exception.Message}");
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static byte AcceptsFirstResponder(nint self, nint cmd) => 1;
+
     private static unsafe nint CreateRenderTimerTarget()
     {
         // A minimal NSObject subclass whose onFrame: is our unmanaged callback —
@@ -344,6 +432,7 @@ internal static partial class MetalVideoPresenter
 
     private static void RenderFrame()
     {
+        MetalHostInput.PumpAutoKeys();
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
@@ -446,6 +535,20 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
+            // The window title reflects late guest state (the game registers its
+            // application name after boot) plus the GPU suffix; the Vulkan
+            // presenter re-reads it, so refresh periodically here for parity.
+            if ((++_titleRefreshCounter & 0x3F) == 0)
+            {
+                var title = VideoOutExports.GetWindowTitle();
+                if (!string.Equals(title, _lastWindowTitle, StringComparison.Ordinal))
+                {
+                    _lastWindowTitle = title;
+                    MetalNative.SendVoid(
+                        _window, MetalNative.Selector("setTitle:"), MetalNative.NsString(title));
+                }
+            }
+
             var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
             {
@@ -480,14 +583,89 @@ internal static partial class MetalVideoPresenter
                     _drawableHeight);
             }
 
+            if (PerfOverlay.Enabled)
+            {
+                EncodeOverlay(encoder);
+            }
+
             MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("presentDrawable:"), drawable);
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+            PerfOverlay.RecordPresent();
         }
         finally
         {
             MetalNative.objc_autoreleasePoolPop(pool);
         }
+    }
+
+    /// <summary>Draws the CPU-rasterized perf panel over the frame's top-left
+    /// corner, reusing the present pipeline with a panel-sized viewport.</summary>
+    private static void EncodeOverlay(nint encoder)
+    {
+        if (_overlayTexture == 0)
+        {
+            var descriptor = MetalNative.SendTextureDescriptor(
+                MetalNative.Class("MTLTextureDescriptor"),
+                MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+                PixelFormatBgra8Unorm,
+                PerfOverlay.PanelWidth,
+                PerfOverlay.PanelHeight,
+                mipmapped: false);
+            _overlayTexture = MetalNative.Send(
+                _device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
+            if (_overlayTexture == 0)
+            {
+                return;
+            }
+        }
+
+        int pendingWork;
+        lock (_gate)
+        {
+            pendingWork = _pendingGuestWorkCount;
+        }
+
+        PerfOverlay.Fill(_overlayPixels, pendingWork, 0);
+        ReplaceTextureContents(
+            _overlayTexture,
+            PerfOverlay.PanelWidth,
+            PerfOverlay.PanelHeight,
+            _overlayPixels,
+            PerfOverlay.PanelWidth,
+            bytesPerPixel: 4);
+
+        const double margin = 16;
+        var panelWidth = Math.Min(PerfOverlay.PanelWidth, _drawableWidth - margin);
+        var panelHeight = Math.Min(PerfOverlay.PanelHeight, _drawableHeight - margin);
+        if (panelWidth <= 0 || panelHeight <= 0)
+        {
+            return;
+        }
+
+        MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), _presentPipeline);
+        MetalNative.SendVoidViewport(
+            encoder,
+            MetalNative.Selector("setViewport:"),
+            new MtlViewport
+            {
+                OriginX = margin,
+                OriginY = margin,
+                Width = panelWidth,
+                Height = panelHeight,
+                ZNear = 0,
+                ZFar = 1,
+            });
+        MetalNative.SendSetAtIndex(
+            encoder, MetalNative.Selector("setFragmentTexture:atIndex:"), _overlayTexture, 0);
+        MetalNative.SendSetAtIndex(
+            encoder, MetalNative.Selector("setFragmentSamplerState:atIndex:"), _presentSampler, 0);
+        MetalNative.SendDrawPrimitives(
+            encoder,
+            MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:"),
+            PrimitiveTypeTriangle,
+            0,
+            3);
     }
 
     private static nint CreateWindow(uint width, uint height)
@@ -529,6 +707,11 @@ internal static partial class MetalVideoPresenter
             MetalNative.Selector("init"));
         MetalNative.SendVoid(layer, MetalNative.Selector("setDevice:"), device);
         MetalNative.Send(layer, MetalNative.Selector("setPixelFormat:"), (nint)PixelFormatBgra8Unorm);
+        // A Core Animation layer composites with its alpha channel by default, so
+        // a presented frame whose guest alpha is zero would show through as the
+        // window background (black). The presenter output is a finished opaque
+        // frame; mark the layer opaque so alpha never reaches the compositor.
+        MetalNative.SendVoidBool(layer, MetalNative.Selector("setOpaque:"), true);
         MetalNative.SendVoidBool(layer, MetalNative.Selector("setFramebufferOnly:"), true);
         MetalNative.SendVoidDouble(layer, MetalNative.Selector("setContentsScale:"), scale);
         MetalNative.SendVoidSize(
@@ -559,15 +742,23 @@ internal static partial class MetalVideoPresenter
     private static bool TryCreatePresentPipeline(nint device, out nint pipeline, out string error)
     {
         pipeline = 0;
+        var dbg = Environment.GetEnvironmentVariable("SHARPEMU_METAL_DBG");
+        var fragmentSource = dbg switch
+        {
+            "solid" => MslFixedShaders.CreateSolidFragment(0f, 1f, 0f, 1f),
+            "uv" => MslFixedShaders.CreateAttributeFragment(0),
+            _ => MslFixedShaders.CreatePresentFragment(),
+        };
         if (!TryCompileLibrary(device, MslFixedShaders.CreateFullscreenVertex(1), out var vertexLibrary, out error) ||
-            !TryCompileLibrary(device, MslFixedShaders.CreatePresentFragment(), out var fragmentLibrary, out error))
+            !TryCompileLibrary(device, fragmentSource, out var fragmentLibrary, out error))
         {
             return false;
         }
 
         var selNewFunction = MetalNative.Selector("newFunctionWithName:");
+        var fragmentEntry = dbg switch { "solid" => "solid_fs", "uv" => "attribute_fs", _ => "present_fs" };
         var vertexFunction = MetalNative.Send(vertexLibrary, selNewFunction, MetalNative.NsString("fullscreen_vs"));
-        var fragmentFunction = MetalNative.Send(fragmentLibrary, selNewFunction, MetalNative.NsString("present_fs"));
+        var fragmentFunction = MetalNative.Send(fragmentLibrary, selNewFunction, MetalNative.NsString(fragmentEntry));
         if (vertexFunction == 0 || fragmentFunction == 0)
         {
             error = "present shader entry points missing from the compiled libraries";

@@ -358,6 +358,7 @@ internal static partial class MetalVideoPresenter
     {
         var perfStart = System.Diagnostics.Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _perfDrawCount);
+        VideoOut.PerfOverlay.RecordDraw();
         try
         {
             ExecuteOffscreenDrawCore(device, queue, work);
@@ -705,7 +706,7 @@ internal static partial class MetalVideoPresenter
         nint device,
         nint encoder,
         OffscreenGuestDraw work,
-        out List<(nint Buffer, GuestMemoryBuffer Guest)> writeBackBuffers)
+        out List<(nint Buffer, GuestMemoryBuffer Guest, uint Bias)> writeBackBuffers)
     {
         var draw = work.Draw;
         var buffers = new List<nint>();
@@ -713,22 +714,24 @@ internal static partial class MetalVideoPresenter
 
         var selSetVertexBuffer = MetalNative.Selector("setVertexBuffer:offset:atIndex:");
         var selSetFragmentBuffer = MetalNative.Selector("setFragmentBuffer:offset:atIndex:");
-        for (var index = 0; index < draw.GlobalMemoryBuffers.Length; index++)
+        var bufferCount = draw.GlobalMemoryBuffers.Length;
+        var boundBytes = new uint[Math.Max(bufferCount, 1)];
+        for (var index = 0; index < bufferCount; index++)
         {
             var guest = draw.GlobalMemoryBuffers[index];
-            var buffer = CreateBuffer(device, guest.Data, guest.Length);
+            var buffer = CreateGlobalBuffer(device, guest, out var bias, out boundBytes[index]);
             buffers.Add(buffer);
             MetalNative.SendSetBuffer(encoder, selSetVertexBuffer, buffer, 0, (nuint)index);
             MetalNative.SendSetBuffer(encoder, selSetFragmentBuffer, buffer, 0, (nuint)index);
             if (guest.Writable && guest.WriteBackToGuest)
             {
-                writeBackBuffers.Add((buffer, guest));
+                writeBackBuffers.Add((buffer, guest, bias));
             }
         }
 
         // SharpEmuUniforms per the translation contract: dispatch limit (unused by
-        // graphics stages), reserved, then each bound buffer's byte length.
-        var bufferCount = draw.GlobalMemoryBuffers.Length;
+        // graphics stages), reserved, then each bound buffer's byte length
+        // (including the alignment-bias prefix the shader indexes past).
         var uniforms = new byte[16 + (Math.Max(bufferCount, 1) * sizeof(uint))];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(0), 1);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(4), 1);
@@ -737,13 +740,32 @@ internal static partial class MetalVideoPresenter
         {
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
                 uniforms.AsSpan(16 + (index * sizeof(uint))),
-                (uint)draw.GlobalMemoryBuffers[index].Length);
+                boundBytes[index]);
         }
 
+        // Each stage declares SharpEmuUniforms at its own translation-time index
+        // (globalBufferBase + totalGlobalBufferCount). A draw whose vertex-stage
+        // guest buffers sit after the pixel stage's gives the two stages
+        // different indices, so bind the buffer at each stage's declared slot —
+        // one shared index leaves the other stage's uniforms unbound, which
+        // zeroes its bounds-checked loads (caught by Metal API validation as
+        // "missing Buffer binding ... for sharpemu_uniforms").
         var uniformsBuffer = CreateBuffer(device, uniforms, uniforms.Length);
         buffers.Add(uniformsBuffer);
-        MetalNative.SendSetBuffer(encoder, selSetVertexBuffer, uniformsBuffer, 0, (nuint)bufferCount);
-        MetalNative.SendSetBuffer(encoder, selSetFragmentBuffer, uniformsBuffer, 0, (nuint)bufferCount);
+        var vertexUniformsIndex = draw.VertexShader?.Shader.UniformsBufferIndex ?? -1;
+        MetalNative.SendSetBuffer(
+            encoder,
+            selSetVertexBuffer,
+            uniformsBuffer,
+            0,
+            (nuint)(vertexUniformsIndex >= 0 ? vertexUniformsIndex : bufferCount));
+        var fragmentUniformsIndex = draw.PixelShader.Shader.UniformsBufferIndex;
+        MetalNative.SendSetBuffer(
+            encoder,
+            selSetFragmentBuffer,
+            uniformsBuffer,
+            0,
+            (nuint)(fragmentUniformsIndex >= 0 ? fragmentUniformsIndex : bufferCount));
 
         var selSetVertexTexture = MetalNative.Selector("setVertexTexture:atIndex:");
         var selSetFragmentTexture = MetalNative.Selector("setFragmentTexture:atIndex:");
@@ -769,11 +791,10 @@ internal static partial class MetalVideoPresenter
             var vertexBuffer = draw.VertexBuffers[index];
             var buffer = CreateBuffer(device, vertexBuffer.Data, vertexBuffer.Length);
             buffers.Add(buffer);
-            var offset = vertexBuffer.OffsetBytes < (uint)vertexBuffer.Length
-                ? vertexBuffer.OffsetBytes
-                : 0;
+            // Bind at zero; the attribute's byte offset (set in the vertex
+            // descriptor) selects the field inside the interleaved vertex.
             MetalNative.SendSetBuffer(
-                encoder, selSetVertexBuffer, buffer, offset, VertexBufferSlotBase + (nuint)index);
+                encoder, selSetVertexBuffer, buffer, 0, VertexBufferSlotBase + (nuint)index);
         }
 
         return buffers;
@@ -849,6 +870,9 @@ internal static partial class MetalVideoPresenter
                 ((ulong)vertexBuffer.DataFormat << 16) |
                 ((ulong)vertexBuffer.NumberFormat << 26) |
                 ((ulong)vertexBuffer.Stride << 34));
+            // The attribute byte offset is baked into the pipeline's vertex
+            // descriptor, so it must key the cache too.
+            Mix(vertexBuffer.OffsetBytes);
         }
 
         var key = new PipelineKey(draw.VertexShader, draw.PixelShader, stateHash);
@@ -984,7 +1008,17 @@ internal static partial class MetalVideoPresenter
                 MetalNative.Selector("setFormat:"),
                 (nint)ToMetalVertexFormat(
                     vertexBuffer.DataFormat, vertexBuffer.NumberFormat, vertexBuffer.ComponentCount));
-            MetalNative.Send(attribute, MetalNative.Selector("setOffset:"), 0);
+            // The guest byte offset is the attribute's position inside the
+            // interleaved vertex; carry it on the attribute (buffer bound at 0)
+            // rather than the buffer bind offset. Metal fetches a fixed
+            // (bind-offset + attribute-offset + index*stride), so the two are
+            // arithmetically equal, but a non-zero per-buffer bind offset here
+            // fetched zero on this path — keeping the attribute offset is the
+            // layout Metal's vertex-descriptor path expects.
+            var attributeOffset = vertexBuffer.OffsetBytes < (uint)vertexBuffer.Length
+                ? vertexBuffer.OffsetBytes
+                : 0;
+            MetalNative.Send(attribute, MetalNative.Selector("setOffset:"), (nint)attributeOffset);
             MetalNative.Send(attribute, MetalNative.Selector("setBufferIndex:"), (nint)slot);
 
             var layout = MetalNative.SendAtIndex(layouts, selAt, slot);
@@ -1213,6 +1247,8 @@ internal static partial class MetalVideoPresenter
         return texture;
     }
 
+    private static int _missingTextureTraces;
+
     private static nint CreateDrawTexture(nint device, GuestDrawTexture texture)
     {
         if (texture.Width == 0 || texture.Height == 0)
@@ -1245,11 +1281,29 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
+            if (_missingTextureTraces < 16)
+            {
+                _missingTextureTraces++;
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Metal draw texture unresolved: live 0x{texture.Address:X} " +
+                    $"{texture.Width}x{texture.Height} found={live is not null} " +
+                    $"init={live?.Initialized ?? false}");
+            }
+
             return 0;
         }
 
         if ((ulong)texture.RgbaPixels.Length < (ulong)texture.Width * texture.Height * 4)
         {
+            if (_missingTextureTraces < 16)
+            {
+                _missingTextureTraces++;
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Metal draw texture undersized: 0x{texture.Address:X} " +
+                    $"{texture.Width}x{texture.Height} pitch={texture.Pitch} " +
+                    $"bytes={texture.RgbaPixels.Length}");
+            }
+
             return 0;
         }
 
@@ -1330,6 +1384,30 @@ internal static partial class MetalVideoPresenter
         return handle;
     }
 
+    // A guest global buffer is bound so the shader's alignment bias (the guest
+    // base address's low bits below the storage-buffer offset alignment) lands
+    // on the real data: the buffer is allocated bias + length bytes with the
+    // data at offset bias, matching how the Vulkan backend binds into a larger
+    // allocation at an aligned-down descriptor offset. boundBytes is what
+    // SharpEmuUniforms must carry so the shader's bounds check passes.
+    private const ulong StorageBufferOffsetAlignment = 256;
+
+    private static nint CreateGlobalBuffer(
+        nint device, GuestMemoryBuffer guest, out uint bias, out uint boundBytes)
+    {
+        bias = (uint)((ulong)guest.BaseAddress & (StorageBufferOffsetAlignment - 1));
+        var length = Math.Clamp(guest.Length, 0, guest.Data.Length);
+        boundBytes = bias + (uint)length;
+        if (bias == 0)
+        {
+            return CreateBuffer(device, guest.Data, length);
+        }
+
+        var padded = new byte[bias + (uint)Math.Max(length, 1)];
+        Array.Copy(guest.Data, 0, padded, bias, length);
+        return CreateBuffer(device, padded, padded.Length);
+    }
+
     private static nint CreateBuffer(nint device, byte[] data, int length)
     {
         var bounded = Math.Clamp(length, 0, data.Length);
@@ -1353,10 +1431,11 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    private static void WriteBuffersBackToGuest(List<(nint Buffer, GuestMemoryBuffer Guest)> writeBackBuffers)
+    private static void WriteBuffersBackToGuest(
+        List<(nint Buffer, GuestMemoryBuffer Guest, uint Bias)> writeBackBuffers)
     {
         var memory = _guestMemory;
-        foreach (var (buffer, guest) in writeBackBuffers)
+        foreach (var (buffer, guest, bias) in writeBackBuffers)
         {
             var contents = MetalNative.Send(buffer, MetalNative.Selector("contents"));
             if (contents == 0 || memory is null)
@@ -1366,9 +1445,10 @@ internal static partial class MetalVideoPresenter
 
             unsafe
             {
+                // The data sits at offset bias inside the bound buffer.
                 _ = memory.TryWrite(
                     guest.BaseAddress,
-                    new ReadOnlySpan<byte>((void*)contents, guest.Length));
+                    new ReadOnlySpan<byte>((void*)(contents + bias), guest.Length));
             }
         }
     }
