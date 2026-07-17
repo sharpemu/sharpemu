@@ -25,7 +25,7 @@ public static class GameSourceDiscovery
                 {
                     source = GameSource.Open(sourcePath);
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
                 {
                     continue;
                 }

@@ -384,6 +384,38 @@ public sealed class ZArchiveFileSystemTests
         }
     }
 
+    [Fact]
+    public void DiscoverySkipsMalformedArchiveAndKeepsValidPhysicalSource()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sharpemu-game-discovery-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var executable = Path.Combine(root, "eboot.bin");
+        var malformedArchive = Path.Combine(root, "broken.zar");
+        File.WriteAllBytes(executable, [0x7F, 0x45, 0x4C, 0x46]);
+        File.WriteAllBytes(malformedArchive, [0x00]);
+
+        IReadOnlyList<GameSource>? sources = null;
+        try
+        {
+            sources = GameSourceDiscovery.OpenPreferredSources([malformedArchive, executable]);
+            var source = Assert.Single(sources);
+            Assert.False(source.IsArchive);
+            Assert.Equal(Path.GetFullPath(executable), source.SourcePath);
+        }
+        finally
+        {
+            if (sources is not null)
+            {
+                foreach (var source in sources)
+                {
+                    source.Dispose();
+                }
+            }
+
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static byte[] ParamJson =>
         """
         {
