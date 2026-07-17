@@ -338,6 +338,52 @@ public sealed class ZArchiveFileSystemTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DiscoveryPrefersDecryptedExecutableForTheSamePhysicalGame(bool decryptedFirst)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"sharpemu-game-discovery-{Guid.NewGuid():N}");
+        var decryptedDirectory = Path.Combine(root, "decrypted");
+        Directory.CreateDirectory(decryptedDirectory);
+        Directory.CreateDirectory(Path.Combine(root, "Media"));
+        Directory.CreateDirectory(Path.Combine(root, "sce_sys"));
+        var retailExecutable = Path.Combine(root, "eboot.bin");
+        var decryptedExecutable = Path.Combine(decryptedDirectory, "eboot.bin");
+        File.WriteAllBytes(retailExecutable, [0x54, 0x14, 0xF5, 0xEE]);
+        File.WriteAllBytes(decryptedExecutable, [0x7F, 0x45, 0x4C, 0x46]);
+        File.WriteAllBytes(Path.Combine(root, "sce_sys", "param.json"), ParamJson);
+        var candidates = decryptedFirst
+            ? new[] { decryptedExecutable, retailExecutable }
+            : new[] { retailExecutable, decryptedExecutable };
+
+        IReadOnlyList<GameSource>? sources = null;
+        try
+        {
+            sources = GameSourceDiscovery.OpenPreferredSources(candidates);
+            var source = Assert.Single(sources);
+            Assert.Equal(Path.GetFullPath(decryptedExecutable), source.SourcePath);
+            Assert.Equal(Path.GetFullPath(root), source.PhysicalRootPath);
+            Assert.Equal("decrypted/eboot.bin", source.ExecutablePath);
+            var metadata = GameMetadataReader.Read(source.FileSystem);
+            Assert.Equal("Test Game", metadata.Title);
+            Assert.Equal("PPSA00001", metadata.TitleId);
+            Assert.Equal("01.000.000", metadata.Version);
+        }
+        finally
+        {
+            if (sources is not null)
+            {
+                foreach (var source in sources)
+                {
+                    source.Dispose();
+                }
+            }
+
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static byte[] ParamJson =>
         """
         {

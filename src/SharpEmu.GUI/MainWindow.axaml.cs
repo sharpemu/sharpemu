@@ -1061,6 +1061,7 @@ public partial class MainWindow : Window
     {
         var games = new List<GameEntry>();
         var seen = new HashSet<string>(FilePathComparer);
+        var candidates = new List<string>();
         var enumeration = new EnumerationOptions
         {
             IgnoreInaccessible = true,
@@ -1086,37 +1087,57 @@ public partial class MainWindow : Window
                     }
 
                     var fullPath = Path.GetFullPath(file);
-                    if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
+                    if (!seen.Add(fullPath))
                     {
                         continue;
                     }
 
-                    try
-                    {
-                        using var source = GameSource.Open(fullPath);
-                        var metadata = GameMetadataReader.Read(source.FileSystem);
-                        var executableSize = source.FileSystem.TryGetEntry(source.ExecutablePath, out var executable)
-                            ? executable.Length
-                            : 0;
-                        var initialSize = source.IsArchive ? new FileInfo(fullPath).Length : executableSize;
-                        games.Add(new GameEntry(
-                            metadata.Title ?? source.DisplayName,
-                            metadata.TitleId,
-                            metadata.Version,
-                            fullPath,
-                            initialSize,
-                            FindAsset(source.FileSystem, "icon0.png", "pic0.png"),
-                            FindAsset(source.FileSystem, "pic0.png", "pic1.png")));
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or NotSupportedException)
-                    {
-                        // Skip malformed archives and inaccessible games.
-                    }
+                    candidates.Add(fullPath);
                 }
             }
             catch (Exception)
             {
                 // Skip folders that fail to enumerate.
+            }
+        }
+
+        var sources = GameSourceDiscovery.OpenPreferredSources(candidates);
+        try
+        {
+            foreach (var source in sources)
+            {
+                if (excludedPaths.Contains(source.SourcePath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var metadata = GameMetadataReader.Read(source.FileSystem);
+                    var executableSize = source.FileSystem.TryGetEntry(source.ExecutablePath, out var executable)
+                        ? executable.Length
+                        : 0;
+                    var initialSize = source.IsArchive ? new FileInfo(source.SourcePath).Length : executableSize;
+                    games.Add(new GameEntry(
+                        metadata.Title ?? source.DisplayName,
+                        metadata.TitleId,
+                        metadata.Version,
+                        source.SourcePath,
+                        initialSize,
+                        FindAsset(source.FileSystem, "icon0.png", "pic0.png"),
+                        FindAsset(source.FileSystem, "pic0.png", "pic1.png")));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+                {
+                    // Skip malformed archives and inaccessible games.
+                }
+            }
+        }
+        finally
+        {
+            foreach (var source in sources)
+            {
+                source.Dispose();
             }
         }
 
