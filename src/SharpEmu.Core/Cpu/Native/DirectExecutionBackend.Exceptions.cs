@@ -211,6 +211,10 @@ public sealed partial class DirectExecutionBackend
 			{
 				Console.Error.WriteLine("[LOADER][INFO]   RIP symbol: " + symbol);
 			}
+			if (exceptionCode == StatusIllegalInstruction)
+			{
+				LogUnsupportedInstructionTrace(rip);
+			}
 			Console.Error.WriteLine($"[LOADER][INFO]   RAX: 0x{rax:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   RBX: 0x{rbx:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   RCX: 0x{rcx:X16}");

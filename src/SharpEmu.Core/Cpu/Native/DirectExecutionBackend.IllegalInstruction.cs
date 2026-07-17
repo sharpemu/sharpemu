@@ -194,6 +194,28 @@ public sealed partial class DirectExecutionBackend
         }
     }
 
+    // Reached only once TryRecoverIllegalInstruction has declined: either the opcode is outside the
+    // BMI/ABM set modelled above, or the host lacks an extension nothing here emulates. Without this
+    // the reader gets a bare #UD dump and has to decode the bytes at RIP by hand to learn why. Iced
+    // already knows which extension each opcode needs, so name it. Rosetta 2 is the common case: it
+    // stops at SSE4.2, so the PS5's Zen 2 vector code (SSE4a, AVX, AVX2) lands here.
+    private unsafe void LogUnsupportedInstructionTrace(ulong rip)
+    {
+        if (!TryReadFaultingInstruction(rip, out var instruction))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine("[LOADER][INFO]   " + DescribeUnsupportedInstruction(in instruction));
+        Console.Error.Flush();
+    }
+
+    // Iced reports at least one CPUID feature for every opcode it decodes, and the caller only
+    // reaches here with a decoded one.
+    internal static string DescribeUnsupportedInstruction(in Instruction instruction) =>
+        $"Unsupported instruction: {instruction.Mnemonic} " +
+        $"(requires {string.Join("+", instruction.CpuidFeatures)}; host does not implement it)";
+
     private unsafe bool TryReadFaultingInstruction(ulong rip, out Instruction instruction)
     {
         // Try the full instruction window first, then shrink so a fault near the end of a mapped

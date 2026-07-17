@@ -27,7 +27,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 > [!NOTE]  
 > SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
-> can run the macOS x64 build through Rosetta 2.
+> can run the macOS x64 build through Rosetta 2, with the instruction-set caveat
+> below.
+
+> [!IMPORTANT]  
+> **Apple Silicon (Rosetta 2) has an instruction-set ceiling.** Guest code runs
+> natively rather than through an interpreter, so it executes on whatever the
+> host provides. Rosetta 2 implements up to SSE4.2 and does not implement SSE4a,
+> AVX, AVX2, or BMI1/BMI2, while the PS5's CPU has all of them. SharpEmu
+> emulates the scalar BMI/ABM instructions in software, but a title that reaches
+> SSE4a or AVX vector code aborts with an illegal instruction; the log names the
+> opcode and the extension it needed. Intel Macs are limited by their own CPU in
+> the same way. This is independent of GPU and game — see #328.
 
 > [!WARNING]  
 > SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
