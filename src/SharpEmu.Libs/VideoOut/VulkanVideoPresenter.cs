@@ -5560,8 +5560,6 @@ internal static unsafe class VulkanVideoPresenter
             ShaderStageFlags stageFlags)
         {
             var textureCount = resources.Textures.Length;
-            var sampledImageCount = resources.Textures.Count(texture => !texture.IsStorage);
-            var storageImageCount = textureCount - sampledImageCount;
             var globalBufferCount = resources.GlobalMemoryBuffers.Length;
             var bindingCount = textureCount + (globalBufferCount == 0 ? 0 : 1);
             var layout = GetOrCreateDescriptorLayout(resources, stageFlags, bindingCount);
@@ -5574,38 +5572,6 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             var setLayout = layout.DescriptorSetLayout;
-
-            var poolSizes = new DescriptorPoolSize[
-                (sampledImageCount == 0 ? 0 : 1) +
-                (storageImageCount == 0 ? 0 : 1) +
-                (globalBufferCount == 0 ? 0 : 1)];
-            var poolSizeIndex = 0;
-            if (sampledImageCount != 0)
-            {
-                poolSizes[poolSizeIndex++] = new DescriptorPoolSize
-                {
-                    Type = DescriptorType.CombinedImageSampler,
-                    DescriptorCount = (uint)sampledImageCount,
-                };
-            }
-
-            if (storageImageCount != 0)
-            {
-                poolSizes[poolSizeIndex++] = new DescriptorPoolSize
-                {
-                    Type = DescriptorType.StorageImage,
-                    DescriptorCount = (uint)storageImageCount,
-                };
-            }
-
-            if (globalBufferCount != 0)
-            {
-                poolSizes[poolSizeIndex] = new DescriptorPoolSize
-                {
-                    Type = DescriptorType.StorageBuffer,
-                    DescriptorCount = (uint)globalBufferCount,
-                };
-            }
 
             if (_recycledDescriptorPools.TryPop(out var recycledPool))
             {
