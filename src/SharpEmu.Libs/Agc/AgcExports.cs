@@ -76,8 +76,10 @@ public static partial class AgcExports
     private const uint SpiShaderPgmHiEs = 0xC9;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
-    private const uint SpiShaderPgmLoGs = 0x8A;
-    private const uint SpiShaderPgmHiGs = 0x8B;
+    private const uint SpiShaderPgmLoGs = 0x88;
+    private const uint SpiShaderPgmHiGs = 0x89;
+    private const uint SpiShaderPgmLoHs = 0x108;
+    private const uint SpiShaderPgmHiHs = 0x109;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
     private const uint ComputePgmLo = 0x20C;
@@ -570,6 +572,13 @@ public static partial class AgcExports
         Explicit,
     }
 
+    private enum ShaderProgramRegisterPatchResult : byte
+    {
+        Success,
+        InvalidArgument,
+        MemoryFault,
+    }
+
     private readonly record struct RegisteredAgcResource(
         uint Owner,
         ulong Address,
@@ -691,9 +700,15 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        if (!PatchShaderProgramRegisters(ctx, headerAddress, codeAddress))
+        var patchResult = PatchShaderProgramRegisters(ctx, headerAddress, codeAddress);
+        if (patchResult == ShaderProgramRegisterPatchResult.InvalidArgument)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (patchResult == ShaderProgramRegisterPatchResult.MemoryFault)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (destinationAddress != 0 &&
@@ -10234,24 +10249,16 @@ public static partial class AgcExports
         }
     }
 
-    private static bool PatchShaderProgramRegisters(CpuContext ctx, ulong headerAddress, ulong codeAddress)
+    private static ShaderProgramRegisterPatchResult PatchShaderProgramRegisters(
+        CpuContext ctx,
+        ulong headerAddress,
+        ulong codeAddress)
     {
         if (!TryReadUInt64(ctx, headerAddress + ShaderShRegistersOffset, out var shRegistersAddress) ||
             !TryReadByte(ctx, headerAddress + ShaderTypeOffset, out var shaderType) ||
             !TryReadByte(ctx, headerAddress + ShaderNumShRegistersOffset, out var registerCount))
         {
-            return false;
-        }
-
-        if (shRegistersAddress == 0 || registerCount < 2)
-        {
-            return false;
-        }
-
-        if (!TryReadUInt32(ctx, shRegistersAddress, out var loRegister) ||
-            !TryReadUInt32(ctx, shRegistersAddress + 8, out var hiRegister))
-        {
-            return false;
+            return ShaderProgramRegisterPatchResult.MemoryFault;
         }
 
         var expectedLo = shaderType switch
@@ -10260,6 +10267,7 @@ public static partial class AgcExports
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
             4 => SpiShaderPgmLoGs,
+            5 => SpiShaderPgmLoHs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -10269,19 +10277,76 @@ public static partial class AgcExports
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
             4 => SpiShaderPgmHiGs,
+            5 => SpiShaderPgmHiHs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
-        if (expectedLo == 0 || loRegister != expectedLo || hiRegister != expectedHi)
+        if (shRegistersAddress == 0 || registerCount < 2 || expectedLo == 0)
         {
-            TraceCreateShader(0, headerAddress, codeAddress, $"unexpected-registers type={shaderType} lo=0x{loRegister:X8} hi=0x{hiRegister:X8}");
-            return false;
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"invalid-register-array type={shaderType} count={registerCount} address=0x{shRegistersAddress:X16}");
+            return ShaderProgramRegisterPatchResult.InvalidArgument;
+        }
+
+        ulong loValueAddress = 0;
+        ulong hiValueAddress = 0;
+        uint firstRegister = 0;
+        uint secondRegister = 0;
+        for (var index = 0; index < registerCount; index++)
+        {
+            var entryAddress = shRegistersAddress + ((ulong)index * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var register))
+            {
+                return ShaderProgramRegisterPatchResult.MemoryFault;
+            }
+
+            if (index == 0)
+            {
+                firstRegister = register;
+            }
+            else if (index == 1)
+            {
+                secondRegister = register;
+            }
+
+            if (register != expectedLo || index + 1 >= registerCount)
+            {
+                continue;
+            }
+
+            var nextEntryAddress = entryAddress + 8;
+            if (!TryReadUInt32(ctx, nextEntryAddress, out var nextRegister))
+            {
+                return ShaderProgramRegisterPatchResult.MemoryFault;
+            }
+
+            if (nextRegister == expectedHi)
+            {
+                loValueAddress = entryAddress + sizeof(uint);
+                hiValueAddress = nextEntryAddress + sizeof(uint);
+                break;
+            }
+        }
+
+        if (loValueAddress == 0 || hiValueAddress == 0)
+        {
+            TraceAgc(
+                $"agc.create_shader header=0x{headerAddress:X16} code=0x{codeAddress:X16} " +
+                $"program-registers-unpatched type={shaderType} count={registerCount} " +
+                $"expected=0x{expectedLo:X8}/0x{expectedHi:X8} " +
+                $"first=0x{firstRegister:X8}/0x{secondRegister:X8}");
+            return ShaderProgramRegisterPatchResult.Success;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
         var hiValue = (uint)((codeAddress >> 40) & 0xFFUL);
-        return TryWriteUInt32(ctx, shRegistersAddress + sizeof(uint), loValue) &&
-               TryWriteUInt32(ctx, shRegistersAddress + 8 + sizeof(uint), hiValue);
+        return TryWriteUInt32(ctx, loValueAddress, loValue) &&
+               TryWriteUInt32(ctx, hiValueAddress, hiValue)
+            ? ShaderProgramRegisterPatchResult.Success
+            : ShaderProgramRegisterPatchResult.MemoryFault;
     }
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
