@@ -71,18 +71,18 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 ## Games Tested
 
 * **Demon's Souls Remake**
-  * [Demon's Souls [PPSA01341]](https://github.com/par274/sharpemu/issues/2)
+  * [Demon's Souls [PPSA01341]](https://github.com/sharpemu/sharpemu/issues/2)
   * Demon's Souls is now video loop. Shaders are ready to be converted to SPIR-V/Vulkan. We are continuing our work on this.
   ![DeS videoOut submit first frame](./.github/images/des-videoout-shaders.jpg)
 
 * **Poppy Playtime Chapter 1**
-  * [Poppy Playtime Chapter 1 [PPSA20591]](https://github.com/par274/sharpemu/issues/3)
+  * [Poppy Playtime Chapter 1 [PPSA20591]](https://github.com/sharpemu/sharpemu/issues/3)
 
 * **SILENT HILL: The Short Message**
-  * [SILENT HILL: The Short Message [PPSA10112]](https://github.com/par274/sharpemu/issues/4)
+  * [SILENT HILL: The Short Message [PPSA10112]](https://github.com/sharpemu/sharpemu/issues/4)
 
 * **Dreaming Sarah**
-  * [Dreaming Sarah [PPSA02929]](https://github.com/par274/sharpemu/issues/9)
+  * [Dreaming Sarah [PPSA02929]](https://github.com/sharpemu/sharpemu/issues/9)
   * Real texture rendering for this game;
   ![Splash texture](./.github/images/dreaming-sarah.jpg)
 
@@ -95,7 +95,7 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 ## Build
 
 1. Install the **.NET SDK**.
-2. Clone the repository: `git clone https://github.com/par274/sharpemu.git`
+2. Clone the repository: `git clone https://github.com/sharpemu/sharpemu.git`
 3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
 4. Build the project: `dotnet build` or `dotnet publish`
 5. Build artifacts will be located in the `artifacts` directory.
@@ -121,7 +121,7 @@ Provided valuable references for filesystem handling and low-level C# implementa
 
 # License
 
-- [**GPL-2.0 license**](https://github.com/par274/sharpemu/blob/main/LICENSE)
+- [**GPL-2.0 license**](https://github.com/sharpemu/sharpemu/blob/main/LICENSE)
 
 ## Contributing
 
