@@ -62,6 +62,22 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<PipelineKey, nint> _pipelineCache = new();
     private static readonly Dictionary<GuestSampler, nint> _samplerCache = new();
     private static readonly Dictionary<ulong, GuestImage> _guestDepthImages = new();
+
+    // A depth target sampled later through its read address must resolve to
+    // the same image the write address produced (the Vulkan presenter matches
+    // either address on its depth resources).
+    private static readonly Dictionary<ulong, ulong> _guestDepthReadAliases = new();
+
+    // Retired same-address render targets: a game that recreates a target with
+    // a new extent at the same address may still sample the old content later,
+    // so replacement retires the image here instead of releasing it, and the
+    // draw-texture path scores candidates like the Vulkan presenter's
+    // guest-image variants. Bounded FIFO so stale variants cannot accumulate.
+    private const int MaxGuestImageVariants = 32;
+    private static readonly Dictionary<(ulong Address, uint Width, uint Height, MtlPixelFormat Format), GuestImage>
+        _guestImageVariants = new();
+    private static readonly Queue<(ulong Address, uint Width, uint Height, MtlPixelFormat Format)>
+        _guestImageVariantOrder = new();
     private static readonly Dictionary<(MtlPixelFormat Format, uint Width, uint Height), nint>
         _transientTargets = new();
 
@@ -447,7 +463,7 @@ internal static partial class MetalVideoPresenter
 
             var depthWidth = Math.Max(depthTarget.Width, firstWidth);
             var depthHeight = Math.Max(depthTarget.Height, firstHeight);
-            depth = EnsureGuestDepthImage(device, depthTarget.Address, depthWidth, depthHeight);
+            depth = EnsureGuestDepthImage(device, depthTarget, depthWidth, depthHeight);
         }
 
         if (!TryGetDrawPipeline(device, draw, targetFormats, depth is not null, out var pipeline))
@@ -1164,7 +1180,7 @@ internal static partial class MetalVideoPresenter
             _pendingGuestImageInitialData.Remove(target.Address, out initialData);
             if (_guestImages.TryGetValue(target.Address, out var replaced))
             {
-                MetalNative.SendVoid(replaced.Texture, MetalNative.Selector("release"));
+                RetireGuestImageVariantLocked(target.Address, replaced);
             }
 
             _guestImages[target.Address] = image;
@@ -1184,10 +1200,44 @@ internal static partial class MetalVideoPresenter
         return image;
     }
 
-    private static GuestImage EnsureGuestDepthImage(nint device, ulong address, uint width, uint height)
+    private static void RetireGuestImageVariantLocked(ulong address, GuestImage retired)
     {
+        var key = (address, retired.Width, retired.Height, retired.Format);
+        if (_guestImageVariants.Remove(key, out var previous))
+        {
+            MetalNative.SendVoid(previous.Texture, MetalNative.Selector("release"));
+        }
+        else
+        {
+            while (_guestImageVariantOrder.Count >= MaxGuestImageVariants)
+            {
+                var evicted = _guestImageVariantOrder.Dequeue();
+                if (_guestImageVariants.Remove(evicted, out var old))
+                {
+                    MetalNative.SendVoid(old.Texture, MetalNative.Selector("release"));
+                }
+            }
+
+            _guestImageVariantOrder.Enqueue(key);
+        }
+
+        _guestImageVariants[key] = retired;
+    }
+
+    private static GuestImage EnsureGuestDepthImage(
+        nint device,
+        GuestDepthTarget target,
+        uint width,
+        uint height)
+    {
+        var address = target.Address;
         lock (_gate)
         {
+            if (target.ReadAddress != 0 && target.ReadAddress != address)
+            {
+                _guestDepthReadAliases[target.ReadAddress] = address;
+            }
+
             if (_guestDepthImages.TryGetValue(address, out var existing) &&
                 existing.Width == width &&
                 existing.Height == height)
@@ -1256,15 +1306,18 @@ internal static partial class MetalVideoPresenter
             return 0;
         }
 
-        // Feedback reads of a live guest render target sample an ordered snapshot.
+        // Feedback reads of a live guest render target sample an ordered
+        // snapshot, resolved like the Vulkan presenter: a guest depth image
+        // first (shadow-style depth sampling), then the current image or a
+        // retired variant at the same address, scored by descriptor match.
         if (texture.RgbaPixels.Length == 0 && texture.Address != 0)
         {
-            GuestImage? live;
-            lock (_gate)
+            if (TryCreateDepthSampleTexture(device, texture, out var depthSample))
             {
-                _guestImages.TryGetValue(texture.Address, out live);
+                return depthSample;
             }
 
+            var live = ResolveGuestImageAlias(texture);
             if (live is { Initialized: true })
             {
                 var snapshot = CreateGuestTexture(device, live.Format, live.Width, live.Height);
@@ -1333,6 +1386,184 @@ internal static partial class MetalVideoPresenter
         }
 
         return handle;
+    }
+
+    /// <summary>Resolves a live guest texture to the current image or a retired
+    /// same-address variant, scored by descriptor match like the Vulkan
+    /// presenter's guest-image variants: exact extent outranks format, format
+    /// outranks initialization, and the active image breaks ties.</summary>
+    private static GuestImage? ResolveGuestImageAlias(GuestDrawTexture texture)
+    {
+        var hasViewFormat = MetalGuestFormats.TryDecodeRenderTargetFormat(
+            texture.Format, texture.NumberType, out var viewFormat);
+        GuestImage? best = null;
+        var bestScore = int.MinValue;
+
+        void Consider(GuestImage candidate, bool isActive)
+        {
+            // Exact extent always qualifies; a larger image qualifies only for
+            // tiled descriptors, mirroring IsCompatibleGuestImageAlias.
+            var sizeMatch = candidate.Width == texture.Width &&
+                candidate.Height == texture.Height;
+            if (!sizeMatch &&
+                (texture.TileMode == 0 ||
+                 texture.Width == 0 ||
+                 texture.Height == 0 ||
+                 texture.Width > candidate.Width ||
+                 texture.Height > candidate.Height))
+            {
+                return;
+            }
+
+            var score = 0;
+            if (sizeMatch)
+            {
+                score += 32;
+            }
+
+            if (hasViewFormat && candidate.Format == viewFormat.Format)
+            {
+                score += 16;
+            }
+
+            if (candidate.Initialized)
+            {
+                score += 4;
+            }
+
+            if (isActive)
+            {
+                score += 1;
+            }
+
+            if (score > bestScore)
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        lock (_gate)
+        {
+            if (_guestImages.TryGetValue(texture.Address, out var active))
+            {
+                Consider(active, isActive: true);
+            }
+
+            foreach (var (key, candidate) in _guestImageVariants)
+            {
+                if (key.Address == texture.Address)
+                {
+                    Consider(candidate, isActive: false);
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Snapshots a guest depth image for sampling when the texture
+    /// descriptor names a depth target's write or read address. Depth32Float
+    /// cannot blit to a color format, so the copy round-trips through a
+    /// buffer into an R32Float texture the translated shader can sample.</summary>
+    private static bool TryCreateDepthSampleTexture(
+        nint device,
+        GuestDrawTexture texture,
+        out nint sample)
+    {
+        sample = 0;
+        // Identity channel select only; swizzled depth reads keep the
+        // unresolved-texture warning until a title needs them.
+        if (texture.DstSelect != 0xFAC)
+        {
+            return false;
+        }
+
+        GuestImage? depth;
+        lock (_gate)
+        {
+            if (!_guestDepthImages.TryGetValue(texture.Address, out depth) &&
+                _guestDepthReadAliases.TryGetValue(texture.Address, out var primary))
+            {
+                _guestDepthImages.TryGetValue(primary, out depth);
+            }
+        }
+
+        if (depth is null ||
+            !depth.Initialized ||
+            texture.Width > depth.Width ||
+            texture.Height > depth.Height)
+        {
+            return false;
+        }
+
+        var queue = _drawSnapshotQueue;
+        if (queue == 0)
+        {
+            return false;
+        }
+
+        var bytesPerRow = (nuint)depth.Width * 4;
+        var bytesPerImage = bytesPerRow * depth.Height;
+        // MTLResourceStorageModePrivate = 32: staging never touches the CPU.
+        var staging = MetalNative.SendNewBuffer(
+            device, MetalNative.Selector("newBufferWithLength:options:"), bytesPerImage, 32);
+        if (staging == 0)
+        {
+            return false;
+        }
+
+        var descriptor = MetalNative.SendTextureDescriptor(
+            MetalNative.Class("MTLTextureDescriptor"),
+            MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+            (nuint)MtlPixelFormat.R32Float,
+            depth.Width,
+            depth.Height,
+            mipmapped: false);
+        MetalNative.Send(descriptor, MetalNative.Selector("setUsage:"), (nint)UsageShaderRead);
+        sample = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
+        if (sample == 0)
+        {
+            MetalNative.SendVoid(staging, MetalNative.Selector("release"));
+            return false;
+        }
+
+        var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+        var blit = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
+        var size = new MtlSize { Width = depth.Width, Height = depth.Height, Depth = 1 };
+        MetalNative.SendCopyTextureToBuffer(
+            blit,
+            MetalNative.Selector(
+                "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:" +
+                "toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:"),
+            depth.Texture,
+            0,
+            0,
+            default,
+            size,
+            staging,
+            0,
+            bytesPerRow,
+            bytesPerImage);
+        MetalNative.SendCopyBufferToTexture(
+            blit,
+            MetalNative.Selector(
+                "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:" +
+                "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
+            staging,
+            0,
+            bytesPerRow,
+            bytesPerImage,
+            size,
+            sample,
+            0,
+            0,
+            default);
+        MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
+        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+        // The committed command buffer retains the staging buffer.
+        MetalNative.SendVoid(staging, MetalNative.Selector("release"));
+        return true;
     }
 
     [ThreadStatic]

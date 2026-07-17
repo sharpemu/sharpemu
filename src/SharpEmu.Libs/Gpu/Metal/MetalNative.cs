@@ -54,6 +54,14 @@ internal struct MtlSize
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct MtlOrigin
+{
+    public nuint X;
+    public nuint Y;
+    public nuint Z;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct MtlScissorRect
 {
     public nuint X;
@@ -194,6 +202,37 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendBuffer(nint receiver, nint selector, nint bytes, nuint length, nuint options);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial nint SendNewBuffer(nint receiver, nint selector, nuint length, nuint options);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyTextureToBuffer(
+        nint receiver,
+        nint selector,
+        nint sourceTexture,
+        nuint sourceSlice,
+        nuint sourceLevel,
+        MtlOrigin sourceOrigin,
+        MtlSize sourceSize,
+        nint destinationBuffer,
+        nuint destinationOffset,
+        nuint destinationBytesPerRow,
+        nuint destinationBytesPerImage);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyBufferToTexture(
+        nint receiver,
+        nint selector,
+        nint sourceBuffer,
+        nuint sourceOffset,
+        nuint sourceBytesPerRow,
+        nuint sourceBytesPerImage,
+        MtlSize sourceSize,
+        nint destinationTexture,
+        nuint destinationSlice,
+        nuint destinationLevel,
+        MtlOrigin destinationOrigin);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendDispatch(
