@@ -1567,6 +1567,11 @@ internal static unsafe class VulkanVideoPresenter
     public static void RequestClose()
     {
         Volatile.Write(ref _presenterCloseRequested, true);
+        _shutdownRequested = true;
+        lock (_gate)
+        {
+            System.Threading.Monitor.PulseAll(_gate);
+        }
     }
 
     /// <summary>
@@ -1634,16 +1639,12 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        // If DISPLAY is set (X11/Xvfb available), force X11 backend.
+        // This is needed even when WAYLAND_DISPLAY is not set, because
+        // GLFW's auto-detection may fail in headless/container environments.
+        var display = Environment.GetEnvironmentVariable("DISPLAY");
+        if (string.IsNullOrEmpty(display))
         {
-            return;
-        }
-
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY")))
-        {
-            Console.Error.WriteLine(
-                "[LOADER][WARN] Wayland session without an X server (DISPLAY unset); " +
-                "cannot steer GLFW to XWayland. Set SHARPEMU_ENABLE_WAYLAND=1 to use native Wayland.");
             return;
         }
 
@@ -1658,7 +1659,7 @@ internal static unsafe class VulkanVideoPresenter
                 System.Runtime.InteropServices.NativeLibrary.GetExport(glfw, "glfwInitHint");
             initHint(GlfwPlatformHint, GlfwPlatformX11);
             Console.Error.WriteLine(
-                "[LOADER][INFO] Wayland session detected; requested GLFW X11/XWayland backend.");
+                "[LOADER][INFO] X11 display detected; requested GLFW X11 backend.");
         }
         catch (Exception exception)
         {
@@ -1704,6 +1705,89 @@ internal static unsafe class VulkanVideoPresenter
             System.Runtime.InteropServices.NativeLibrary.TryLoad(name, out handle);
     }
 
+    private static void RunHeadless()
+    {
+        var dumpFrames = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FRAMES"),
+            "1", StringComparison.Ordinal) ||
+            string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_CAPTURE"),
+            "1", StringComparison.Ordinal);
+        var frameCount = 0;
+        var dumpDir = System.IO.Path.Combine(System.AppContext.BaseDirectory, "frames");
+        if (dumpFrames)
+        {
+            Directory.CreateDirectory(dumpDir);
+        }
+
+        try
+        {
+            while (!_shutdownRequested)
+            {
+                Presentation? presentation = null;
+                lock (_gate)
+                {
+                    if (_pendingGuestImagePresentations.Count > 0)
+                    {
+                        presentation = _pendingGuestImagePresentations.Dequeue();
+                    }
+                    else
+                    {
+                        System.Threading.Monitor.Wait(_gate, TimeSpan.FromMilliseconds(16));
+                    }
+                }
+
+                if (presentation != null)
+                {
+                    frameCount++;
+                    SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                        $"Frame #{frameCount}", $"seq={presentation.Value.Sequence} {presentation.Value.Width}x{presentation.Value.Height}");
+
+                    if (frameCount <= 10 || frameCount % 100 == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[HEADLESS] Frame#{frameCount}: seq={presentation.Value.Sequence} " +
+                            $"w={presentation.Value.Width} h={presentation.Value.Height}");
+                    }
+
+                    if (dumpFrames && frameCount <= 10)
+                    {
+                        try
+                        {
+                            // Save raw frame data
+                            var rawPath = Path.Combine(dumpDir, $"frame_{frameCount:D4}.raw");
+                            Console.Error.WriteLine($"[HEADLESS] Saving frame#{frameCount} to {rawPath}");
+                            SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                                $"Frame Capture", $"saved to {rawPath}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"[HEADLESS] Frame save failed: {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[HEADLESS] Error: {ex.Message}");
+        }
+        finally
+        {
+            Console.Error.WriteLine($"[HEADLESS] Total frames consumed: {frameCount}");
+            SharpEmu.Diagnostics.BootDiagnostics.RecordEvent(
+                "Headless Exit", $"frames={frameCount}");
+            lock (_gate)
+            {
+                _closed = true;
+                _thread = null;
+                System.Threading.Monitor.PulseAll(_gate);
+            }
+        }
+    }
+
+    private static bool _shutdownRequested;
+
     private static void Run()
     {
         uint width;
@@ -1717,6 +1801,22 @@ internal static unsafe class VulkanVideoPresenter
         PreferX11OnLinuxWayland();
         InitializeMacVulkanLoader();
 
+        // Check for headless mode (no Vulkan/GPU needed — for CI, debugging, AI agents)
+        var headless = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_HEADLESS"),
+            "1", StringComparison.Ordinal) ||
+            string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_HEADLESS_AI"),
+            "1", StringComparison.Ordinal);
+
+        if (headless)
+        {
+            Console.Error.WriteLine("[LOADER][INFO] Headless mode: skipping Vulkan/GPU initialization");
+            Console.Error.WriteLine("[LOADER][INFO] VideoOut will accept frames but not display them");
+            RunHeadless();
+            return;
+        }
+
         try
         {
             using var presenter = new Presenter(width, height);
@@ -1725,6 +1825,8 @@ internal static unsafe class VulkanVideoPresenter
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[LOADER][ERROR] Vulkan VideoOut presenter failed: {exception}");
+            Console.Error.WriteLine("[LOADER][INFO] Falling back to headless mode (no display)");
+            RunHeadless();
         }
         finally
         {
@@ -1771,7 +1873,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (_latestPresentation is { } rej &&
                     rej.GuestImageAddress != 0 &&
-					rej.Sequence != presentedSequence &&
+                                        rej.Sequence != presentedSequence &&
                     _tracedGuestImagePresentRejections.Add(rej.Sequence))
                 {
                     var reason = rej.Sequence == presentedSequence
@@ -1815,14 +1917,14 @@ internal static unsafe class VulkanVideoPresenter
 
     private static readonly HashSet<long> _tracedGuestImagePresentRejections = new();
 
-	private static bool HasPendingGuestPresentation(long presentedSequence)
-	{
-		lock (_gate)
-		{
-			return _pendingGuestImagePresentations.Count > 0 ||
-				_latestPresentation is { } latest && latest.Sequence > presentedSequence;
-		}
-	}
+        private static bool HasPendingGuestPresentation(long presentedSequence)
+        {
+                lock (_gate)
+                {
+                        return _pendingGuestImagePresentations.Count > 0 ||
+                                _latestPresentation is { } latest && latest.Sequence > presentedSequence;
+                }
+        }
 
     private static long EnqueueGuestWorkLocked(object work)
     {
@@ -11391,10 +11493,10 @@ internal static unsafe class VulkanVideoPresenter
 
             if (!TryTakePresentation(_presentedSequence, out var presentation))
             {
-				// A render-loop tick with no newer flip is normal. Warn only when
-				// an actual queued presentation is waiting on unfinished guest work.
+                                // A render-loop tick with no newer flip is normal. Warn only when
+                                // an actual queued presentation is waiting on unfinished guest work.
                 if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-					HasPendingGuestPresentation(_presentedSequence) &&
+                                        HasPendingGuestPresentation(_presentedSequence) &&
                     _presentNotTakenLoggedSequence != _presentedSequence)
                 {
                     _presentNotTakenLoggedSequence = _presentedSequence;
@@ -13715,15 +13817,15 @@ internal static unsafe class VulkanVideoPresenter
                         $"present-{seq:D4}-{_extent.Width}x{_extent.Height}-{_swapchainFormat}.bgra");
                     File.WriteAllBytes(path, bytes.ToArray());
                     Console.Error.WriteLine($"[LOADER][TRACE] vk.swapchain_dump path={path}");
-					// Continuous readback is intentionally opt-in: each 1080p frame
-					// is several megabytes and synchronously waits for the GPU.
-					if (string.Equals(
-							Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_DUMP_CONTINUOUS"),
-							"1",
-							StringComparison.Ordinal))
-					{
-						_tracedPresentedSwapchain = false;
-					}
+                                        // Continuous readback is intentionally opt-in: each 1080p frame
+                                        // is several megabytes and synchronously waits for the GPU.
+                                        if (string.Equals(
+                                                        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_DUMP_CONTINUOUS"),
+                                                        "1",
+                                                        StringComparison.Ordinal))
+                                        {
+                                                _tracedPresentedSwapchain = false;
+                                        }
                 }
             }
             finally

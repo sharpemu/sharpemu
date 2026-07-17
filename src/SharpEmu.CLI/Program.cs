@@ -56,9 +56,46 @@ internal static partial class Program
         }
         finally
         {
+            // DIAGNOSTICS: write final report before exit
+            try
+            {
+                WriteDiagnosticsReport();
+            }
+            catch { }
             DropConsoleFileMirror();
             SharpEmuLog.Shutdown();
         }
+    }
+
+    private static void WriteDiagnosticsReport()
+    {
+        // Cross-platform path: use AppContext.BaseDirectory + "reports" on all platforms
+        var reportDir = Path.Combine(AppContext.BaseDirectory, "reports");
+        try { Directory.CreateDirectory(reportDir); } catch { }
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("========== SharpEmu Diagnostics Report ==========");
+        sb.AppendLine($"Generated: {DateTimeOffset.UtcNow:O}");
+        sb.AppendLine($"OS: {Environment.OSVersion}");
+        sb.AppendLine($"CPU: {Environment.ProcessorCount} cores");
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.ReturnAnalyzer.Instance.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.MissingNidReporter.Instance.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.ApiStateValidator.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.PointerOriginTracker.Instance.RenderReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.BootDiagnostics.GetEngineReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.BootDiagnostics.GetTimelineReport());
+        sb.AppendLine();
+        sb.AppendLine(SharpEmu.Diagnostics.ImportLoopDetector.Instance.RenderReport());
+
+        var path = Path.Combine(reportDir, "diagnostics_report.txt");
+        File.WriteAllText(path, sb.ToString());
+        Console.Error.WriteLine($"[DIAGNOSTICS] Report written to {path}");
     }
 
     private static int Run(string[] args)
@@ -247,10 +284,36 @@ internal static partial class Program
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
 
+        // If the path doesn't exist, try common locations
         if (!File.Exists(ebootPath))
         {
-            Log.Error($"EBOOT file was not found: {ebootPath}");
-            return 2;
+            // Try looking for eboot.bin in the same directory as the executable
+            var exeDir = AppContext.BaseDirectory;
+            var altPath = Path.Combine(exeDir, "eboot.bin");
+            if (File.Exists(altPath))
+            {
+                ebootPath = altPath;
+                Console.Error.WriteLine($"[DEBUG] Found eboot.bin at: {ebootPath}");
+            }
+            else
+            {
+                // Try sce_sys/eboot.bin relative to the given path
+                var dir = Path.GetDirectoryName(ebootPath) ?? "";
+                var scePath = Path.Combine(dir, "sce_sys", "eboot.bin");
+                if (File.Exists(scePath))
+                {
+                    ebootPath = scePath;
+                    Console.Error.WriteLine($"[DEBUG] Found eboot.bin at: {ebootPath}");
+                }
+                else
+                {
+                    Log.Error($"EBOOT file was not found: {ebootPath}");
+                    Log.Error($"Also checked: {altPath}");
+                    Log.Error($"Also checked: {scePath}");
+                    Log.Error("Usage: SharpEmu.exe <path-to-eboot.bin>");
+                    return 2;
+                }
+            }
         }
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
