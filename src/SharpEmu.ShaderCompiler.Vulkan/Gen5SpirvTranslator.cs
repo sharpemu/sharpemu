@@ -293,6 +293,13 @@ public static partial class Gen5SpirvTranslator
             Uint,
         }
 
+        private enum VertexInputComponentKind
+        {
+            Float,
+            Sint,
+            Uint,
+        }
+
         private readonly record struct SpirvImageResource(
             uint Variable,
             uint ImageType,
@@ -305,7 +312,9 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvVertexInput(
             uint Variable,
             uint Type,
-            uint ComponentCount);
+            uint ComponentType,
+            uint ComponentCount,
+            VertexInputComponentKind ComponentKind);
 
         private readonly record struct SpirvPixelOutput(
             uint Variable,
@@ -1266,12 +1275,23 @@ public static partial class Gen5SpirvTranslator
         {
             foreach (var input in _evaluation.VertexInputs ?? [])
             {
+                var componentKind = input.NumberFormat switch
+                {
+                    4 => VertexInputComponentKind.Uint,
+                    5 => VertexInputComponentKind.Sint,
+                    _ => VertexInputComponentKind.Float,
+                };
+                var componentType = componentKind switch
+                {
+                    VertexInputComponentKind.Uint => _uintType,
+                    VertexInputComponentKind.Sint => _intType,
+                    _ => _floatType,
+                };
                 var type = input.ComponentCount switch
                 {
-                    1u => _floatType,
-                    2u => _vec2Type,
-                    3u => _vec3Type,
-                    4u => _vec4Type,
+                    1u => componentType,
+                    >= 2u and <= 4u =>
+                        _module.TypeVector(componentType, input.ComponentCount),
                     _ => 0u,
                 };
                 if (type == 0)
@@ -1293,7 +1313,9 @@ public static partial class Gen5SpirvTranslator
                     new SpirvVertexInput(
                         variable,
                         type,
-                        input.ComponentCount));
+                        componentType,
+                        input.ComponentCount,
+                        componentKind));
                 _interfaces.Add(variable);
             }
         }
@@ -3173,10 +3195,13 @@ public static partial class Gen5SpirvTranslator
                     ? loaded
                     : _module.AddInstruction(
                         SpirvOp.CompositeExtract,
-                        _floatType,
+                        input.ComponentType,
                         loaded,
                         component);
-                StoreV(control.VectorData + component, Bitcast(_uintType, value));
+                var raw = input.ComponentKind == VertexInputComponentKind.Uint
+                    ? value
+                    : Bitcast(_uintType, value);
+                StoreV(control.VectorData + component, raw);
             }
 
             return true;
