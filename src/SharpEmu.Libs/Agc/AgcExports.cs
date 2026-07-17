@@ -552,7 +552,7 @@ public static partial class AgcExports
         public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
         public Dictionary<uint, string> ResourceOwners { get; } = new();
         public Dictionary<uint, RegisteredAgcResource> RegisteredResources { get; } = new();
-        public bool ResourceRegistrationInitialized { get; set; }
+        public ResourceRegistrationMode ResourceRegistrationMode { get; set; }
         public ulong ResourceRegistrationMemory { get; set; }
         public ulong ResourceRegistrationMemorySize { get; set; }
         public uint ResourceRegistrationMaxOwners { get; set; }
@@ -562,6 +562,13 @@ public static partial class AgcExports
         public ulong WorkSequence { get; set; }
         public ulong SubmissionSequence { get; set; }
         public bool WaitMonitorRunning { get; set; }
+    }
+
+    private enum ResourceRegistrationMode : byte
+    {
+        None,
+        Implicit,
+        Explicit,
     }
 
     private readonly record struct RegisteredAgcResource(
@@ -934,6 +941,31 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "t7PlZ9nt5Lc",
+        ExportName = "sceAgcCbNopGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbNopGetSize(CpuContext ctx)
+    {
+        // CbNop writes exactly the requested number of dwords.
+        var dwordCount = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = (ulong)dwordCount * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "hL7C0IRpWZI",
+        ExportName = "sceAgcCbQueueEndOfPipeActionGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbQueueEndOfPipeActionGetSize(CpuContext ctx)
+    {
+        // End-of-pipe actions use an eight-dword release-memory packet.
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "k3GhuSNmBLU",
         ExportName = "sceAgcCbDispatch",
         Target = Generation.Gen5,
@@ -1128,6 +1160,17 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "ewobAQeMo5k",
+        ExportName = "sceAgcAcbAcquireMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbAcquireMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -1345,6 +1388,36 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.dcb_reset_queue buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "w4-d0n60hdo",
+        ExportName = "sceAgcDcbSetUcRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegisterDirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var packedRegister = ctx[CpuRegister.Rsi];
+        var value = (uint)packedRegister;
+        var offset = (uint)(packedRegister >> 32);
+        if (commandBufferAddress == 0 || offset > ushort.MaxValue)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(3, ItSetUconfigReg, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, offset) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, value))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_set_uc_direct buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"offset=0x{offset:X4} value=0x{value:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -1702,6 +1775,17 @@ public static partial class AgcExports
             $"agc.dcb_acquire_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"engine={engine} cbdb=0x{cbDbOp:X8} gcr=0x{gcrControl:X8} base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "-vnlTPPXPrw",
+        ExportName = "sceAgcDcbAcquireMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbAcquireMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -2638,6 +2722,34 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "XlNp7jzGiPo",
+        ExportName = "sceAgcDriverSetTFRing",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSetTFRing(CpuContext ctx)
+    {
+        // The tessellation-factor ring is consumed by the hardware scheduler.
+        // Record the registration for diagnostics and accept it under HLE.
+        var ringAddress = ctx[CpuRegister.Rdi];
+        var ringSizeBytes = (uint)ctx[CpuRegister.Rsi];
+        TraceAgc($"agc.driver_set_tf_ring addr=0x{ringAddress:X16} size=0x{ringSizeBytes:X}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "MM4IZSEYytQ",
+        ExportName = "sceAgcDriverSetHsOffchipParam",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSetHsOffchipParam(CpuContext ctx)
+    {
+        // Hull-shader off-chip LDS configuration is likewise hardware-only.
+        var param = (uint)ctx[CpuRegister.Rdi];
+        TraceAgc($"agc.driver_set_hs_offchip_param param=0x{param:X8}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
         Nid = "UglJIZjGssM",
         ExportName = "sceAgcDriverSubmitDcb",
         Target = Generation.Gen5,
@@ -2782,12 +2894,19 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryWriteUInt32(ctx, ownerAddress, DefaultAgcOwner))
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        uint owner;
+        lock (state.Gate)
+        {
+            owner = state.DefaultOwner;
+        }
+
+        if (!TryWriteUInt32(ctx, ownerAddress, owner))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.driver_get_default_owner out=0x{ownerAddress:X16} owner={DefaultAgcOwner}");
+        TraceAgc($"agc.driver_get_default_owner out=0x{ownerAddress:X16} owner={owner}");
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -2798,15 +2917,66 @@ public static partial class AgcExports
     LibraryName = "libSceAgc")]
     public static int DriverRegisterResource(CpuContext ctx)
     {
-        var resourceAddress = ctx[CpuRegister.Rdi];
+        var resourceHandleAddress = ctx[CpuRegister.Rdi];
         var owner = (uint)ctx[CpuRegister.Rsi];
-        var nameAddress = ctx[CpuRegister.Rdx];
-        var type = (uint)ctx[CpuRegister.R8];
-        var flags = (uint)ctx[CpuRegister.R9];
+        var resourceAddress = ctx[CpuRegister.Rdx];
+        var resourceSize = ctx[CpuRegister.Rcx];
+        var nameAddress = ctx[CpuRegister.R8];
+        var type = (uint)ctx[CpuRegister.R9];
+        if (resourceHandleAddress == 0 || resourceAddress == 0 || resourceSize == 0 ||
+            !ctx.TryReadUInt32(ctx[CpuRegister.Rsp] + sizeof(ulong), out var flags) ||
+            !TryReadGuestCString(
+                ctx,
+                nameAddress,
+                ResourceRegistrationMaxNameLength,
+                out var nameBytes))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var resourceName = System.Text.Encoding.UTF8.GetString(nameBytes);
+        uint resourceHandle;
+        lock (state.Gate)
+        {
+            if (state.ResourceRegistrationMode == ResourceRegistrationMode.None ||
+                owner != state.DefaultOwner &&
+                !state.ResourceOwners.ContainsKey(owner))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            resourceHandle = state.NextResource;
+            while (resourceHandle == 0 || state.RegisteredResources.ContainsKey(resourceHandle))
+            {
+                resourceHandle++;
+                if (resourceHandle == state.NextResource)
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                }
+            }
+
+            if (!TryWriteUInt32(ctx, resourceHandleAddress, resourceHandle))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            state.NextResource = resourceHandle + 1;
+            state.RegisteredResources.Add(
+                resourceHandle,
+                new RegisteredAgcResource(
+                    owner,
+                    resourceAddress,
+                    resourceSize,
+                    resourceName,
+                    type,
+                    flags));
+        }
 
         TraceAgc(
-            $"agc.driver_register_resource resource=0x{resourceAddress:X16} owner={owner} " +
-            $"name=0x{nameAddress:X16} type={type} flags={flags}");
+            $"agc.driver_register_resource handle={resourceHandle} owner={owner} " +
+            $"resource=0x{resourceAddress:X16} bytes=0x{resourceSize:X} " +
+            $"name={resourceName} type={type} flags={flags}");
 
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
@@ -10942,6 +11112,28 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "QIXCsbipds0",
+        ExportName = "sceAgcDcbRewindGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbRewindGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "VEGu4dixjUg",
+        ExportName = "sceAgcDcbJumpGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbJumpGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 4u * sizeof(uint);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "bbFueFP+J4k",
         ExportName = "sceAgcDcbSetPredication",
         Target = Generation.Gen5,
@@ -11092,7 +11284,7 @@ public static partial class AgcExports
         var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
-            state.ResourceRegistrationInitialized = true;
+            state.ResourceRegistrationMode = ResourceRegistrationMode.Explicit;
             state.ResourceRegistrationMemory = memoryAddress;
             state.ResourceRegistrationMemorySize = memorySize;
             state.ResourceRegistrationMaxOwners = (uint)ownerCount;
@@ -11148,10 +11340,11 @@ public static partial class AgcExports
 
         var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
         uint owner;
+        var initializedImplicitly = false;
+        var ownerName = System.Text.Encoding.UTF8.GetString(nameBytes);
         lock (state.Gate)
         {
-            if (!state.ResourceRegistrationInitialized ||
-                state.ResourceRegistrationMaxOwners != 0 &&
+            if (state.ResourceRegistrationMaxOwners != 0 &&
                 state.ResourceOwners.Count >= state.ResourceRegistrationMaxOwners)
             {
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
@@ -11167,23 +11360,29 @@ public static partial class AgcExports
                 }
             }
 
-            state.NextOwner = owner + 1;
-            state.ResourceOwners.Add(owner, System.Text.Encoding.UTF8.GetString(nameBytes));
-        }
-
-        if (!ctx.TryWriteUInt32(ownerAddress, owner))
-        {
-            lock (state.Gate)
+            if (!ctx.TryWriteUInt32(ownerAddress, owner))
             {
-                state.ResourceOwners.Remove(owner);
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            if (state.ResourceRegistrationMode == ResourceRegistrationMode.None)
+            {
+                state.ResourceRegistrationMode = ResourceRegistrationMode.Implicit;
+                initializedImplicitly = true;
+            }
+
+            state.NextOwner = owner + 1;
+            state.ResourceOwners.Add(owner, ownerName);
+        }
+
+        if (initializedImplicitly)
+        {
+            TraceAgc("agc.driver_register_owner initialized implicit resource registration");
         }
 
         TraceAgc(
             $"agc.driver_register_owner out=0x{ownerAddress:X16} owner={owner} " +
-            $"name={System.Text.Encoding.UTF8.GetString(nameBytes)}");
+            $"name={ownerName}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
