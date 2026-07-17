@@ -59,12 +59,23 @@ public static partial class Gen5MslTranslator
 
                     // Under the single-lane graphics model the "first active
                     // lane" is always this lane; a real simd_shuffle would read
-                    // another fragment's value. Compute lanes are real, and its
-                    // per-lane ballot makes lane 0 the first set bit.
+                    // another fragment's value. Compute broadcasts from the
+                    // first guest-active lane (the ballot of EXEC), matching
+                    // the SPIR-V translator — SPIR-V's own BroadcastFirst uses
+                    // the first host-active invocation, which may be a lane the
+                    // guest has masked off.
                     var value = RawSource(instruction, 0);
+                    if (IsSingleLaneStage)
+                    {
+                        StoreScalar(instruction.Destinations[0].Value, Temp("uint", value));
+                        return true;
+                    }
+
+                    var mask = Temp("uint", "sharpemu_ballot(exec)");
+                    var firstLane = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
                     StoreScalar(
                         instruction.Destinations[0].Value,
-                        Temp("uint", ShuffleLane(value, "0u")));
+                        Temp("uint", ShuffleLane(value, firstLane)));
                     return true;
                 }
                 case "VReadlaneB32":

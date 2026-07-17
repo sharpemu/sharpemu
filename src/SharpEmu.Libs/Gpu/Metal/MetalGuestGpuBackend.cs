@@ -106,15 +106,9 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
-        if (waveLaneCount != 32)
-        {
-            // One MSL invocation models one lane of a 32-wide wave (the Apple
-            // simdgroup width); wave64 needs a two-pass emulation that has not
-            // been built yet.
-            error = $"the Metal backend does not support wave{waveLaneCount} compute shaders yet";
-            return false;
-        }
-
+        // Wave64 is rejected inside the translator, and only when the program
+        // actually contains wave-sensitive operations — a wave64 kernel without
+        // them executes identically per-thread on 32-wide Apple simdgroups.
         if (!Gen5MslTranslator.TryCompileComputeShader(
                 state,
                 evaluation,

@@ -63,7 +63,7 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return value ? 0xFFFFFFFFu : 0u;
+    return (uint)(uint64_t)simd_ballot(value);
 }
 
 static constant float sharpemu_off_i4_table[16] =

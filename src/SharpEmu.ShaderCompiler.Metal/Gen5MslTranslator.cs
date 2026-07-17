@@ -309,13 +309,14 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             try
             {
-                if (_waveLaneCount != 32)
+                if (_waveLaneCount != 32 && UsesWaveSensitiveOperations())
                 {
-                    // gfx10 titles run wave32 for compute in the cases the
-                    // emulator dispatches today; Apple simdgroups are 32 wide,
-                    // so wave64 needs the SPIR-V translator's emulation scheme.
-                    // Fail loudly instead of translating with wrong lane math.
-                    error = "wave64 compute is not supported by the MSL translator yet";
+                    // Apple simdgroups are 32 wide; wave64 lane math needs the
+                    // SPIR-V translator's two-half emulation scheme. A wave64
+                    // program without wave-sensitive ops executes identically
+                    // per-thread, so only the combination is fatal — and it
+                    // fails loudly instead of translating with wrong lane math.
+                    error = "wave64 compute with cross-lane operations is not supported by the MSL translator yet";
                     return false;
                 }
 
@@ -415,6 +416,49 @@ public static partial class Gen5MslTranslator
                 return false;
             }
         }
+
+        /// <summary>Mirrors the SPIR-V translator's subgroup-usage predicates:
+        /// the ops whose results depend on the wave width or on other lanes.
+        /// A program without them is wave-size-agnostic.</summary>
+        private bool UsesWaveSensitiveOperations()
+        {
+            foreach (var instruction in _state.Program.Instructions)
+            {
+                if (instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
+                    instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32"
+                        or "VReadlaneB32" or "VReadfirstlaneB32"
+                        or "VMbcntLoU32B32" or "VMbcntHiU32B32" ||
+                    instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                foreach (var operand in instruction.Sources)
+                {
+                    if (IsWaveMaskOperand(operand))
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (var operand in instruction.Destinations)
+                {
+                    if (IsWaveMaskOperand(operand))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsWaveMaskOperand(Gen5Operand operand) =>
+            operand.Kind == Gen5OperandKind.ScalarRegister &&
+            operand.Value is VccLoRegister or VccHiRegister or ExecLoRegister or ExecHiRegister;
 
         /// <summary>Rewrites the trailing comma of the last emitted parameter
         /// line into the closing parenthesis. Every stage emits each entry
@@ -682,14 +726,15 @@ public static partial class Gen5MslTranslator
         // while(active){switch(pc)} dispatcher, where Metal leaves cross-lane
         // ops undefined, so lanes at different pc corrupt each other's EXEC/VCC
         // reconstruction and kill whole quads (all fragments discarded). This
-        // is the SPIR-V translator's no-subgroup fallback model. Compute keeps
-        // the per-lane all-ones form so its real simdgroup lane index still
-        // finds its own bit ("ballot(v) >> lane & 1" == v for every lane).
+        // is the SPIR-V translator's no-subgroup fallback model. Compute
+        // mirrors the SPIR-V translator's compute path instead: threads map
+        // one-to-one onto real simdgroup lanes and ballots are real, so masks
+        // parked in VCC/EXEC hold each lane's actual bit.
         private void EmitPrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "prelude",
                 ("ballot_return", _stage == Gen5MslStage.Compute
-                    ? "value ? 0xFFFFFFFFu : 0u"
+                    ? "(uint)(uint64_t)simd_ballot(value)"
                     : "value ? 1u : 0u")));
 
         // The GFX10 unified-format table is baked from the same authoritative
