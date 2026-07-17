@@ -273,8 +273,16 @@ internal static unsafe class VulkanVideoPresenter
     private const uint NvidiaVendorId = 0x10DE;
     private const uint AmdVendorId = 0x1002;
     // Other GPU PCI vendor IDs, for reference when adding future rules:
-    // Intel 0x8086, Qualcomm 0x5143, ARM 0x13B5, Apple 0x106B, Microsoft (software) 0x1414.
+    // Intel 0x8086, Apple 0x106B, Qualcomm 0x5143 (Windows-on-ARM), Microsoft software 0x1414.
     private const int LastResortPenalty = 1000;
+    private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
+    private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
+    private const int GlfwPlatformHint = 0x00050003;
+    private const int GlfwPlatformWin32 = 0x00060001;
+    private const int GlfwPlatformCocoa = 0x00060002;
+    private const int GlfwPlatformWayland = 0x00060003;
+    private const int GlfwPlatformX11 = 0x00060004;
+    private const int GlfwPlatformNull = 0x00060005;
 
     internal static int ScorePhysicalDevice(
         PhysicalDeviceProperties properties,
@@ -318,14 +326,7 @@ internal static unsafe class VulkanVideoPresenter
 
         return penalty;
     }
-    private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
-    private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
-    private const int GlfwPlatformHint = 0x00050003;
-    private const int GlfwPlatformWin32 = 0x00060001;
-    private const int GlfwPlatformCocoa = 0x00060002;
-    private const int GlfwPlatformWayland = 0x00060003;
-    private const int GlfwPlatformX11 = 0x00060004;
-    private const int GlfwPlatformNull = 0x00060005;
+
     private static bool _splashHidden;
     private static long _enqueuedGuestWorkSequence;
     // Largest contiguous completed sequence, retained for compact diagnostics.
