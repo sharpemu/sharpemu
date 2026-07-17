@@ -24,6 +24,14 @@ public enum Gen5MslStage
 /// uniform. Unlike SPIR-V, Metal fixes the threadgroup size at dispatch time, so
 /// the size the shader was translated for is carried here.
 /// </summary>
+/// <remarks>
+/// <see cref="UniformsBufferIndex"/> is the [[buffer(N)]] slot this stage's
+/// SharpEmuUniforms argument was emitted at (globalBufferBase +
+/// totalGlobalBufferCount, both translation-time inputs). Stages sharing a draw
+/// can disagree — a vertex stage whose guest buffers sit after the pixel
+/// stage's has a higher base — so the presenter must bind the uniforms buffer
+/// per stage at this exact index rather than assuming one shared slot.
+/// </remarks>
 public sealed record Gen5MslShader(
     string Source,
     string EntryPoint,
@@ -34,4 +42,5 @@ public sealed record Gen5MslShader(
     IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
     uint ThreadgroupSizeX = 1,
     uint ThreadgroupSizeY = 1,
-    uint ThreadgroupSizeZ = 1);
+    uint ThreadgroupSizeZ = 1,
+    int UniformsBufferIndex = -1);

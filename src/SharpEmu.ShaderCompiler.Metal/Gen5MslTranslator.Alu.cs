@@ -57,15 +57,11 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
-                    // Guest EXEC is modeled as data, so obtain the guest-active
-                    // mask explicitly and broadcast from its first set lane
-                    // (falling back to lane 0 for an empty mask).
+                    // Each host thread models one wave lane whose ballot is its
+                    // own bit, so the "first active lane" is always this lane —
+                    // a real simd_shuffle would read another fragment's value.
                     var value = RawSource(instruction, 0);
-                    var mask = Temp("uint", "sharpemu_ballot(exec)");
-                    var firstLane = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
-                    StoreScalar(
-                        instruction.Destinations[0].Value,
-                        Temp("uint", $"simd_shuffle({value}, (ushort){firstLane})"));
+                    StoreScalar(instruction.Destinations[0].Value, Temp("uint", value));
                     return true;
                 }
                 case "VReadlaneB32":
@@ -625,6 +621,8 @@ public static partial class Gen5MslTranslator
             {
                 // GFX10 VCMPX writes EXEC only.
                 Line($"exec = {active};");
+                Line($"s[{ExecLoRegister}] = sharpemu_ballot(exec);");
+                Line($"s[{ExecHiRegister}] = 0u;");
             }
             else
             {
@@ -687,7 +685,8 @@ public static partial class Gen5MslTranslator
 
         /// <summary>
         /// Writes this lane's bit of a wave mask: VCC/EXEC update the per-lane
-        /// bool; a plain SGPR receives the ballot of the per-lane condition.
+        /// bool and mirror the ballot into their architectural SGPRs; a plain
+        /// SGPR receives the ballot of the per-lane condition.
         /// </summary>
         private void StoreMaskBit(uint register, string condition)
         {
@@ -695,9 +694,13 @@ public static partial class Gen5MslTranslator
             {
                 case VccLoRegister:
                     Line($"vcc = {condition};");
+                    Line($"s[{VccLoRegister}] = sharpemu_ballot(vcc);");
+                    Line($"s[{VccHiRegister}] = 0u;");
                     return;
                 case ExecLoRegister:
                     Line($"exec = {condition};");
+                    Line($"s[{ExecLoRegister}] = sharpemu_ballot(exec);");
+                    Line($"s[{ExecHiRegister}] = 0u;");
                     return;
                 default:
                     if (register < ScalarRegisterFileCount)
@@ -870,7 +873,7 @@ public static partial class Gen5MslTranslator
             var left = Temp("uint", RawSource(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
             {
-                var oldExec = Temp("uint", "sharpemu_ballot(exec)");
+                var oldExec = Temp("uint", $"s[{ExecLoRegister}]");
                 var operation = instruction.Opcode[1..instruction.Opcode.IndexOf(
                     "Saveexec",
                     StringComparison.Ordinal)];
@@ -896,6 +899,8 @@ public static partial class Gen5MslTranslator
 
                 var mask = Temp("uint", combined);
                 StoreScalar(destination, oldExec);
+                Line($"s[{ExecLoRegister}] = {mask};");
+                Line($"s[{ExecHiRegister}] = 0u;");
                 Line($"exec = (({mask} >> sharpemu_lane) & 1u) != 0u;");
                 Line($"scc = {mask} != 0u;");
                 return true;
@@ -1203,7 +1208,7 @@ public static partial class Gen5MslTranslator
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = Temp("ulong", "(ulong)sharpemu_ballot(exec)");
+                var oldExec = Temp("ulong", Scalar64Expression(ExecLoRegister));
                 var operation = instruction.Opcode[1..instruction.Opcode.IndexOf(
                     "Saveexec",
                     StringComparison.Ordinal)];
@@ -1229,6 +1234,8 @@ public static partial class Gen5MslTranslator
 
                 var mask = Temp("ulong", combined);
                 StoreScalar64(destination, oldExec);
+                Line($"s[{ExecLoRegister}] = (uint){mask};");
+                Line($"s[{ExecHiRegister}] = (uint)({mask} >> 32);");
                 Line($"exec = ((((uint){mask}) >> sharpemu_lane) & 1u) != 0u;");
                 Line($"scc = {mask} != 0ul;");
                 return true;
@@ -1437,8 +1444,8 @@ public static partial class Gen5MslTranslator
 
         private string Scalar64Expression(uint register) => register switch
         {
-            VccLoRegister => "(ulong)sharpemu_ballot(vcc)",
-            ExecLoRegister => "(ulong)sharpemu_ballot(exec)",
+            // VCC/EXEC read their architectural SGPR pairs like any other
+            // register — programs park plain data there (see StoreScalar).
             _ when register + 1 < ScalarRegisterFileCount =>
                 $"((ulong)s[{register}] | ((ulong)s[{register + 1}] << 32))",
             _ => "0ul",

@@ -63,7 +63,7 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return (uint)(uint64_t)simd_ballot(value);
+    return value ? 0xFFFFFFFFu : 0u;
 }
 
 static constant float sharpemu_off_i4_table[16] =
@@ -93,6 +93,10 @@ kernel void gen5_cs(
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < sharpemu_uniforms.dispatch_limit_x
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < sharpemu_uniforms.dispatch_limit_y
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < sharpemu_uniforms.dispatch_limit_z;
+    s[106] = 0u;
+    s[107] = 0u;
+    s[126] = sharpemu_ballot(true);
+    s[127] = 0u;
 
     while (active)
     {

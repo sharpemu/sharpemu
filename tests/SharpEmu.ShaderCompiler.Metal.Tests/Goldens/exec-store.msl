@@ -63,7 +63,7 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return (uint)(uint64_t)simd_ballot(value);
+    return value ? 0xFFFFFFFFu : 0u;
 }
 
 static constant float sharpemu_off_i4_table[16] =
@@ -94,6 +94,10 @@ kernel void gen5_cs(
     active = (sharpemu_group_id.x * 32u + sharpemu_local_id.x) < sharpemu_uniforms.dispatch_limit_x
         && (sharpemu_group_id.y * 1u + sharpemu_local_id.y) < sharpemu_uniforms.dispatch_limit_y
         && (sharpemu_group_id.z * 1u + sharpemu_local_id.z) < sharpemu_uniforms.dispatch_limit_z;
+    s[106] = 0u;
+    s[107] = 0u;
+    s[126] = sharpemu_ballot(true);
+    s[127] = 0u;
 
     while (active)
     {
@@ -133,18 +137,22 @@ kernel void gen5_cs(
                 sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t10 + 0u, v[6], 4u);
             }
             uint t11 = 0u;
-            exec = ((t11) >> sharpemu_lane & 1u) != 0u;
-            uint t12 = ((0xCu + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
+            uint t12 = t11;
+            s[126] = t12;
+            exec = ((t12) >> sharpemu_lane & 1u) != 0u;
+            uint t13 = ((0xCu + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
             if (exec)
             {
-                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t12 + 0u, v[2], 4u);
+                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t13 + 0u, v[2], 4u);
             }
-            uint t13 = 0xFFFFFFFFu;
-            exec = ((t13) >> sharpemu_lane & 1u) != 0u;
-            uint t14 = ((0x10u + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
+            uint t14 = 0xFFFFFFFFu;
+            uint t15 = t14;
+            s[126] = t15;
+            exec = ((t15) >> sharpemu_lane & 1u) != 0u;
+            uint t16 = ((0x10u + 0u + 0u + (0u * ((s[9] >> 16) & 0x3FFFu))) + bias[0]);
             if (exec)
             {
-                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t14 + 0u, v[0], 4u);
+                sharpemu_store_bytes(b0, sharpemu_uniforms.buffer_bytes[0], t16 + 0u, v[0], 4u);
             }
             active = false;
         }

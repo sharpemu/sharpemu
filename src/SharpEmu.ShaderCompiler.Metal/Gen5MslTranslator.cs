@@ -401,7 +401,8 @@ public static partial class Gen5MslTranslator
                         : [],
                     _localSizeX,
                     _localSizeY,
-                    _localSizeZ);
+                    _localSizeZ,
+                    UniformsBufferIndex: UniformsBufferIndex);
                 return true;
             }
             catch (Exception exception)
@@ -648,15 +649,24 @@ public static partial class Gen5MslTranslator
         // range-checked against the binding's byte length; loads outside the
         // buffer produce zero and stores are dropped, matching the SPIR-V
         // translator's robust-access behavior. The static text lives in
-        // Templates/prelude.msl; only the wave-ballot expression varies —
-        // vertex functions have no simdgroup attributes, so that stage models
-        // a single logical wave lane whose mask is its own bit.
+        // Templates/prelude.msl; only the wave-ballot expression varies.
+        //
+        // Each host thread models one guest wave lane, so the mask a lane needs
+        // back from a ballot is just its own bit repeated: "value ? all-ones :
+        // 0" makes "ballot(v) >> lane & 1" evaluate to v for every lane index,
+        // and "ballot(v) != 0" evaluate to v. A real simd_ballot cannot be used
+        // here: the translated program runs inside the divergent
+        // while(active){switch(pc)} dispatcher, where Metal leaves cross-lane
+        // ops undefined, so lanes at different pc corrupt each other's EXEC/VCC
+        // reconstruction and killed whole quads (all fragments discarded). The
+        // vertex stage's lane is always 0, so its own bit is bit 0 ("value ? 1 :
+        // 0"); pixel lanes span the simdgroup and need the all-ones form.
         private void EmitPrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "prelude",
                 ("ballot_return", _stage == Gen5MslStage.Vertex
                     ? "value ? 1u : 0u"
-                    : "(uint)(uint64_t)simd_ballot(value)")));
+                    : "value ? 0xFFFFFFFFu : 0u")));
 
         // The GFX10 unified-format table is baked from the same authoritative
         // decoder descriptor evaluation uses (dataFormat | numberFormat << 8);
@@ -851,6 +861,15 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    v[5] = sharpemu_vertex_id;");
                 source.AppendLine("    v[8] = sharpemu_instance_id;");
             }
+
+            // VCC/EXEC live in their architectural SGPRs (see StoreScalar);
+            // establish the entry state over whatever the initial-scalar block
+            // carried so the register file and the bool views agree from the
+            // first instruction.
+            source.AppendLine($"    s[{VccLoRegister}] = 0u;");
+            source.AppendLine($"    s[{VccHiRegister}] = 0u;");
+            source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
+            source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
         }
 
         private static void EmitComputeSystemRegister(
@@ -886,6 +905,14 @@ public static partial class Gen5MslTranslator
 
                 if (instruction.Opcode == "SBranch")
                 {
+                    // A branch to (or past) the program's end is an exit — the
+                    // pattern sprite alpha-kill shaders use to skip their tail.
+                    if (IsExitBranchTarget(instructions, instruction))
+                    {
+                        Line("active = false;");
+                        return true;
+                    }
+
                     if (!TryGetBranchTargetBlock(blocks, instruction, out var target))
                     {
                         error = $"branch target outside program at pc=0x{instruction.Pc:X}";
@@ -904,13 +931,30 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
+                    var fallthrough = blockIndex + 1;
+                    if (IsExitBranchTarget(instructions, instruction))
+                    {
+                        // Taken → exit; not taken → fall through (or exit when
+                        // this is the last block anyway).
+                        if (fallthrough >= blocks.Count)
+                        {
+                            Line("active = false;");
+                        }
+                        else
+                        {
+                            Line($"pc = {fallthrough}u;");
+                            Line($"active = !({condition});");
+                        }
+
+                        return true;
+                    }
+
                     if (!TryGetBranchTargetBlock(blocks, instruction, out var target))
                     {
                         error = $"branch target outside program at pc=0x{instruction.Pc:X}";
                         return false;
                     }
 
-                    var fallthrough = blockIndex + 1;
                     if (fallthrough >= blocks.Count)
                     {
                         Line($"pc = ({condition}) ? {target}u : 0xFFFFFFFFu;");
@@ -953,10 +997,12 @@ public static partial class Gen5MslTranslator
             {
                 "SCbranchScc0" => "!scc",
                 "SCbranchScc1" => "scc",
-                "SCbranchVccz" => "sharpemu_ballot(vcc) == 0u",
-                "SCbranchVccnz" => "sharpemu_ballot(vcc) != 0u",
-                "SCbranchExecz" => "sharpemu_ballot(exec) == 0u",
-                "SCbranchExecnz" => "sharpemu_ballot(exec) != 0u",
+                // VCCZ/EXECZ test the full architectural register pair, which
+                // also covers programs that parked plain data in VCC.
+                "SCbranchVccz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u",
+                "SCbranchVccnz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
+                "SCbranchExecz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
+                "SCbranchExecnz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
                 _ => string.Empty,
             };
             return condition.Length != 0;
@@ -970,6 +1016,23 @@ public static partial class Gen5MslTranslator
             block = -1;
             return TryGetBranchTargetPc(instruction, out var targetPc) &&
                 TryFindBlock(blocks, targetPc, out block);
+        }
+
+        /// <summary>True when the branch lands at or past the last instruction's
+        /// end — an exit, matching the SPIR-V translator's handling.</summary>
+        private static bool IsExitBranchTarget(
+            IReadOnlyList<Gen5ShaderInstruction> instructions,
+            Gen5ShaderInstruction instruction)
+        {
+            if (instructions.Count == 0 ||
+                !TryGetBranchTargetPc(instruction, out var targetPc))
+            {
+                return false;
+            }
+
+            var last = instructions[^1];
+            var lastEndPc = last.Pc + (uint)(last.Words.Count * sizeof(uint));
+            return targetPc >= lastEndPc;
         }
 
         // ---- instruction dispatch ----
@@ -1594,19 +1657,36 @@ public static partial class Gen5MslTranslator
             return name;
         }
 
+        // VCC (s106:s107) and EXEC (s126:s127) are architectural SGPRs: programs
+        // freely use them as scratch data registers (s_buffer_load into s[106],
+        // then v_rcp_f32 of that value is real RDNA2 code). The register file
+        // holds their raw 32-bit values as the source of truth; the bools
+        // vcc/exec are cached per-lane views kept in sync at every write so
+        // control flow stays cheap. Reading them back as data returns the file.
         private void StoreScalar(uint register, string expression)
         {
             switch (register)
             {
                 case VccLoRegister:
-                    Line($"vcc = (({expression}) >> sharpemu_lane & 1u) != 0u;");
+                {
+                    var value = Temp("uint", expression);
+                    Line($"s[{VccLoRegister}] = {value};");
+                    Line($"vcc = (({value}) >> sharpemu_lane & 1u) != 0u;");
                     return;
+                }
+
                 case ExecLoRegister:
-                    Line($"exec = (({expression}) >> sharpemu_lane & 1u) != 0u;");
+                {
+                    var value = Temp("uint", expression);
+                    Line($"s[{ExecLoRegister}] = {value};");
+                    Line($"exec = (({value}) >> sharpemu_lane & 1u) != 0u;");
                     return;
+                }
+
                 case VccHiRegister:
                 case ExecHiRegister:
-                    // Wave32: the high mask halves hold no lanes.
+                    // Wave32: the high halves carry no lanes, but keep the data.
+                    Line($"s[{register}] = {expression};");
                     return;
             }
 
@@ -1633,14 +1713,8 @@ public static partial class Gen5MslTranslator
             }
         }
 
-        private string ScalarExpression(uint register) => register switch
-        {
-            VccLoRegister => "sharpemu_ballot(vcc)",
-            ExecLoRegister => "sharpemu_ballot(exec)",
-            VccHiRegister or ExecHiRegister => "0u",
-            _ when register < ScalarRegisterFileCount => $"s[{register}]",
-            _ => "0u",
-        };
+        private string ScalarExpression(uint register) =>
+            register < ScalarRegisterFileCount ? $"s[{register}]" : "0u";
 
         private string SourceExpression(
             Gen5Operand operand,
@@ -1658,12 +1732,12 @@ public static partial class Gen5MslTranslator
                     // 251/252/253 read the VCCZ/EXECZ/SCC status bits as data.
                     if (operand.Value == 251)
                     {
-                        return "(sharpemu_ballot(vcc) == 0u ? 1u : 0u)";
+                        return $"((s[{VccLoRegister}] | s[{VccHiRegister}]) == 0u ? 1u : 0u)";
                     }
 
                     if (operand.Value == 252)
                     {
-                        return "(sharpemu_ballot(exec) == 0u ? 1u : 0u)";
+                        return $"((s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u ? 1u : 0u)";
                     }
 
                     if (operand.Value == 253)

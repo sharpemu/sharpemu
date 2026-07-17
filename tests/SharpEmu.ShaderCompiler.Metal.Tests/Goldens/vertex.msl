@@ -96,6 +96,10 @@ vertex Gen5VsOut gen5_vs(
     uint bias[1] = {};
     v[5] = sharpemu_vertex_id;
     v[8] = sharpemu_instance_id;
+    s[106] = 0u;
+    s[107] = 0u;
+    s[126] = sharpemu_ballot(true);
+    s[127] = 0u;
 
     while (active)
     {

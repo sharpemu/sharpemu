@@ -63,7 +63,7 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return (uint)(uint64_t)simd_ballot(value);
+    return value ? 0xFFFFFFFFu : 0u;
 }
 
 static constant float sharpemu_off_i4_table[16] =
@@ -98,6 +98,10 @@ fragment Gen5PsOut gen5_ps(
     uint steps = 0u;
     Gen5PsOut sharpemu_out = {};
     uint bias[1] = {};
+    s[106] = 0u;
+    s[107] = 0u;
+    s[126] = sharpemu_ballot(true);
+    s[127] = 0u;
 
     while (active)
     {
