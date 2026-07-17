@@ -26,8 +26,11 @@ public static class JsonExports
         ulong GuestBufferAddress = 0,
         int GuestBufferCapacity = 0);
 
+    private readonly record struct JsonReferenceKey(ulong ValueAddress, string Key);
+
     private static readonly ConcurrentDictionary<ulong, JsonValueState> _values = new();
     private static readonly ConcurrentDictionary<ulong, JsonStringState> _strings = new();
+    private static readonly ConcurrentDictionary<JsonReferenceKey, ulong> _valueReferences = new();
     private static readonly JsonElement _nullElement = CreateNullElement();
 
     [SysAbiExport(
@@ -356,6 +359,39 @@ public static class JsonExports
     }
 
     [SysAbiExport(
+        Nid = "wLsJlmgEIaI",
+        ExportName = "_ZN3sce4Json5Value10referValueERKNS0_6StringE",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int ValueReferValueByString(CpuContext ctx)
+    {
+        var valueAddress = ctx[CpuRegister.Rdi];
+        var stringAddress = ctx[CpuRegister.Rsi];
+        if (!TryGetStringValue(ctx, stringAddress, out var key))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            TraceJsonReference(valueAddress, string.Empty, 0, 0);
+            return 0;
+        }
+
+        var parent = GetValue(valueAddress);
+        if (parent.ValueKind != System.Text.Json.JsonValueKind.Object ||
+            !parent.TryGetProperty(key, out var property) ||
+            !TryGetOrAllocateValueReference(ctx, new JsonReferenceKey(valueAddress, key), out var childAddress))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            TraceJsonReference(valueAddress, key, 0, 0);
+            return 0;
+        }
+
+        var child = property.Clone();
+        StoreValue(ctx, childAddress, child);
+        ctx[CpuRegister.Rax] = childAddress;
+        TraceJsonReference(valueAddress, key, childAddress, GetValueType(child));
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "XlWbvieLj2M",
         ExportName = "_ZNK3sce4Json5ValueixEm",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -517,7 +553,7 @@ public static class JsonExports
     private static int DestroyValue(CpuContext ctx)
     {
         var thisAddress = ctx[CpuRegister.Rdi];
-        _values.TryRemove(thisAddress, out _);
+        RemoveCompleteValueShadow(ctx, thisAddress);
         if (thisAddress != 0)
         {
             Span<byte> empty = stackalloc byte[ValueObjectSize];
@@ -546,7 +582,7 @@ public static class JsonExports
     private static int DestroyString(CpuContext ctx)
     {
         var thisAddress = ctx[CpuRegister.Rdi];
-        _strings.TryRemove(thisAddress, out _);
+        RemoveCompleteStringShadow(ctx, thisAddress);
         if (thisAddress != 0)
         {
             ctx.TryWriteUInt64(thisAddress, 0);
@@ -580,7 +616,8 @@ public static class JsonExports
         Span<byte> mirror = stackalloc byte[ValueObjectSize];
         mirror.Clear();
         var type = GetValueType(clone);
-        BinaryPrimitives.WriteInt32LittleEndian(mirror[0x1C..], type);
+        var typeOffset = ctx.TargetGeneration == Generation.Gen4 ? 0x18 : 0x1C;
+        BinaryPrimitives.WriteInt32LittleEndian(mirror[typeOffset..], type);
         switch (clone.ValueKind)
         {
             case System.Text.Json.JsonValueKind.True:
@@ -622,6 +659,68 @@ public static class JsonExports
             allocator.TryAllocateGuestMemory((ulong)size, 0x10, out address);
     }
 
+    private static bool TryGetOrAllocateValueReference(
+        CpuContext ctx,
+        JsonReferenceKey key,
+        out ulong address)
+    {
+        if (_valueReferences.TryGetValue(key, out address))
+        {
+            return true;
+        }
+
+        if (!TryAllocateGuestObject(ctx, ValueObjectSize, out var allocatedAddress))
+        {
+            address = 0;
+            return false;
+        }
+
+        address = _valueReferences.GetOrAdd(key, allocatedAddress);
+        if (address != allocatedAddress && ctx.Memory is IGuestMemoryAllocator allocator)
+        {
+            allocator.TryFreeGuestMemory(allocatedAddress);
+        }
+
+        return true;
+    }
+
+    internal static void RemoveCompleteValueShadow(CpuContext ctx, ulong address)
+    {
+        _values.TryRemove(address, out _);
+        foreach (var reference in _valueReferences.Where(entry => entry.Key.ValueAddress == address).ToArray())
+        {
+            if (!_valueReferences.TryRemove(reference.Key, out var childAddress))
+            {
+                continue;
+            }
+
+            _values.TryRemove(childAddress, out _);
+            if (ctx.Memory is IGuestMemoryAllocator allocator)
+            {
+                allocator.TryFreeGuestMemory(childAddress);
+            }
+        }
+    }
+
+    internal static void RemoveCompleteStringShadow(CpuContext ctx, ulong address)
+    {
+        if (!_strings.TryRemove(address, out var state) ||
+            state.GuestBufferAddress == 0 ||
+            ctx.Memory is not IGuestMemoryAllocator allocator)
+        {
+            return;
+        }
+
+        allocator.TryFreeGuestMemory(state.GuestBufferAddress);
+    }
+
+    internal static void ResetForTests()
+    {
+        _values.Clear();
+        _strings.Clear();
+        _valueReferences.Clear();
+    }
+
     private static bool TryReadUtf8CString(
         CpuContext ctx,
         ulong address,
@@ -655,6 +754,30 @@ public static class JsonExports
         return false;
     }
 
+    private static bool TryGetStringValue(CpuContext ctx, ulong address, out string value)
+    {
+        value = string.Empty;
+        if (address == 0)
+        {
+            return false;
+        }
+
+        if (_strings.TryGetValue(address, out var stringState))
+        {
+            value = stringState.Value;
+            return true;
+        }
+
+        if (JsonObjectHeap.Strings.TryGetValue(address, out var heapValue))
+        {
+            value = heapValue;
+            return true;
+        }
+
+        return ctx.TryReadUInt64(address, out var bufferAddress) &&
+            TryReadUtf8CString(ctx, bufferAddress, 4096, out value);
+    }
+
     private static int SetReturn(CpuContext ctx, int result)
     {
         ctx[CpuRegister.Rax] = unchecked((ulong)result);
@@ -682,5 +805,22 @@ public static class JsonExports
         var preview = value.Length <= 128 ? value : value[..128];
         Console.Error.WriteLine(
             $"[LOADER][TRACE] json.{operation} this=0x{thisAddress:X16} value={preview}");
+    }
+
+    private static void TraceJsonReference(
+        ulong valueAddress,
+        string key,
+        ulong childAddress,
+        int childType)
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_JSON"), "1", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var preview = key.Length <= 128 ? key : key[..128];
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] json.Value.refer this=0x{valueAddress:X16} key={preview} " +
+            $"child=0x{childAddress:X16} type={childType}");
     }
 }

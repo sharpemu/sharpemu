@@ -117,7 +117,9 @@ public static class JsonValueExports
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceJson")]
     public static int ValueDestructor(CpuContext ctx)
     {
-        JsonObjectHeap.RemoveValue(ctx[CpuRegister.Rdi]);
+        var thisAddress = ctx[CpuRegister.Rdi];
+        JsonExports.RemoveCompleteValueShadow(ctx, thisAddress);
+        JsonObjectHeap.RemoveValue(thisAddress);
         return ReturnVoid(ctx);
     }
 
@@ -228,7 +230,9 @@ public static class JsonValueExports
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceJson")]
     public static int StringDestructor(CpuContext ctx)
     {
-        JsonObjectHeap.RemoveString(ctx[CpuRegister.Rdi]);
+        var thisAddress = ctx[CpuRegister.Rdi];
+        JsonExports.RemoveCompleteStringShadow(ctx, thisAddress);
+        JsonObjectHeap.RemoveString(thisAddress);
         return ReturnVoid(ctx);
     }
 }

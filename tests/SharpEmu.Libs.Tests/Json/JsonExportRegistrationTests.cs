@@ -22,6 +22,7 @@ public sealed class JsonExportRegistrationTests
         ("BSmWDIkV4w4", "_ZN3sce4Json5Value3setEd"),
         ("IKQimvG9Wqs", "_ZN3sce4Json5Value3setENS0_9ValueTypeE"),
         ("6l3Bv2gysNc", "_ZN3sce4Json5Value3setERKNS0_6StringE"),
+        ("wLsJlmgEIaI", "_ZN3sce4Json5Value10referValueERKNS0_6StringE"),
         ("9KUZFjI1IxA", "_ZN3sce4Json6StringC1EPKc"),
         ("cG1VE2HMl6c", "_ZN3sce4Json6StringD1Ev"),
         ("+drDFyAS6u4", "_ZN3sce4Json11Initializer27setGlobalNullAccessCallbackEPFRKNS0_5ValueENS0_9ValueTypeEPS3_PvES7_"),
