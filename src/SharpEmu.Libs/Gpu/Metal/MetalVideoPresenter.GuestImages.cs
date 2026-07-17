@@ -559,6 +559,7 @@ internal static partial class MetalVideoPresenter
         var completedWork = 0;
         _drawSnapshotQueue = queue;
         RecycleCompletedUploadPages();
+        RecycleCompletedSnapshotResources();
         EvictDirtyCachedDrawTextures();
         while (completedWork < MaxGuestWorkPerRender)
         {

@@ -510,6 +510,7 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
+        TagSnapshotResources(commandBuffer);
 
         // CPU-visible GPU writes are ordering points in the guest command
         // stream: completing this work item is the signal WaitForGuestWork
@@ -599,6 +600,7 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
+        TagSnapshotResources(commandBuffer);
         if (writeBackBuffers.Count > 0)
         {
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
@@ -1339,23 +1341,23 @@ internal static partial class MetalVideoPresenter
         {
             if (TryCreateDepthSampleTexture(device, texture, out var depthSample))
             {
+                ownedByCaller = false;
                 return depthSample;
             }
 
             var live = ResolveGuestImageAlias(texture);
-            if (live is { Initialized: true })
+            if (live is { Initialized: true } && _drawSnapshotQueue != 0)
             {
-                var snapshot = CreateGuestTexture(device, live.Format, live.Width, live.Height);
+                // ShaderRead | RenderTarget (5), matching CreateGuestTexture:
+                // the source image was created with the same usage and blit
+                // sources/destinations need no extra flags.
+                var snapshot = AcquireSnapshotTexture(
+                    device, live.Format, live.Width, live.Height, usage: 5);
                 if (snapshot != 0)
                 {
-                    var queue = _drawSnapshotQueue;
-                    if (queue != 0)
-                    {
-                        CopyTexture(queue, live.Texture, snapshot);
-                        return snapshot;
-                    }
-
-                    MetalNative.SendVoid(snapshot, MetalNative.Selector("release"));
+                    CopyTexture(_drawSnapshotQueue, live.Texture, snapshot);
+                    ownedByCaller = false;
+                    return snapshot;
                 }
             }
 
@@ -1559,26 +1561,20 @@ internal static partial class MetalVideoPresenter
 
         var bytesPerRow = (nuint)depth.Width * 4;
         var bytesPerImage = bytesPerRow * depth.Height;
-        // MTLResourceStorageModePrivate = 32: staging never touches the CPU.
-        var staging = MetalNative.SendNewBuffer(
-            device, MetalNative.Selector("newBufferWithLength:options:"), bytesPerImage, 32);
+        var staging = AcquireSnapshotBuffer(device, bytesPerImage);
         if (staging == 0)
         {
             return false;
         }
 
-        var descriptor = MetalNative.SendTextureDescriptor(
-            MetalNative.Class("MTLTextureDescriptor"),
-            MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-            (nuint)MtlPixelFormat.R32Float,
+        sample = AcquireSnapshotTexture(
+            device,
+            MtlPixelFormat.R32Float,
             depth.Width,
             depth.Height,
-            mipmapped: false);
-        MetalNative.Send(descriptor, MetalNative.Selector("setUsage:"), (nint)UsageShaderRead);
-        sample = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
+            (nint)UsageShaderRead);
         if (sample == 0)
         {
-            MetalNative.SendVoid(staging, MetalNative.Selector("release"));
             return false;
         }
 
@@ -1615,8 +1611,6 @@ internal static partial class MetalVideoPresenter
             default);
         MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
-        // The committed command buffer retains the staging buffer.
-        MetalNative.SendVoid(staging, MetalNative.Selector("release"));
         return true;
     }
 

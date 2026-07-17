@@ -238,6 +238,7 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
+        TagSnapshotResources(commandBuffer);
 
         if (writeBackBuffers.Count > 0)
         {
