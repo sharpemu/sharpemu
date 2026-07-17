@@ -1148,6 +1148,25 @@ public static class Gen5ShaderScalarEvaluator
             return true;
         }
 
+        if (instruction.Opcode == "SFF1I32B64")
+        {
+            if (!TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    execMask,
+                    out var value))
+            {
+                error = $"scalar-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            registers[destination.Value] = value == 0
+                ? uint.MaxValue
+                : (uint)BitOperations.TrailingZeroCount(value);
+            scalarConditionCode = registers[destination.Value] != 0;
+            return true;
+        }
+
         if (instruction.Opcode is "SMovB64" or "SWqmB64" or "SNotB64")
         {
             if (destination.Value >= ScalarRegisterCount - 1 ||
@@ -1330,6 +1349,22 @@ public static class Gen5ShaderScalarEvaluator
         if (instruction.Opcode == "SMovB32")
         {
             registers[destination.Value] = left;
+            return true;
+        }
+
+        if (instruction.Opcode == "SWqmB32")
+        {
+            var quadAny = (left | (left >> 1) | (left >> 2) | (left >> 3)) &
+                0x1111_1111u;
+            var value = quadAny * 0xFu;
+            registers[destination.Value] = value;
+            if (destination.Value == 126)
+            {
+                execMask = value;
+                registers[127] = 0;
+            }
+
+            scalarConditionCode = value != 0;
             return true;
         }
 
@@ -1728,6 +1763,30 @@ public static class Gen5ShaderScalarEvaluator
     {
         scalarConditionCode = false;
         error = string.Empty;
+        if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+        {
+            if (instruction.Sources.Count != 2 ||
+                !TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    ulong.MaxValue,
+                    out var left64) ||
+                !TryEvaluateScalarOperand64(
+                    instruction.Sources[1],
+                    registers,
+                    ulong.MaxValue,
+                    out var right64))
+            {
+                error = $"scalar-compare-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            scalarConditionCode = instruction.Opcode == "SCmpEqU64"
+                ? left64 == right64
+                : left64 != right64;
+            return true;
+        }
+
         if (instruction.Sources.Count != 2 ||
             !TryEvaluateScalarOperand(instruction.Sources[0], registers, out var left) ||
             !TryEvaluateScalarOperand(instruction.Sources[1], registers, out var right))

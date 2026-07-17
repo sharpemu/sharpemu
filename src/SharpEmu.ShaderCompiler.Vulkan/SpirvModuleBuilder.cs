@@ -93,6 +93,8 @@ public enum SpirvOp : ushort
     SMod = 139,
     FRem = 140,
     FMod = 141,
+    DPdx = 207,
+    DPdy = 208,
     IAddCarry = 149,
     ISubBorrow = 150,
     UMulExtended = 151,
@@ -196,6 +198,7 @@ public enum SpirvCapability : uint
     GroupNonUniformVote = 62,
     GroupNonUniformBallot = 64,
     GroupNonUniformShuffle = 65,
+    FragmentBarycentricKhr = 5284,
     RuntimeDescriptorArray = 5302,
 }
 
@@ -234,10 +237,13 @@ public enum SpirvDecoration : uint
     BuiltIn = 11,
     NoPerspective = 13,
     Flat = 14,
+    Centroid = 16,
+    Sample = 17,
     Location = 30,
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
+    PerVertexKhr = 5285,
 }
 
 public enum SpirvBuiltIn : uint
@@ -252,6 +258,8 @@ public enum SpirvBuiltIn : uint
     GlobalInvocationId = 28,
     LocalInvocationIndex = 29,
     SubgroupLocalInvocationId = 41,
+    BaryCoordKhr = 5286,
+    BaryCoordNoPerspKhr = 5287,
 }
 
 public enum SpirvImageDim : uint

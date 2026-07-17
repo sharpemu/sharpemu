@@ -52,7 +52,8 @@ public enum Gen5PixelOutputKind
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
-    Gen5PixelOutputKind Kind);
+    Gen5PixelOutputKind Kind,
+    uint WriteMask = 0xFu);
 
 public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,
@@ -124,7 +125,38 @@ public sealed record Gen5ShaderState(
     IReadOnlyList<uint> UserData,
     Gen5ShaderMetadata? Metadata,
     Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
-    uint UserDataScalarRegisterBase = 0);
+    uint UserDataScalarRegisterBase = 0,
+    uint ProgramResource1 = 0);
+
+/// <summary>
+/// Shared ABI for the per-draw scalar block consumed by translated shaders.
+/// Buffer metadata is interleaved by absolute descriptor index so every stage
+/// can address its own bindings without knowing another stage's binding count.
+/// </summary>
+public static class Gen5RuntimeScalarLayout
+{
+    public const int ScalarRegisterDwordCount = 256;
+    public const int BufferMetadataDwordCount = 2;
+
+    public static int GetByteBiasDwordIndex(int bindingIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bindingIndex);
+        return checked(
+            ScalarRegisterDwordCount +
+            bindingIndex * BufferMetadataDwordCount);
+    }
+
+    public static int GetBufferDwordCountDwordIndex(int bindingIndex) =>
+        checked(GetByteBiasDwordIndex(bindingIndex) + 1);
+
+    public static int GetDwordLength(int bindingCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bindingCount);
+        return checked(
+            ScalarRegisterDwordCount +
+            bindingCount * BufferMetadataDwordCount);
+    }
+}
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
