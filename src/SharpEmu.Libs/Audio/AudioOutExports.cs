@@ -156,6 +156,37 @@ public static class AudioOutExports
     }
 
     [SysAbiExport(
+        Nid = "GrQ9s4IrNaQ",
+        ExportName = "sceAudioOutGetPortState",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAudioOut")]
+    public static int AudioOutGetPortState(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var stateAddress = ctx[CpuRegister.Rsi];
+        if (stateAddress == 0 || !Ports.TryGetValue(handle, out var port))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // SceAudioOutPortState: report a connected primary output at full volume
+        // so pacing/mixing code sees a live port. We do no host rerouting, so
+        // rerouteCounter and flag stay zero.
+        Span<byte> state = stackalloc byte[16];
+        state.Clear();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(state, 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(
+            state[2..], (ushort)port.Channels);
+        state[7] = 127;
+        if (!ctx.Memory.TryWrite(stateAddress, state))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "QOQtbeDqsT4",
         ExportName = "sceAudioOutOutput",
         Target = Generation.Gen5,

@@ -217,6 +217,38 @@ public static class PadExports
     }
 
     [SysAbiExport(
+        Nid = "AcslpN1jHR8",
+        ExportName = "scePadDeviceClassGetExtendedInformation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadDeviceClassGetExtendedInformation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var informationAddress = ctx[CpuRegister.Rsi];
+        if (!IsPrimaryPadHandle(handle))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (informationAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // ScePadDeviceClassExtendedInformation: deviceClass 0 = standard pad
+        // (DualSense). We emulate no special peripheral (guitar/drums/wheel), so
+        // the class-data union stays zeroed — the guest treats it as a plain
+        // controller with no extended capabilities.
+        Span<byte> information = stackalloc byte[0x20];
+        information.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(information[0x00..], 0);
+
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "YndgXqQVV7c",
         ExportName = "scePadReadState",
         Target = Generation.Gen4 | Generation.Gen5,
