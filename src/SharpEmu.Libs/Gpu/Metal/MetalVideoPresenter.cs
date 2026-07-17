@@ -24,9 +24,14 @@ internal static partial class MetalVideoPresenter
     private const uint DefaultWindowWidth = 1280;
     private const uint DefaultWindowHeight = 720;
 
-    // NSWindow style: Titled | Closable | Miniaturizable — fixed border like the
-    // Vulkan presenter's window.
-    private const nuint WindowStyleMask = 1 | 2 | 4;
+    // NSWindow style: Titled | Closable | Miniaturizable | Resizable. Resizable
+    // both lets the user drag the window edges and turns the green zoom button
+    // into the full-screen toggle (paired with the collection behavior below).
+    private const nuint WindowStyleMask = 1 | 2 | 4 | 8;
+
+    // NSWindowCollectionBehaviorFullScreenPrimary: opt this window into native
+    // full-screen, so the green button enters full-screen rather than zooming.
+    private const nuint FullScreenPrimaryBehavior = 1 << 7;
     private const nuint BackingStoreBuffered = 2;
     private const nuint PixelFormatBgra8Unorm = (nuint)MtlPixelFormat.Bgra8Unorm;
     private const nuint LoadActionLoad = 1;
@@ -606,6 +611,13 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
+            // The window is resizable, so the backing layer's bounds follow the
+            // window while its drawable size does not — match them before asking
+            // for a drawable, or nextDrawable keeps handing back the original
+            // resolution and Core Animation stretches it (blurry, mis-scaled
+            // overlay). No-op when the size is unchanged, i.e. almost every tick.
+            SyncDrawableSizeToLayer();
+
             var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
             {
@@ -736,6 +748,8 @@ internal static partial class MetalVideoPresenter
             defer: false);
         // The presenter owns the handle; AppKit must not free it on user close.
         MetalNative.SendVoidBool(window, MetalNative.Selector("setReleasedWhenClosed:"), false);
+        MetalNative.Send(
+            window, MetalNative.Selector("setCollectionBehavior:"), (nint)FullScreenPrimaryBehavior);
         MetalNative.SendVoid(
             window,
             MetalNative.Selector("setTitle:"),
@@ -743,6 +757,34 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(window, MetalNative.Selector("center"));
         // makeKeyAndOrderFront happens after the metal layer is attached.
         return window;
+    }
+
+    /// <summary>Keeps the CAMetalLayer's drawable size (pixels) matched to its
+    /// current bounds (points) × scale as the window resizes or moves between
+    /// displays. CAMetalLayer never updates drawableSize on its own, even as a
+    /// view's backing layer, so the render loop drives it.</summary>
+    private static void SyncDrawableSizeToLayer()
+    {
+        MetalNative.SendStretRect(out var bounds, _metalLayer, MetalNative.Selector("bounds"));
+        var scale = MetalNative.SendDouble(_metalLayer, MetalNative.Selector("contentsScale"));
+        if (scale <= 0)
+        {
+            scale = 1;
+        }
+
+        var width = Math.Max(1, Math.Round(bounds.Width * scale));
+        var height = Math.Max(1, Math.Round(bounds.Height * scale));
+        if (width == _drawableWidth && height == _drawableHeight)
+        {
+            return;
+        }
+
+        _drawableWidth = width;
+        _drawableHeight = height;
+        MetalNative.SendVoidSize(
+            _metalLayer,
+            MetalNative.Selector("setDrawableSize:"),
+            new CGSize { Width = width, Height = height });
     }
 
     private static nint CreateLayer(nint device, nint window, out double drawableWidth, out double drawableHeight)

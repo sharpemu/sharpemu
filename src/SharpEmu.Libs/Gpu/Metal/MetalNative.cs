@@ -164,6 +164,13 @@ internal static partial class MetalNative
     public static partial nint Send(nint receiver, nint selector, nint argument);
 
 
+    /// <summary>objc_msgSend for a CGRect-returning selector (e.g. -bounds).
+    /// A 32-byte struct is returned via the x86-64 stret ABI — a hidden
+    /// pointer to caller storage passed ahead of self/_cmd — so this must not
+    /// be folded into the plain objc_msgSend overloads.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend_stret")]
+    public static partial void SendStretRect(out CGRect result, nint receiver, nint selector);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument, ref nint error);
 
