@@ -1144,6 +1144,13 @@ internal static partial class MetalVideoPresenter
         // ShaderRead | RenderTarget: the present pass samples these and fills
         // clear them through a render pass.
         MetalNative.Send(descriptor, MetalNative.Selector("setUsage:"), (nint)5);
+        // MTLStorageModeShared (0): these textures are CPU-populated
+        // (replaceRegion) and GPU-sampled. The MTLTextureDescriptor default is
+        // Managed, which on unified memory needs an explicit host->device sync
+        // we never issue, so the GPU reads stale (uninitialized/white) texels —
+        // Xcode's frame capture flags exactly this. Shared is coherent on
+        // Apple Silicon with no sync.
+        MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
         return MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
     }
 

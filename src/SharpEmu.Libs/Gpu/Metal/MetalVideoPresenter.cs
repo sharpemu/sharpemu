@@ -948,6 +948,9 @@ internal static partial class MetalVideoPresenter
                 presentation.Width,
                 presentation.Height,
                 mipmapped: false);
+            // Shared (0): CPU-uploaded frame, GPU-sampled by the present pass;
+            // the Managed default reads stale on unified memory.
+            MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
             frameTexture = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
             textureWidth = presentation.Width;
             textureHeight = presentation.Height;

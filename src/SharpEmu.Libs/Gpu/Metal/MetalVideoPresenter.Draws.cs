@@ -1611,6 +1611,9 @@ internal static partial class MetalVideoPresenter
             texture.Width,
             texture.Height,
             mipmapped: false);
+        // MTLStorageModeShared (0): CPU-uploaded (replaceRegion) + GPU-sampled;
+        // the Managed default reads stale on unified memory (see CreateGuestTexture).
+        MetalNative.Send(descriptor, MetalNative.Selector("setStorageMode:"), (nint)0);
         if (texture.IsStorage)
         {
             MetalNative.Send(
