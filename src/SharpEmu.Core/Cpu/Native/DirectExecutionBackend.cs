@@ -9,6 +9,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Cpu.Emulation;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
@@ -2492,28 +2493,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
 	{
-		// Rosetta does not implement AMD SSE4a EXTRQ. This exact sequence masks
-		// xmm2 to its low 40 bits, then copies the resulting second dword into
-		// xmm0. PEXTRB/PINSRD provides the same observable result in 12 bytes:
-		// extract source byte 4 and insert the zero-extended value into lane 1.
-		ReadOnlySpan<byte> pattern =
-		[
-			0x66, 0x0F, 0x78, 0xC2, 0x28, 0x00,
-			0xC4, 0xE3, 0x79, 0x02, 0xC2, 0x02,
-		];
-		for (var i = 0; i < pattern.Length; i++)
+		// AMD SSE4a EXTRQ faults with #UD on Intel hosts and under Rosetta. The recognition and the
+		// SSE4.1 replacement encoding live in Sse4aExtrqRewriter so they can be unit-tested without
+		// executable memory; the register the toolchain picks for the extract varies between titles
+		// (xmm1 in PPSA15552, xmm2 elsewhere), which the rewriter now handles.
+		var window = new ReadOnlySpan<byte>(source, Sse4aExtrqRewriter.SequenceLength);
+		Span<byte> replacement = stackalloc byte[Sse4aExtrqRewriter.SequenceLength];
+		if (!Sse4aExtrqRewriter.TryRewrite(window, replacement))
 		{
-			if (source[i] != pattern[i])
-			{
-				return false;
-			}
+			return false;
 		}
 
-		ReadOnlySpan<byte> replacement =
-		[
-			0x66, 0x0F, 0x3A, 0x14, 0xD0, 0x04,
-			0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x01,
-		];
 		uint oldProtect = 0;
 		if (!VirtualProtect((void*)address, (nuint)replacement.Length, 64u, &oldProtect))
 		{
