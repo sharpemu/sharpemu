@@ -47,7 +47,7 @@ public sealed class SaveDataExportsTests : IDisposable
         _originalSaveRoot = Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
         _saveRoot = Path.Combine(Path.GetTempPath(), $"sharpemu-savedata-{Guid.NewGuid():N}");
         Environment.SetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR", _saveRoot);
-        SaveDataExports.ConfigureApplicationInfo("PPSA03525");
+        SaveDataExports.ConfigureApplicationInfo("PPSA00001");
         _context = new CpuContext(_memory, Generation.Gen5);
     }
 
@@ -101,7 +101,7 @@ public sealed class SaveDataExportsTests : IDisposable
     {
         MountSave("slot0");
         Assert.EndsWith(
-            Path.Combine("PPSA03525", "slot0", "data.bin"),
+            Path.Combine("PPSA00001", "slot0", "data.bin"),
             KernelMemoryCompatExports.ResolveGuestPath("/savedata0/data.bin"));
 
         var title = new byte[128];
@@ -116,13 +116,13 @@ public sealed class SaveDataExportsTests : IDisposable
         var metadataPath = Path.Combine(
             _saveRoot,
             "1",
-            "PPSA03525",
+            "PPSA00001",
             "sce_params",
             "slot0.bin");
         var stored = File.ReadAllBytes(metadataPath);
         Assert.Equal(0x530, stored.Length);
         Assert.Equal(title, stored[..128]);
-        Assert.False(File.Exists(Path.Combine(_saveRoot, "1", "PPSA03525", "slot0", "slot0.bin")));
+        Assert.False(File.Exists(Path.Combine(_saveRoot, "1", "PPSA00001", "slot0", "slot0.bin")));
 
         Span<byte> condition = stackalloc byte[0x20];
         condition.Clear();
@@ -234,7 +234,7 @@ public sealed class SaveDataExportsTests : IDisposable
         _context[CpuRegister.Rsi] = MemoryBase + 0x10000;
 
         Assert.Equal(MemoryFault, SaveDataExports.SaveDataMount3(_context));
-        Assert.False(Directory.Exists(Path.Combine(_saveRoot, "1", "PPSA03525", "rollback")));
+        Assert.False(Directory.Exists(Path.Combine(_saveRoot, "1", "PPSA00001", "rollback")));
     }
 
     [Fact]
@@ -556,7 +556,7 @@ public sealed class SaveDataExportsTests : IDisposable
     private string GetMetadataPath(string dirName) => Path.Combine(
         _saveRoot,
         "1",
-        "PPSA03525",
+        "PPSA00001",
         "sce_params",
         $"{dirName}.bin");
 
