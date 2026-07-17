@@ -185,6 +185,36 @@ public static class AudioOut2Exports
     }
 
     [SysAbiExport(
+        Nid = "G1YOKDJYX2Y",
+        ExportName = "sceAudioOut2GetSpeakerArrayMemorySize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2GetSpeakerArrayMemorySize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0x10000;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "+k91hoTuoA8",
+        ExportName = "sceAudioOut2SpeakerArrayCreate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2SpeakerArrayCreate(CpuContext ctx)
+    {
+        var outHandleAddress = ctx[CpuRegister.Rdi];
+        if (outHandleAddress == 0)
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var handle = (ulong)Interlocked.Increment(ref _nextContextHandle);
+        return TryWriteUInt64(ctx, outHandleAddress, handle)
+            ? SetReturn(ctx, 0)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "DxGyV8dtOR8",
         ExportName = "sceAudioOut2ContextBedWrite",
         Target = Generation.Gen5,
