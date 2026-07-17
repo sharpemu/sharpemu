@@ -34,6 +34,17 @@ internal struct MtlClearColor
     public double Alpha;
 }
 
+/// <summary>MTLTextureSwizzleChannels: one MTLTextureSwizzle byte per output
+/// channel (Zero=0, One=1, Red=2, Green=3, Blue=4, Alpha=5).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct MtlTextureSwizzleChannels
+{
+    public byte Red;
+    public byte Green;
+    public byte Blue;
+    public byte Alpha;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct MtlRegion
 {
@@ -186,6 +197,14 @@ internal static partial class MetalNative
         nint performedSelector,
         nint argument,
         [MarshalAs(UnmanagedType.I1)] bool waitUntilDone);
+
+    /// <summary>setSwizzle: on MTLTextureDescriptor. Four one-byte
+    /// MTLTextureSwizzle values, passed packed like the framework expects.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidSwizzle(
+        nint receiver,
+        nint selector,
+        MtlTextureSwizzleChannels channels);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);

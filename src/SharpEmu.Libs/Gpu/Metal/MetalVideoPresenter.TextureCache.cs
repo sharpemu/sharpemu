@@ -151,8 +151,8 @@ internal static partial class MetalVideoPresenter
     /// <summary>Self-heal for the skip/eviction race: the submit thread saw a
     /// cached identity and skipped the copy, but the entry was evicted before
     /// this draw executed. Read the texels directly rather than rendering a
-    /// fallback texture for the frame. The draw path treats texels as 4-byte
-    /// RGBA rows, so read that footprint.</summary>
+    /// fallback texture for the frame, sized with the same block-aware math
+    /// the draw path expects.</summary>
     private static byte[]? TryReadGuestDrawTexturePixels(GuestDrawTexture texture)
     {
         var memory = _guestMemory;
@@ -161,13 +161,14 @@ internal static partial class MetalVideoPresenter
             return null;
         }
 
-        var width = Math.Max(texture.Width, 1);
-        var height = Math.Max(texture.Height, 1);
+        var width = Math.Max(texture.Width, 1u);
+        var height = Math.Max(texture.Height, 1u);
         var rowLength = texture.TileMode == 0
             ? Math.Max(texture.Pitch, width)
             : width;
-        var byteCount = (ulong)rowLength * height * 4;
-        if (byteCount > int.MaxValue)
+        var format = MetalGuestFormats.DecodeTextureFormat(texture.Format, texture.NumberType);
+        var byteCount = MetalGuestFormats.GetTextureByteCount(format, rowLength, height);
+        if (byteCount == 0 || byteCount > int.MaxValue)
         {
             return null;
         }

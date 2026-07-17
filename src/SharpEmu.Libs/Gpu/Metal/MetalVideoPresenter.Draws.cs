@@ -1545,7 +1545,13 @@ internal static partial class MetalVideoPresenter
             return cached;
         }
 
-        if ((ulong)texture.RgbaPixels.Length < (ulong)texture.Width * texture.Height * 4)
+        // AGC ships the raw (detiled) source texels; create the texture in the
+        // guest's native format — Mac-family GPUs sample BC blocks directly —
+        // and size expectations with the same block-aware math AGC used.
+        var textureFormat = MetalGuestFormats.DecodeTextureFormat(texture.Format, texture.NumberType);
+        var pitch = texture.Pitch != 0 ? Math.Max(texture.Pitch, texture.Width) : texture.Width;
+        var expectedBytes = MetalGuestFormats.GetTextureByteCount(textureFormat, pitch, texture.Height);
+        if ((ulong)texture.RgbaPixels.Length < expectedBytes)
         {
             if (_missingTextureTraces < 16)
             {
@@ -1553,7 +1559,8 @@ internal static partial class MetalVideoPresenter
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Metal draw texture undersized: 0x{texture.Address:X} " +
                     $"{texture.Width}x{texture.Height} pitch={texture.Pitch} " +
-                    $"bytes={texture.RgbaPixels.Length}");
+                    $"fmt={texture.Format}/{texture.NumberType} " +
+                    $"bytes={texture.RgbaPixels.Length} expected={expectedBytes}");
             }
 
             return 0;
@@ -1562,7 +1569,7 @@ internal static partial class MetalVideoPresenter
         var descriptor = MetalNative.SendTextureDescriptor(
             MetalNative.Class("MTLTextureDescriptor"),
             MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-            (nuint)MtlPixelFormat.Rgba8Unorm,
+            (nuint)textureFormat.Format,
             texture.Width,
             texture.Height,
             mipmapped: false);
@@ -1573,15 +1580,22 @@ internal static partial class MetalVideoPresenter
                 MetalNative.Selector("setUsage:"),
                 (nint)(UsageShaderRead | UsageShaderWrite));
         }
+        else if (texture.DstSelect != 0xFAC && texture.DstSelect != 0)
+        {
+            // Channel select from the guest descriptor, like the Vulkan view's
+            // component mapping. Shader-writable textures reject swizzles, so
+            // storage stays identity (matching Vulkan, which never swizzles
+            // storage views either).
+            MetalNative.SendVoidSwizzle(
+                descriptor,
+                MetalNative.Selector("setSwizzle:"),
+                ToMetalSwizzle(texture.DstSelect));
+        }
 
         var handle = MetalNative.Send(device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
         if (handle != 0)
         {
-            var pitch = texture.Pitch != 0 ? Math.Max(texture.Pitch, texture.Width) : texture.Width;
-            // AGC always supplies RGBA8 texel copies, matching the Rgba8Unorm
-            // texture created above; row clamping happens in the helper.
-            ReplaceTextureContents(
-                handle, texture.Width, texture.Height, texture.RgbaPixels, pitch, bytesPerPixel: 4);
+            ReplaceDrawTextureContents(handle, texture, pitch, textureFormat);
             if (cacheable)
             {
                 CacheDrawTexture(texture, handle);
@@ -1590,6 +1604,72 @@ internal static partial class MetalVideoPresenter
 
         return handle;
     }
+
+    /// <summary>Uploads a draw texture's source texels: linear formats reuse the
+    /// row-clamping helper; block-compressed formats upload whole 4x4 block rows
+    /// with the block-row stride replaceRegion expects.</summary>
+    private static unsafe void ReplaceDrawTextureContents(
+        nint handle,
+        GuestDrawTexture texture,
+        uint pitch,
+        in MetalTextureFormat format)
+    {
+        if (!format.IsBlockCompressed)
+        {
+            ReplaceTextureContents(
+                handle, texture.Width, texture.Height, texture.RgbaPixels, pitch, format.BytesPerPixel);
+            return;
+        }
+
+        var blocksWide = ((ulong)Math.Max(pitch, texture.Width) + 3) / 4;
+        var bytesPerBlockRow = blocksWide * format.BlockBytes;
+        if (bytesPerBlockRow == 0)
+        {
+            return;
+        }
+
+        var blockRows = Math.Min(
+            ((ulong)texture.Height + 3) / 4,
+            (ulong)texture.RgbaPixels.Length / bytesPerBlockRow);
+        if (blockRows == 0)
+        {
+            return;
+        }
+
+        var texelRows = Math.Min(texture.Height, (uint)(blockRows * 4));
+        fixed (byte* source = texture.RgbaPixels)
+        {
+            MetalNative.SendReplaceRegion(
+                handle,
+                MetalNative.Selector("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
+                new MtlRegion { X = 0, Y = 0, Z = 0, Width = texture.Width, Height = texelRows, Depth = 1 },
+                0,
+                (nint)source,
+                (nuint)bytesPerBlockRow);
+        }
+    }
+
+    /// <summary>Guest DST_SEL (3 bits per channel: 0=zero, 1=one, 4..7=RGBA) to
+    /// Metal swizzle bytes, mirroring the Vulkan view's component mapping.</summary>
+    private static MtlTextureSwizzleChannels ToMetalSwizzle(uint dstSelect) => new()
+    {
+        Red = ToMetalSwizzleChannel(dstSelect & 0x7, identity: 2),
+        Green = ToMetalSwizzleChannel((dstSelect >> 3) & 0x7, identity: 3),
+        Blue = ToMetalSwizzleChannel((dstSelect >> 6) & 0x7, identity: 4),
+        Alpha = ToMetalSwizzleChannel((dstSelect >> 9) & 0x7, identity: 5),
+    };
+
+    private static byte ToMetalSwizzleChannel(uint selector, byte identity) =>
+        selector switch
+        {
+            0 => 0,
+            1 => 1,
+            4 => 2,
+            5 => 3,
+            6 => 4,
+            7 => 5,
+            _ => identity,
+        };
 
     /// <summary>Resolves a live guest texture to the current image or a retired
     /// same-address variant, scored by descriptor match like the Vulkan
