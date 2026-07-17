@@ -54,8 +54,15 @@ public static partial class Gen5MslTranslator
             };
         }
 
+        /// <summary>Metal exposes 16 sampler slots per stage.</summary>
+        private const int MaxSamplerSlots = 16;
+
+        private int[] _samplerSlots = [];
+
         private void EmitImageArguments(StringBuilder source)
         {
+            _samplerSlots = new int[_imageKinds.Count];
+            var samplerCount = 0;
             for (var index = 0; index < _imageKinds.Count; index++)
             {
                 var (isStorage, kind) = _imageKinds[index];
@@ -63,10 +70,23 @@ public static partial class Gen5MslTranslator
                 source.AppendLine(isStorage
                     ? $"    texture2d<{kind}, access::read_write> tex{index} [[texture({slot})]],"
                     : $"    texture2d<{kind}> tex{index} [[texture({slot})]],");
-                if (!isStorage)
+                if (isStorage)
                 {
-                    source.AppendLine($"    sampler smp{index} [[sampler({slot})]],");
+                    _samplerSlots[index] = -1;
+                    continue;
                 }
+
+                // Sampler slots are per-stage and compact: texture slots run to
+                // 30, but [[sampler(N)]] must stay below 16, so samplers count
+                // sampled images only — never the shared texture slot.
+                if (samplerCount >= MaxSamplerSlots)
+                {
+                    throw new InvalidOperationException(
+                        $"stage samples {samplerCount + 1}+ images; Metal exposes only {MaxSamplerSlots} sampler slots per stage");
+                }
+
+                source.AppendLine($"    sampler smp{index} [[sampler({samplerCount})]],");
+                _samplerSlots[index] = samplerCount++;
             }
         }
 

@@ -214,6 +214,9 @@ internal static partial class MetalVideoPresenter
 
         var selSetTexture = MetalNative.Selector("setTexture:atIndex:");
         var selSetSampler = MetalNative.Selector("setSamplerState:atIndex:");
+        // Sampler slots are per-stage and compact (see the draw path): bind at
+        // the slots the kernel declared, skipping storage images.
+        var samplerSlots = shader.SamplerSlots;
         for (var index = 0; index < dispatch.Textures.Length; index++)
         {
             var descriptor = dispatch.Textures[index];
@@ -227,8 +230,16 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
-            MetalNative.SendSetAtIndex(
-                encoder, selSetSampler, GetOrCreateSampler(device, descriptor.Sampler), (nuint)index);
+            if (samplerSlots is not null &&
+                index < samplerSlots.Count &&
+                samplerSlots[index] >= 0)
+            {
+                MetalNative.SendSetAtIndex(
+                    encoder,
+                    selSetSampler,
+                    GetOrCreateSampler(device, descriptor.Sampler),
+                    (nuint)samplerSlots[index]);
+            }
         }
 
         MetalNative.SendDispatch(

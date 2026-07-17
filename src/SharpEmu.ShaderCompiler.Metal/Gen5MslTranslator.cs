@@ -414,7 +414,9 @@ public static partial class Gen5MslTranslator
                     _localSizeX,
                     _localSizeY,
                     _localSizeZ,
-                    UniformsBufferIndex: UniformsBufferIndex);
+                    UniformsBufferIndex: UniformsBufferIndex,
+                    ImageBindingBase: _imageBindingBase,
+                    SamplerSlots: _samplerSlots);
                 return true;
             }
             catch (Exception exception)

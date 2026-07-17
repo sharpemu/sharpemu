@@ -881,6 +881,14 @@ internal static partial class MetalVideoPresenter
         var selSetFragmentTexture = MetalNative.Selector("setFragmentTexture:atIndex:");
         var selSetVertexSampler = MetalNative.Selector("setVertexSamplerState:atIndex:");
         var selSetFragmentSampler = MetalNative.Selector("setFragmentSamplerState:atIndex:");
+        // Texture slots are global across the draw's stages ([0, vertexImageBase)
+        // is the pixel stage's block), so textures bind to both stage tables at
+        // their global index. Sampler slots are per-stage and compact (Metal has
+        // 16 against 31 texture slots) — bind each stage's samplers at the slots
+        // its shader declared, from that shader's SamplerSlots map.
+        var pixelSamplerSlots = draw.PixelShader.Shader.SamplerSlots;
+        var vertexSamplerSlots = draw.VertexShader?.Shader.SamplerSlots;
+        var vertexImageBase = draw.VertexShader?.Shader.ImageBindingBase ?? int.MaxValue;
         for (var index = 0; index < draw.Textures.Length; index++)
         {
             var texture = textureHandles[index];
@@ -895,8 +903,24 @@ internal static partial class MetalVideoPresenter
             }
 
             var sampler = GetOrCreateSampler(device, draw.Textures[index].Sampler);
-            MetalNative.SendSetAtIndex(encoder, selSetVertexSampler, sampler, (nuint)index);
-            MetalNative.SendSetAtIndex(encoder, selSetFragmentSampler, sampler, (nuint)index);
+            if (index >= vertexImageBase)
+            {
+                var local = index - vertexImageBase;
+                if (vertexSamplerSlots is not null &&
+                    local < vertexSamplerSlots.Count &&
+                    vertexSamplerSlots[local] >= 0)
+                {
+                    MetalNative.SendSetAtIndex(
+                        encoder, selSetVertexSampler, sampler, (nuint)vertexSamplerSlots[local]);
+                }
+            }
+            else if (pixelSamplerSlots is not null &&
+                     index < pixelSamplerSlots.Count &&
+                     pixelSamplerSlots[index] >= 0)
+            {
+                MetalNative.SendSetAtIndex(
+                    encoder, selSetFragmentSampler, sampler, (nuint)pixelSamplerSlots[index]);
+            }
         }
 
         Span<nuint> vertexSlots = stackalloc nuint[draw.VertexBuffers.Length];
