@@ -54,6 +54,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == ''">
     <ApplicationIcon>..\..\assets\images\SharpEmu.ico</ApplicationIcon>
     <Win32Icon>..\..\assets\images\SharpEmu.ico</Win32Icon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <PropertyGroup>

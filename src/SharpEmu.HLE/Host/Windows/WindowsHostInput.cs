@@ -67,7 +67,19 @@ internal sealed partial class WindowsHostInput : IHostInput
         }
 
         GetWindowThreadProcessId(foregroundWindow, out var processId);
-        return processId == (uint)Environment.ProcessId;
+        if (processId == (uint)Environment.ProcessId)
+        {
+            return true;
+        }
+
+        // The GUI runs the emulator in an isolated child process. Its native
+        // Vulkan surface is a child of the GUI window, so the foreground
+        // window belongs to the launcher process rather than this one.
+        var embeddedHostWindow = HostSessionControl.EmbeddedHostWindow;
+        var hostTopLevelWindow = embeddedHostWindow == 0
+            ? 0
+            : GetAncestor(embeddedHostWindow, GetAncestorRoot);
+        return hostTopLevelWindow != 0 && foregroundWindow == hostTopLevelWindow;
     }
 
     public bool IsKeyDown(int virtualKey) =>
@@ -81,4 +93,9 @@ internal sealed partial class WindowsHostInput : IHostInput
 
     [LibraryImport("user32.dll")]
     private static partial uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+    [LibraryImport("user32.dll")]
+    private static partial nint GetAncestor(nint hWnd, uint gaFlags);
+
+    private const uint GetAncestorRoot = 2;
 }

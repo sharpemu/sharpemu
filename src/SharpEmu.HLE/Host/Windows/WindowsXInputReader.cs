@@ -11,7 +11,7 @@ namespace SharpEmu.HLE.Host.Windows;
 /// <see cref="HostGamepadState"/> conventions. Supports rumble and hot-plug
 /// retry; the first connected slot (of four) is used.
 /// </summary>
-internal static partial class WindowsXInputReader
+public static partial class WindowsXInputReader
 {
     private const uint ErrorSuccess = 0;
     private const int SlotCount = 4;
@@ -43,7 +43,7 @@ internal static partial class WindowsXInputReader
     private static byte _triggerRight;
 
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
-    internal static void EnsureStarted()
+    public static void EnsureStarted()
     {
         // The GUI source-links this reader and calls it directly, without the
         // host-platform resolution that otherwise guarantees Windows.
@@ -69,7 +69,7 @@ internal static partial class WindowsXInputReader
         }
     }
 
-    internal static bool TryGetState(out HostGamepadState state)
+    public static bool TryGetState(out HostGamepadState state)
     {
         lock (Gate)
         {

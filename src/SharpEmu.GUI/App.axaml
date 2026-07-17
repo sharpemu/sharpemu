@@ -29,6 +29,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
     <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
     <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
+    <SolidColorBrush x:Key="InfoBrush" Color="#58A6FF" />
     <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
     <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
   </Application.Resources>
@@ -53,6 +54,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Padding" Value="10,3" />
+    </Style>
+
+    <!-- Session status/hotkey badges: the title-id pill geometry with a
+         tinted fill so state (RUNNING) and keys (F11) read at a glance. -->
+    <Style Selector="Border.badge">
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="8,2" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="Border.badge.running">
+      <Setter Property="Background" Value="#1E46C46B" />
+      <Setter Property="BorderBrush" Value="#5546C46B" />
+    </Style>
+    <Style Selector="Border.badge.key">
+      <Setter Property="Background" Value="#1E58A6FF" />
+      <Setter Property="BorderBrush" Value="#5558A6FF" />
     </Style>
 
     <Style Selector="TextBlock.sectionTitle">

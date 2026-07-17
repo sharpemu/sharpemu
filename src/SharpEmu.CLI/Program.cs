@@ -69,10 +69,9 @@ internal static partial class Program
         }
 
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
-        if (args.Length == 0 && !isMitigatedChild)
+
+        if (args.Length == 0)
         {
-            // No arguments: open the desktop frontend. Any argument selects
-            // the classic CLI behavior below.
             return GuiLauncher.Run();
         }
 
@@ -228,7 +227,17 @@ internal static partial class Program
             return childExitCode;
         }
 
-        if (!TryParseArguments(args, out var ebootPath, out var runtimeOptions, out var logLevel, out var logFilePath))
+        if (!TryExtractHostSurfaceArgument(args, out var emulatorArgs, out var hostSurface, out var hostSurfaceError))
+        {
+            Console.Error.WriteLine($"[LOADER][ERROR] {hostSurfaceError}");
+            return 1;
+        }
+
+        HostSessionControl.SetEmbeddedHostSurface(
+            hostSurface?.WindowHandle ?? 0,
+            hostSurface?.DisplayHandle ?? 0);
+
+        if (!TryParseArguments(emulatorArgs, out var ebootPath, out var runtimeOptions, out var logLevel, out var logFilePath))
         {
             PrintUsage();
             return 1;
@@ -255,66 +264,122 @@ internal static partial class Program
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
 
-        using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
-
-        OrbisGen2Result result;
-        ConsoleCancelEventHandler? cancelHandler = null;
         try
         {
-            cancelHandler = (_, eventArgs) =>
+            if (hostSurface is not null && !VulkanVideoHost.TryAttachSurface(hostSurface))
             {
-                eventArgs.Cancel = true;
-                VideoOutExports.NotifyHostInterrupt();
-            };
-            Console.CancelKeyPress += cancelHandler;
+                Console.Error.WriteLine("[LOADER][ERROR] The requested GUI host surface is already active.");
+                return 3;
+            }
 
-            Console.Error.WriteLine($"[DEBUG] Running: {ebootPath}");
-            result = runtime.Run(ebootPath);
-            Console.Error.WriteLine($"[DEBUG] Result: {result}");
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
-            Log.Error("SharpEmu failed to run.", ex);
-            return 3;
+            using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
+
+            OrbisGen2Result result;
+            ConsoleCancelEventHandler? cancelHandler = null;
+            try
+            {
+                cancelHandler = (_, eventArgs) =>
+                {
+                    eventArgs.Cancel = true;
+                    VideoOutExports.NotifyHostInterrupt();
+                };
+                Console.CancelKeyPress += cancelHandler;
+
+                Console.Error.WriteLine($"[DEBUG] Running: {ebootPath}");
+                result = runtime.Run(ebootPath);
+                Console.Error.WriteLine($"[DEBUG] Result: {result}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
+                Log.Error("SharpEmu failed to run.", ex);
+                return 3;
+            }
+            finally
+            {
+                if (cancelHandler is not null)
+                {
+                    Console.CancelKeyPress -= cancelHandler;
+                }
+            }
+
+            Log.Info($"SharpEmu execution completed. Result={result} (0x{(int)result:X8})");
+            if (!string.IsNullOrWhiteSpace(runtime.LastSessionSummary))
+            {
+                Log.Info(runtime.LastSessionSummary);
+            }
+
+            if (!string.IsNullOrWhiteSpace(runtime.LastBasicBlockTrace))
+            {
+                Log.Info("BB trace:");
+                Log.Info(runtime.LastBasicBlockTrace);
+            }
+
+            if (!string.IsNullOrWhiteSpace(runtime.LastMilestoneLog))
+            {
+                Log.Info(runtime.LastMilestoneLog);
+            }
+
+            if (result != OrbisGen2Result.ORBIS_GEN2_OK && !string.IsNullOrWhiteSpace(runtime.LastExecutionDiagnostics))
+            {
+                Log.Warn(runtime.LastExecutionDiagnostics);
+            }
+
+            if (runtimeOptions.ImportTraceLimit > 0 && !string.IsNullOrWhiteSpace(runtime.LastExecutionTrace))
+            {
+                Log.Info("Import trace:");
+                Log.Info(runtime.LastExecutionTrace);
+            }
+
+            return result == OrbisGen2Result.ORBIS_GEN2_OK ? 0 : 4;
         }
         finally
         {
-            if (cancelHandler is not null)
+            HostSessionControl.SetEmbeddedHostSurface(0);
+            if (hostSurface is not null)
             {
-                Console.CancelKeyPress -= cancelHandler;
+                VulkanVideoHost.RequestClose();
+                VulkanVideoHost.DetachSurface(hostSurface);
+                hostSurface.Dispose();
+            }
+        }
+    }
+
+    private static bool TryExtractHostSurfaceArgument(
+        IReadOnlyList<string> args,
+        out string[] emulatorArgs,
+        out VulkanHostSurface? hostSurface,
+        out string? error)
+    {
+        const string hostSurfacePrefix = "--host-surface=";
+        var remaining = new List<string>(args.Count);
+        hostSurface = null;
+        error = null;
+        foreach (var argument in args)
+        {
+            if (!argument.StartsWith(hostSurfacePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                remaining.Add(argument);
+                continue;
+            }
+
+            if (hostSurface is not null)
+            {
+                emulatorArgs = [];
+                error = "more than one GUI host surface was specified";
+                return false;
+            }
+
+            var descriptor = argument[hostSurfacePrefix.Length..];
+            if (!VulkanHostSurface.TryCreateChildProcessSurface(descriptor, out hostSurface, out error))
+            {
+                emulatorArgs = [];
+                return false;
             }
         }
 
-        Log.Info($"SharpEmu execution completed. Result={result} (0x{(int)result:X8})");
-        if (!string.IsNullOrWhiteSpace(runtime.LastSessionSummary))
-        {
-            Log.Info(runtime.LastSessionSummary);
-        }
-
-        if (!string.IsNullOrWhiteSpace(runtime.LastBasicBlockTrace))
-        {
-            Log.Info("BB trace:");
-            Log.Info(runtime.LastBasicBlockTrace);
-        }
-
-        if (!string.IsNullOrWhiteSpace(runtime.LastMilestoneLog))
-        {
-            Log.Info(runtime.LastMilestoneLog);
-        }
-
-        if (result != OrbisGen2Result.ORBIS_GEN2_OK && !string.IsNullOrWhiteSpace(runtime.LastExecutionDiagnostics))
-        {
-            Log.Warn(runtime.LastExecutionDiagnostics);
-        }
-
-        if (runtimeOptions.ImportTraceLimit > 0 && !string.IsNullOrWhiteSpace(runtime.LastExecutionTrace))
-        {
-            Log.Info("Import trace:");
-            Log.Info(runtime.LastExecutionTrace);
-        }
-
-        return result == OrbisGen2Result.ORBIS_GEN2_OK ? 0 : 4;
+        emulatorArgs = remaining.ToArray();
+        return true;
     }
 
     private static void EnsureCliConsole()
@@ -411,7 +476,9 @@ internal static partial class Program
         return handle != 0 && handle != -1;
     }
 
-    private static string[] NormalizeInternalArguments(string[] args, out bool isMitigatedChild)
+    private static string[] NormalizeInternalArguments(
+        string[] args,
+        out bool isMitigatedChild)
     {
         isMitigatedChild = false;
         var trustedMitigatedChild = string.Equals(

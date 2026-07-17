@@ -10,7 +10,7 @@ namespace SharpEmu.HLE.Host.Windows;
 /// Supports USB (input report 0x01) and Bluetooth (extended report 0x31,
 /// activated by requesting feature report 0x05), with hot-plug retry.
 /// </summary>
-internal static class WindowsDualSenseReader
+public static class WindowsDualSenseReader
 {
     private const ushort SonyVendorId = 0x054C;
     private const ushort DualSenseProductId = 0x0CE6;
@@ -35,7 +35,7 @@ internal static class WindowsDualSenseReader
     private static byte _playerLeds = 0x04; // center LED = player 1
 
     /// <summary>Starts the background reader once; safe to call repeatedly.</summary>
-    internal static void EnsureStarted()
+    public static void EnsureStarted()
     {
         // The GUI source-links this reader and calls it directly, without the
         // host-platform resolution that otherwise guarantees Windows.
@@ -61,7 +61,7 @@ internal static class WindowsDualSenseReader
         }
     }
 
-    internal static bool TryGetState(out HostGamepadState state)
+    public static bool TryGetState(out HostGamepadState state)
     {
         lock (Gate)
         {

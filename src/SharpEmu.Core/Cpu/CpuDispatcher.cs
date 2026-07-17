@@ -693,6 +693,13 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         return _virtualMemory.TryWrite(address, buffer);
     }
 
+    /// <summary>
+    /// True when the disposed native backend left its session state alive
+    /// because guest workers were still executing guest code. The guest
+    /// address space must then stay mapped as well.
+    /// </summary>
+    internal bool NativeSessionLeaked { get; private set; }
+
     public void Dispose()
     {
         if (_nativeCpuBackend is IDisposable disposableBackend)
@@ -700,6 +707,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             disposableBackend.Dispose();
         }
 
+        NativeSessionLeaked = _nativeCpuBackend is DirectExecutionBackend { GuestSessionLeaked: true };
         _nativeCpuBackend = null;
     }
 }

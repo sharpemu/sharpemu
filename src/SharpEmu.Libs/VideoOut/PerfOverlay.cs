@@ -154,7 +154,10 @@ public static class PerfOverlay
             _lastGen2 = gen2;
 
             var cpuTime = GetProcessCpuTime();
-            _cpuPercent = (cpuTime - _lastCpuTime).TotalSeconds / seconds * 100.0;
+            // Normalize across logical processors (Task Manager convention):
+            // raw process time / wall time reads 100% per fully busy core.
+            _cpuPercent = (cpuTime - _lastCpuTime).TotalSeconds / seconds * 100.0 /
+                Environment.ProcessorCount;
             _lastCpuTime = cpuTime;
 
             var drawsPerFrame = _fps > 0.5 ? _drawsPerSecond / _fps : 0;

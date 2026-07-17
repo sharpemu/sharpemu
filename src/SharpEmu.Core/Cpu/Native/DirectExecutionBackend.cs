@@ -718,7 +718,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private string? _guestThreadYieldReason;
 
-	private bool _forcedGuestExit;
+	private volatile bool _forcedGuestExit;
 
 	private ulong _lastAvTraceRip;
 
@@ -917,7 +917,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool ActiveForcedGuestExit
 	{
-		get => HasActiveExecutionThread ? _activeForcedGuestExit : _forcedGuestExit;
+		// Host shutdown is requested from a UI or VideoOut thread. Native guest
+		// workers have their own thread-local execution state, so they must also
+		// observe the backend-wide shutdown flag.
+		get => _forcedGuestExit || (HasActiveExecutionThread && _activeForcedGuestExit);
 		set
 		{
 			if (HasActiveExecutionThread)
@@ -3409,6 +3412,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		returnValue = 0;
 		error = null;
+		if (_forcedGuestExit)
+		{
+			error = "guest execution is shutting down";
+			return false;
+		}
 		if (entryPoint < 65536)
 		{
 			error = $"invalid guest callback entry=0x{entryPoint:X16}";
@@ -3655,6 +3663,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out string? error)
 	{
 		error = null;
+		if (_forcedGuestExit)
+		{
+			error = "guest execution is shutting down";
+			return false;
+		}
 		if (continuation.Rip < 65536 || continuation.Rsp == 0)
 		{
 			error = $"invalid guest continuation rip=0x{continuation.Rip:X16} rsp=0x{continuation.Rsp:X16}";
@@ -4685,6 +4698,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private void RunGuestThread(GuestThreadState thread, string reason)
 	{
+		if (_forcedGuestExit)
+		{
+			// Host shutdown: never enter guest code again. Teardown is about to
+			// free trampolines and the guest address space, and it only waits
+			// for executors that are already inside a slice.
+			lock (_guestThreadGate)
+			{
+				thread.State = GuestThreadRunState.Faulted;
+				thread.BlockReason = "host shutdown";
+				thread.HostThread = null;
+				thread.ExecutorActive = false;
+			}
+			return;
+		}
+
 		lock (_guestThreadGate)
 		{
 			if (!thread.ExecutorActive)
@@ -5526,7 +5554,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				num6 = CallNativeEntry(ptr);
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
-				PumpUntilGuestThreadsIdle(context, "entry_return");
+				// A host stop has already invalidated the session. Draining guest
+				// continuations here can re-enter a blocked HLE call after its owner
+				// has exited, preventing the embedded GUI from receiving its exit
+				// callback.
+				if (!ActiveForcedGuestExit)
+				{
+					PumpUntilGuestThreadsIdle(context, "entry_return");
+				}
 			}
 			catch (AccessViolationException ex)
 			{
@@ -6179,8 +6214,68 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	[return: MarshalAs(UnmanagedType.Bool)]
 	private static extern bool Win32CloseHandle(nint hObject);
 
+	/// <summary>
+	/// Set when <see cref="Dispose"/> intentionally left the native session
+	/// state (import trampolines, TLS, exception handlers) alive because guest
+	/// worker threads were still executing guest code. The owning runtime must
+	/// then keep the guest address space mapped as well; freeing either under a
+	/// running worker faults the whole process, which hosts the GUI launcher.
+	/// </summary>
+	internal bool GuestSessionLeaked { get; private set; }
+
+	private bool WaitForGuestThreadQuiescence(TimeSpan timeout)
+	{
+		var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+		while (true)
+		{
+			var busyCount = 0;
+			string? busyName = null;
+			var now = Stopwatch.GetTimestamp();
+			using (LockGate("WaitForGuestThreadQuiescence"))
+			{
+				foreach (var thread in _guestThreads.Values)
+				{
+					if (thread.ExecutorActive)
+					{
+						busyCount++;
+						busyName ??= thread.Name;
+					}
+				}
+			}
+
+			if (busyCount == 0)
+			{
+				return true;
+			}
+
+			if (now >= deadline)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][WARN] {busyCount} guest worker(s) (first: '{busyName}') did not leave guest code " +
+					"during shutdown; the native session state stays alive to avoid faulting them.");
+				return false;
+			}
+
+			Thread.Sleep(5);
+		}
+	}
+
 	public unsafe void Dispose()
 	{
+		// Guest workers unwind cooperatively at their next import or block
+		// boundary once the forced-exit flag is set. Everything freed below is
+		// still reachable from a worker inside guest code, so drain the
+		// scheduler first and leak the session rather than fault a straggler.
+		_forcedGuestExit = true;
+		StopReadyThreadDispatcher();
+		StopStallWatchdog();
+		if (!WaitForGuestThreadQuiescence(TimeSpan.FromSeconds(5)))
+		{
+			GuestSessionLeaked = true;
+			return;
+		}
+
+		ClearGuestThreads();
 		if (ReferenceEquals(_posixSignalBackend, this))
 		{
 			// The signal handlers stay installed (they chain to the previous

@@ -156,15 +156,29 @@ public static class VideoOutExports
     private static void RequestHostShutdown(string reason)
     {
         Console.Error.WriteLine($"[LOADER][INFO] Host shutdown requested: {reason}");
-        VulkanVideoPresenter.RequestClose();
+        var embedded = VulkanVideoHost.IsEmbedded;
         AudioOutExports.ShutdownAllPorts();
         Interlocked.Exchange(ref _vblankStopRequested, 1);
         HostSessionControl.RequestShutdown(reason);
-        ThreadPool.QueueUserWorkItem(static _ =>
+
+        // A hosted game can still be issuing AGC work after it requests its
+        // own shutdown. Keep the Vulkan resources alive until the GUI session
+        // reaches its guest-safe exit path and disposes the host surface.
+        if (!embedded)
         {
-            Thread.Sleep(2000);
-            Environment.Exit(0);
-        });
+            VulkanVideoPresenter.RequestClose();
+        }
+
+        // The embedded GUI owns the process lifetime. A guest shutdown should
+        // end only that session rather than terminating the launcher itself.
+        if (!embedded)
+        {
+            ThreadPool.QueueUserWorkItem(static _ =>
+            {
+                Thread.Sleep(2000);
+                Environment.Exit(0);
+            });
+        }
     }
 
     private sealed class VideoOutPortState

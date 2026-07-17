@@ -5,6 +5,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SharpEmu.GUI"
+        xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
         Width="1280" Height="820"
@@ -18,7 +20,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
-  <Grid RowDefinitions="Auto,*,Auto">
+  <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto">
 
     <!-- Selected-game backdrop: key art behind the main content, dimmed by
          a scrim so tiles and text stay readable. Fades on selection. -->
@@ -56,13 +58,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+
+      <!-- The game owns the full client area while running. Session controls
+           use a native popup so they can stay above this native child surface. -->
+      <Border x:Name="GameView" Grid.Row="0" Grid.RowSpan="4" IsVisible="False" Background="#000000" ClipToBounds="True">
+        <Grid x:Name="GameSurfaceContainer" />
+      </Border>
 
       <!-- Library / Options page switcher, with the library toolbar sharing
            the same row on the right. Plain buttons (not TabItem) so there is
            no underline; LB/RB hint chips flank the pair and the gamepad's
            shoulder buttons actually switch pages from anywhere. -->
-      <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
+      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
         <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
           <Border Classes="padHint" VerticalAlignment="Center">
             <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
@@ -568,7 +576,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       </Border>
 
       <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
-      <Border Grid.Row="3" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
+      <Border Grid.Row="3" x:Name="LaunchBar" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
         <StackPanel Spacing="14">
           <Grid ColumnDefinitions="Auto,*,Auto">
 
@@ -632,6 +640,66 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </StackPanel>
       </Border>
     </Grid>
+
+    <!-- Avalonia's regular overlay layer cannot appear over a native child
+         HWND/X11/Metal surface. Keep the running-session controls in a native
+         popup so the game reaches the bottom status bar without losing Stop. -->
+    <primitives:Popup x:Name="SessionBarPopup"
+                      IsOpen="False"
+                      PlacementTarget="{Binding #GameView}"
+                      Placement="Bottom"
+                      VerticalOffset="-66"
+                      Topmost="True"
+                      ShouldUseOverlayLayer="False"
+                      TakesFocusFromNativeControl="False"
+                      IsLightDismissEnabled="False">
+      <Border Classes="card" Width="520" Height="58" CornerRadius="16" Padding="14,8">
+        <Grid ColumnDefinitions="*,Auto">
+          <StackPanel Spacing="3" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <TextBlock x:Name="SessionGameTitle" Text="GAME RUNNING" FontSize="13" FontWeight="SemiBold"
+                         MaxWidth="240" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+              <Border Classes="badge running" VerticalAlignment="Center">
+                <TextBlock Text="RUNNING" FontSize="9" FontWeight="Bold" LetterSpacing="1"
+                           Foreground="{StaticResource SuccessBrush}" />
+              </Border>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="7">
+              <Border x:Name="SessionF11Badge" Classes="badge key" VerticalAlignment="Center">
+                <TextBlock Text="F11" FontSize="9" FontWeight="Bold"
+                           Foreground="{StaticResource InfoBrush}" />
+              </Border>
+              <TextBlock x:Name="SessionHintText" Text="Fullscreen" FontSize="11"
+                         Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <Button x:Name="SessionConsoleButton" Classes="ghost" Content="≡ Console" />
+            <Button x:Name="SessionStopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
+          </StackPanel>
+        </Grid>
+      </Border>
+    </primitives:Popup>
+
+    <!-- This is a native popup rather than an Avalonia overlay because the
+         emulated Vulkan surface is a native child window. -->
+    <primitives:Popup x:Name="SessionLoadingPopup"
+                      IsOpen="False"
+                      PlacementTarget="{Binding #GameView}"
+                      Placement="Center"
+                      Topmost="True"
+                      ShouldUseOverlayLayer="False"
+                      TakesFocusFromNativeControl="False"
+                      IsLightDismissEnabled="False">
+      <Border Classes="card" Width="380" CornerRadius="18" Padding="22,18">
+        <StackPanel Spacing="12">
+          <TextBlock x:Name="SessionLoadingTitle" Text="Loading game" FontSize="16" FontWeight="SemiBold" />
+          <TextBlock x:Name="SessionLoadingDetail" Text="Preparing the emulation session..." FontSize="12"
+                     Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
+          <ProgressBar IsIndeterminate="True" Height="5" />
+        </StackPanel>
+      </Border>
+    </primitives:Popup>
 
     <!-- Status bar -->
     <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"

@@ -189,6 +189,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Console.Error.WriteLine($"[RUNTIME] DispatchEntry returned: {result}");
         Console.Error.WriteLine($"[RUNTIME] Dispatch result: {result}");
+
+        // Stop is a host operation, not an emulation failure. The detailed
+        // trace and session-summary builders can traverse a partially torn
+        // down native backend, delaying the GUI exit callback indefinitely.
+        if (HostSessionControl.IsShutdownRequested)
+        {
+            Console.Error.WriteLine("[RUNTIME] Skipping post-exit diagnostics for host shutdown.");
+            return result;
+        }
+
         LastExecutionTrace = _cpuDispatcher.LastImportResolutionTrace;
         LastMilestoneLog = _cpuDispatcher.LastMilestoneLog;
         LastSessionSummary = BuildSessionSummary(_cpuDispatcher.LastSessionSummary);
@@ -1150,6 +1160,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         if (_cpuDispatcher is IDisposable disposableDispatcher)
         {
             disposableDispatcher.Dispose();
+        }
+
+        if (_cpuDispatcher is CpuDispatcher { NativeSessionLeaked: true })
+        {
+            // A guest worker is still inside guest code; unmapping the guest
+            // address space under it would fault the whole process, which
+            // hosts the GUI launcher in embedded sessions.
+            Console.Error.WriteLine(
+                "[RUNTIME] Guest workers were still active at teardown; keeping the guest address space mapped.");
+            return;
         }
 
         if (_virtualMemory is IDisposable disposableMemory)

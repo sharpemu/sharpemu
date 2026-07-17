@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -10,32 +9,36 @@ using Microsoft.Win32.SafeHandles;
 namespace SharpEmu.GUI;
 
 /// <summary>
-/// Launches the SharpEmu CLI as a child process with the same CET/CFG mitigation
-/// opt-outs the CLI would apply to its own relaunched child, while capturing
-/// stdout/stderr through pipes. The CLI's internal relaunch is suppressed via
-/// SHARPEMU_DISABLE_MITIGATION_RELAUNCH so output is not lost to a detached
-/// console. A kill-on-close job object ties the emulator's lifetime to the GUI.
+/// Owns an isolated emulator process. Guest virtual memory is fixed-address and
+/// cannot be reliably reused while guest-created host threads are still alive,
+/// so the GUI must never execute a game in its own process.
 /// </summary>
 internal sealed class EmulatorProcess : IDisposable
 {
-    private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
-    private const uint CREATE_NO_WINDOW = 0x08000000;
-    private const int STARTF_USESTDHANDLES = 0x00000100;
-    private const uint HANDLE_FLAG_INHERIT = 0x00000001;
-    private const uint INFINITE = 0xFFFFFFFF;
-    private const int PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY = 0x00020007;
-    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-    private const int JobObjectExtendedLimitInformation = 9;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_XTENDED_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
+    public const int HostStopExitCode = -2;
+
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateNoWindow = 0x08000000;
+    private const int StartfUseStdHandles = 0x00000100;
+    private const uint HandleFlagInherit = 0x00000001;
+    private const uint Infinite = 0xFFFFFFFF;
+    private const int ProcThreadAttributeMitigationPolicy = 0x00020007;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInformationClass = 9;
+    private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
+    private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const ulong ControlFlowGuardAlwaysOff = 0x00000002UL << 40;
+    private const ulong CetUserShadowStacksAlwaysOff = 0x00000002UL << 28;
+    private const ulong UserCetSetContextIpValidationAlwaysOff = 0x00000002UL << 32;
+
+    private static readonly object EnvironmentGate = new();
 
     private readonly object _sync = new();
     private nint _processHandle;
     private nint _jobHandle;
     private Process? _fallbackProcess;
     private bool _running;
+    private bool _stopRequested;
     private bool _disposed;
 
     public event Action<string, bool>? OutputReceived;
@@ -55,29 +58,34 @@ internal sealed class EmulatorProcess : IDisposable
 
     public void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(exePath);
+        ArgumentNullException.ThrowIfNull(arguments);
+
         lock (_sync)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfDisposed();
             if (_running)
             {
                 throw new InvalidOperationException("The emulator process is already running.");
             }
 
-            if (OperatingSystem.IsWindows())
-            {
-                StartWindows(exePath, arguments, workingDirectory);
-            }
-            else
-            {
-                StartFallback(exePath, arguments, workingDirectory);
-            }
-
-            _running = true;
+            _stopRequested = false;
         }
+
+        if (OperatingSystem.IsWindows())
+        {
+            StartWindows(exePath, arguments, workingDirectory);
+            return;
+        }
+
+        StartFallback(exePath, arguments, workingDirectory);
     }
 
     public void Stop()
     {
+        nint processHandle;
+        nint jobHandle;
+        Process? fallbackProcess;
         lock (_sync)
         {
             if (!_running)
@@ -85,27 +93,34 @@ internal sealed class EmulatorProcess : IDisposable
                 return;
             }
 
-            // Prefer terminating the job: it kills the whole tree, including
-            // any children the emulator spawned, even when the main process
-            // is wedged in a GPU driver call.
-            if (_jobHandle != 0)
-            {
-                _ = TerminateJobObject(_jobHandle, 1);
-            }
+            _stopRequested = true;
+            processHandle = _processHandle;
+            jobHandle = _jobHandle;
+            fallbackProcess = _fallbackProcess;
+        }
 
-            if (_processHandle != 0)
-            {
-                _ = TerminateProcess(_processHandle, 1);
-            }
+        if (jobHandle != 0)
+        {
+            _ = TerminateJobObject(jobHandle, unchecked((uint)HostStopExitCode));
+            return;
+        }
 
-            try
+        if (processHandle != 0)
+        {
+            _ = TerminateProcess(processHandle, unchecked((uint)HostStopExitCode));
+            return;
+        }
+
+        try
+        {
+            if (fallbackProcess is { HasExited: false })
             {
-                _fallbackProcess?.Kill(entireProcessTree: true);
+                fallbackProcess.Kill(entireProcessTree: true);
             }
-            catch (InvalidOperationException)
-            {
-                // Already exited.
-            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The process exited while Stop was handling the request.
         }
     }
 
@@ -124,121 +139,206 @@ internal sealed class EmulatorProcess : IDisposable
         Stop();
     }
 
-    private void StartWindows(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
+    private void StartFallback(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
     {
-        // The CLI would otherwise relaunch itself into a mitigated child whose
-        // console output cannot flow through our pipes.
-        Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_MITIGATION_RELAUNCH", "1");
-
-        var securityAttributes = new SECURITY_ATTRIBUTES
+        var startInfo = new ProcessStartInfo(exePath)
         {
-            nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
-            bInheritHandle = 1,
+            WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
+                ? Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
+                : workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
         };
-
-        if (!CreatePipe(out var stdoutRead, out var stdoutWrite, ref securityAttributes, 0) ||
-            !CreatePipe(out var stderrRead, out var stderrWrite, ref securityAttributes, 0))
+        foreach (var argument in arguments)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to create output pipes.");
+            startInfo.ArgumentList.Add(argument);
         }
 
-        _ = SetHandleInformation(stdoutRead, HANDLE_FLAG_INHERIT, 0);
-        _ = SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0);
+        var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start the emulator process.");
+        process.EnableRaisingEvents = true;
+        process.OutputDataReceived += (_, eventArgs) => ForwardOutput(eventArgs.Data, isError: false);
+        process.ErrorDataReceived += (_, eventArgs) => ForwardOutput(eventArgs.Data, isError: true);
+        process.Exited += (_, _) => OnExited(process.ExitCode);
 
-        var startupInfoEx = new STARTUPINFOEX();
-        startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
-        startupInfoEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startupInfoEx.StartupInfo.hStdOutput = stdoutWrite;
-        startupInfoEx.StartupInfo.hStdError = stderrWrite;
+        lock (_sync)
+        {
+            _fallbackProcess = process;
+            _running = true;
+        }
 
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+    }
+
+    private unsafe void StartWindows(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
+    {
+        nint stdoutRead = 0;
+        nint stdoutWrite = 0;
+        nint stderrRead = 0;
+        nint stderrWrite = 0;
         nint attributeList = 0;
         nint mitigationPolicies = 0;
+        nint processHandle = 0;
+        nint threadHandle = 0;
+
         try
         {
+            var security = new SecurityAttributes
+            {
+                Size = Marshal.SizeOf<SecurityAttributes>(),
+                InheritHandle = 1,
+            };
+            if (!CreatePipe(out stdoutRead, out stdoutWrite, ref security, 0) ||
+                !CreatePipe(out stderrRead, out stderrWrite, ref security, 0))
+            {
+                throw new InvalidOperationException($"Could not create emulator output pipes (Win32 error {Marshal.GetLastWin32Error()}).");
+            }
+
+            if (!SetHandleInformation(stdoutRead, HandleFlagInherit, 0) ||
+                !SetHandleInformation(stderrRead, HandleFlagInherit, 0))
+            {
+                throw new InvalidOperationException($"Could not configure emulator output pipes (Win32 error {Marshal.GetLastWin32Error()}).");
+            }
+
             nuint attributeListSize = 0;
             _ = InitializeProcThreadAttributeList(0, 1, 0, ref attributeListSize);
             attributeList = Marshal.AllocHGlobal((nint)attributeListSize);
             if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to initialize the process attribute list.");
+                throw new InvalidOperationException($"Could not initialize process mitigation attributes (Win32 error {Marshal.GetLastWin32Error()}).");
             }
-
-            startupInfoEx.lpAttributeList = attributeList;
-
-            var policy1 = PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF;
-            var policy2 =
-                PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF |
-                PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF;
 
             mitigationPolicies = Marshal.AllocHGlobal(sizeof(ulong) * 2);
-            Marshal.WriteInt64(mitigationPolicies, unchecked((long)policy1));
-            Marshal.WriteInt64(nint.Add(mitigationPolicies, sizeof(long)), unchecked((long)policy2));
-
+            Marshal.WriteInt64(mitigationPolicies, unchecked((long)ControlFlowGuardAlwaysOff));
+            Marshal.WriteInt64(
+                nint.Add(mitigationPolicies, sizeof(long)),
+                unchecked((long)(CetUserShadowStacksAlwaysOff | UserCetSetContextIpValidationAlwaysOff)));
             if (!UpdateProcThreadAttribute(
-                attributeList,
-                0,
-                PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-                mitigationPolicies,
-                (nuint)(sizeof(ulong) * 2),
-                0,
-                0))
+                    attributeList,
+                    0,
+                    (nint)ProcThreadAttributeMitigationPolicy,
+                    mitigationPolicies,
+                    (nuint)(sizeof(ulong) * 2),
+                    0,
+                    0))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to apply the mitigation policy.");
+                throw new InvalidOperationException($"Could not apply process mitigations (Win32 error {Marshal.GetLastWin32Error()}).");
             }
 
-            var currentDirectory = workingDirectory ?? Environment.CurrentDirectory;
-            var created = CreateProcessW(
-                exePath,
-                new StringBuilder(BuildCommandLine(exePath, arguments)),
-                0,
-                0,
-                true,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-                0,
-                currentDirectory,
-                ref startupInfoEx,
-                out var processInfo);
+            var startup = new StartupInfoEx();
+            startup.StartupInfo.Size = Marshal.SizeOf<StartupInfoEx>();
+            startup.StartupInfo.Flags = StartfUseStdHandles;
+            startup.StartupInfo.StdOutput = stdoutWrite;
+            startup.StartupInfo.StdError = stderrWrite;
+            startup.AttributeList = attributeList;
 
-            if (!created)
+            var childArguments = new List<string>(arguments.Count + 1) { MitigatedChildFlag };
+            childArguments.AddRange(arguments);
+            var commandLine = new StringBuilder(BuildCommandLine(exePath, childArguments));
+            ProcessInformation processInfo;
+            lock (EnvironmentGate)
             {
-                var error = Marshal.GetLastWin32Error();
-                throw new Win32Exception(error, $"Failed to start '{exePath}' with CET/CFG mitigation disabled (Win32 error {error}: {new Win32Exception(error).Message}).");
+                var previousValue = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+                try
+                {
+                    Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+                    if (!CreateProcessW(
+                            exePath,
+                            commandLine,
+                            0,
+                            0,
+                            true,
+                            ExtendedStartupInfoPresent | CreateNoWindow,
+                            0,
+                            string.IsNullOrWhiteSpace(workingDirectory)
+                                ? Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
+                                : workingDirectory,
+                            ref startup,
+                            out processInfo))
+                    {
+                        throw new InvalidOperationException($"Could not start the emulator process (Win32 error {Marshal.GetLastWin32Error()}).");
+                    }
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousValue);
+                }
             }
 
-            CloseHandle(processInfo.hThread);
-            _processHandle = processInfo.hProcess;
+            processHandle = processInfo.Process;
+            threadHandle = processInfo.Thread;
+            CloseHandle(stdoutWrite);
+            stdoutWrite = 0;
+            CloseHandle(stderrWrite);
+            stderrWrite = 0;
 
-            _jobHandle = CreateJobObjectW(0, null);
-            if (_jobHandle != 0 &&
-                (!TryEnableKillOnJobClose(_jobHandle) || !AssignProcessToJobObject(_jobHandle, processInfo.hProcess)))
+            var jobHandle = CreateJobObjectW(0, null);
+            if (jobHandle != 0 &&
+                (!TryEnableKillOnJobClose(jobHandle) || !AssignProcessToJobObject(jobHandle, processHandle)))
             {
-                CloseHandle(_jobHandle);
-                _jobHandle = 0;
+                CloseHandle(jobHandle);
+                jobHandle = 0;
             }
 
-            StartReaderThread(stdoutRead, isError: false);
-            StartReaderThread(stderrRead, isError: true);
-            StartExitWatcherThread();
+            lock (_sync)
+            {
+                _processHandle = processHandle;
+                _jobHandle = jobHandle;
+                _running = true;
+            }
+            processHandle = 0;
+
+            StartPipeReader(stdoutRead, isError: false);
+            stdoutRead = 0;
+            StartPipeReader(stderrRead, isError: true);
+            stderrRead = 0;
+            StartWindowsExitWatcher(_processHandle);
         }
         catch
         {
-            CloseHandle(stdoutRead);
-            CloseHandle(stderrRead);
+            if (processHandle != 0)
+            {
+                _ = TerminateProcess(processHandle, 1);
+            }
+
             throw;
         }
         finally
         {
-            // The child owns duplicated pipe write ends; closing ours lets the
-            // readers observe EOF when the child exits.
-            CloseHandle(stdoutWrite);
-            CloseHandle(stderrWrite);
-
+            if (threadHandle != 0)
+            {
+                CloseHandle(threadHandle);
+            }
+            if (processHandle != 0)
+            {
+                CloseHandle(processHandle);
+            }
+            if (stdoutRead != 0)
+            {
+                CloseHandle(stdoutRead);
+            }
+            if (stdoutWrite != 0)
+            {
+                CloseHandle(stdoutWrite);
+            }
+            if (stderrRead != 0)
+            {
+                CloseHandle(stderrRead);
+            }
+            if (stderrWrite != 0)
+            {
+                CloseHandle(stderrWrite);
+            }
             if (attributeList != 0)
             {
                 DeleteProcThreadAttributeList(attributeList);
                 Marshal.FreeHGlobal(attributeList);
             }
-
             if (mitigationPolicies != 0)
             {
                 Marshal.FreeHGlobal(mitigationPolicies);
@@ -246,103 +346,56 @@ internal sealed class EmulatorProcess : IDisposable
         }
     }
 
-    private void StartFallback(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
+    private void StartPipeReader(nint handle, bool isError)
     {
-        var startInfo = new ProcessStartInfo
+        var readerThread = new Thread(() =>
         {
-            FileName = exePath,
-            WorkingDirectory = workingDirectory ?? Environment.CurrentDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
+            using var safeHandle = new SafeFileHandle(handle, ownsHandle: true);
+            using var stream = new FileStream(safeHandle, FileAccess.Read, 4096, isAsync: false);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            while (reader.ReadLine() is { } line)
             {
-                OutputReceived?.Invoke(e.Data, false);
+                ForwardOutput(line, isError);
             }
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
-            {
-                OutputReceived?.Invoke(e.Data, true);
-            }
-        };
-        process.Exited += (_, _) =>
-        {
-            int exitCode;
-            try
-            {
-                exitCode = process.ExitCode;
-            }
-            catch (InvalidOperationException)
-            {
-                exitCode = -1;
-            }
-
-            OnExited(exitCode);
-        };
-
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        _fallbackProcess = process;
-    }
-
-    private void StartReaderThread(nint readHandle, bool isError)
-    {
-        var thread = new Thread(() =>
-        {
-            using var stream = new FileStream(new SafeFileHandle(readHandle, ownsHandle: true), FileAccess.Read);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            try
-            {
-                while (reader.ReadLine() is { } line)
-                {
-                    OutputReceived?.Invoke(line, isError);
-                }
-            }
-            catch (IOException)
-            {
-                // Pipe broken on process teardown.
-            }
-        })
+        }, 256 * 1024)
         {
             IsBackground = true,
             Name = isError ? "SharpEmu stderr reader" : "SharpEmu stdout reader",
         };
-        thread.Start();
+        readerThread.Start();
     }
 
-    private void StartExitWatcherThread()
+    private void StartWindowsExitWatcher(nint processHandle)
     {
-        var processHandle = _processHandle;
-        var thread = new Thread(() =>
+        var watcher = new Thread(() =>
         {
-            _ = WaitForSingleObject(processHandle, INFINITE);
-            var exitCode = GetExitCodeProcess(processHandle, out var rawExitCode)
-                ? unchecked((int)rawExitCode)
-                : -1;
+            _ = WaitForSingleObject(processHandle, Infinite);
+            var exitCode = 1;
+            if (GetExitCodeProcess(processHandle, out var nativeExitCode))
+            {
+                exitCode = unchecked((int)nativeExitCode);
+            }
+
             OnExited(exitCode);
-        })
+        }, 128 * 1024)
         {
             IsBackground = true,
             Name = "SharpEmu exit watcher",
         };
-        thread.Start();
+        watcher.Start();
     }
 
-    private void OnExited(int exitCode)
+    private void ForwardOutput(string? line, bool isError)
     {
+        if (!string.IsNullOrEmpty(line))
+        {
+            OutputReceived?.Invoke(line, isError);
+        }
+    }
+
+    private void OnExited(int nativeExitCode)
+    {
+        int exitCode;
         lock (_sync)
         {
             if (!_running)
@@ -350,13 +403,13 @@ internal sealed class EmulatorProcess : IDisposable
                 return;
             }
 
+            exitCode = _stopRequested ? HostStopExitCode : nativeExitCode;
             _running = false;
             if (_processHandle != 0)
             {
                 CloseHandle(_processHandle);
                 _processHandle = 0;
             }
-
             if (_jobHandle != 0)
             {
                 CloseHandle(_jobHandle);
@@ -372,24 +425,19 @@ internal sealed class EmulatorProcess : IDisposable
 
     private static bool TryEnableKillOnJobClose(nint jobHandle)
     {
-        var extendedLimitInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        var info = new JobObjectExtendedLimitInformation
         {
-            BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+            BasicLimitInformation = new JobObjectBasicLimitInformation
             {
-                LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                LimitFlags = JobObjectLimitKillOnJobClose,
             },
         };
-
-        var size = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+        var size = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
         var memory = Marshal.AllocHGlobal(size);
         try
         {
-            Marshal.StructureToPtr(extendedLimitInfo, memory, false);
-            return SetInformationJobObject(
-                jobHandle,
-                JobObjectExtendedLimitInformation,
-                memory,
-                unchecked((uint)size));
+            Marshal.StructureToPtr(info, memory, false);
+            return SetInformationJobObject(jobHandle, JobObjectExtendedLimitInformationClass, memory, unchecked((uint)size));
         }
         finally
         {
@@ -397,128 +445,124 @@ internal sealed class EmulatorProcess : IDisposable
         }
     }
 
-    private static string BuildCommandLine(string processPath, IReadOnlyList<string> args)
+    private static string BuildCommandLine(string processPath, IReadOnlyList<string> arguments)
     {
-        var builder = new StringBuilder();
-        builder.Append(QuoteArgument(processPath));
-        for (var i = 0; i < args.Count; i++)
+        var builder = new StringBuilder(QuoteArgument(processPath));
+        foreach (var argument in arguments)
         {
             builder.Append(' ');
-            builder.Append(QuoteArgument(args[i]));
+            builder.Append(QuoteArgument(argument));
         }
 
         return builder.ToString();
     }
 
-    private static string QuoteArgument(string argument)
+    private static string QuoteArgument(string value)
     {
-        if (argument.Length == 0)
+        if (value.Length == 0)
         {
             return "\"\"";
         }
 
-        var needsQuotes = false;
-        foreach (var c in argument)
+        if (!value.Any(static c => char.IsWhiteSpace(c) || c == '"'))
         {
-            if (char.IsWhiteSpace(c) || c == '"')
-            {
-                needsQuotes = true;
-                break;
-            }
+            return value;
         }
 
-        if (!needsQuotes)
-        {
-            return argument;
-        }
-
-        var builder = new StringBuilder(argument.Length + 2);
+        var builder = new StringBuilder(value.Length + 2);
         builder.Append('"');
-
-        var backslashCount = 0;
-        foreach (var c in argument)
+        var slashCount = 0;
+        foreach (var character in value)
         {
-            if (c == '\\')
+            if (character == '\\')
             {
-                backslashCount++;
+                slashCount++;
                 continue;
             }
 
-            if (c == '"')
+            if (character == '"')
             {
-                builder.Append('\\', (backslashCount * 2) + 1);
-                builder.Append('"');
-                backslashCount = 0;
+                builder.Append('\\', (slashCount * 2) + 1);
+                builder.Append(character);
+                slashCount = 0;
                 continue;
             }
 
-            if (backslashCount > 0)
+            if (slashCount > 0)
             {
-                builder.Append('\\', backslashCount);
-                backslashCount = 0;
+                builder.Append('\\', slashCount);
+                slashCount = 0;
             }
 
-            builder.Append(c);
+            builder.Append(character);
         }
 
-        if (backslashCount > 0)
+        if (slashCount > 0)
         {
-            builder.Append('\\', backslashCount * 2);
+            builder.Append('\\', slashCount * 2);
         }
 
         builder.Append('"');
         return builder.ToString();
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SECURITY_ATTRIBUTES
+    private void ThrowIfDisposed()
     {
-        public int nLength;
-        public nint lpSecurityDescriptor;
-        public int bInheritHandle;
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(EmulatorProcess));
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int Size;
+        public nint SecurityDescriptor;
+        public int InheritHandle;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct STARTUPINFO
+    private struct StartupInfo
     {
-        public int cb;
-        public nint lpReserved;
-        public nint lpDesktop;
-        public nint lpTitle;
-        public int dwX;
-        public int dwY;
-        public int dwXSize;
-        public int dwYSize;
-        public int dwXCountChars;
-        public int dwYCountChars;
-        public int dwFillAttribute;
-        public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public nint lpReserved2;
-        public nint hStdInput;
-        public nint hStdOutput;
-        public nint hStdError;
+        public int Size;
+        public nint Reserved;
+        public nint Desktop;
+        public nint Title;
+        public int X;
+        public int Y;
+        public int XSize;
+        public int YSize;
+        public int XCountChars;
+        public int YCountChars;
+        public int FillAttribute;
+        public int Flags;
+        public short ShowWindow;
+        public short Reserved2Count;
+        public nint Reserved2;
+        public nint StdInput;
+        public nint StdOutput;
+        public nint StdError;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct STARTUPINFOEX
+    private struct StartupInfoEx
     {
-        public STARTUPINFO StartupInfo;
-        public nint lpAttributeList;
+        public StartupInfo StartupInfo;
+        public nint AttributeList;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct PROCESS_INFORMATION
+    private struct ProcessInformation
     {
-        public nint hProcess;
-        public nint hThread;
-        public int dwProcessId;
-        public int dwThreadId;
+        public nint Process;
+        public nint Thread;
+        public int ProcessId;
+        public int ThreadId;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    private struct JobObjectBasicLimitInformation
     {
         public long PerProcessUserTimeLimit;
         public long PerJobUserTimeLimit;
@@ -532,7 +576,7 @@ internal sealed class EmulatorProcess : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct IO_COUNTERS
+    private struct IoCounters
     {
         public ulong ReadOperationCount;
         public ulong WriteOperationCount;
@@ -543,10 +587,10 @@ internal sealed class EmulatorProcess : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    private struct JobObjectExtendedLimitInformation
     {
-        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
-        public IO_COUNTERS IoInfo;
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
         public nuint ProcessMemoryLimit;
         public nuint JobMemoryLimit;
         public nuint PeakProcessMemoryUsed;
@@ -555,66 +599,37 @@ internal sealed class EmulatorProcess : IDisposable
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreatePipe(
-        out nint hReadPipe,
-        out nint hWritePipe,
-        ref SECURITY_ATTRIBUTES lpPipeAttributes,
-        uint nSize);
+    private static extern bool CreatePipe(out nint readPipe, out nint writePipe, ref SecurityAttributes attributes, uint size);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetHandleInformation(nint hObject, uint dwMask, uint dwFlags);
+    private static extern bool SetHandleInformation(nint handle, uint mask, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool InitializeProcThreadAttributeList(
-        nint lpAttributeList,
-        int dwAttributeCount,
-        int dwFlags,
-        ref nuint lpSize);
+    private static extern bool InitializeProcThreadAttributeList(nint list, int count, int flags, ref nuint size);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UpdateProcThreadAttribute(
-        nint lpAttributeList,
-        uint dwFlags,
-        nint attribute,
-        nint lpValue,
-        nuint cbSize,
-        nint lpPreviousValue,
-        nint lpReturnSize);
+    private static extern bool UpdateProcThreadAttribute(nint list, uint flags, nint attribute, nint value, nuint size, nint previousValue, nint returnSize);
 
     [DllImport("kernel32.dll")]
-    private static extern void DeleteProcThreadAttributeList(nint lpAttributeList);
+    private static extern void DeleteProcThreadAttributeList(nint list);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern nint CreateJobObjectW(nint lpJobAttributes, string? lpName);
+    private static extern nint CreateJobObjectW(nint attributes, string? name);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetInformationJobObject(
-        nint hJob,
-        int jobObjectInfoClass,
-        nint lpJobObjectInfo,
-        uint cbJobObjectInfoLength);
+    private static extern bool SetInformationJobObject(nint job, int infoClass, nint info, uint size);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AssignProcessToJobObject(nint hJob, nint hProcess);
+    private static extern bool AssignProcessToJobObject(nint job, nint process);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcessW(
-        string applicationName,
-        StringBuilder commandLine,
-        nint processAttributes,
-        nint threadAttributes,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
-        uint creationFlags,
-        nint environment,
-        string currentDirectory,
-        ref STARTUPINFOEX startupInfo,
-        out PROCESS_INFORMATION processInformation);
+    private static extern bool CreateProcessW(string applicationName, StringBuilder commandLine, nint processAttributes, nint threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, nint environment, string currentDirectory, ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(nint handle, uint milliseconds);
