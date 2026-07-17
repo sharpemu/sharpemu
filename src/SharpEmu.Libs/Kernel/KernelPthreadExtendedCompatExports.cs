@@ -991,6 +991,27 @@ public static class KernelPthreadExtendedCompatExports
     public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockWrlock(ctx);
 
     [SysAbiExport(
+        Nid = "SFxTMOfuCkE",
+        ExportName = "scePthreadRwlockTryrdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTryrdlock(CpuContext ctx) => PthreadRwlockTryLockCore(ctx, write: false);
+
+    [SysAbiExport(
+        Nid = "XhWHn6P5R7U",
+        ExportName = "scePthreadRwlockTrywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTrywrlock(CpuContext ctx) => PthreadRwlockTryLockCore(ctx, write: true);
+
+    [SysAbiExport(
+        Nid = "bIHoZCTomsI",
+        ExportName = "pthread_rwlock_trywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockTrywrlock(CpuContext ctx) => PthreadRwlockTrywrlock(ctx);
+
+    [SysAbiExport(
         Nid = "+L98PIbGttk",
         ExportName = "scePthreadRwlockUnlock",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1219,6 +1240,55 @@ public static class KernelPthreadExtendedCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int OrbisPthreadGetspecific(CpuContext ctx) => PosixPthreadGetspecific(ctx);
+
+    private static int PthreadRwlockTryLockCore(CpuContext ctx, bool write)
+    {
+        var rwlockAddress = ctx[CpuRegister.Rdi];
+        if (rwlockAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out _, out var rwlock))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        lock (rwlock.SyncRoot)
+        {
+            if (write)
+            {
+                if (rwlock.WriterThreadId == currentThreadId || rwlock.GetReaderCount(currentThreadId) > 0)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+                }
+
+                if (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+                }
+
+                rwlock.WriterThreadId = currentThreadId;
+            }
+            else
+            {
+                var alreadyReader = rwlock.GetReaderCount(currentThreadId) > 0;
+                if (rwlock.WriterThreadId == currentThreadId ||
+                    (rwlock.WriterThreadId == 0 && (rwlock.WaitingWriters == 0 || alreadyReader)))
+                {
+                    rwlock.AddReader(currentThreadId);
+                }
+                else
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+                }
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 
     private static int PthreadRwlockLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
     {
