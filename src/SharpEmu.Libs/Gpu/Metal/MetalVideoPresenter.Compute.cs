@@ -203,8 +203,8 @@ internal static partial class MetalVideoPresenter
             }
             else
             {
-                texture = CreateDrawTexture(device, descriptor);
-                transient = texture != 0;
+                texture = CreateDrawTexture(device, descriptor, out var ownedTexture);
+                transient = texture != 0 && ownedTexture;
             }
 
             if (texture != 0)

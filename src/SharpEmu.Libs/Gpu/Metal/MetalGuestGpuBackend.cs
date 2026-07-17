@@ -399,8 +399,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
         MetalVideoPresenter.GetGuestImageExtents();
 
-    // No backend texture cache until the translated-draw phase.
-    public bool IsTextureContentCached(in TextureContentIdentity identity) => false;
+    public bool IsTextureContentCached(in TextureContentIdentity identity) =>
+        MetalVideoPresenter.IsTextureContentCached(identity);
 
     public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
         MetalVideoPresenter.AttachGuestMemory(memory);

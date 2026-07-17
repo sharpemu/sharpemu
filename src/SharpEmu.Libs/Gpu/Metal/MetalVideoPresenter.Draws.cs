@@ -803,12 +803,15 @@ internal static partial class MetalVideoPresenter
         var selSetFragmentSampler = MetalNative.Selector("setFragmentSamplerState:atIndex:");
         for (var index = 0; index < draw.Textures.Length; index++)
         {
-            var texture = CreateDrawTexture(device, draw.Textures[index]);
+            var texture = CreateDrawTexture(device, draw.Textures[index], out var ownedTexture);
             if (texture != 0)
             {
                 MetalNative.SendSetAtIndex(encoder, selSetVertexTexture, texture, (nuint)index);
                 MetalNative.SendSetAtIndex(encoder, selSetFragmentTexture, texture, (nuint)index);
-                MetalNative.SendVoid(texture, MetalNative.Selector("release"));
+                if (ownedTexture)
+                {
+                    MetalNative.SendVoid(texture, MetalNative.Selector("release"));
+                }
             }
 
             var sampler = GetOrCreateSampler(device, draw.Textures[index].Sampler);
@@ -1318,12 +1321,15 @@ internal static partial class MetalVideoPresenter
 
     private static int _missingTextureTraces;
 
-    private static nint CreateDrawTexture(nint device, GuestDrawTexture texture)
+    private static nint CreateDrawTexture(nint device, GuestDrawTexture texture, out bool ownedByCaller)
     {
+        ownedByCaller = true;
         if (texture.Width == 0 || texture.Height == 0)
         {
             return 0;
         }
+
+        var cacheable = IsCacheableDrawTexture(texture);
 
         // Feedback reads of a live guest render target sample an ordered
         // snapshot, resolved like the Vulkan presenter: a guest depth image
@@ -1353,16 +1359,41 @@ internal static partial class MetalVideoPresenter
                 }
             }
 
-            if (_missingTextureTraces < 16)
+            // Empty texels can also mean the submit thread skipped the
+            // guest-memory copy because this identity is cached here.
+            if (cacheable && TryGetCachedDrawTexture(texture, out var cachedSkip))
             {
-                _missingTextureTraces++;
-                Console.Error.WriteLine(
-                    $"[LOADER][WARN] Metal draw texture unresolved: live 0x{texture.Address:X} " +
-                    $"{texture.Width}x{texture.Height} found={live is not null} " +
-                    $"init={live?.Initialized ?? false}");
+                ownedByCaller = false;
+                return cachedSkip;
             }
 
-            return 0;
+            // A miss on skipped texels is an invalidation race (the entry
+            // was evicted after the submit thread checked). Self-heal by
+            // reading the texels directly rather than rendering a fallback.
+            var refreshed = TryReadGuestDrawTexturePixels(texture);
+            if (refreshed is null)
+            {
+                if (_missingTextureTraces < 16)
+                {
+                    _missingTextureTraces++;
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] Metal draw texture unresolved: live 0x{texture.Address:X} " +
+                        $"{texture.Width}x{texture.Height} found={live is not null} " +
+                        $"init={live?.Initialized ?? false}");
+                }
+
+                return 0;
+            }
+
+            texture = texture with { RgbaPixels = refreshed };
+        }
+        else if (cacheable && TryGetCachedDrawTexture(texture, out var cached))
+        {
+            // Fresh texels for an identity already cached: the content is
+            // unchanged (a guest write would have evicted the entry at drain
+            // start), so skip the redundant texture creation and upload.
+            ownedByCaller = false;
+            return cached;
         }
 
         if ((ulong)texture.RgbaPixels.Length < (ulong)texture.Width * texture.Height * 4)
@@ -1402,6 +1433,10 @@ internal static partial class MetalVideoPresenter
             // texture created above; row clamping happens in the helper.
             ReplaceTextureContents(
                 handle, texture.Width, texture.Height, texture.RgbaPixels, pitch, bytesPerPixel: 4);
+            if (cacheable)
+            {
+                CacheDrawTexture(texture, handle);
+            }
         }
 
         return handle;
