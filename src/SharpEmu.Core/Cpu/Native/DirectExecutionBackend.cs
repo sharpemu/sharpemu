@@ -3139,7 +3139,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					continue;
 				}
 
-				if (thread.BlockWaiter is not null && !thread.BlockWaiter.TryWake())
+				if (!TryConsumeRegisteredWakeSignal(thread))
 				{
 					continue;
 				}
@@ -3168,6 +3168,24 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		return wakeCount;
+	}
+
+	// A blocked thread's readiness predicate is registered either as an
+	// IGuestThreadBlockWaiter (BlockWaiter) or, for the delegate-pair
+	// compatibility bridge used by pthread mutex/cond/rwlock/semaphore waits
+	// (see RequestCurrentThreadBlock's resumeHandler/wakeHandler overload), as
+	// a bare BlockWakeHandler with BlockWaiter left null. Both must be checked
+	// here; skipping BlockWakeHandler would ready a mutex/cond waiter before
+	// its handle was actually granted. A thread with neither (a plain
+	// wakeKey wait, e.g. event flags/queues) always wakes on a key match.
+	private static bool TryConsumeRegisteredWakeSignal(GuestThreadState thread)
+	{
+		if (thread.BlockWaiter is { } waiter)
+		{
+			return waiter.TryWake();
+		}
+
+		return thread.BlockWakeHandler is not { } wakeHandler || wakeHandler();
 	}
 
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
@@ -4734,6 +4752,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			LastError = null;
 			GuestCpuContinuation continuation = default;
 			IGuestThreadBlockWaiter? blockWaiter = null;
+			Func<int>? blockResumeHandler = null;
 			var resumeContinuation = false;
 			using (LockGate("RunGuestThread.block"))
 			{
@@ -4745,14 +4764,24 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					thread.BlockWakeKey = null;
 					blockWaiter = thread.BlockWaiter;
 					thread.BlockWaiter = null;
+					blockResumeHandler = thread.BlockResumeHandler;
+					thread.BlockResumeHandler = null;
+					thread.BlockWakeHandler = null;
 					thread.BlockDeadlineTimestamp = 0;
 					resumeContinuation = true;
 				}
 			}
 
+			// BlockWaiter and BlockResumeHandler are mutually exclusive (see
+			// RegisterBlockedGuestThreadContinuation's two overloads): a plain
+			// wakeKey wait with neither leaves the guest's original RAX intact.
 			if (blockWaiter is not null)
 			{
 				continuation = continuation with { Rax = unchecked((ulong)(long)blockWaiter.Resume()) };
+			}
+			else if (blockResumeHandler is not null)
+			{
+				continuation = continuation with { Rax = unchecked((ulong)(long)blockResumeHandler()) };
 			}
 
 			if (_logGuestThreads)
@@ -4782,9 +4811,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					case GuestNativeCallExitReason.Blocked:
 						thread.State = GuestThreadRunState.Blocked;
 						thread.BlockReason = blockReason;
-						if (thread.HasBlockedContinuation &&
-							thread.BlockWaiter is not null &&
-							thread.BlockWaiter.TryWake())
+						if (thread.HasBlockedContinuation && TryConsumeRegisteredWakeSignal(thread))
 						{
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
