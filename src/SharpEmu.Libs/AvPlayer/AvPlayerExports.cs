@@ -17,11 +17,23 @@ public static class AvPlayerExports
     private const int FrameBufferCount = 3;
     private const int FrameInfoSize = 40;
     private const int FrameInfoExSize = 104;
-    private const int StreamInfoSize = 40;
+    private const int Gen4StreamInfoSize = 40;
+    private const int Gen5StreamInfoSize = 32;
+    private const int Gen5StreamInfoExSize = 104;
     private const int MaxGuestPathLength = 4096;
+    private const ulong Gen4InitExAutoStartOffset = 0xA8;
+    private const ulong Gen5InitExAutoStartOffset = 0x74;
+    private const ulong Gen5PostInitVideoDecoderOffset = 0x8;
+    private const uint Gen5VideoDecoderSoftware2 = 1;
     private static readonly object StateGate = new();
     private static readonly Dictionary<ulong, PlayerState> Players = new();
     private static int _traceCount;
+
+    internal readonly record struct VideoFrameLayout(
+        int Width,
+        int Height,
+        int Pitch,
+        int BufferSize);
 
     private sealed class PlayerState : IDisposable
     {
@@ -31,6 +43,7 @@ public static class AvPlayerExports
         public ulong AllocateTextureCallback { get; init; }
         public ulong EventObject { get; init; }
         public ulong EventCallback { get; init; }
+        public bool UseVideoDecoderSoftware2 { get; set; }
         public string? SourcePath { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
@@ -54,6 +67,7 @@ public static class AvPlayerExports
         public int NextGuestBuffer { get; set; }
         public ulong LastGuestBuffer { get; set; }
         public long NextFrameIndex { get; set; }
+        public int VideoFramesDelivered { get; set; }
         public ulong AudioBufferBase { get; set; }
         public int NextAudioBuffer { get; set; }
         public long NextAudioFrameIndex { get; set; }
@@ -107,6 +121,7 @@ public static class AvPlayerExports
             Dispose();
             PlaybackClock.Reset();
             NextFrameIndex = 0;
+            VideoFramesDelivered = 0;
             NextAudioFrameIndex = 0;
             EndOfStream = false;
         }
@@ -156,12 +171,53 @@ public static class AvPlayerExports
         var dataAddress = ctx[CpuRegister.Rsi];
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
-                handle != 0 && dataAddress != 0 && Players.ContainsKey(handle)
-                    ? 0
-                    : InvalidParameters);
+            if (handle == 0 || dataAddress == 0 ||
+                !Players.TryGetValue(handle, out var player))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            if ((ctx.TargetGeneration & Generation.Gen5) == 0)
+            {
+                return SetReturn(ctx, 0);
+            }
+            if (!TryReadGen5PostInitVideoDecoder(
+                    ctx,
+                    dataAddress,
+                    out var videoDecoderType,
+                    out var useVideoDecoderSoftware2))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            player.UseVideoDecoderSoftware2 = useVideoDecoderSoftware2;
+            Console.Error.WriteLine(
+                $"[AVPLAYER][INFO] post_init handle=0x{handle:X16} " +
+                $"video_decoder_type={videoDecoderType} software2={(player.UseVideoDecoderSoftware2 ? 1 : 0)}");
+            return SetReturn(ctx, 0);
         }
+    }
+
+    internal static bool TryReadGen5PostInitVideoDecoder(
+        CpuContext ctx,
+        ulong dataAddress,
+        out uint videoDecoderType,
+        out bool useVideoDecoderSoftware2)
+    {
+        if ((ctx.TargetGeneration & Generation.Gen5) == 0 ||
+            dataAddress == 0 ||
+            !TryReadUInt32(
+                ctx,
+                dataAddress + Gen5PostInitVideoDecoderOffset,
+                out videoDecoderType))
+        {
+            videoDecoderType = 0;
+            useVideoDecoderSoftware2 = false;
+            return false;
+        }
+
+        useVideoDecoderSoftware2 = videoDecoderType == Gen5VideoDecoderSoftware2;
+        return true;
     }
 
     [SysAbiExport(
@@ -186,7 +242,7 @@ public static class AvPlayerExports
             Players.Add(handle, new PlayerState
             {
                 Handle = handle,
-                AutoStart = TryReadByte(ctx, initDataAddress + 164, out var autoStart) && autoStart != 0,
+                AutoStart = TryReadInitExAutoStart(ctx, initDataAddress, out var autoStart) && autoStart,
                 AllocatorObject = TryReadUInt64(ctx, initDataAddress + 8, out var allocatorObject) ? allocatorObject : 0,
                 AllocateTextureCallback = TryReadUInt64(ctx, initDataAddress + 32, out var allocateTexture) ? allocateTexture : 0,
                 EventObject = TryReadUInt64(ctx, initDataAddress + 88, out var eventObject) ? eventObject : 0,
@@ -194,7 +250,12 @@ public static class AvPlayerExports
             });
         }
 
-        Trace($"init_ex handle=0x{handle:X16} alloc_texture=0x{Players[handle].AllocateTextureCallback:X16}");
+        TryReadUInt64(ctx, initDataAddress, out var initDataSize);
+        Trace(
+            $"init_ex handle=0x{handle:X16} " +
+            $"alloc_texture=0x{Players[handle].AllocateTextureCallback:X16} " +
+            $"generation={ctx.TargetGeneration} size={initDataSize} " +
+            $"auto_start={(Players[handle].AutoStart ? 1 : 0)}");
         return SetReturn(ctx, 0);
     }
 
@@ -386,7 +447,25 @@ public static class AvPlayerExports
         ExportName = "sceAvPlayerEnableStream",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
-    public static int AvPlayerEnableStream(CpuContext ctx) => ValidatePlayer(ctx);
+    public static int AvPlayerEnableStream(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var streamIndex = unchecked((uint)ctx[CpuRegister.Rsi]);
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(handle, out var player))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+            if (player.SourcePath is null || streamIndex > 1)
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            Trace($"enable_stream handle=0x{handle:X16} index={streamIndex}");
+            return SetReturn(ctx, 0);
+        }
+    }
 
     [SysAbiExport(
         Nid = "k-q+xOxdc3E",
@@ -404,7 +483,8 @@ public static class AvPlayerExports
         ExportName = "sceAvPlayerGetStreamInfoEx",
         Target = Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
-    public static int AvPlayerSetDecoderMode(CpuContext ctx) => ValidatePlayer(ctx);
+    public static int AvPlayerGetStreamInfoEx(CpuContext ctx) =>
+        GetStreamInfo(ctx, extended: true);
 
     [SysAbiExport(
         Nid = "XC9wM+xULz8",
@@ -555,9 +635,17 @@ public static class AvPlayerExports
         LibraryName = "libSceAvPlayer")]
     public static int AvPlayerStreamCount(CpuContext ctx)
     {
+        var handle = ctx[CpuRegister.Rdi];
         lock (StateGate)
         {
-            return SetReturn(ctx, Players.ContainsKey(ctx[CpuRegister.Rdi]) ? 2 : InvalidParameters);
+            if (!Players.TryGetValue(handle, out var player))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            var count = player.SourcePath is null ? 0 : 2;
+            Trace($"stream_count handle=0x{handle:X16} count={count}");
+            return SetReturn(ctx, count);
         }
     }
 
@@ -566,41 +654,152 @@ public static class AvPlayerExports
         ExportName = "sceAvPlayerGetStreamInfo",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
-    public static int AvPlayerGetStreamInfo(CpuContext ctx)
+    public static int AvPlayerGetStreamInfo(CpuContext ctx) =>
+        GetStreamInfo(ctx, extended: false);
+
+    private static int GetStreamInfo(CpuContext ctx, bool extended)
     {
         var streamIndex = unchecked((uint)ctx[CpuRegister.Rsi]);
         var infoAddress = ctx[CpuRegister.Rdx];
         lock (StateGate)
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
-                streamIndex > 1 || infoAddress == 0 || player.Width <= 0 || player.Height <= 0)
+                infoAddress == 0)
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+            if (player.SourcePath is null || streamIndex > 1 ||
+                player.Width <= 0 || player.Height <= 0)
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            if (!TryWriteStreamInfo(
+                    ctx,
+                    infoAddress,
+                    streamIndex,
+                    player.Width,
+                    player.Height,
+                    player.FramesPerSecond,
+                    player.DurationMilliseconds,
+                    extended,
+                    out var size,
+                    player.UseVideoDecoderSoftware2))
             {
                 return SetReturn(ctx, InvalidParameters);
             }
 
-            Span<byte> info = stackalloc byte[StreamInfoSize];
-            info.Clear();
-            BinaryPrimitives.WriteUInt32LittleEndian(info[0..], streamIndex); // 0=video, 1=audio
-            if (streamIndex == 0)
-            {
-                BinaryPrimitives.WriteUInt32LittleEndian(info[8..], checked((uint)player.Width));
-                BinaryPrimitives.WriteUInt32LittleEndian(info[12..], checked((uint)player.Height));
-                BinaryPrimitives.WriteSingleLittleEndian(info[16..], (float)player.Width / player.Height);
-            }
-            else
-            {
-                BinaryPrimitives.WriteUInt16LittleEndian(info[8..], 2);
-                BinaryPrimitives.WriteUInt32LittleEndian(info[12..], 48_000);
-            }
-            BinaryPrimitives.WriteUInt64LittleEndian(info[24..], player.DurationMilliseconds);
-            if (!ctx.Memory.TryWrite(infoAddress, info))
-            {
-                return SetReturn(ctx, InvalidParameters);
-            }
-
+            var type = GetStreamType(ctx.TargetGeneration, streamIndex);
+            Trace(
+                $"stream_info handle=0x{player.Handle:X16} index={streamIndex} " +
+                $"type={type} extended={(extended ? 1 : 0)} size={size}");
             return SetReturn(ctx, 0);
         }
     }
+
+    internal static bool TryWriteStreamInfo(
+        CpuContext ctx,
+        ulong infoAddress,
+        uint streamIndex,
+        int width,
+        int height,
+        double framesPerSecond,
+        ulong durationMilliseconds,
+        bool extended,
+        out int size,
+        bool useVideoDecoderSoftware2 = true)
+    {
+        size = 0;
+        if (infoAddress == 0 || streamIndex > 1 || width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        var gen5 = (ctx.TargetGeneration & Generation.Gen5) != 0;
+        if (extended && !gen5)
+        {
+            return false;
+        }
+
+        size = extended
+            ? Gen5StreamInfoExSize
+            : gen5
+                ? Gen5StreamInfoSize
+                : Gen4StreamInfoSize;
+        Span<byte> storage = stackalloc byte[Gen5StreamInfoExSize];
+        var info = storage[..size];
+        info.Clear();
+
+        var typeOffset = extended ? sizeof(ulong) : 0;
+        var detailsOffset = extended ? 16 : 8;
+        var durationOffset = extended ? 96 : 24;
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            info[typeOffset..],
+            GetStreamType(ctx.TargetGeneration, streamIndex));
+        if (extended)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(info, Gen5StreamInfoExSize);
+        }
+
+        if (streamIndex == 0)
+        {
+            var layoutWidth = width;
+            var layoutHeight = height;
+            var layoutPitch = width;
+            if (gen5)
+            {
+                var layout = GetVideoFrameLayout(
+                    ctx.TargetGeneration,
+                    width,
+                    height,
+                    useVideoDecoderSoftware2,
+                    extended);
+                layoutWidth = layout.Width;
+                layoutHeight = layout.Height;
+                layoutPitch = layout.Pitch;
+            }
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[detailsOffset..],
+                checked((uint)layoutWidth));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[(detailsOffset + sizeof(uint))..],
+                checked((uint)layoutHeight));
+            BinaryPrimitives.WriteSingleLittleEndian(
+                info[(detailsOffset + 2 * sizeof(uint))..],
+                (float)width / height);
+            if (extended)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    info[(detailsOffset + 36)..],
+                    checked((uint)layoutPitch));
+                info[detailsOffset + 40] = 8;
+                info[detailsOffset + 41] = 8;
+                BinaryPrimitives.WriteDoubleLittleEndian(
+                    info[(detailsOffset + 48)..],
+                    framesPerSecond);
+            }
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(info[detailsOffset..], 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[(detailsOffset + sizeof(uint))..],
+                48_000);
+        }
+
+        info[detailsOffset + 12] = (byte)'u';
+        info[detailsOffset + 13] = (byte)'n';
+        info[detailsOffset + 14] = (byte)'d';
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            info[durationOffset..],
+            durationMilliseconds);
+        return ctx.Memory.TryWrite(infoAddress, info);
+    }
+
+    private static uint GetStreamType(Generation generation, uint streamIndex) =>
+        (generation & Generation.Gen5) != 0
+            ? streamIndex + 1 // Gen5: Unknown=0, Video=1, Audio=2.
+            : streamIndex;    // Gen4: Video=0, Audio=1.
 
     private static int AddSource(CpuContext ctx, string guestPath)
     {
@@ -682,6 +881,22 @@ public static class AvPlayerExports
                 return SetReturn(ctx, 0);
             }
 
+            player.VideoFramesDelivered++;
+            if (player.VideoFramesDelivered == 1)
+            {
+                var layout = GetVideoFrameLayout(
+                    ctx.TargetGeneration,
+                    player.Width,
+                    player.Height,
+                    player.UseVideoDecoderSoftware2,
+                    extended);
+                Console.Error.WriteLine(
+                    $"[AVPLAYER][INFO] first_video_frame handle=0x{player.Handle:X16} " +
+                    $"ex={(extended ? 1 : 0)} ts={timestamp} data=0x{player.LastGuestBuffer:X16} " +
+                    $"source={player.Width}x{player.Height} software2={(player.UseVideoDecoderSoftware2 ? 1 : 0)} " +
+                    $"pitch={layout.Pitch} " +
+                    $"buffer_size={player.GuestBufferStride}");
+            }
             Trace($"video_frame handle=0x{player.Handle:X16} ex={extended} ts={timestamp} data=0x{player.LastGuestBuffer:X16}");
             return SetReturn(ctx, 1);
         }
@@ -884,9 +1099,13 @@ public static class AvPlayerExports
             return false;
         }
 
-        var alignedWidth = AlignUp(player.Width, 16);
-        var alignedHeight = AlignUp(player.Height, 16);
-        var bufferStride = checked(alignedWidth * alignedHeight * 3 / 2);
+        var layout = GetVideoFrameLayout(
+            ctx.TargetGeneration,
+            player.Width,
+            player.Height,
+            player.UseVideoDecoderSoftware2,
+            extended);
+        var bufferStride = layout.BufferSize;
         if (player.GuestBuffers[0] == 0)
         {
             if (!AllocateGuestVideoBuffers(ctx, player, bufferStride))
@@ -897,21 +1116,20 @@ public static class AvPlayerExports
         }
 
         var frameData = player.RawFrame;
-        if (!extended && (alignedWidth != player.Width || alignedHeight != player.Height))
+        if (layout.Pitch != player.Width || layout.Height != player.Height)
         {
-            player.PaddedFrame ??= new byte[bufferStride];
-            player.PaddedFrame.AsSpan().Clear();
-            for (var row = 0; row < player.Height; row++)
+            if (player.PaddedFrame is null || player.PaddedFrame.Length != bufferStride)
             {
-                player.RawFrame.AsSpan(row * player.Width, player.Width)
-                    .CopyTo(player.PaddedFrame.AsSpan(row * alignedWidth, player.Width));
+                player.PaddedFrame = new byte[bufferStride];
             }
-            var rawChromaOffset = player.Width * player.Height;
-            var paddedChromaOffset = alignedWidth * alignedHeight;
-            for (var row = 0; row < player.Height / 2; row++)
+            if (!TryCopyNv12Frame(
+                    player.RawFrame,
+                    player.PaddedFrame,
+                    player.Width,
+                    player.Height,
+                    layout))
             {
-                player.RawFrame.AsSpan(rawChromaOffset + (row * player.Width), player.Width)
-                    .CopyTo(player.PaddedFrame.AsSpan(paddedChromaOffset + (row * alignedWidth), player.Width));
+                return false;
             }
             frameData = player.PaddedFrame;
         }
@@ -924,22 +1142,130 @@ public static class AvPlayerExports
             return false;
         }
 
+        return TryWriteVideoFrameInfo(
+            ctx,
+            infoAddress,
+            bufferAddress,
+            timestamp,
+            player.Width,
+            player.Height,
+            layout,
+            player.FramesPerSecond,
+            extended);
+    }
+
+    internal static bool TryWriteVideoFrameInfo(
+        CpuContext ctx,
+        ulong infoAddress,
+        ulong bufferAddress,
+        ulong timestamp,
+        int sourceWidth,
+        int sourceHeight,
+        VideoFrameLayout layout,
+        double framesPerSecond,
+        bool extended)
+    {
         Span<byte> info = extended
             ? stackalloc byte[FrameInfoExSize]
             : stackalloc byte[FrameInfoSize];
         info.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(info[0..], bufferAddress);
         BinaryPrimitives.WriteUInt64LittleEndian(info[16..], timestamp);
-        BinaryPrimitives.WriteUInt32LittleEndian(info[24..], checked((uint)(extended ? player.Width : alignedWidth)));
-        BinaryPrimitives.WriteUInt32LittleEndian(info[28..], checked((uint)(extended ? player.Height : alignedHeight)));
-        BinaryPrimitives.WriteSingleLittleEndian(info[32..], 1.0f);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[24..], checked((uint)layout.Width));
+        BinaryPrimitives.WriteUInt32LittleEndian(info[28..], checked((uint)layout.Height));
+        BinaryPrimitives.WriteSingleLittleEndian(
+            info[32..],
+            (ctx.TargetGeneration & Generation.Gen5) != 0
+                ? (float)sourceWidth / sourceHeight
+                : 1.0f);
         if (extended)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(info[60..], checked((uint)player.Width));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[48..],
+                checked((uint)(layout.Pitch - sourceWidth)));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[56..],
+                checked((uint)(layout.Height - sourceHeight)));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[60..], checked((uint)layout.Pitch));
             info[64] = 8;
             info[65] = 8;
+            if ((ctx.TargetGeneration & Generation.Gen5) != 0)
+            {
+                BinaryPrimitives.WriteDoubleLittleEndian(info[72..], framesPerSecond);
+            }
         }
         return ctx.Memory.TryWrite(infoAddress, info);
+    }
+
+    internal static VideoFrameLayout GetVideoFrameLayout(
+        Generation generation,
+        int sourceWidth,
+        int sourceHeight,
+        bool useVideoDecoderSoftware2,
+        bool extended = false)
+    {
+        if (sourceWidth <= 0 || sourceHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(sourceWidth),
+                "Video dimensions must be positive.");
+        }
+
+        var gen5 = (generation & Generation.Gen5) != 0;
+        var alignedWidth = AlignUp(sourceWidth, 16);
+        var alignedHeight = AlignUp(sourceHeight, 16);
+        var width = gen5
+            ? useVideoDecoderSoftware2 ? sourceWidth : alignedWidth
+            : extended ? sourceWidth : alignedWidth;
+        var height = gen5
+            ? useVideoDecoderSoftware2 ? sourceHeight : alignedHeight
+            : extended ? sourceHeight : alignedHeight;
+        var pitch = gen5 ? AlignUp(width, 256) : width;
+        var bufferSize = gen5
+            ? checked(pitch * height * 3 / 2)
+            : checked(alignedWidth * alignedHeight * 3 / 2);
+        return new VideoFrameLayout(
+            width,
+            height,
+            pitch,
+            bufferSize);
+    }
+
+    internal static bool TryCopyNv12Frame(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        int sourceWidth,
+        int sourceHeight,
+        VideoFrameLayout layout)
+    {
+        var sourceSize = (long)sourceWidth * sourceHeight * 3 / 2;
+        if (sourceWidth <= 0 || sourceHeight <= 0 ||
+            (sourceWidth & 1) != 0 || (sourceHeight & 1) != 0 ||
+            layout.Width < sourceWidth || layout.Height < sourceHeight ||
+            layout.Pitch < sourceWidth ||
+            sourceSize > source.Length ||
+            destination.Length < layout.BufferSize)
+        {
+            return false;
+        }
+
+        destination[..layout.BufferSize].Clear();
+        for (var row = 0; row < sourceHeight; row++)
+        {
+            source.Slice(row * sourceWidth, sourceWidth)
+                .CopyTo(destination.Slice(row * layout.Pitch, sourceWidth));
+        }
+
+        var sourceChromaOffset = sourceWidth * sourceHeight;
+        var destinationChromaOffset = layout.Pitch * layout.Height;
+        for (var row = 0; row < sourceHeight / 2; row++)
+        {
+            source.Slice(sourceChromaOffset + (row * sourceWidth), sourceWidth)
+                .CopyTo(destination.Slice(
+                    destinationChromaOffset + (row * layout.Pitch),
+                    sourceWidth));
+        }
+        return true;
     }
 
     private static bool AllocateGuestVideoBuffers(CpuContext ctx, PlayerState player, int bufferSize)
@@ -1196,6 +1522,28 @@ public static class AvPlayerExports
             return false;
         }
         value = buffer[0];
+        return true;
+    }
+
+    internal static bool TryReadInitExAutoStart(
+        CpuContext ctx,
+        ulong initDataAddress,
+        out bool autoStart)
+    {
+        // Gen5's InitDataEx places auto_start immediately after debug_level;
+        // Gen4's compact priority/affinity layout places it after the output
+        // framebuffer count. The old shared +0xA4 read was Gen4's framebuffer
+        // count, not either ABI's auto_start field.
+        var offset = (ctx.TargetGeneration & Generation.Gen5) != 0
+            ? Gen5InitExAutoStartOffset
+            : Gen4InitExAutoStartOffset;
+        if (!TryReadByte(ctx, initDataAddress + offset, out var value))
+        {
+            autoStart = false;
+            return false;
+        }
+
+        autoStart = value != 0;
         return true;
     }
 
