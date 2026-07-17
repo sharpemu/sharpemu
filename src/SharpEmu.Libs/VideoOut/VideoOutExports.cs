@@ -34,7 +34,6 @@ public static class VideoOutExports
     private const int VideoOutBufferAttributeSize = 0x28;
     private const int VideoOutBufferAttribute2Size = 0x50;
     private const int VideoOutBuffersEntrySize = 0x20;
-    private const int VideoOutOutputOptionsSize = 0x40;
     private const int VideoOutOutputStatusSize = 0x30;
     private const int VideoOutVblankStatusSize = 0x28;
     private const ulong SceVideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
@@ -335,13 +334,14 @@ public static class VideoOutExports
         LibraryName = "libSceVideoOut")]
     public static int VideoOutInitializeOutputOptions(CpuContext ctx)
     {
+        const int outputOptionsSize = 0x40;
         var optionsAddress = ctx[CpuRegister.Rdi];
         if (optionsAddress == 0)
         {
             return OrbisVideoOutErrorInvalidAddress;
         }
 
-        Span<byte> options = stackalloc byte[VideoOutOutputOptionsSize];
+        Span<byte> options = stackalloc byte[outputOptionsSize];
         options.Clear();
         return ctx.Memory.TryWrite(optionsAddress, options)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
