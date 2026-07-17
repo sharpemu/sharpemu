@@ -271,6 +271,51 @@ internal static unsafe class VulkanVideoPresenter
     private static bool _presenterCloseRequested;
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
     private const uint NvidiaVendorId = 0x10DE;
+    private const uint AmdVendorId = 0x1002;
+
+    // Ranks a Vulkan physical device for automatic selection. Pure policy, kept
+    // beside the vendor IDs it uses and callable in isolation for tests (#325).
+    internal static int ScorePhysicalDevice(
+        PhysicalDeviceProperties properties,
+        string name,
+        string? deviceOverride)
+    {
+        if (!string.IsNullOrWhiteSpace(deviceOverride))
+        {
+            return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
+        }
+
+        var score = properties.DeviceType switch
+        {
+            PhysicalDeviceType.DiscreteGpu => 300,
+            PhysicalDeviceType.VirtualGpu => 100,
+            // A real integrated GPU (Intel, Apple/MoltenVK, Qualcomm, ...) still
+            // beats a software rasterizer; #97's crash was AMD's integrated
+            // driver specifically, penalized below.
+            PhysicalDeviceType.IntegratedGpu => 50,
+            // Software rasterizers such as Mesa lavapipe present as Cpu: a
+            // fallback only, chosen when no hardware GPU can present.
+            PhysicalDeviceType.Cpu => 20,
+            _ => 10,
+        };
+
+        if (properties.VendorID == NvidiaVendorId)
+        {
+            score += 500;
+        }
+
+        // #97: AMD's integrated driver access-violates inside
+        // vkCreateGraphicsPipelines while compiling some translated shaders, so
+        // keep AMD iGPUs as the true last resort - below even software
+        // rendering, chosen only when nothing else can present.
+        if (properties.DeviceType == PhysicalDeviceType.IntegratedGpu &&
+            properties.VendorID == AmdVendorId)
+        {
+            score = -100;
+        }
+
+        return score;
+    }
     private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
     private const int GlfwPlatformHint = 0x00050003;
@@ -3198,33 +3243,6 @@ internal static unsafe class VulkanVideoPresenter
                 $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
             VideoOutExports.SetSelectedGpuName(selectedName);
             _window.Title = VideoOutExports.GetWindowTitle();
-        }
-
-        private static int ScorePhysicalDevice(
-            PhysicalDeviceProperties properties,
-            string name,
-            string? deviceOverride)
-        {
-            if (!string.IsNullOrWhiteSpace(deviceOverride))
-            {
-                return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
-            }
-
-            var score = properties.DeviceType switch
-            {
-                PhysicalDeviceType.DiscreteGpu => 300,
-                PhysicalDeviceType.VirtualGpu => 100,
-                PhysicalDeviceType.Cpu => 50,
-                PhysicalDeviceType.IntegratedGpu => -100,
-                _ => 10,
-            };
-
-            if (properties.VendorID == NvidiaVendorId)
-            {
-                score += 500;
-            }
-
-            return score;
         }
 
         private void LoadComputeDeviceLimits()
