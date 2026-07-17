@@ -504,7 +504,8 @@ public static class VideoOutExports
         status.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(status, count);
         BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..], elapsedMicroseconds);
-        BinaryPrimitives.WriteUInt64LittleEndian(status[0x10..], unchecked((ulong)now));
+        var counterOffset = ctx.TargetGeneration == Generation.Gen5 ? 0x18 : 0x10;
+        BinaryPrimitives.WriteUInt64LittleEndian(status[counterOffset..], unchecked((ulong)now));
         status[0x20] = 0;
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
