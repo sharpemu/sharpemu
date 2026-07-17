@@ -3282,7 +3282,7 @@ public static partial class KernelMemoryCompatExports
     public static int KernelDirectMemoryQuery(CpuContext ctx)
     {
         var offset = ctx[CpuRegister.Rdi];
-        _ = ctx[CpuRegister.Rsi]; // flags
+        var flags = ctx[CpuRegister.Rsi];
         var infoAddress = ctx[CpuRegister.Rdx];
         var infoSize = ctx[CpuRegister.Rcx];
         if (infoAddress == 0 || infoSize < 24)
@@ -3290,27 +3290,49 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // Bit 0 of flags enables find-next-in-gap: when offset does not fall inside
+        // any allocated block, return the first allocation whose start exceeds offset.
+        // When offset is inside an allocation, that block is always returned regardless
+        // of flags — matching the sceKernelVirtualQuery pattern and reference behaviour.
+        var findNextInGap = (flags & 0x1) != 0;
+
         lock (_memoryGate)
         {
+            DirectAllocation? containing = null;
+            DirectAllocation? nextInGap = null;
+            ulong bestNextStart = ulong.MaxValue;
+
             foreach (var block in _directAllocations.Values)
             {
-                if (offset < block.Start || offset >= block.Start + block.Length)
+                if (offset >= block.Start && offset < block.Start + block.Length)
                 {
-                    continue;
+                    containing = block;
+                    break;
                 }
 
-                if (!ctx.TryWriteUInt64(infoAddress, block.Start) ||
-                    !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), block.Start + block.Length) ||
-                    !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), block.MemoryType))
+                if (findNextInGap && block.Start > offset && block.Start < bestNextStart)
                 {
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                    bestNextStart = block.Start;
+                    nextInGap = block;
                 }
+            }
 
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            var found = containing ?? nextInGap;
+            if (!found.HasValue)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            var b = found.Value;
+            if (!ctx.TryWriteUInt64(infoAddress, b.Start) ||
+                !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), b.Start + b.Length) ||
+                !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), b.MemoryType))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
         }
 
-        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
