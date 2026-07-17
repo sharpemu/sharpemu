@@ -17,6 +17,59 @@ namespace SharpEmu.Libs.Gpu.Metal;
 internal static partial class MetalVideoPresenter
 {
     private const nuint VertexBufferSlotBase = 26;
+
+    /// <summary>Metal's vertex stage exposes buffer indices 0..30; setting a
+    /// vertex-descriptor attribute to 31 is a framework assertion that aborts
+    /// the process.</summary>
+    private const nuint MaxVertexStageBufferIndex = 30;
+
+    private static int _vertexSlotOverflowTraces;
+
+    /// <summary>Assigns each vertex stream a Metal buffer slot, sharing one
+    /// slot between attributes that read the same guest buffer — interleaved
+    /// vertices arrive from AGC as one <see cref="GuestVertexBuffer"/> per
+    /// attribute, so without sharing a handful of attributes exhausts the
+    /// vertex-stage buffer range. Deterministic over the draw's buffer array;
+    /// the pipeline descriptor and the bind path both derive from it. Returns
+    /// false when the unique streams still overflow Metal's last slot.</summary>
+    private static bool TryAssignVertexBufferSlots(
+        GuestVertexBuffer[] vertexBuffers,
+        Span<nuint> slots)
+    {
+        var uniqueCount = 0;
+        var overflowed = false;
+        for (var index = 0; index < vertexBuffers.Length; index++)
+        {
+            var buffer = vertexBuffers[index];
+            var shared = false;
+            if (buffer.BaseAddress != 0)
+            {
+                for (var prior = 0; prior < index; prior++)
+                {
+                    var candidate = vertexBuffers[prior];
+                    if (candidate.BaseAddress == buffer.BaseAddress &&
+                        candidate.Stride == buffer.Stride &&
+                        candidate.Length == buffer.Length)
+                    {
+                        slots[index] = slots[prior];
+                        shared = true;
+                        break;
+                    }
+                }
+            }
+
+            if (shared)
+            {
+                continue;
+            }
+
+            slots[index] = VertexBufferSlotBase + (nuint)uniqueCount;
+            uniqueCount++;
+            overflowed |= slots[index] > MaxVertexStageBufferIndex;
+        }
+
+        return !overflowed;
+    }
     private const nuint UsageShaderRead = 1;
     private const nuint UsageShaderWrite = 2;
     private const nuint UsageRenderTarget = 4;
@@ -846,8 +899,27 @@ internal static partial class MetalVideoPresenter
             MetalNative.SendSetAtIndex(encoder, selSetFragmentSampler, sampler, (nuint)index);
         }
 
+        Span<nuint> vertexSlots = stackalloc nuint[draw.VertexBuffers.Length];
+        _ = TryAssignVertexBufferSlots(draw.VertexBuffers, vertexSlots);
         for (var index = 0; index < draw.VertexBuffers.Length; index++)
         {
+            // Streams sharing a slot read the same guest bytes; the first
+            // occurrence uploads and binds them once.
+            var duplicate = false;
+            for (var prior = 0; prior < index; prior++)
+            {
+                if (vertexSlots[prior] == vertexSlots[index])
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+
+            if (duplicate)
+            {
+                continue;
+            }
+
             var vertexBuffer = draw.VertexBuffers[index];
             var length = Math.Max(vertexBuffer.Length, 1);
             var slice = AllocateUpload(device, length, out var buffer, out var offset);
@@ -857,7 +929,7 @@ internal static partial class MetalVideoPresenter
             // selects the field inside the interleaved vertex; the bind
             // offset is just the arena slice.
             MetalNative.SendSetBuffer(
-                encoder, selSetVertexBuffer, buffer, (nuint)offset, VertexBufferSlotBase + (nuint)index);
+                encoder, selSetVertexBuffer, buffer, (nuint)offset, vertexSlots[index]);
         }
     }
 
@@ -925,6 +997,22 @@ internal static partial class MetalVideoPresenter
         }
 
         Mix(hasDepth ? 2UL : 1UL);
+        Span<nuint> vertexSlots = stackalloc nuint[draw.VertexBuffers.Length];
+        if (!TryAssignVertexBufferSlots(draw.VertexBuffers, vertexSlots))
+        {
+            if (_vertexSlotOverflowTraces < 16)
+            {
+                _vertexSlotOverflowTraces++;
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] Metal skipped draw: " +
+                    $"{draw.VertexBuffers.Length} vertex streams need more than " +
+                    $"{MaxVertexStageBufferIndex - VertexBufferSlotBase + 1} unique buffer slots.");
+            }
+
+            pipeline = 0;
+            return false;
+        }
+
         for (var index = 0; index < draw.VertexBuffers.Length; index++)
         {
             var vertexBuffer = draw.VertexBuffers[index];
@@ -933,9 +1021,10 @@ internal static partial class MetalVideoPresenter
                 ((ulong)vertexBuffer.DataFormat << 16) |
                 ((ulong)vertexBuffer.NumberFormat << 26) |
                 ((ulong)vertexBuffer.Stride << 34));
-            // The attribute byte offset is baked into the pipeline's vertex
-            // descriptor, so it must key the cache too.
-            Mix(vertexBuffer.OffsetBytes);
+            // The attribute byte offset and the assigned slot are baked into
+            // the pipeline's vertex descriptor, so both must key the cache
+            // (the slot captures which streams alias one guest buffer).
+            Mix(vertexBuffer.OffsetBytes | ((ulong)vertexSlots[index] << 32));
         }
 
         var key = new PipelineKey(draw.VertexShader, draw.PixelShader, stateHash);
@@ -1061,10 +1150,12 @@ internal static partial class MetalVideoPresenter
         var attributes = MetalNative.Send(descriptor, MetalNative.Selector("attributes"));
         var layouts = MetalNative.Send(descriptor, MetalNative.Selector("layouts"));
         var selAt = MetalNative.Selector("objectAtIndexedSubscript:");
+        Span<nuint> slots = stackalloc nuint[vertexBuffers.Length];
+        _ = TryAssignVertexBufferSlots(vertexBuffers, slots);
         for (var index = 0; index < vertexBuffers.Length; index++)
         {
             var vertexBuffer = vertexBuffers[index];
-            var slot = VertexBufferSlotBase + (nuint)index;
+            var slot = slots[index];
             var attribute = MetalNative.SendAtIndex(attributes, selAt, vertexBuffer.Location);
             MetalNative.Send(
                 attribute,
