@@ -263,6 +263,9 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // The first six arguments use the SysV integer registers. The file
+        // offset is the seventh argument and therefore follows the guest
+        // return address on the stack.
         if (!ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out var fileOffset))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
