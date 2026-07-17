@@ -35,7 +35,8 @@ internal interface IGuestGpuBackend
         int imageBindingBase = 0,
         int scalarRegisterBufferIndex = -1,
         int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1);
+        ulong storageBufferOffsetAlignment = 1,
+        IReadOnlyList<uint>? pixelInputControls = null);
 
     bool TryCompilePixelShader(
         Gen5ShaderState state,
@@ -49,7 +50,8 @@ internal interface IGuestGpuBackend
         int scalarRegisterBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
-        ulong storageBufferOffsetAlignment = 1);
+        ulong storageBufferOffsetAlignment = 1,
+        IReadOnlyList<uint>? pixelInputControls = null);
 
     bool TryCompileComputeShader(
         Gen5ShaderState state,

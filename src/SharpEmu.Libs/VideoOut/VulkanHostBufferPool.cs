@@ -18,10 +18,16 @@ internal readonly record struct VulkanHostBufferAllocation(
 
 internal sealed class VulkanHostBufferPool : IDisposable
 {
-    private readonly Dictionary<VulkanHostBufferPoolKey, Stack<VulkanHostBufferAllocation>>
+    private sealed record CachedAllocation(
+        VulkanHostBufferAllocation Allocation,
+        LinkedListNode<VulkanHostBufferAllocation> BucketNode,
+        LinkedListNode<ulong> RecencyNode);
+
+    private readonly Dictionary<VulkanHostBufferPoolKey, LinkedList<VulkanHostBufferAllocation>>
         _available = [];
     private readonly Dictionary<ulong, VulkanHostBufferAllocation> _allocations = [];
-    private readonly HashSet<ulong> _cachedHandles = [];
+    private readonly Dictionary<ulong, CachedAllocation> _cached = [];
+    private readonly LinkedList<ulong> _recency = [];
     private readonly Action<VulkanHostBufferAllocation> _destroy;
 
     public VulkanHostBufferPool(
@@ -41,13 +47,22 @@ internal sealed class VulkanHostBufferPool : IDisposable
         out VulkanHostBufferAllocation allocation)
     {
         if (!_available.TryGetValue(key, out var available) ||
-            !available.TryPop(out allocation))
+            available.Last is not { } availableNode)
         {
             allocation = default;
             return false;
         }
 
-        _cachedHandles.Remove(allocation.Buffer.Handle);
+        allocation = availableNode.Value;
+        var cached = _cached[allocation.Buffer.Handle];
+        available.Remove(availableNode);
+        if (available.Count == 0)
+        {
+            _available.Remove(key);
+        }
+
+        _recency.Remove(cached.RecencyNode);
+        _cached.Remove(allocation.Buffer.Handle);
         CachedBytes -= allocation.Key.Capacity;
         return true;
     }
@@ -70,17 +85,21 @@ internal sealed class VulkanHostBufferPool : IDisposable
             return false;
         }
 
-        if (!_cachedHandles.Add(buffer.Handle))
+        if (_cached.ContainsKey(buffer.Handle))
         {
             return true;
         }
 
-        if (allocation.Key.Capacity > MaximumCachedBytes - CachedBytes)
+        if (allocation.Key.Capacity > MaximumCachedBytes)
         {
-            _cachedHandles.Remove(buffer.Handle);
             _allocations.Remove(buffer.Handle);
             _destroy(allocation);
             return true;
+        }
+
+        while (CachedBytes > MaximumCachedBytes - allocation.Key.Capacity)
+        {
+            EvictLeastRecentlyUsed();
         }
 
         if (!_available.TryGetValue(allocation.Key, out var available))
@@ -89,9 +108,35 @@ internal sealed class VulkanHostBufferPool : IDisposable
             _available.Add(allocation.Key, available);
         }
 
-        available.Push(allocation);
+        var bucketNode = available.AddLast(allocation);
+        var recencyNode = _recency.AddLast(buffer.Handle);
+        _cached.Add(
+            buffer.Handle,
+            new CachedAllocation(allocation, bucketNode, recencyNode));
         CachedBytes += allocation.Key.Capacity;
         return true;
+    }
+
+    private void EvictLeastRecentlyUsed()
+    {
+        var recencyNode = _recency.First ??
+            throw new InvalidOperationException("Host-buffer cache accounting is inconsistent.");
+        var handle = recencyNode.Value;
+        var cached = _cached[handle];
+        var allocation = cached.Allocation;
+
+        _recency.Remove(recencyNode);
+        _cached.Remove(handle);
+        var available = _available[allocation.Key];
+        available.Remove(cached.BucketNode);
+        if (available.Count == 0)
+        {
+            _available.Remove(allocation.Key);
+        }
+
+        CachedBytes -= allocation.Key.Capacity;
+        _allocations.Remove(handle);
+        _destroy(allocation);
     }
 
     public void Dispose()
@@ -103,7 +148,8 @@ internal sealed class VulkanHostBufferPool : IDisposable
 
         _allocations.Clear();
         _available.Clear();
-        _cachedHandles.Clear();
+        _cached.Clear();
+        _recency.Clear();
         CachedBytes = 0;
     }
 }

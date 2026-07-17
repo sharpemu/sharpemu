@@ -28,7 +28,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         int imageBindingBase = 0,
         int scalarRegisterBufferIndex = -1,
         int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        IReadOnlyList<uint>? pixelInputControls = null)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompileVertexShader(
@@ -41,7 +42,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
                 imageBindingBase,
                 scalarRegisterBufferIndex,
                 requiredVertexOutputCount,
-                storageBufferOffsetAlignment))
+                storageBufferOffsetAlignment,
+                VulkanVideoPresenter.SupportsVertexSubgroupOperations,
+                pixelInputControls))
         {
             return false;
         }
@@ -62,7 +65,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         int scalarRegisterBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        IReadOnlyList<uint>? pixelInputControls = null)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompilePixelShader(
@@ -77,7 +81,10 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
                 scalarRegisterBufferIndex,
                 pixelInputEnable,
                 pixelInputAddress,
-                storageBufferOffsetAlignment))
+                storageBufferOffsetAlignment,
+                VulkanVideoPresenter.SupportsFragmentSubgroupOperations,
+                VulkanVideoPresenter.SupportsFragmentShaderBarycentric,
+                pixelInputControls))
         {
             return false;
         }
@@ -111,7 +118,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
                 totalGlobalBufferCount,
                 initialScalarBufferIndex,
                 waveLaneCount,
-                storageBufferOffsetAlignment))
+                storageBufferOffsetAlignment,
+                VulkanVideoPresenter.SupportsComputeSubgroupOperations))
         {
             return false;
         }

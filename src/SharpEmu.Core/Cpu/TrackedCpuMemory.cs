@@ -31,6 +31,7 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
         var result = _inner.TryWrite(virtualAddress, source);
         if (!result)
         {

@@ -19,6 +19,7 @@ public static class AvPlayerExports
     private const int FrameInfoExSize = 104;
     private const int StreamInfoSize = 40;
     private const int MaxGuestPathLength = 4096;
+    private const int VideoPitchAlignment = 256;
     private static readonly object StateGate = new();
     private static readonly Dictionary<ulong, PlayerState> Players = new();
     private static int _traceCount;
@@ -886,7 +887,9 @@ public static class AvPlayerExports
 
         var alignedWidth = AlignUp(player.Width, 16);
         var alignedHeight = AlignUp(player.Height, 16);
-        var bufferStride = checked(alignedWidth * alignedHeight * 3 / 2);
+        var pitch = extended ? CalculateNv12Pitch(player.Width) : alignedWidth;
+        var bufferHeight = extended ? player.Height : alignedHeight;
+        var bufferStride = CalculateNv12BufferSize(pitch, bufferHeight);
         if (player.GuestBuffers[0] == 0)
         {
             if (!AllocateGuestVideoBuffers(ctx, player, bufferStride))
@@ -894,12 +897,34 @@ public static class AvPlayerExports
                 return false;
             }
             player.GuestBufferStride = bufferStride;
+            Trace(
+                $"video_layout ex={extended} width={player.Width} height={player.Height} " +
+                $"pitch={pitch} uv_offset={checked(pitch * bufferHeight)} size={bufferStride}");
         }
 
         var frameData = player.RawFrame;
-        if (!extended && (alignedWidth != player.Width || alignedHeight != player.Height))
+        if (extended)
         {
-            player.PaddedFrame ??= new byte[bufferStride];
+            if (player.PaddedFrame is null || player.PaddedFrame.Length != bufferStride)
+            {
+                player.PaddedFrame = new byte[bufferStride];
+            }
+            CopyNv12ToGuestBuffer(
+                player.RawFrame,
+                player.PaddedFrame,
+                player.Width,
+                player.Height,
+                player.Width,
+                player.Width,
+                pitch);
+            frameData = player.PaddedFrame;
+        }
+        else if (alignedWidth != player.Width || alignedHeight != player.Height)
+        {
+            if (player.PaddedFrame is null || player.PaddedFrame.Length != bufferStride)
+            {
+                player.PaddedFrame = new byte[bufferStride];
+            }
             player.PaddedFrame.AsSpan().Clear();
             for (var row = 0; row < player.Height; row++)
             {
@@ -935,11 +960,43 @@ public static class AvPlayerExports
         BinaryPrimitives.WriteSingleLittleEndian(info[32..], 1.0f);
         if (extended)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(info[60..], checked((uint)player.Width));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[60..], checked((uint)pitch));
             info[64] = 8;
             info[65] = 8;
         }
         return ctx.Memory.TryWrite(infoAddress, info);
+    }
+
+    internal static int CalculateNv12Pitch(int width) =>
+        AlignUp(width, VideoPitchAlignment);
+
+    internal static int CalculateNv12BufferSize(int pitch, int height) =>
+        checked(pitch * height * 3 / 2);
+
+    internal static void CopyNv12ToGuestBuffer(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        int width,
+        int height,
+        int sourceLumaStride,
+        int sourceChromaStride,
+        int destinationPitch)
+    {
+        var sourceChromaOffset = checked(sourceLumaStride * height);
+        var destinationChromaOffset = checked(destinationPitch * height);
+        var destinationSize = CalculateNv12BufferSize(destinationPitch, height);
+        destination[..destinationSize].Clear();
+
+        for (var row = 0; row < height; row++)
+        {
+            source.Slice(row * sourceLumaStride, width)
+                .CopyTo(destination.Slice(row * destinationPitch, width));
+        }
+        for (var row = 0; row < height / 2; row++)
+        {
+            source.Slice(sourceChromaOffset + (row * sourceChromaStride), width)
+                .CopyTo(destination.Slice(destinationChromaOffset + (row * destinationPitch), width));
+        }
     }
 
     private static bool AllocateGuestVideoBuffers(CpuContext ctx, PlayerState player, int bufferSize)

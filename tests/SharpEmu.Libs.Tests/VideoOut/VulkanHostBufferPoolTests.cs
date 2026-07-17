@@ -45,6 +45,49 @@ public sealed class VulkanHostBufferPoolTests
     }
 
     [Fact]
+    public void ReturnEvictsOldestCachedAllocationsToAdmitCurrentWorkload()
+    {
+        var destroyed = new List<VulkanHostBufferAllocation>();
+        using var pool = new VulkanHostBufferPool(512, destroyed.Add);
+        var oldKey = new VulkanHostBufferPoolKey(BufferUsageFlags.VertexBufferBit, 256);
+        var currentKey = new VulkanHostBufferPoolKey(BufferUsageFlags.StorageBufferBit, 512);
+        var oldFirst = Allocation(11, 12, oldKey);
+        var oldSecond = Allocation(13, 14, oldKey);
+        var current = Allocation(15, 16, currentKey);
+
+        pool.Register(oldFirst);
+        pool.Register(oldSecond);
+        pool.Register(current);
+        Assert.True(pool.Return(oldFirst.Buffer, oldFirst.Memory));
+        Assert.True(pool.Return(oldSecond.Buffer, oldSecond.Memory));
+        Assert.Equal(512UL, pool.CachedBytes);
+
+        Assert.True(pool.Return(current.Buffer, current.Memory));
+
+        Assert.Equal([oldFirst, oldSecond], destroyed);
+        Assert.Equal(512UL, pool.CachedBytes);
+        Assert.False(pool.TryRent(oldKey, out _));
+        Assert.True(pool.TryRent(currentKey, out var rented));
+        Assert.Equal(current, rented);
+    }
+
+    [Fact]
+    public void ZeroBudgetDestroysEveryReturnedAllocation()
+    {
+        var destroyed = new List<VulkanHostBufferAllocation>();
+        using var pool = new VulkanHostBufferPool(0, destroyed.Add);
+        var key = new VulkanHostBufferPoolKey(BufferUsageFlags.IndexBufferBit, 256);
+        var allocation = Allocation(21, 22, key);
+
+        pool.Register(allocation);
+
+        Assert.True(pool.Return(allocation.Buffer, allocation.Memory));
+        Assert.Equal([allocation], destroyed);
+        Assert.Equal(0UL, pool.CachedBytes);
+        Assert.False(pool.TryRent(key, out _));
+    }
+
+    [Fact]
     public void UnknownAllocationIsNotClaimedByPool()
     {
         using var pool = new VulkanHostBufferPool(1024, _ => { });
