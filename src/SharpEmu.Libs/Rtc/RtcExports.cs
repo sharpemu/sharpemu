@@ -84,6 +84,12 @@ public static class RtcExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // TryConvertTickToDateTime yields a Utc-kind DateTime, but here the tick is a local
+        // wall-clock time. ConvertTimeToUtc throws ArgumentException when a Utc-kind value is
+        // paired with a non-UTC source zone, so on any host not set to UTC this would always
+        // fail. Re-tag as Unspecified so the value is interpreted as local time and converted.
+        localDateTime = DateTime.SpecifyKind(localDateTime, DateTimeKind.Unspecified);
+
         DateTime utcDateTime;
         try
         {
@@ -235,6 +241,64 @@ public static class RtcExports
         LibraryName = "libSceRtc")]
     public static int RtcGetCurrentRawNetworkTick(CpuContext ctx) => RtcGetCurrentTick(ctx);
 
+    // Diagnostic: middleware busy-wait loops typically poll sceRtcGetCurrentTick, so the
+    // caller's return address pinpoints the loop. SHARPEMU_RTC_PROBE_RANGE=<start>-<end>
+    // (hex guest addresses) dumps 0x100 bytes of code around the first matching caller,
+    // once, for offline disassembly. Costs nothing when the variable is unset.
+    private static readonly ulong[]? _rtcProbeRange = ParseRtcProbeRange();
+    private static int _rtcProbeDone;
+
+    private static ulong[]? ParseRtcProbeRange()
+    {
+        var value = Environment.GetEnvironmentVariable("SHARPEMU_RTC_PROBE_RANGE");
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var parts = value.Split('-', 2, StringSplitOptions.TrimEntries);
+        return parts.Length == 2 &&
+               TryParseHexAddress(parts[0], out var start) &&
+               TryParseHexAddress(parts[1], out var end) &&
+               start < end
+            ? [start, end]
+            : null;
+    }
+
+    private static bool TryParseHexAddress(string value, out ulong address)
+    {
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[2..];
+        }
+
+        return ulong.TryParse(
+            value,
+            System.Globalization.NumberStyles.HexNumber,
+            null,
+            out address);
+    }
+
+    private static void ProbeRtcCaller(CpuContext ctx)
+    {
+        if (Volatile.Read(ref _rtcProbeDone) != 0 ||
+            !ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out var ret) ||
+            ret < _rtcProbeRange![0] ||
+            ret >= _rtcProbeRange[1] ||
+            Interlocked.CompareExchange(ref _rtcProbeDone, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var start = ret - 0x60;
+        Span<byte> code = stackalloc byte[0x100];
+        if (ctx.Memory.TryRead(start, code))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][DIAG] rtc.caller_code ret=0x{ret:X} @0x{start:X}: {System.Convert.ToHexString(code)}");
+        }
+    }
+
     [SysAbiExport(
         Nid = "18B2NS1y9UU",
         ExportName = "sceRtcGetCurrentTick",
@@ -246,6 +310,11 @@ public static class RtcExports
         if (tickAddress == 0)
         {
             return unchecked((int)0x80B50002);
+        }
+
+        if (_rtcProbeRange is not null)
+        {
+            ProbeRtcCaller(ctx);
         }
 
         var tickValue = unchecked((ulong)(DateTime.UtcNow.Ticks / DateTimeTicksPerMicrosecond));

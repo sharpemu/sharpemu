@@ -26,6 +26,12 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
 
     public ulong GsBase { get; set; }
 
+    /// <summary>x87 control word observed at the current guest boundary.</summary>
+    public ushort FpuControlWord { get; set; } = 0x037F;
+
+    /// <summary>MXCSR observed at the current guest boundary.</summary>
+    public uint Mxcsr { get; set; } = 0x1F80;
+
     public ulong this[CpuRegister register]
     {
         get => _registers[(int)register];

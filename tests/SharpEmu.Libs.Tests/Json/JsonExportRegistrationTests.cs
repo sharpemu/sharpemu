@@ -30,7 +30,7 @@ public sealed class JsonExportRegistrationTests
     private static ModuleManager CreateRegisteredManager()
     {
         var manager = new ModuleManager();
-        manager.RegisterFromAssembly(typeof(JsonValueExports).Assembly, Generation.Gen5);
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
         return manager;
     }
 

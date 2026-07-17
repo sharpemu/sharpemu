@@ -3,7 +3,6 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
-using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -12,15 +11,17 @@ public sealed unsafe class StubManager : IDisposable
     private readonly List<nint> _allocatedStubs = new();
     private readonly Dictionary<string, nint> _importHandlers = new();
     private readonly Dictionary<ulong, nint> _stubAddresses = new();
-    private readonly IHostMemory _hostMemory;
     private byte* _pltMemory;
     private int _pltOffset;
     private const int PltMemorySize = 1024 * 1024; // 1MB for stubs
 
-    public StubManager(IHostMemory? hostMemory = null)
+    public StubManager()
     {
-        _hostMemory = hostMemory ?? HostPlatform.Current.Memory;
-        _pltMemory = (byte*)_hostMemory.Allocate(0, PltMemorySize, HostPageProtection.ReadWriteExecute);
+        _pltMemory = (byte*)VirtualAlloc(
+            null,
+            (nuint)PltMemorySize,
+            AllocationType.Reserve | AllocationType.Commit,
+            MemoryProtection.ExecuteReadWrite);
 
         if (_pltMemory == null)
         {
@@ -184,13 +185,37 @@ public sealed unsafe class StubManager : IDisposable
     {
         if (_pltMemory != null)
         {
-            _hostMemory.Free((ulong)_pltMemory);
+            VirtualFree(_pltMemory, 0, FreeType.Release);
             _pltMemory = null;
         }
 
         _allocatedStubs.Clear();
         _importHandlers.Clear();
         _stubAddresses.Clear();
+    }
+
+    private static void* VirtualAlloc(void* lpAddress, nuint dwSize, AllocationType flAllocationType, MemoryProtection flProtect) =>
+        HostMemory.Alloc(lpAddress, dwSize, (uint)flAllocationType, (uint)flProtect);
+
+    private static bool VirtualFree(void* lpAddress, nuint dwSize, FreeType dwFreeType) =>
+        HostMemory.Free(lpAddress, dwSize, (uint)dwFreeType);
+
+    [Flags]
+    private enum AllocationType : uint
+    {
+        Commit = 0x1000,
+        Reserve = 0x2000,
+    }
+
+    [Flags]
+    private enum MemoryProtection : uint
+    {
+        ExecuteReadWrite = 0x40,
+    }
+
+    private enum FreeType : uint
+    {
+        Release = 0x8000,
     }
 
     public delegate void ImportHandler(CpuContext context);

@@ -25,7 +25,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- Server GC reserves one large heap range per logical processor. On
+         high-core-count hosts those ranges can overlap fixed PS5 image bases
+         before the guest address space is established. Workstation GC avoids
+         that collision and keeps the emulator's required mappings available. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
   </PropertyGroup>

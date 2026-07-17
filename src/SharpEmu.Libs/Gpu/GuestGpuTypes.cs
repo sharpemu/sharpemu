@@ -22,6 +22,8 @@ internal sealed record GuestDrawTexture(
     bool IsStorage,
     uint MipLevels = 1,
     uint MipLevel = 0,
+    uint BaseMipLevel = 0,
+    uint ResourceMipLevels = 1,
     uint Pitch = 0,
     uint TileMode = 0,
     uint DstSelect = 0xFAC,
@@ -36,7 +38,11 @@ internal readonly record struct GuestSampler(
 
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,
-    byte[] Data);
+    byte[] Data,
+    int Length,
+    bool Pooled,
+    bool Writable = false,
+    bool WriteBackToGuest = true);
 
 /// <summary>DataFormat/NumberFormat are raw guest vertex-attribute codes.</summary>
 internal sealed record GuestVertexBuffer(
@@ -47,11 +53,15 @@ internal sealed record GuestVertexBuffer(
     ulong BaseAddress,
     uint Stride,
     uint OffsetBytes,
-    byte[] Data);
+    byte[] Data,
+    int Length,
+    bool Pooled);
 
 internal sealed record GuestIndexBuffer(
     byte[] Data,
-    bool Is32Bit);
+    int Length,
+    bool Is32Bit,
+    bool Pooled);
 
 internal readonly record struct GuestRect(
     int X,
@@ -66,6 +76,26 @@ internal readonly record struct GuestViewport(
     float Height,
     float MinDepth,
     float MaxDepth);
+
+internal readonly record struct GuestRasterState(
+    bool CullFront,
+    bool CullBack,
+    bool FrontFaceClockwise,
+    bool Wireframe)
+{
+    public static GuestRasterState Default { get; } = new(false, false, false, false);
+}
+
+// CompareOp uses the GCN DB_DEPTH_CONTROL ZFUNC encoding, which matches the
+// Vulkan CompareOp ordering (0=Never through 7=Always).
+internal readonly record struct GuestDepthState(
+    bool TestEnable,
+    bool WriteEnable,
+    uint CompareOp,
+    bool ClearEnable = false)
+{
+    public static GuestDepthState Default { get; } = new(false, false, 7, false);
+}
 
 /// <summary>Factors/funcs are raw guest CB_BLEND*_CONTROL register bitfields; the
 /// defaults (1/0) are the guest ONE/ZERO codes.</summary>
@@ -95,12 +125,16 @@ internal readonly record struct GuestBlendState(
 internal sealed record GuestRenderState(
     IReadOnlyList<GuestBlendState> Blends,
     GuestRect? Scissor,
-    GuestViewport? Viewport)
+    GuestViewport? Viewport,
+    GuestRasterState Raster,
+    GuestDepthState Depth)
 {
     public static GuestRenderState Default { get; } = new(
         [GuestBlendState.Default],
         Scissor: null,
-        Viewport: null);
+        Viewport: null,
+        GuestRasterState.Default,
+        GuestDepthState.Default);
 
     public GuestBlendState Blend =>
         Blends.Count == 0 ? GuestBlendState.Default : Blends[0];
@@ -114,3 +148,17 @@ internal sealed record GuestRenderTarget(
     uint Format,
     uint NumberType,
     uint MipLevels = 1);
+
+/// <summary>Guest DB surface bound alongside a color render target.</summary>
+internal sealed record GuestDepthTarget(
+    ulong ReadAddress,
+    ulong WriteAddress,
+    uint Width,
+    uint Height,
+    uint GuestFormat,
+    uint SwizzleMode,
+    float ClearDepth,
+    bool ReadOnly)
+{
+    public ulong Address => WriteAddress != 0 ? WriteAddress : ReadAddress;
+}

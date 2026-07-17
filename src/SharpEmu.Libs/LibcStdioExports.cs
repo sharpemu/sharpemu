@@ -14,9 +14,9 @@ public static class LibcStdioExports
     private const int MaxPathLength = 4096;
     private const int MaxModeLength = 16;
     private const int ReadChunkSize = 1024 * 1024;
+    private const ulong GuestFileObjectSize = 0x100;
 
     private static readonly ConcurrentDictionary<ulong, FileStream> _fileHandles = new();
-    private static long _nextHandle = 0x1000 - 8;
 
     private static readonly bool _traceStdio =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STDIO"), "1", StringComparison.Ordinal);
@@ -96,7 +96,21 @@ public static class LibcStdioExports
                 stream.Seek(0, SeekOrigin.End);
             }
 
-            var handle = unchecked((ulong)Interlocked.Add(ref _nextHandle, 8));
+            // A FILE* can cross between HLE stdio and a title's bundled libc.
+            // Back the handle with zeroed guest memory so native helpers such
+            // as _Lockfilelock can safely inspect the FILE object instead of
+            // dereferencing the old small integer token (0x1000, 0x1008...).
+            if (!KernelMemoryCompatExports.TryAllocateHleData(
+                    ctx,
+                    GuestFileObjectSize,
+                    alignment: 0x10,
+                    out var handle))
+            {
+                stream.Dispose();
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            }
+
             _fileHandles[handle] = stream;
 
             if (_traceStdio)

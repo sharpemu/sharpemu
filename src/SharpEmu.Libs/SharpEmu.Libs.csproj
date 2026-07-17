@@ -8,6 +8,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- SysAbi export generator + analyzers (compile-time registry, NID validation). -->
+    <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The PS5 symbol catalog: lets the analyzer flag export names it doesn't know. -->
+    <AdditionalFiles Include="..\..\scripts\ps5_names.txt" />
   </ItemGroup>
 
   <ItemGroup>

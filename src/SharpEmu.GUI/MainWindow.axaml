@@ -353,6 +353,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch Grid.Column="1" x:Name="DiscordToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock x:Name="AutoUpdateLabel" Text="Check for updates on startup" FontSize="13" />
+                          <TextBlock x:Name="AutoUpdateDesc" Text="Checks GitHub without delaying startup."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off"
+                                      IsChecked="True" VerticalAlignment="Center" />
+                      </Grid>
                     </StackPanel>
                   </Border>
                   <Border Classes="card">
@@ -360,6 +370,40 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <TextBlock x:Name="AboutSectionTitle"
                                 Classes="sectionTitle"
                                 Text="ABOUT" />
+
+                      <!--Latest commit info-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/commit-icon.png"
+                                    Width="24" Height="24" VerticalAlignment="Center" />
+                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
+                            <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                          </StackPanel>
+                        </StackPanel>
+
+                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
+                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
+                          VerticalAlignment="Center" IsEnabled="False" />
+
+                      </Grid>
+
+                      <!--Update-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/update-icon.png"
+                                    Width="24"
+                                    Height="24"
+                                    VerticalAlignment="Center" />
+                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
+                            <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
+                                      Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                          </StackPanel>
+                        </StackPanel>
+                        <Button Grid.Column="1" x:Name="UpdateButton" Classes="ghost"
+                                Content="Check for updates" VerticalAlignment="Center" />
+                      </Grid>
                       
                       <!--Github-->
                       <Grid ColumnDefinitions="*,Auto">
@@ -577,6 +621,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <Grid ColumnDefinitions="*,Auto">
                         <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_WRITABLE_APP0" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvWritableApp0Desc"
+                                     Text="Allow titles to create and write files inside their install folder.&#10;Needed by unpackaged dumps that write their save or config data under /app0."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
                           <TextBlock Text="SHARPEMU_VK_VALIDATION" FontSize="13" FontFamily="Consolas,monospace" />
                           <TextBlock x:Name="EnvVkValidationDesc"
                                      Text="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed."
@@ -605,6 +660,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                         <ToggleSwitch Grid.Column="1" x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+                          <TextBlock Text="SHARPEMU_LOG_IO" FontSize="13" FontFamily="Consolas,monospace" />
+                          <TextBlock x:Name="EnvLogIoDesc"
+                                     Text="Log file open, read, and path-resolve activity to the console.&#10;Use when a game cannot find its data files during boot."
+                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </Grid>
 

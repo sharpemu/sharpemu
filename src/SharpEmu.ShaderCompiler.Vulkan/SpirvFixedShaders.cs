@@ -164,4 +164,100 @@ public static class SpirvFixedShaders
         module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
         return module.Build();
     }
+
+    public static byte[] CreateSolidFragment(float red, float green, float blue, float alpha)
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var floatType = module.TypeFloat(32);
+        var vec4Type = module.TypeVector(floatType, 4);
+        var outputVec4Pointer = module.TypePointer(SpirvStorageClass.Output, vec4Type);
+        var output = module.AddGlobalVariable(outputVec4Pointer, SpirvStorageClass.Output);
+        module.AddName(output, "outColor");
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+        var color = module.ConstantComposite(
+            vec4Type,
+            module.ConstantFloat(floatType, red),
+            module.ConstantFloat(floatType, green),
+            module.ConstantFloat(floatType, blue),
+            module.ConstantFloat(floatType, alpha));
+        module.AddStatement(SpirvOp.Store, output, color);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        module.AddEntryPoint(SpirvExecutionModel.Fragment, main, "main", [output]);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
+
+    /// <summary>
+    /// Diagnostic fragment stage that exposes one interpolated vertex output
+    /// directly as color. This keeps the real guest vertex/index/depth path
+    /// intact while isolating fragment-shader translation from interface data.
+    /// </summary>
+    public static byte[] CreateAttributeFragment(uint location)
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var floatType = module.TypeFloat(32);
+        var vec4Type = module.TypeVector(floatType, 4);
+        var inputPointer = module.TypePointer(SpirvStorageClass.Input, vec4Type);
+        var outputPointer = module.TypePointer(SpirvStorageClass.Output, vec4Type);
+        var input = module.AddGlobalVariable(inputPointer, SpirvStorageClass.Input);
+        module.AddName(input, $"attr{location}");
+        module.AddDecoration(input, SpirvDecoration.Location, location);
+        var output = module.AddGlobalVariable(outputPointer, SpirvStorageClass.Output);
+        module.AddName(output, "outColor");
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+        var value = module.AddInstruction(SpirvOp.Load, vec4Type, input);
+        module.AddStatement(SpirvOp.Store, output, value);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        module.AddEntryPoint(
+            SpirvExecutionModel.Fragment,
+            main,
+            "main",
+            [input, output]);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
+
+    /// <summary>
+    /// Minimal fragment stage for fixed-function depth-only passes.  The
+    /// guest has no pixel shader and therefore cannot export colour; keeping
+    /// this stage output-free preserves that contract while allowing Vulkan
+    /// to run early/late depth tests for the translated vertex shader.
+    /// </summary>
+    public static byte[] CreateDepthOnlyFragment()
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        module.AddEntryPoint(SpirvExecutionModel.Fragment, main, "main", []);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
 }

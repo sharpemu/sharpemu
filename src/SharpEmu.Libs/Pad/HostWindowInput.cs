@@ -40,6 +40,11 @@ public static class HostWindowInput
         {
             keyboard.KeyDown += (_, key, _) =>
             {
+                if (key == Key.F1)
+                {
+                    VideoOut.PerfOverlay.Toggle();
+                }
+
                 lock (Gate)
                 {
                     Pressed.Add(key);
@@ -248,9 +253,9 @@ public static class HostWindowInput
         };
     }
 
-    private static byte ToStickByte(float value)
+    internal static byte ToStickByte(float value)
     {
-        return (byte)Math.Clamp((int)(128.0f + value * 127.0f), 0, 255);
+        return (byte)Math.Clamp((int)MathF.Round((value + 1.0f) * 127.5f), 0, 255);
     }
 
     private static HostGamepadButtons MapButton(ButtonName name) => name switch

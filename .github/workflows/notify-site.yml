@@ -1,0 +1,31 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Tells the website repo to rebuild when a release is published, so
+# sharpemu.app/downloads lists the new build within a minute.
+name: Notify website
+
+on:
+  release:
+    types: [published, released, edited, deleted]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sharpemu-site rebuild
+        env:
+          TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "SITE_DISPATCH_TOKEN is not set — skipping website rebuild."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/sharpemu/sharpemu-site/dispatches \
+            -d '{"event_type":"release-published"}'
+          echo "Website rebuild requested."

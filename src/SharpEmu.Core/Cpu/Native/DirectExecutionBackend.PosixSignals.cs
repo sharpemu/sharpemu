@@ -4,7 +4,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
-using SharpEmu.Core.Cpu.Native.Windows;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -21,6 +21,8 @@ public sealed unsafe partial class DirectExecutionBackend
 	// runtime keeps turning its own faults into managed exceptions.
 
 	private const int PosixSigIll = 4;
+	private const int PosixSigTrap = 5;
+	private const int PosixSigAbort = 6;
 	private const int PosixSigSegv = 11;
 	private static readonly int PosixSigBus = OperatingSystem.IsMacOS() ? 10 : 7;
 
@@ -62,6 +64,9 @@ public sealed unsafe partial class DirectExecutionBackend
 	private static bool _posixSignalWarmup;
 	private static readonly nint[] _posixPreviousActions = new nint[32];
 	private static int _posixSignalTraceCount;
+	private static long _perfSignalCount;
+	private static readonly bool _perfSignalCounter =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_PERF_MEM"), "1", StringComparison.Ordinal);
 
 	[ThreadStatic]
 	private static int _posixSignalHandlerDepth;
@@ -88,10 +93,13 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		WarmUpPosixSignalPath();
+		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
 
 		if (!InstallPosixSignalHandler(PosixSigSegv) ||
 			!InstallPosixSignalHandler(PosixSigBus) ||
-			!InstallPosixSignalHandler(PosixSigIll))
+			!InstallPosixSignalHandler(PosixSigIll) ||
+			!InstallPosixSignalHandler(PosixSigTrap) ||
+			!InstallPosixSignalHandler(PosixSigAbort))
 		{
 			throw new InvalidOperationException("Failed to install POSIX fault signal handlers");
 		}
@@ -132,8 +140,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			// action and sigaction(0, ...) fails with EINVAL).
 			EXCEPTION_RECORD record = default;
 			record.ExceptionCode = DBG_PRINTEXCEPTION_C;
-			byte* contextRecord = stackalloc byte[Win64ContextOffsets.Size];
-			new Span<byte>(contextRecord, Win64ContextOffsets.Size).Clear();
+			byte* contextRecord = stackalloc byte[Win64ContextSize];
+			new Span<byte>(contextRecord, Win64ContextSize).Clear();
 			EXCEPTION_POINTERS pointers;
 			pointers.ExceptionRecord = &record;
 			pointers.ContextRecord = contextRecord;
@@ -190,8 +198,27 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		_posixSignalHandlerDepth++;
+		if (_perfSignalCounter)
+		{
+			var n = Interlocked.Increment(ref _perfSignalCount);
+			if (n % 100000 == 0)
+			{
+				Console.Error.WriteLine($"[PERF][MEM] posix_faults={n}");
+			}
+		}
 		try
 		{
+			// Guest-image write tracking runs first: it only needs the fault
+			// address (safe for host and guest threads alike) and must resume
+			// the faulting write immediately after restoring write access.
+			if (signal != PosixSigIll &&
+				siginfo != 0 &&
+				SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
+					*(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset)))
+			{
+				return;
+			}
+
 			if (TryHandlePosixFault(signal, siginfo, ucontext))
 			{
 				return;
@@ -217,8 +244,8 @@ public sealed unsafe partial class DirectExecutionBackend
 			return false;
 		}
 
-		byte* contextRecord = stackalloc byte[Win64ContextOffsets.Size];
-		new Span<byte>(contextRecord, Win64ContextOffsets.Size).Clear();
+		byte* contextRecord = stackalloc byte[Win64ContextSize];
+		new Span<byte>(contextRecord, Win64ContextSize).Clear();
 		int[] offsets = PosixRegisterOffsets;
 		for (int i = 0; i < offsets.Length; i++)
 		{
@@ -230,6 +257,14 @@ public sealed unsafe partial class DirectExecutionBackend
 		if (signal == PosixSigIll)
 		{
 			record.ExceptionCode = 3221225501u;
+		}
+		else if (signal == PosixSigTrap)
+		{
+			record.ExceptionCode = 2147483651u;
+		}
+		else if (signal == PosixSigAbort)
+		{
+			record.ExceptionCode = 1073741845u;
 		}
 		else
 		{

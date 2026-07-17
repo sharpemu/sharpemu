@@ -18,6 +18,7 @@ using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Reflection;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Ellipse = Avalonia.Controls.Shapes.Ellipse;
 
@@ -34,6 +35,12 @@ public partial class MainWindow : Window
     private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
     private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
     private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
+    private static readonly StringComparer FilePathComparer = OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+    private static readonly StringComparison FilePathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
@@ -51,6 +58,9 @@ public partial class MainWindow : Window
     private bool _isRunning;
     private int _autoScrollTicks;
     private int _activePageIndex;
+    private Updater.UpdateInfo? _availableUpdate;
+    private string _updateStatusKey = "Updater.Status.Ready";
+    private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
 
     // Discord Rich Presence state.
     private readonly long _launcherStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -76,6 +86,10 @@ public partial class MainWindow : Window
 
     // Top-right clock, PS5 home-screen style.
     private readonly DispatcherTimer _clockTimer;
+
+    //Github http client for latest commit
+    private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
+    private string? _latestCommitSha;
 
     public MainWindow()
     {
@@ -141,17 +155,24 @@ public partial class MainWindow : Window
             _settings.DiscordRichPresence = DiscordToggle.IsChecked == true;
             UpdateDiscordPresence();
         };
+        AutoUpdateToggle.IsCheckedChanged += (_, _) =>
+            _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
+        UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", EnvLoopGuardToggle.IsChecked == true);
+        EnvWritableApp0Toggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
         EnvVkValidationToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
         EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
+        EnvLogIoToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
@@ -200,7 +221,7 @@ public partial class MainWindow : Window
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "https://github.com/par274/sharpemu",
+                FileName = "https://github.com/sharpemu/sharpemu",
                 UseShellExecute = true
             });
         };
@@ -210,6 +231,21 @@ public partial class MainWindow : Window
             Process.Start(new ProcessStartInfo
             {
                 FileName = "https://discord.com/invite/6GejPEDqpc",
+                UseShellExecute = true
+            });
+        };
+
+        LatestCommitHashText.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_latestCommitSha))
+            {
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName =
+                    $"https://github.com/sharpemu/sharpemu/commit/{_latestCommitSha}",
                 UseShellExecute = true
             });
         };
@@ -251,6 +287,91 @@ public partial class MainWindow : Window
         else
         {
             button.Classes.Remove("active");
+        }
+    }
+
+    // ---- Github http client config ----
+    // This is for getting lash commit id
+    private static HttpClient CreateGithubHttpClient()
+    {
+        var client = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("SharpEmu/1.0");
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/vnd.github.sha"));
+
+        client.DefaultRequestHeaders.Add(
+            "X-GitHub-Api-Version",
+            "2026-03-10");
+
+        return client;
+    }
+    private async Task LoadLatestCommitAsync()
+    {
+        const string apiUrl =
+            "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
+
+        _latestCommitSha = null;
+        LatestCommitHashText.Content = "Loading…";
+        LatestCommitHashText.IsEnabled = false;
+
+        try
+        {
+            using var response = await GithubHttpClient.GetAsync(apiUrl);
+            var responseBody =
+                (await response.Content.ReadAsStringAsync()).Trim();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                LatestCommitHashText.Content =
+                    $"HTTP {(int)response.StatusCode}";
+
+                ToolTip.SetTip(
+                    LatestCommitHashText,
+                    string.IsNullOrWhiteSpace(responseBody)
+                        ? response.ReasonPhrase
+                        : responseBody);
+
+                return;
+            }
+
+            if (responseBody.Length < 7)
+            {
+                LatestCommitHashText.Content = "Invalid response";
+                ToolTip.SetTip(LatestCommitHashText, responseBody);
+                return;
+            }
+
+            // Keep the complete SHA for the URL.
+            _latestCommitSha = responseBody;
+
+            // Display only the short SHA.
+            LatestCommitHashText.Content =
+                responseBody[..Math.Min(7, responseBody.Length)];
+
+            LatestCommitHashText.IsEnabled = true;
+
+            ToolTip.SetTip(
+                LatestCommitHashText,
+                $"Open commit {_latestCommitSha}");
+        }
+        catch (TaskCanceledException ex)
+        {
+            LatestCommitHashText.Content = "Timeout";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+        }
+        catch (HttpRequestException ex)
+        {
+            LatestCommitHashText.Content = "Connection error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            LatestCommitHashText.Content = "Error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
         }
     }
 
@@ -455,6 +576,12 @@ public partial class MainWindow : Window
         ApplySettingsToControls();
         LocateEmulator();
         UpdateDiscordPresence();
+        _ = LoadLatestCommitAsync();
+
+        if (_settings.CheckForUpdatesOnStartup)
+        {
+            _ = CheckForUpdatesAsync();
+        }
         await RescanLibraryAsync();
     }
 
@@ -517,9 +644,11 @@ public partial class MainWindow : Window
         EnvDesc.Text = loc.Get("Options.Env.Desc");
         EnvBthidDesc.Text = loc.Get("Options.Env.Bthid.Desc");
         EnvLoopGuardDesc.Text = loc.Get("Options.Env.LoopGuard.Desc");
+        EnvWritableApp0Desc.Text = loc.Get("Options.Env.WritableApp0.Desc");
         EnvVkValidationDesc.Text = loc.Get("Options.Env.VkValidation.Desc");
         EnvDumpSpirvDesc.Text = loc.Get("Options.Env.DumpSpirv.Desc");
         EnvLogDirectMemoryDesc.Text = loc.Get("Options.Env.LogDirectMemory.Desc");
+        EnvLogIoDesc.Text = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpDesc.Text = loc.Get("Options.Env.LogNp.Desc");
         EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
@@ -562,8 +691,10 @@ public partial class MainWindow : Window
 
         DiscordLabel.Text = loc.Get("Options.Discord.Label");
         DiscordDesc.Text = loc.Get("Options.Discord.Desc");
+        AutoUpdateLabel.Text = loc.Get("Updater.Auto.Label");
+        AutoUpdateDesc.Text = loc.Get("Updater.Auto.Desc");
 
-        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle })
+        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle, AutoUpdateToggle })
         {
             toggle.OnContent = loc.Get("Common.On");
             toggle.OffContent = loc.Get("Common.Off");
@@ -587,6 +718,10 @@ public partial class MainWindow : Window
         DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
         GithubButton.Content = loc.Get("About.GithubButton");
         DiscordButton.Content = loc.Get("About.DiscordButton");
+        UpdateLabel.Text = loc.Get("Updater.Label");
+        LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
+        LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
+        RefreshUpdateText();
 
         UpdateEmptyStateTexts();
         UpdateSelectedGameTexts();
@@ -703,13 +838,85 @@ public partial class MainWindow : Window
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
+        AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
         EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
         EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
+        EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
         EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_VK_VALIDATION");
         EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DUMP_SPIRV");
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
+        EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
         UpdateLogFilePathText();
+    }
+
+    private async Task OnUpdateButtonAsync()
+    {
+        if (_availableUpdate is null)
+        {
+            await CheckForUpdatesAsync();
+            return;
+        }
+
+        UpdateButton.IsEnabled = false;
+        try
+        {
+            var progress = new Progress<int>(value =>
+                SetUpdateStatus("Updater.Status.Downloading", value));
+            await Updater.DownloadAndRestartAsync(_availableUpdate, progress);
+            SetUpdateStatus("Updater.Status.Installing");
+            Close();
+        }
+        catch
+        {
+            SetUpdateStatus("Updater.Status.Failed");
+            UpdateButton.IsEnabled = true;
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        _availableUpdate = null;
+        UpdateButton.IsEnabled = false;
+        SetUpdateStatus("Updater.Status.Checking");
+        try
+        {
+            _availableUpdate = await Updater.CheckAsync(BuildInfo.CommitSha);
+            SetUpdateStatus(
+                _availableUpdate is null ? "Updater.Status.Current" : "Updater.Status.Available",
+                _availableUpdate?.Sha ?? BuildInfo.CommitSha ?? "dev");
+        }
+        catch (OperationCanceledException)
+        {
+            SetUpdateStatus("Updater.Status.Timeout");
+        }
+        catch (PlatformNotSupportedException)
+        {
+            SetUpdateStatus("Updater.Status.Unsupported");
+        }
+        catch
+        {
+            SetUpdateStatus("Updater.Status.Failed");
+        }
+        finally
+        {
+            UpdateButton.IsEnabled = true;
+            RefreshUpdateText();
+        }
+    }
+
+    private void SetUpdateStatus(string key, params object?[] args)
+    {
+        _updateStatusKey = key;
+        _updateStatusArgs = args;
+        RefreshUpdateText();
+    }
+
+    private void RefreshUpdateText()
+    {
+        UpdateStatusText.Text = Localization.Instance.Format(_updateStatusKey, _updateStatusArgs);
+        UpdateButton.Content = Localization.Instance.Get(
+            _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
     }
 
     // Environment variables set on this process at the previous launch; children
@@ -824,7 +1031,7 @@ public partial class MainWindow : Window
         }
 
         var changed = false;
-        if (!_settings.GameFolders.Contains(path, StringComparer.OrdinalIgnoreCase))
+        if (!_settings.GameFolders.Contains(path, FilePathComparer))
         {
             _settings.GameFolders.Add(path);
             changed = true;
@@ -834,7 +1041,7 @@ public partial class MainWindow : Window
         // games beneath it that were removed from the library earlier.
         var prefix = Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar;
         changed |= _settings.ExcludedGames.RemoveAll(excluded =>
-            excluded.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) > 0;
+            excluded.StartsWith(prefix, FilePathComparison)) > 0;
 
         if (changed)
         {
@@ -847,7 +1054,7 @@ public partial class MainWindow : Window
     private async Task RescanLibraryAsync()
     {
         var folders = _settings.GameFolders.ToArray();
-        var excluded = new HashSet<string>(_settings.ExcludedGames, StringComparer.OrdinalIgnoreCase);
+        var excluded = new HashSet<string>(_settings.ExcludedGames, FilePathComparer);
         StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
         EmptyState.IsVisible = false;
         LoadingState.IsVisible = true;
@@ -965,7 +1172,7 @@ public partial class MainWindow : Window
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
     {
         var games = new List<GameEntry>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(FilePathComparer);
         var enumeration = new EnumerationOptions
         {
             IgnoreInaccessible = true,
@@ -1229,13 +1436,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_settings.ExcludedGames.Contains(game.Path, StringComparer.OrdinalIgnoreCase))
+        if (!_settings.ExcludedGames.Contains(game.Path, FilePathComparer))
         {
             _settings.ExcludedGames.Add(game.Path);
             _settings.Save();
         }
 
-        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, StringComparison.OrdinalIgnoreCase));
+        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
         GameList.SelectedItem = null;
         RefreshVisibleGames();
         StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
@@ -1259,7 +1466,7 @@ public partial class MainWindow : Window
         }
 
         if (selectedPath is not null &&
-            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, StringComparison.OrdinalIgnoreCase))
+            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
         {
             GameList.SelectedItem = reselected;
@@ -1584,7 +1791,7 @@ public partial class MainWindow : Window
         _isRunning = true;
         _runningGameName = displayName;
         _runningGameTitleId = _allGames
-            .FirstOrDefault(game => game.Path.Equals(ebootPath, StringComparison.OrdinalIgnoreCase))?
+            .FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?
             .TitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         StatusDot.Fill = SuccessLineBrush;

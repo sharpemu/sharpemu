@@ -95,6 +95,32 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Equal(0UL, (ulong)memory.GetPointer(address));
     }
 
+    [Fact]
+    public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideMacOS()
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        const ulong desiredAddress = 0x00005000_0000_0123;
+        const ulong alignment = 0x10000;
+        const ulong alignedAddress = 0x00005000_0001_0000;
+        const ulong allocationSize = 0x2000;
+        using var host = new RelocatingHostMemory(alignedAddress);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.True(memory.TryAllocateAtOrAbove(desiredAddress, 0x1234, false, alignment, out var actualAddress));
+        Assert.Equal(alignedAddress + alignment, actualAddress);
+        Assert.Equal(
+            [
+                (alignedAddress, allocationSize),
+                (alignedAddress + alignment, allocationSize),
+            ],
+            host.AllocationCalls);
+        Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
+    }
+
     private sealed class FakeHostMemory : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
@@ -194,6 +220,63 @@ public sealed class GuestMemoryAllocatorTests
                 System.Runtime.InteropServices.Marshal.FreeHGlobal(_allocation);
                 _freed = true;
             }
+        }
+    }
+
+    private sealed class RelocatingHostMemory(ulong firstAddress) : IHostMemory, IDisposable
+    {
+        private bool _relocatedFirstAllocation;
+
+        public List<(ulong Address, ulong Size)> AllocationCalls { get; } = [];
+
+        public List<ulong> FreedAddresses { get; } = [];
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            AllocationCalls.Add((desiredAddress, size));
+            if (!_relocatedFirstAllocation)
+            {
+                _relocatedFirstAllocation = true;
+                return firstAddress + 0x1000;
+            }
+
+            return desiredAddress;
+        }
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address)
+        {
+            FreedAddresses.Add(address);
+            return true;
+        }
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            info = default;
+            return false;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose()
+        {
         }
     }
 

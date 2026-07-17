@@ -131,6 +131,8 @@
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Código fuente, issues y desarrollo del proyecto.",
   "About.Discord.Label": "Discord",
+  "About.Github.LatestCommitLabel": "Último Commit",
+  "About.Github.LatestCommitDescription": "Último commit en la rama main",
   "About.Discord.Desc": "Únete a la comunidad, recibe soporte y sigue el desarrollo.",
   "About.GithubButton": "Contribuye en GitHub!",
   "About.DiscordButton": "Únete a nuestro Discord!"

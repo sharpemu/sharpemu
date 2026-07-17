@@ -13,6 +13,63 @@ public static class SystemServiceExports
     private const int OrbisSystemServiceErrorParameter = unchecked((int)0x80A10003);
     private const int SystemServiceStatusSize = 0x0C;
     private const int DisplaySafeAreaInfoSize = sizeof(float) + 128;
+    private const int HdrToneMapLuminanceSize = sizeof(float) * 3;
+
+    private const int TitleIdFieldSize = 0x10;
+
+    private static string? _mainAppTitleId;
+
+    public static void ConfigureApplicationInfo(string? titleId)
+    {
+        _mainAppTitleId = string.IsNullOrWhiteSpace(titleId) ? null : titleId.Trim();
+    }
+
+    [SysAbiExport(
+        Nid = "3RQ5aQfnstU",
+        ExportName = "sceSystemServiceGetNoticeScreenSkipFlag",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceGetNoticeScreenSkipFlag(CpuContext ctx)
+    {
+        var flagAddress = ctx[CpuRegister.Rdi];
+        if (flagAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        // No system notice screen to skip in the emulator; report "do not skip".
+        Span<byte> flagBytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(flagBytes, 0);
+        return ctx.Memory.TryWrite(flagAddress, flagBytes)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "4veE0XiIugA",
+        ExportName = "sceSystemServiceGetMainAppTitleId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceGetMainAppTitleId(CpuContext ctx)
+    {
+        var titleIdAddress = ctx[CpuRegister.Rdi];
+        if (titleIdAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        // Title IDs are a fixed 9-char format written into a 0x10-byte field;
+        // bound the length so a malformed param.json cannot drive an unbounded
+        // stack allocation or overrun the guest buffer.
+        var titleId = _mainAppTitleId ?? "PPSA00000";
+        var length = Math.Min(titleId.Length, TitleIdFieldSize - 1);
+        Span<byte> titleIdBytes = stackalloc byte[TitleIdFieldSize];
+        titleIdBytes.Clear();
+        System.Text.Encoding.ASCII.GetBytes(titleId.AsSpan(0, length), titleIdBytes);
+        return ctx.Memory.TryWrite(titleIdAddress, titleIdBytes[..(length + 1)])
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
     [SysAbiExport(
         Nid = "fZo48un7LK4",
@@ -38,6 +95,35 @@ public static class SystemServiceExports
         Span<byte> valueBytes = stackalloc byte[sizeof(int)];
         BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
         return ctx.Memory.TryWrite(valueAddress, valueBytes)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "SsC-m-S9JTA",
+        ExportName = "sceSystemServiceParamGetString",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceParamGetString(CpuContext ctx)
+    {
+        _ = unchecked((int)ctx[CpuRegister.Rdi]); // parameter id (nickname, etc.)
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var bufferSize = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (bufferAddress == 0 || bufferSize <= 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        // String params are typically the user nickname. Callers that gate UI
+        // or text setup on a successful read (and skip it on failure) stall on
+        // a black screen when this returns NOT_FOUND, so return a neutral
+        // non-empty default and success.
+        var value = System.Text.Encoding.UTF8.GetBytes("SharpEmu");
+        var writeLength = Math.Min(value.Length, bufferSize - 1);
+        Span<byte> output = stackalloc byte[writeLength + 1];
+        value.AsSpan(0, writeLength).CopyTo(output);
+        output[writeLength] = 0;
+        return ctx.Memory.TryWrite(bufferAddress, output)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -83,6 +169,28 @@ public static class SystemServiceExports
         BinaryPrimitives.WriteSingleLittleEndian(info, 1.0f);
 
         return ctx.Memory.TryWrite(infoAddress, info)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "mPpPxv5CZt4",
+        ExportName = "sceSystemServiceGetHdrToneMapLuminance",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceGetHdrToneMapLuminance(CpuContext ctx)
+    {
+        var luminanceAddress = ctx[CpuRegister.Rdi];
+        if (luminanceAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        Span<byte> luminance = stackalloc byte[HdrToneMapLuminanceSize];
+        BinaryPrimitives.WriteSingleLittleEndian(luminance, 1000.0f);
+        BinaryPrimitives.WriteSingleLittleEndian(luminance[sizeof(float)..], 1000.0f);
+        BinaryPrimitives.WriteSingleLittleEndian(luminance[(sizeof(float) * 2)..], 0.01f);
+        return ctx.Memory.TryWrite(luminanceAddress, luminance)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }

@@ -33,7 +33,9 @@ internal interface IGuestGpuBackend
         int globalBufferBase = 0,
         int totalGlobalBufferCount = -1,
         int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1);
+        int scalarRegisterBufferIndex = -1,
+        int requiredVertexOutputCount = 0,
+        ulong storageBufferOffsetAlignment = 1);
 
     bool TryCompilePixelShader(
         Gen5ShaderState state,
@@ -44,7 +46,10 @@ internal interface IGuestGpuBackend
         int globalBufferBase = 0,
         int totalGlobalBufferCount = -1,
         int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1);
+        int scalarRegisterBufferIndex = -1,
+        uint pixelInputEnable = 0,
+        uint pixelInputAddress = 0,
+        ulong storageBufferOffsetAlignment = 1);
 
     bool TryCompileComputeShader(
         Gen5ShaderState state,
@@ -53,7 +58,14 @@ internal interface IGuestGpuBackend
         uint localSizeY,
         uint localSizeZ,
         out IGuestCompiledShader? shader,
-        out string error);
+        out string error,
+        int totalGlobalBufferCount = -1,
+        int initialScalarBufferIndex = -1,
+        uint waveLaneCount = 32,
+        ulong storageBufferOffsetAlignment = 1);
+
+    /// <summary>Returns the backend's no-color-output fragment shader.</summary>
+    IGuestCompiledShader GetDepthOnlyFragmentShader();
 
     void HideSplashScreen();
 
@@ -78,6 +90,21 @@ internal interface IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null);
 
+    void SubmitDepthOnlyTranslatedDraw(
+        IGuestCompiledShader pixelShader,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
+        uint attributeCount,
+        GuestDepthTarget depthTarget,
+        IGuestCompiledShader? vertexShader = null,
+        uint vertexCount = 3,
+        uint instanceCount = 1,
+        uint primitiveType = 4,
+        GuestIndexBuffer? indexBuffer = null,
+        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
+        GuestRenderState? renderState = null,
+        ulong shaderAddress = 0);
+
     void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -90,7 +117,9 @@ internal interface IGuestGpuBackend
         uint primitiveType = 4,
         GuestIndexBuffer? indexBuffer = null,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null);
+        GuestRenderState? renderState = null,
+        GuestDepthTarget? depthTarget = null,
+        ulong shaderAddress = 0);
 
     void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -98,18 +127,38 @@ internal interface IGuestGpuBackend
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint attributeCount,
         uint width,
-        uint height);
+        uint height,
+        ulong shaderAddress = 0);
 
-    void SubmitComputeDispatch(
+    long SubmitComputeDispatch(
         ulong shaderAddress,
         IGuestCompiledShader computeShader,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
         uint groupCountX,
         uint groupCountY,
-        uint groupCountZ);
+        uint groupCountZ,
+        uint baseGroupX,
+        uint baseGroupY,
+        uint baseGroupZ,
+        uint localSizeX,
+        uint localSizeY,
+        uint localSizeZ,
+        bool isIndirect,
+        bool writesGlobalMemory,
+        uint threadCountX = uint.MaxValue,
+        uint threadCountY = uint.MaxValue,
+        uint threadCountZ = uint.MaxValue);
 
     bool TrySubmitGuestImage(
+        ulong address,
+        uint width,
+        uint height,
+        uint pitchInPixel);
+
+    bool TrySubmitOrderedGuestImageFlip(
+        int videoOutHandle,
+        int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
@@ -126,10 +175,12 @@ internal interface IGuestGpuBackend
         uint sourceWidth,
         uint sourceHeight,
         uint sourceFormat,
+        uint sourceNumberType,
         ulong destinationAddress,
         uint destinationWidth,
         uint destinationHeight,
-        uint destinationFormat);
+        uint destinationFormat,
+        uint destinationNumberType);
 
     /// <summary>
     /// Whether the backend supports the guest render-target format, and how its pixel
