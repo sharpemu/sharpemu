@@ -191,8 +191,8 @@ public static class AvPlayerExports
             }
 
             player.UseVideoDecoderSoftware2 = useVideoDecoderSoftware2;
-            Console.Error.WriteLine(
-                $"[AVPLAYER][INFO] post_init handle=0x{handle:X16} " +
+            Trace(
+                $"post_init handle=0x{handle:X16} " +
                 $"video_decoder_type={videoDecoderType} software2={(player.UseVideoDecoderSoftware2 ? 1 : 0)}");
             return SetReturn(ctx, 0);
         }
@@ -890,8 +890,8 @@ public static class AvPlayerExports
                     player.Height,
                     player.UseVideoDecoderSoftware2,
                     extended);
-                Console.Error.WriteLine(
-                    $"[AVPLAYER][INFO] first_video_frame handle=0x{player.Handle:X16} " +
+                Trace(
+                    $"first_video_frame handle=0x{player.Handle:X16} " +
                     $"ex={(extended ? 1 : 0)} ts={timestamp} data=0x{player.LastGuestBuffer:X16} " +
                     $"source={player.Width}x{player.Height} software2={(player.UseVideoDecoderSoftware2 ? 1 : 0)} " +
                     $"pitch={layout.Pitch} " +
