@@ -14,10 +14,15 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static class GuestTlsTemplate
 {
-    // Must match CpuDispatcher/DirectExecutionBackend's mapped prefix. PS5
-    // modules can require more than one host page of Variant II static TLS;
-    // Dreaming Sarah's startup image, for example, reaches 0x1870 bytes.
-    public const ulong StartupStaticTlsReservation = 0x10000UL;
+    // CpuDispatcher/DirectExecutionBackend map at least this much space below
+    // each thread pointer. Larger Variant II layouts grow the reservation to
+    // the page-aligned size computed from all startup PT_TLS modules.
+    public const ulong MinimumStartupStaticTlsReservation = 0x10000UL;
+    // Thread TLS regions are spaced 16 MiB apart and reserve the top 64 KiB
+    // for the TCB/dynamic area. Keep the static prefix within the remainder
+    // so adjacent worker slots can never overlap.
+    public const ulong MaximumStartupStaticTlsReservation = 0x00FF_0000UL;
+    private const ulong GuestPageSize = 0x1000UL;
     private static readonly object _gate = new();
     private static readonly SortedDictionary<ulong, ModuleTemplate> _modules = new();
     private static readonly Dictionary<ulong, ThreadDtv> _threadDtvs = new();
@@ -102,6 +107,20 @@ public static class GuestTlsTemplate
         get { lock (_gate) { return _staticTlsSize; } }
     }
 
+    /// <summary>
+    /// Returns the page-aligned prefix that must be mapped below a new thread
+    /// pointer for the currently registered Variant II static TLS layout.
+    /// </summary>
+    public static ulong GetStartupStaticTlsReservation()
+    {
+        lock (_gate)
+        {
+            return AlignUp(
+                Math.Max(MinimumStartupStaticTlsReservation, _staticTlsSize),
+                GuestPageSize);
+        }
+    }
+
     /// <summary>Largest PT_TLS alignment required by the registered modules.</summary>
     public static ulong MaximumAlignment
     {
@@ -171,11 +190,11 @@ public static class GuestTlsTemplate
                 memorySize,
                 normalizedAlignment,
                 alignmentBias);
-            if (staticOffset > StartupStaticTlsReservation)
+            if (staticOffset > MaximumStartupStaticTlsReservation)
             {
-                throw new InvalidOperationException(
-                    $"Static TLS requires 0x{staticOffset:X} bytes, but startup maps only " +
-                    $"0x{StartupStaticTlsReservation:X} bytes below the thread pointer.");
+                throw new InvalidDataException(
+                    $"Cumulative PT_TLS size 0x{staticOffset:X} exceeds the supported " +
+                    $"0x{MaximumStartupStaticTlsReservation:X}-byte static reservation.");
             }
             _modules.Add(moduleId, new ModuleTemplate
             {

@@ -156,10 +156,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const ulong GuestThreadTlsSize = 0x0001_0000UL;
 
-	// Matches CpuDispatcher.TlsPrefixSize: static TLS blocks sit below the
-	// thread pointer and PS5 modules can reach beyond one host page.
-	private const ulong GuestThreadTlsPrefixSize = GuestTlsTemplate.StartupStaticTlsReservation;
-
 	private const ulong GuestThreadRegionStride = 0x0100_0000UL;
 
 	// Unity titles routinely create more than 64 workers once native plugins,
@@ -4504,11 +4500,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out ulong tlsBase,
 		out string? error)
 	{
+		var tlsPrefixSize = GuestTlsTemplate.GetStartupStaticTlsReservation();
 		for (int i = 0; i < GuestThreadRegionSlots; i++)
 		{
 			var candidateBase = GuestThreadTlsBaseAddress - ((ulong)i * GuestThreadRegionStride);
-			var mappedBase = candidateBase - GuestThreadTlsPrefixSize;
-			var mappedSize = GuestThreadTlsSize + GuestThreadTlsPrefixSize;
+			var mappedBase = candidateBase - tlsPrefixSize;
+			var mappedSize = GuestThreadTlsSize + tlsPrefixSize;
 			if (!IsGuestThreadRegionFree(virtualMemory, mappedBase, mappedSize))
 			{
 				continue;

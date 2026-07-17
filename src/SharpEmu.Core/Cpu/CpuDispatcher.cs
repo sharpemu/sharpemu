@@ -26,10 +26,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private const ulong StackSize = 0x0020_0000UL;
     private static readonly ulong TlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
     private const ulong TlsSize = 0x0001_0000UL;
-    // The static TLS blocks live at negative offsets from the TCB (FreeBSD
-    // amd64 variant II). Keep every host in sync with GuestTlsTemplate's
-    // startup reservation; PS5 modules routinely reach beyond one host page.
-    private const ulong TlsPrefixSize = GuestTlsTemplate.StartupStaticTlsReservation;
     private static readonly ulong BootstrapStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_F000_0000UL : 0x6FFD_F000_0000UL;
     private static readonly ulong BootstrapPayloadBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_E000_0000UL : 0x6FFD_E000_0000UL;
     private static readonly ulong DynlibFallbackStubBaseAddress = OperatingSystem.IsWindows() ? 0x7FFD_D000_0000UL : 0x6FFD_D000_0000UL;
@@ -347,15 +343,16 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private ulong TryMapTlsRegion()
     {
         const ulong tlsStride = 0x0100_0000UL;
+        var tlsPrefixSize = GuestTlsTemplate.GetStartupStaticTlsReservation();
         for (var i = 0; i < 32; i++)
         {
             var candidateBase = TlsBaseAddress - ((ulong)i * tlsStride);
-            var mappedBase = candidateBase - TlsPrefixSize;
+            var mappedBase = candidateBase - tlsPrefixSize;
             try
             {
                 _virtualMemory.Map(
                     mappedBase,
-                    TlsSize + TlsPrefixSize,
+                    TlsSize + tlsPrefixSize,
                     fileOffset: 0,
                     fileData: ReadOnlySpan<byte>.Empty,
                     ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
