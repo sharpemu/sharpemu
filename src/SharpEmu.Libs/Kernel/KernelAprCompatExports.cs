@@ -143,9 +143,6 @@ public static class KernelAprCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Success stub: the argument layout is unknown and callers tolerate the
-    // empty answer (Quake streams fine), so no output payload is written until
-    // the real signature is reversed.
     [SysAbiExport(
         Nid = "WvEu7yl3Ivg",
         ExportName = "sceKernelAprGetFileSize",
@@ -153,7 +150,43 @@ public static class KernelAprCompatExports
         LibraryName = "libKernel")]
     public static int KernelAprGetFileSize(CpuContext ctx)
     {
-        return ctx.SetReturn(0);
+        var fileId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var sizeAddress = ctx[CpuRegister.Rsi];
+        if (sizeAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        ulong fileSize;
+        try
+        {
+            var info = new FileInfo(hostPath);
+            if (!info.Exists)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            fileSize = unchecked((ulong)info.Length);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return ex is UnauthorizedAccessException
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (!ctx.TryWriteUInt64(sizeAddress, fileSize))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     private static bool TryWriteAprResult(CpuContext ctx, ulong resultAddress)

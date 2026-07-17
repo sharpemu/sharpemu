@@ -1673,6 +1673,90 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Prefix-aware sibling used by games that resolve file metadata through
+    // AMPR before handing the resulting IDs to the streaming command buffer.
+    // Signature: (const char* prefix, const char* const* paths, uint32_t count,
+    //             uint32_t* ids, size_t* sizes, uint32_t* errorIndex).
+    [SysAbiExport(
+        Nid = "w5fcCG+t31g",
+        ExportName = "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(CpuContext ctx)
+    {
+        var prefixAddress = ctx[CpuRegister.Rdi];
+        var pathListAddress = ctx[CpuRegister.Rsi];
+        var count = ctx[CpuRegister.Rdx];
+        var idsAddress = ctx[CpuRegister.Rcx];
+        var sizesAddress = ctx[CpuRegister.R8];
+        var errorIndexAddress = ctx[CpuRegister.R9];
+        if (pathListAddress == 0 || idsAddress == 0 || sizesAddress == 0 || count > 1024)
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var prefix = string.Empty;
+        if (prefixAddress != 0 &&
+            !TryReadNullTerminatedUtf8(ctx, prefixAddress, MaxGuestStringLength, out prefix))
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        for (ulong i = 0; i < count; i++)
+        {
+            if (!TryReadAprUtf8PathPointer(
+                    ctx,
+                    pathListAddress + (i * sizeof(ulong)),
+                    out var relativeGuestPath))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            var guestPath = JoinAprPathPrefix(prefix, relativeGuestPath);
+            var hostPath = ResolveGuestPath(guestPath);
+            if (!TryGetAprFileSize(hostPath, out var fileSize))
+            {
+                LogIoTrace(
+                    "apr_resolve_prefix",
+                    guestPath,
+                    $"host='{hostPath}' index={i} count={count} result=not_found");
+                if (errorIndexAddress != 0 &&
+                    !TryWriteUInt32Compat(ctx, errorIndexAddress, unchecked((uint)i)))
+                {
+                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
+            LogIoTrace(
+                "apr_resolve_prefix",
+                guestPath,
+                $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+
+            if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (!TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), fileSize))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     // The IDs-only sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
     // Games that stream via AMPR APR call this to turn asset paths into file
     // IDs, then hand those IDs to sceAmprAprCommandBufferReadFile. Without it
@@ -5207,6 +5291,30 @@ public static partial class KernelMemoryCompatExports
         }
 
         return TryReadAprPathText(ctx, candidatePath, out guestPath);
+    }
+
+    private static string JoinAprPathPrefix(string prefix, string path)
+    {
+        if (string.IsNullOrEmpty(prefix))
+        {
+            return path;
+        }
+
+        return prefix.EndsWith("/", StringComparison.Ordinal)
+            ? prefix + path
+            : prefix + "/" + path;
+    }
+
+    private static bool TryReadAprUtf8PathPointer(CpuContext ctx, ulong pointerAddress, out string guestPath)
+    {
+        guestPath = string.Empty;
+        if (!ctx.TryReadUInt64(pointerAddress, out var candidatePath) || candidatePath == 0)
+        {
+            return false;
+        }
+
+        return TryReadNullTerminatedUtf8(ctx, candidatePath, MaxGuestStringLength, out guestPath) &&
+               !string.IsNullOrWhiteSpace(guestPath);
     }
 
     private static bool TryReadAprPathText(CpuContext ctx, ulong address, out string guestPath)
