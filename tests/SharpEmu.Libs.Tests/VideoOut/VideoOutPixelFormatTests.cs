@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
 
@@ -8,8 +9,8 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 /// <summary>
 /// Covers the VideoOut pixel-format mapping functions that bridge the PS5 VideoOut
-/// format space to the AGC guest texture format space. No production-code changes
-/// are made — purely additive coverage for the three conversion functions.
+/// format space to the AGC guest texture format. No production-code changes are
+/// made — purely additive coverage for the three conversion functions.
 /// </summary>
 public sealed class VideoOutPixelFormatTests
 {
@@ -91,8 +92,8 @@ public sealed class VideoOutPixelFormatTests
     [Fact]
     public void MapPixelFormat_Unknown_Returns56()
     {
-        // Unknown formats now fall back to 56 (8-bit RGBA) so games display
-        // something instead of silently failing the flip.
+        // All unhandled pixel formats fall back to 56 (8-bit RGBA) per the
+        // merged PR #294, including the zero format itself.
         Assert.Equal(56u, InvokeMapPixelFormat(0x00000000UL));
         Assert.Equal(56u, InvokeMapPixelFormat(0xDEADBEEFUL));
     }
@@ -102,10 +103,11 @@ public sealed class VideoOutPixelFormatTests
     [Fact]
     public void StaticConstructor_RunsSelfChecks_WithoutThrowing()
     {
-        // RunPixelFormatSelfChecks is called from the static constructor.
-        // If the checks fail, Debug.Assert will fail in a debug build.
-        // This test ensures the constructor executed without throwing.
-        Assert.True(true);
+        // RunPixelFormatSelfChecks is called from the static constructor. We
+        // explicitly trigger the type initializer to ensure it executes and
+        // does not throw. If RuntimeHelpers.RunClassConstructor fails, a
+        // TypeInitializationException propagates and fails the test.
+        RuntimeHelpers.RunClassConstructor(typeof(VideoOutExports).TypeHandle);
     }
 
     // ---- Reflection-based access to internal/private methods ----
