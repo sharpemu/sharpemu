@@ -14,6 +14,21 @@ namespace SharpEmu.Libs.Tests.Pthread;
 // See issue #113.
 public sealed class PthreadCondSemanticsTests
 {
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(TimeSpan.TicksPerMillisecond, 1)]
+    [InlineData(TimeSpan.TicksPerMillisecond + 1, 2)]
+    public void Timedwait_HostFallbackRoundsPositiveWaitUp(
+        long remainingTicks,
+        int expectedMilliseconds)
+    {
+        Assert.Equal(
+            expectedMilliseconds,
+            KernelPthreadCompatExports.GetCondMonitorWaitMilliseconds(
+                TimeSpan.FromTicks(remainingTicks)));
+    }
+
     [Fact]
     public void PthreadCondState_DoesNotHavePendingSignals()
     {

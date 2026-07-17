@@ -1307,7 +1307,9 @@ public static class KernelPthreadCompatExports
                 }
 
                 var remaining = GetRemainingTimeout(deadline);
-                if (remaining <= TimeSpan.Zero || !Monitor.Wait(state.SyncRoot, remaining))
+                var waitMilliseconds = GetCondMonitorWaitMilliseconds(remaining);
+                if (waitMilliseconds == 0 ||
+                    !Monitor.Wait(state.SyncRoot, waitMilliseconds))
                 {
                     CompleteCondWaiterLocked(state, waiter, timedOut: true);
                     break;
@@ -1633,6 +1635,18 @@ public static class KernelPthreadCompatExports
         }
 
         return TimeSpan.FromSeconds(remainingTicks / (double)Stopwatch.Frequency);
+    }
+
+    internal static int GetCondMonitorWaitMilliseconds(TimeSpan remaining)
+    {
+        if (remaining <= TimeSpan.Zero)
+        {
+            return 0;
+        }
+
+        return (int)Math.Min(
+            int.MaxValue,
+            Math.Max(1d, Math.Ceiling(remaining.TotalMilliseconds)));
     }
 
     private static int NormalizeMutexType(int type)
