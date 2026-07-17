@@ -15,6 +15,7 @@
   "Library.Context.OpenFolder": "Open game folder",
   "Library.Context.CopyPath": "Copy path",
   "Library.Context.CopyTitleId": "Copy title ID",
+  "Library.Context.GameSettings": "Game settings…",
   "Library.Context.Remove": "Remove from library",
 
   "Library.Empty.Title": "Your library is empty",
@@ -81,6 +82,13 @@
 
   "Common.On": "On",
   "Common.Off": "Off",
+  "Common.Save": "Save",
+  "Common.Cancel": "Cancel",
+
+  "PerGame.Title": "Per-game settings — {0} ({1})",
+  "PerGame.InheritNote": "Unchecked rows inherit the global defaults.",
+  "PerGame.EnvToggles.Label": "Environment toggles",
+  "PerGame.EnvToggles.Desc": "Override the global set of SHARPEMU_* switches for this game.",
 
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Search...",

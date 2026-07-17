@@ -126,6 +126,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
+                <MenuItem x:Name="CtxGameSettings" Header="Game settings…">
+                  <MenuItem.Icon>
+                    <TextBlock Text="⚙" FontSize="13" Foreground="{StaticResource MutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <Separator />
                 <MenuItem x:Name="CtxRemove" Header="Remove from library"
                           Foreground="{StaticResource DangerHoverBrush}">
                   <MenuItem.Icon>
@@ -199,27 +206,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle" Text="EMULATION" />
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="CpuEngineLabel" Text="CPU engine" FontSize="13" />
-                          <TextBlock x:Name="CpuEngineDesc" Text="Execution engine used to run game code."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ComboBox Grid.Column="1" x:Name="CpuEngineBox" Width="160" SelectedIndex="0"
+                      <local:SettingRow x:Name="CpuEngineRow" Label="CPU engine"
+                                        Description="Execution engine used to run game code.">
+                        <ComboBox x:Name="CpuEngineBox" Width="160" SelectedIndex="0"
                                   VerticalAlignment="Center" CornerRadius="8">
                           <ComboBoxItem x:Name="CpuEngineNativeItem" Content="Native" />
                         </ComboBox>
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="StrictLabel" Text="Strict dynlib resolution" FontSize="13" />
-                          <TextBlock x:Name="StrictDesc" Text="Fail the launch when an imported symbol cannot be resolved."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="StrictToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="StrictRow" Label="Strict dynlib resolution"
+                                        Description="Fail the launch when an imported symbol cannot be resolved.">
+                        <ToggleSwitch x:Name="StrictToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
                     </StackPanel>
                   </Border>
 
@@ -227,13 +226,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle" Text="LOGGING" />
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="LogLevelLabel" Text="Log level" FontSize="13" />
-                          <TextBlock x:Name="LogLevelDesc" Text="Verbosity of the emulator console output."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ComboBox Grid.Column="1" x:Name="LogLevelBox" Width="160" SelectedIndex="2"
+                      <local:SettingRow x:Name="LogLevelRow" Label="Log level"
+                                        Description="Verbosity of the emulator console output.">
+                        <ComboBox x:Name="LogLevelBox" Width="160" SelectedIndex="2"
                                   VerticalAlignment="Center" CornerRadius="8">
                           <ComboBoxItem x:Name="LogLevelTraceItem" Content="Trace" />
                           <ComboBoxItem x:Name="LogLevelDebugItem" Content="Debug" />
@@ -242,49 +237,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ComboBoxItem x:Name="LogLevelErrorItem" Content="Error" />
                           <ComboBoxItem x:Name="LogLevelCriticalItem" Content="Critical" />
                         </ComboBox>
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="TraceImportsLabel" Text="Import trace limit" FontSize="13" />
-                          <TextBlock x:Name="TraceImportsDesc" Text="Trace the first N imports per module (0 = off)."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <NumericUpDown Grid.Column="1" x:Name="TraceImportsBox" Width="160" Minimum="0"
+                      <local:SettingRow x:Name="TraceImportsRow" Label="Import trace limit"
+                                        Description="Trace the first N imports per module (0 = off).">
+                        <NumericUpDown x:Name="TraceImportsBox" Width="160" Minimum="0"
                                        Maximum="4096" Increment="16" Value="0" FormatString="0"
                                        VerticalAlignment="Center" CornerRadius="8" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="LogToFileLabel" Text="Log to file" FontSize="13" />
-                          <TextBlock x:Name="LogToFileDesc" Text="Mirror emulator output to a log file."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="LogToFileToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="LogToFileRow" Label="Log to file"
+                                        Description="Mirror emulator output to a log file.">
+                        <ToggleSwitch x:Name="LogToFileToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="LogFilePathLabel" Text="Log file path" FontSize="13" />
-                          <TextBlock x:Name="LogFilePathText" Text="No custom path"
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <Button Grid.Column="1" x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…"
+                      <local:SettingRow x:Name="LogFilePathRow" Label="Log file path"
+                                        Description="No custom path">
+                        <Button x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…"
                                 VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="OverrideLogFileLabel" Text="Override log file" FontSize="13" />
-                          <TextBlock x:Name="OverrideLogFileDesc"
-                                     Text="Use the exact file path instead of appending title ID and timestamp."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="OverrideLogFileRow" Label="Override log file"
+                                        Description="Use the exact file path instead of appending title ID and timestamp.">
+                        <ToggleSwitch x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
                     </StackPanel>
                   </Border>
 
@@ -292,47 +270,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle" Text="LAUNCHER" />
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="LanguageLabel" Text="Emulator language" FontSize="13" />
-                          <TextBlock x:Name="LanguageDesc"
-                                     Text="Language used throughout the launcher. Applies immediately."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ComboBox Grid.Column="1" x:Name="LanguageBox" Width="160"
+                      <local:SettingRow x:Name="LanguageRow" Label="Emulator language"
+                                        Description="Language used throughout the launcher. Applies immediately.">
+                        <ComboBox x:Name="LanguageBox" Width="160"
                                   VerticalAlignment="Center" CornerRadius="8"
                                   DisplayMemberBinding="{Binding NativeName}" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="TitleMusicLabel" Text="Title music" FontSize="13" />
-                          <TextBlock x:Name="TitleMusicDesc" Text="Loop the selected game's preview music in the library."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="TitleMusicToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="TitleMusicRow" Label="Title music"
+                                        Description="Loop the selected game's preview music in the library.">
+                        <ToggleSwitch x:Name="TitleMusicToggle" OnContent="On" OffContent="Off"
                                       IsChecked="True" VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="DiscordLabel" Text="Discord presence" FontSize="13" />
-                          <TextBlock x:Name="DiscordDesc" Text="Show the running game on your Discord profile."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="DiscordToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="DiscordRow" Label="Discord presence"
+                                        Description="Show the running game on your Discord profile.">
+                        <ToggleSwitch x:Name="DiscordToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock x:Name="AutoUpdateLabel" Text="Check for updates on startup" FontSize="13" />
-                          <TextBlock x:Name="AutoUpdateDesc" Text="Checks GitHub without delaying startup."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="AutoUpdateRow" Label="Check for updates on startup"
+                                        Description="Checks GitHub without delaying startup.">
+                        <ToggleSwitch x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off"
                                       IsChecked="True" VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
                     </StackPanel>
                   </Border>
                   <Border Classes="card">
@@ -450,93 +411,53 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="Switches passed to the emulator as environment variables at launch."
                                  FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_BTHID_UNAVAILABLE" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvBthidDesc"
-                                     Text="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvBthidToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvBthidRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
+                                        Description="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails.">
+                        <ToggleSwitch x:Name="EnvBthidToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvLoopGuardDesc"
-                                     Text="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvLoopGuardRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                                        Description="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading.">
+                        <ToggleSwitch x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_WRITABLE_APP0" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvWritableApp0Desc"
-                                     Text="Allow titles to create and write files inside their install folder.&#10;Needed by unpackaged dumps that write their save or config data under /app0."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvWritableApp0Row" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
+                                        Description="Allow titles to create and write files inside their install folder.&#10;Needed by unpackaged dumps that write their save or config data under /app0.">
+                        <ToggleSwitch x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_VK_VALIDATION" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvVkValidationDesc"
-                                     Text="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvVkValidationRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
+                                        Description="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed.">
+                        <ToggleSwitch x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_DUMP_SPIRV" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvDumpSpirvDesc"
-                                     Text="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvDumpSpirvRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
+                                        Description="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs.">
+                        <ToggleSwitch x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_LOG_DIRECT_MEMORY" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvLogDirectMemoryDesc"
-                                     Text="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
+                                        Description="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot.">
+                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_LOG_IO" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvLogIoDesc"
-                                     Text="Log file open, read, and path-resolve activity to the console.&#10;Use when a game cannot find its data files during boot."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvLogIoRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
+                                        Description="Log file open, read, and path-resolve activity to the console.&#10;Use when a game cannot find its data files during boot.">
+                        <ToggleSwitch x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
 
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-                          <TextBlock Text="SHARPEMU_LOG_NP" FontSize="13" FontFamily="Consolas,monospace" />
-                          <TextBlock x:Name="EnvLogNpDesc"
-                                     Text="Log NP (PlayStation Network) library calls to the console."
-                                     FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ToggleSwitch Grid.Column="1" x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvLogNpRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
+                                        Description="Log NP (PlayStation Network) library calls to the console.">
+                        <ToggleSwitch x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
-                      </Grid>
+                      </local:SettingRow>
                     </StackPanel>
                   </Border>
 
