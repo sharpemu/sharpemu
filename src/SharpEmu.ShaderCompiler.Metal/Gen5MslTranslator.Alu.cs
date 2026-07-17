@@ -57,11 +57,14 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
-                    // Each host thread models one wave lane whose ballot is its
-                    // own bit, so the "first active lane" is always this lane —
-                    // a real simd_shuffle would read another fragment's value.
+                    // Under the single-lane graphics model the "first active
+                    // lane" is always this lane; a real simd_shuffle would read
+                    // another fragment's value. Compute lanes are real, and its
+                    // per-lane ballot makes lane 0 the first set bit.
                     var value = RawSource(instruction, 0);
-                    StoreScalar(instruction.Destinations[0].Value, Temp("uint", value));
+                    StoreScalar(
+                        instruction.Destinations[0].Value,
+                        Temp("uint", ShuffleLane(value, "0u")));
                     return true;
                 }
                 case "VReadlaneB32":
@@ -77,7 +80,7 @@ public static partial class Gen5MslTranslator
                     var lane = Temp("uint", $"({RawSource(instruction, 1)}) & 31u");
                     StoreScalar(
                         instruction.Destinations[0].Value,
-                        Temp("uint", $"simd_shuffle({value}, (ushort){lane})"));
+                        Temp("uint", ShuffleLane(value, lane)));
                     return true;
                 }
                 case "VWritelaneB32":
@@ -444,20 +447,31 @@ public static partial class Gen5MslTranslator
             return (Temp("uint", target), "true");
         }
 
+        // Under the single-lane graphics model every shuffle-select resolves
+        // to the lane's own value (the register conceptually holds this
+        // thread's value in every lane); compute lanes are real simdgroup
+        // threads and shuffle for real. Mirrors the SPIR-V translator's
+        // no-subgroup fallback for graphics stages.
+        private bool IsSingleLaneStage => _stage != Gen5MslStage.Compute;
+
+        private string ShuffleLane(string value, string targetLane) =>
+            IsSingleLaneStage ? value : $"simd_shuffle({value}, (ushort){targetLane})";
+
+        private string LaneActiveExpression(string targetLane) =>
+            IsSingleLaneStage ? "exec" : $"simd_shuffle(exec ? 1u : 0u, (ushort){targetLane}) != 0u";
+
         private string ApplyDppSource(Gen5DppControl control, string value)
         {
             var stored = Temp("uint", value);
             var (targetLane, inRange) = EmitDppSourceLane(control);
             var safeTarget = Temp("uint", $"(({inRange}) ? {targetLane} : sharpemu_lane) & 31u");
-            var shuffled = Temp("uint", $"simd_shuffle({stored}, (ushort){safeTarget})");
+            var shuffled = Temp("uint", ShuffleLane(stored, safeTarget));
             if (control.FetchInactive)
             {
                 return shuffled;
             }
 
-            var sourceActive = Temp(
-                "bool",
-                $"simd_shuffle(exec ? 1u : 0u, (ushort){safeTarget}) != 0u");
+            var sourceActive = Temp("bool", LaneActiveExpression(safeTarget));
             return Temp("uint", $"(({inRange}) && {sourceActive}) ? {shuffled} : 0u");
         }
 
@@ -468,15 +482,13 @@ public static partial class Gen5MslTranslator
                 "uint",
                 $"({control.LaneSelectors}u >> ((sharpemu_lane & 7u) * 3u)) & 7u");
             var targetLane = Temp("uint", $"((sharpemu_lane & 0xFFFFFFF8u) + {selector}) & 31u");
-            var shuffled = Temp("uint", $"simd_shuffle({stored}, (ushort){targetLane})");
+            var shuffled = Temp("uint", ShuffleLane(stored, targetLane));
             if (control.FetchInactive)
             {
                 return shuffled;
             }
 
-            var sourceActive = Temp(
-                "bool",
-                $"simd_shuffle(exec ? 1u : 0u, (ushort){targetLane}) != 0u");
+            var sourceActive = Temp("bool", LaneActiveExpression(targetLane));
             return Temp("uint", $"{sourceActive} ? {shuffled} : 0u");
         }
 
@@ -742,16 +754,14 @@ public static partial class Gen5MslTranslator
                 ? "((sharpemu_lane & 0xFFFFFFF0u) ^ 16u)"
                 : "(sharpemu_lane & 0xFFFFFFF0u)";
             var targetLane = Temp("uint", $"({rowBase} + {selector}) & 31u");
-            var shuffled = Temp("uint", $"simd_shuffle({value}, (ushort){targetLane})");
+            var shuffled = Temp("uint", ShuffleLane(value, targetLane));
             var fetchInactive = (control.OperandSelect & 1) != 0;
             if (fetchInactive)
             {
                 return shuffled;
             }
 
-            var sourceActive = Temp(
-                "bool",
-                $"simd_shuffle(exec ? 1u : 0u, (ushort){targetLane}) != 0u");
+            var sourceActive = Temp("bool", LaneActiveExpression(targetLane));
             return Temp("uint", $"{sourceActive} ? {shuffled} : 0u");
         }
 

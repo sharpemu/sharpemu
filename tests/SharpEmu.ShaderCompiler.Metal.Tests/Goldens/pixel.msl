@@ -63,7 +63,7 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
 
 static inline uint sharpemu_ballot(bool value)
 {
-    return value ? 0xFFFFFFFFu : 0u;
+    return value ? 1u : 0u;
 }
 
 static constant float sharpemu_off_i4_table[16] =
@@ -85,9 +85,9 @@ struct Gen5PsOut
 
 fragment Gen5PsOut gen5_ps(
     Gen5PsIn sharpemu_in [[stage_in]],
-    constant SharpEmuUniforms& sharpemu_uniforms [[buffer(0)]],
-    uint sharpemu_lane [[thread_index_in_simdgroup]])
+    constant SharpEmuUniforms& sharpemu_uniforms [[buffer(0)]])
 {
+    const uint sharpemu_lane = 0u;
     uint s[128] = {};
     uint v[256] = {};
     bool exec = true;

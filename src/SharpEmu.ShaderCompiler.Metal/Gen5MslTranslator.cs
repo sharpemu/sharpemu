@@ -17,9 +17,13 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// lane (wave32 — natively the Apple simdgroup width), the register file is typeless
 /// 32-bit uints (float ALU bitcasts through as_type&lt;float&gt;), and control flow is a
 /// PC-dispatcher loop — a bounded while over a switch of GCN basic blocks — rather
-/// than reconstructed structured control flow. EXEC/VCC live as per-lane bools whose
-/// guest-visible mask registers (s106/s107, s126/s127) are materialized with
-/// simd_ballot on read and re-derived from the lane bit on write.
+/// than reconstructed structured control flow. EXEC/VCC live in their architectural
+/// SGPRs (s106/s107, s126/s127) as raw data, with per-lane bools as synced views.
+/// Graphics stages model a single logical wave lane (lane 0, ballots degrade to bit
+/// 0, shuffle-family selects resolve to the lane's own value) — the SPIR-V
+/// translator's no-subgroup fallback — because Metal leaves simdgroup ops undefined
+/// inside the divergent dispatcher loop. Compute threads map one-to-one onto real
+/// simdgroup lanes and shuffle for real.
 ///
 /// Buffer argument contract (documented for the Metal backend):
 ///   [[buffer(globalBufferBase + i)]]  global memory binding i, in
@@ -412,6 +416,25 @@ public static partial class Gen5MslTranslator
             }
         }
 
+        /// <summary>Rewrites the trailing comma of the last emitted parameter
+        /// line into the closing parenthesis. Every stage emits each entry
+        /// parameter with a trailing comma so optional parameters never need
+        /// to know whether they are last.</summary>
+        private static void CloseParameterList(StringBuilder source)
+        {
+            var index = source.Length - 1;
+            while (index >= 0 && (source[index] == '\n' || source[index] == '\r'))
+            {
+                index--;
+            }
+
+            if (index >= 0 && source[index] == ',')
+            {
+                source.Remove(index, source.Length - index);
+                source.AppendLine(")");
+            }
+        }
+
         private string EntryPointName => _stage switch
         {
             Gen5MslStage.Vertex => "gen5_vs",
@@ -557,24 +580,26 @@ public static partial class Gen5MslTranslator
 
             if (_stage == Gen5MslStage.Vertex)
             {
-                // MSL vertex functions have no simdgroup attributes: the vertex
-                // stage models a single logical wave lane like the SPIR-V
-                // translator's graphics path (ballot degrades to 0/1 in the
-                // prelude; lane-shuffle ops would fail Metal compilation
-                // loudly, which no real guest vertex shader hits).
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
-                source.AppendLine("    uint sharpemu_instance_id [[instance_id]])");
-                source.AppendLine("{");
-                source.AppendLine("    const uint sharpemu_lane = 0u;");
+                source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
             }
-            else
+            else if (_stage == Gen5MslStage.Compute)
             {
-                // Wave ops use the invocation's real simdgroup; Apple fragment
-                // simdgroups make this the same model as compute (the SPIR-V
-                // translator instead emulates a single logical lane for
-                // graphics stages, which is equivalent for EXEC round trips).
-                source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]])");
-                source.AppendLine("{");
+                // Compute threads map one-to-one onto guest lanes, so wave ops
+                // address the invocation's real simdgroup lane.
+                source.AppendLine("    uint sharpemu_lane [[thread_index_in_simdgroup]],");
+            }
+
+            CloseParameterList(source);
+            source.AppendLine("{");
+            if (_stage != Gen5MslStage.Compute)
+            {
+                // Graphics stages model a single logical wave lane — the SPIR-V
+                // translator's no-subgroup fallback — because Metal leaves
+                // simdgroup ops undefined inside the divergent dispatcher loop.
+                // Ballots degrade to bit 0 in the prelude and shuffle-family
+                // selects resolve to the lane's own value.
+                source.AppendLine("    const uint sharpemu_lane = 0u;");
             }
             if (_usesLds)
             {
@@ -651,22 +676,21 @@ public static partial class Gen5MslTranslator
         // translator's robust-access behavior. The static text lives in
         // Templates/prelude.msl; only the wave-ballot expression varies.
         //
-        // Each host thread models one guest wave lane, so the mask a lane needs
-        // back from a ballot is just its own bit repeated: "value ? all-ones :
-        // 0" makes "ballot(v) >> lane & 1" evaluate to v for every lane index,
-        // and "ballot(v) != 0" evaluate to v. A real simd_ballot cannot be used
-        // here: the translated program runs inside the divergent
+        // Graphics stages model one logical wave lane (lane 0), so a ballot is
+        // just that lane's bit: "value ? 1 : 0". A real simd_ballot cannot be
+        // used there: the translated program runs inside the divergent
         // while(active){switch(pc)} dispatcher, where Metal leaves cross-lane
         // ops undefined, so lanes at different pc corrupt each other's EXEC/VCC
-        // reconstruction and killed whole quads (all fragments discarded). The
-        // vertex stage's lane is always 0, so its own bit is bit 0 ("value ? 1 :
-        // 0"); pixel lanes span the simdgroup and need the all-ones form.
+        // reconstruction and kill whole quads (all fragments discarded). This
+        // is the SPIR-V translator's no-subgroup fallback model. Compute keeps
+        // the per-lane all-ones form so its real simdgroup lane index still
+        // finds its own bit ("ballot(v) >> lane & 1" == v for every lane).
         private void EmitPrelude(StringBuilder source) =>
             source.Append(MslTemplates.Render(
                 "prelude",
-                ("ballot_return", _stage == Gen5MslStage.Vertex
-                    ? "value ? 1u : 0u"
-                    : "value ? 0xFFFFFFFFu : 0u")));
+                ("ballot_return", _stage == Gen5MslStage.Compute
+                    ? "value ? 0xFFFFFFFFu : 0u"
+                    : "value ? 1u : 0u")));
 
         // The GFX10 unified-format table is baked from the same authoritative
         // decoder descriptor evaluation uses (dataFormat | numberFormat << 8);
