@@ -20,6 +20,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
+using System.Net.Http.Headers;
 
 namespace SharpEmu.GUI;
 
@@ -77,6 +78,10 @@ public partial class MainWindow : Window
     private long _navRightNextAt;
     private long _navUpNextAt;
     private long _navDownNextAt;
+
+    //Github http client for latest commit
+    private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
+    private string? _latestCommitSha;
 
     public MainWindow()
     {
@@ -195,6 +200,21 @@ public partial class MainWindow : Window
                 UseShellExecute = true
             });
         };
+
+        LatestCommitHashText.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_latestCommitSha))
+            {
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName =
+                    $"https://github.com/sharpemu/sharpemu/commit/{_latestCommitSha}",
+                UseShellExecute = true
+            });
+        };
     }
 
     /// <summary>
@@ -233,6 +253,91 @@ public partial class MainWindow : Window
         else
         {
             button.Classes.Remove("active");
+        }
+    }
+
+    // ---- Github http client config ----
+    // This is for getting lash commit id
+    private static HttpClient CreateGithubHttpClient()
+    {
+        var client = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("SharpEmu/1.0");
+        client.DefaultRequestHeaders.Accept.Add(
+            new MediaTypeWithQualityHeaderValue("application/vnd.github.sha"));
+
+        client.DefaultRequestHeaders.Add(
+            "X-GitHub-Api-Version",
+            "2026-03-10");
+
+        return client;
+    }
+    private async Task LoadLatestCommitAsync()
+    {
+        const string apiUrl =
+            "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
+
+        _latestCommitSha = null;
+        LatestCommitHashText.Content = "Loading…";
+        LatestCommitHashText.IsEnabled = false;
+
+        try
+        {
+            using var response = await GithubHttpClient.GetAsync(apiUrl);
+            var responseBody =
+                (await response.Content.ReadAsStringAsync()).Trim();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                LatestCommitHashText.Content =
+                    $"HTTP {(int)response.StatusCode}";
+
+                ToolTip.SetTip(
+                    LatestCommitHashText,
+                    string.IsNullOrWhiteSpace(responseBody)
+                        ? response.ReasonPhrase
+                        : responseBody);
+
+                return;
+            }
+
+            if (responseBody.Length < 7)
+            {
+                LatestCommitHashText.Content = "Invalid response";
+                ToolTip.SetTip(LatestCommitHashText, responseBody);
+                return;
+            }
+
+            // Keep the complete SHA for the URL.
+            _latestCommitSha = responseBody;
+
+            // Display only the short SHA.
+            LatestCommitHashText.Content =
+                responseBody[..Math.Min(7, responseBody.Length)];
+
+            LatestCommitHashText.IsEnabled = true;
+
+            ToolTip.SetTip(
+                LatestCommitHashText,
+                $"Open commit {_latestCommitSha}");
+        }
+        catch (TaskCanceledException ex)
+        {
+            LatestCommitHashText.Content = "Timeout";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+        }
+        catch (HttpRequestException ex)
+        {
+            LatestCommitHashText.Content = "Connection error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            LatestCommitHashText.Content = "Error";
+            ToolTip.SetTip(LatestCommitHashText, ex.Message);
         }
     }
 
@@ -381,6 +486,8 @@ public partial class MainWindow : Window
         ApplySettingsToControls();
         LocateEmulator();
         UpdateDiscordPresence();
+        _ = LoadLatestCommitAsync();
+
         if (_settings.CheckForUpdatesOnStartup)
         {
             _ = CheckForUpdatesAsync();
@@ -516,6 +623,8 @@ public partial class MainWindow : Window
         GithubButton.Content = loc.Get("About.GithubButton");
         DiscordButton.Content = loc.Get("About.DiscordButton");
         UpdateLabel.Text = loc.Get("Updater.Label");
+        LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
+        LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
         RefreshUpdateText();
 
         UpdateEmptyStateTexts();

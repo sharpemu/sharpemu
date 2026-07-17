@@ -2315,6 +2315,12 @@ internal static unsafe class VulkanVideoPresenter
         return keys;
     }
 
+    internal static bool ShouldAttachGuestDepth(
+        GuestDepthTarget? target,
+        GuestDepthState state) =>
+        target is not null &&
+        (state.TestEnable || state.WriteEnable || state.ClearEnable);
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -2871,6 +2877,11 @@ internal static unsafe class VulkanVideoPresenter
 
         private void LoadDebugUtilsCommands()
         {
+            if (!_vulkanDebugUtilsEnabled)
+            {
+                return;
+            }
+
             var setObjectName = _vk.GetDeviceProcAddr(_device, "vkSetDebugUtilsObjectNameEXT");
             var beginLabel = _vk.GetDeviceProcAddr(_device, "vkCmdBeginDebugUtilsLabelEXT");
             var endLabel = _vk.GetDeviceProcAddr(_device, "vkCmdEndDebugUtilsLabelEXT");
@@ -2973,10 +2984,48 @@ internal static unsafe class VulkanVideoPresenter
             $"SharpEmu texture 0x{texture.Address:X16} {texture.Width}x{texture.Height} " +
             $"fmt{texture.Format}/{format}";
 
+        private static bool IsTitleDraw(IReadOnlyList<GuestVertexBuffer> vertexBuffers)
+        {
+            foreach (var buffer in vertexBuffers)
+            {
+                if (buffer.Location == 0 &&
+                    buffer.ComponentCount == 4 &&
+                    buffer.DataFormat == 10 &&
+                    buffer.NumberFormat == 0 &&
+                    buffer.Stride == 16 &&
+                    buffer.OffsetBytes == 12 &&
+                    buffer.Length == 67568)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool AnyTargetAddressMatches(
+            IReadOnlyList<GuestImageResource>? targets,
+            string environmentVariable)
+        {
+            if (targets is null)
+            {
+                return false;
+            }
+
+            foreach (var target in targets)
+            {
+                if (AddressListContains(environmentVariable, target.Address))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private void CreateInstance()
         {
             var applicationName = (byte*)SilkMarshal.StringToPtr("SharpEmu");
-            var enableValidation = Environment.GetEnvironmentVariable("SHARPEMU_VK_VALIDATION") == "1";
             byte* validationLayerName = null;
 
             try
@@ -3002,7 +3051,8 @@ internal static unsafe class VulkanVideoPresenter
                     enabledExtensions[index] = extensions[index];
                 }
 
-                if (IsInstanceExtensionAvailable(DebugUtilsExtensionName))
+                if (_vulkanDebugUtilsEnabled &&
+                    IsInstanceExtensionAvailable(DebugUtilsExtensionName))
                 {
                     debugUtilsExtension = (byte*)SilkMarshal.StringToPtr(DebugUtilsExtensionName);
                     enabledExtensions[enabledExtensionCount++] = debugUtilsExtension;
@@ -3017,11 +3067,12 @@ internal static unsafe class VulkanVideoPresenter
                     instanceCreateFlags |= InstanceCreateFlags.EnumeratePortabilityBitKhr;
                 }
 
-                if (enableValidation && IsInstanceLayerAvailable("VK_LAYER_KHRONOS_validation"))
+                if (_vulkanValidationEnabled &&
+                    IsInstanceLayerAvailable("VK_LAYER_KHRONOS_validation"))
                 {
                     validationLayerName = (byte*)SilkMarshal.StringToPtr("VK_LAYER_KHRONOS_validation");
                 }
-                else if (enableValidation)
+                else if (_vulkanValidationEnabled)
                 {
                     Console.Error.WriteLine("[LOADER][WARN] SHARPEMU_VK_VALIDATION=1 but VK_LAYER_KHRONOS_validation not found (Vulkan SDK installed?).");
                 }
@@ -4501,11 +4552,14 @@ internal static unsafe class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
             var waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) *
                 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            TraceVulkanShader(
-                $"vk.queue_visibility queue={_activeGuestQueue.Name} " +
-                $"submission={_activeGuestQueue.SubmissionId} " +
-                $"target_timeline={targetTimeline} completed_timeline={_completedTimeline} " +
-                $"waited_ms={waitedMs:F3}");
+            if (_traceVulkanShaderEnabled)
+            {
+                TraceVulkanShader(
+                    $"vk.queue_visibility queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} " +
+                    $"target_timeline={targetTimeline} completed_timeline={_completedTimeline} " +
+                    $"waited_ms={waitedMs:F3}");
+            }
         }
 
         private void ExecuteOrderedGuestAction(VulkanOrderedGuestAction work)
@@ -4513,10 +4567,13 @@ internal static unsafe class VulkanVideoPresenter
             WaitForActiveGuestQueueSubmissionsForCpuVisibility();
             WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
             work.Action();
-            TraceVulkanShader(
-                $"vk.ordered_action queue={_activeGuestQueue.Name} " +
-                $"submission={_activeGuestQueue.SubmissionId} " +
-                $"work_sequence={_activeGuestWorkSequence} name='{work.DebugName}'");
+            if (_traceVulkanShaderEnabled)
+            {
+                TraceVulkanShader(
+                    $"vk.ordered_action queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} " +
+                    $"work_sequence={_activeGuestWorkSequence} name='{work.DebugName}'");
+            }
         }
 
         private void ExecuteOrderedGuestFlip(VulkanOrderedGuestFlip work)
@@ -4988,6 +5045,13 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<GuestImageResource>? renderTargets = null,
             ulong shaderAddress = 0)
         {
+            if (!_traceGuestImagesEnabled &&
+                !_traceGuestImageAddressFilterEnabled &&
+                GuestImageTraceInterval() is null)
+            {
+                return Array.Empty<GuestImageResource>();
+            }
+
             var candidates = new HashSet<GuestImageResource>();
             foreach (var renderTarget in renderTargets ?? [])
             {
@@ -5230,47 +5294,35 @@ internal static unsafe class VulkanVideoPresenter
             bool hasDepthAttachment = false,
             GuestDepthResource? feedbackDepth = null)
         {
-            var isTitleDraw = draw.VertexBuffers.Any(buffer =>
-                buffer.Location == 0 &&
-                buffer.ComponentCount == 4 &&
-                buffer.DataFormat == 10 &&
-                buffer.NumberFormat == 0 &&
-                buffer.Stride == 16 &&
-                buffer.OffsetBytes == 12 &&
-                buffer.Length == 67568);
-            var forceFullscreenPipeline = Environment.GetEnvironmentVariable(
-                "SHARPEMU_FORCE_FULLSCREEN_PIPELINE") == "1";
-            var forceFullscreenVertex = forceFullscreenPipeline ||
-                Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_FULLSCREEN_VERTEX") == "1" ||
-                isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_FULLSCREEN_VERTEX") == "1" ||
-                feedbackTargets?.Any(target => AddressListContains(
-                    "SHARPEMU_FORCE_FULLSCREEN_VERTEX_TARGETS",
-                    target.Address)) == true;
-            var forceRasterState = forceFullscreenPipeline ||
-                Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_DEFAULT_RASTER_STATE") == "1" ||
-                isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_DEFAULT_RASTER_STATE") == "1" ||
-                feedbackTargets?.Any(target => AddressListContains(
-                    "SHARPEMU_FORCE_DEFAULT_RASTER_STATE_TARGETS",
-                    target.Address)) == true;
+            var isTitleDraw = IsTitleDraw(draw.VertexBuffers);
+            var forceFullscreenVertex = _forceFullscreenPipeline ||
+                _forceFullscreenVertex ||
+                isTitleDraw && _forceTitleFullscreenVertex ||
+                AnyTargetAddressMatches(
+                    feedbackTargets,
+                    "SHARPEMU_FORCE_FULLSCREEN_VERTEX_TARGETS");
+            var forceRasterState = _forceFullscreenPipeline ||
+                _forceDefaultRasterState ||
+                isTitleDraw && _forceTitleDefaultRasterState ||
+                AnyTargetAddressMatches(
+                    feedbackTargets,
+                    "SHARPEMU_FORCE_DEFAULT_RASTER_STATE_TARGETS");
             var forceTitleSolidFragment =
-                Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_SOLID_FRAGMENT") == "1" &&
+                _forceTitleSolidFragment &&
                 isTitleDraw;
-            var forceSolidFragment = forceTitleSolidFragment || forceFullscreenPipeline ||
-                Environment.GetEnvironmentVariable("SHARPEMU_FORCE_SOLID_FRAGMENT") == "1" ||
-                feedbackTargets?.Any(target => AddressListContains(
-                    "SHARPEMU_FORCE_SOLID_FRAGMENT_TARGETS",
-                    target.Address)) == true;
-            var forceAttributeFragment = uint.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT"),
-                out var attributeFragmentLocation) &&
-                feedbackTargets?.Any(target => AddressListContains(
-                    "SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT_TARGETS",
-                    target.Address)) == true;
+            var forceSolidFragment = forceTitleSolidFragment ||
+                _forceFullscreenPipeline ||
+                _forceSolidFragment ||
+                AnyTargetAddressMatches(
+                    feedbackTargets,
+                    "SHARPEMU_FORCE_SOLID_FRAGMENT_TARGETS");
+            var attributeFragmentLocation =
+                _forceAttributeFragmentLocation.GetValueOrDefault();
+            var forceAttributeFragment =
+                _forceAttributeFragmentLocation.HasValue &&
+                AnyTargetAddressMatches(
+                    feedbackTargets,
+                    "SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT_TARGETS");
             var vertexSpirv = forceFullscreenVertex
                 ? SpirvFixedShaders.CreateFullscreenVertex(0)
                 : draw.VertexSpirv;
@@ -5279,11 +5331,9 @@ internal static unsafe class VulkanVideoPresenter
                 : forceAttributeFragment
                     ? SpirvFixedShaders.CreateAttributeFragment(attributeFragmentLocation)
                 : draw.PixelSpirv;
-            var fixedFragmentDumpPath = Environment.GetEnvironmentVariable(
-                "SHARPEMU_DUMP_FIXED_SOLID_FRAGMENT");
-            if (forceSolidFragment && !string.IsNullOrWhiteSpace(fixedFragmentDumpPath))
+            if (forceSolidFragment && !string.IsNullOrWhiteSpace(_fixedFragmentDumpPath))
             {
-                File.WriteAllBytes(fixedFragmentDumpPath, fragmentSpirv);
+                File.WriteAllBytes(_fixedFragmentDumpPath, fragmentSpirv);
             }
             if (draw.RenderState.Blends.Count != renderTargetFormats.Count)
             {
@@ -5333,21 +5383,18 @@ internal static unsafe class VulkanVideoPresenter
                 resources.Raster = GuestRasterState.Default;
                 resources.Depth = GuestDepthState.Default;
             }
-            if (isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_DEFAULT_BLEND") == "1")
+            if (isTitleDraw && _forceTitleDefaultBlend)
             {
                 resources.Blends = Enumerable.Repeat(
                     GuestBlendState.Default,
                     renderTargetFormats.Count).ToArray();
             }
-            if (isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_DEFAULT_VIEWPORT_SCISSOR") == "1")
+            if (isTitleDraw && _forceTitleDefaultViewportScissor)
             {
                 resources.Scissor = null;
                 resources.Viewport = null;
             }
-            if (isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_DISABLE_CULL") == "1")
+            if (isTitleDraw && _forceTitleDisableCull)
             {
                 resources.Raster = resources.Raster with
                 {
@@ -5355,13 +5402,11 @@ internal static unsafe class VulkanVideoPresenter
                     CullBack = false,
                 };
             }
-            if (isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_FORCE_TITLE_DISABLE_DEPTH") == "1")
+            if (isTitleDraw && _forceTitleDisableDepth)
             {
                 resources.Depth = GuestDepthState.Default;
             }
-            if (isTitleDraw && Environment.GetEnvironmentVariable(
-                    "SHARPEMU_TRACE_TITLE_STATE") == "1")
+            if (isTitleDraw && _traceTitleState)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] vk.title_state " +
@@ -7625,21 +7670,43 @@ internal static unsafe class VulkanVideoPresenter
 
             var size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint));
             var endAddress = checked(guestBuffer.BaseAddress + size);
-            var allocation = _guestBufferAllocations
-                .Where(candidate =>
-                    candidate.BaseAddress <= guestBuffer.BaseAddress &&
-                    candidate.BaseAddress + candidate.Size >= endAddress)
-                .OrderByDescending(candidate =>
-                    string.Equals(
+            GuestBufferAllocation? allocation = null;
+            var allocationPriority = -1;
+            // This runs for every bound global buffer. Preserve the previous
+            // stable queue preference without allocating LINQ sort state.
+            foreach (var candidate in _guestBufferAllocations)
+            {
+                if (candidate.BaseAddress > guestBuffer.BaseAddress ||
+                    candidate.BaseAddress + candidate.Size < endAddress)
+                {
+                    continue;
+                }
+
+                var candidatePriority = string.Equals(
                         candidate.QueueName,
                         _activeGuestQueue.Name,
-                        StringComparison.Ordinal))
-                .ThenByDescending(candidate =>
-                    string.Equals(
+                        StringComparison.Ordinal)
+                    ? 2
+                    : string.Equals(
                         candidate.QueueName,
                         SharedReadOnlyGuestBufferQueue,
-                        StringComparison.Ordinal))
-                .First();
+                        StringComparison.Ordinal)
+                        ? 1
+                        : 0;
+                if (candidatePriority > allocationPriority)
+                {
+                    allocation = candidate;
+                    allocationPriority = candidatePriority;
+                }
+            }
+
+            if (allocation is null)
+            {
+                throw new InvalidOperationException(
+                    $"no Vulkan guest buffer allocation covers " +
+                    $"0x{guestBuffer.BaseAddress:X16}-0x{endAddress:X16}");
+            }
+
             var guestOffset = guestBuffer.BaseAddress - allocation.BaseAddress;
             var descriptorOffset = guestOffset &
                 ~(GuestStorageBufferOffsetAlignment - 1);
@@ -7688,16 +7755,15 @@ internal static unsafe class VulkanVideoPresenter
                     WaitForActiveGuestQueueSubmissionsForCpuVisibility();
                     WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
                 }
-                var live = new byte[guestBuffer.Length];
-                if (_guestMemory?.TryRead(guestBuffer.BaseAddress, live) == true)
+                var mapped = new Span<byte>(
+                    (void*)(allocation.Mapped + checked((nint)guestOffset)),
+                    guestBuffer.Length);
+                if (_guestMemory?.TryRead(guestBuffer.BaseAddress, mapped) != true)
                 {
-                    source = live;
+                    source.CopyTo(mapped);
                 }
 
-                source.CopyTo(new Span<byte>(
-                    (void*)(allocation.Mapped + checked((nint)guestOffset)),
-                    source.Length));
-                source.CopyTo(shadow);
+                mapped.CopyTo(shadow);
             }
 
             if (ShouldTraceVulkanResources() &&
@@ -7707,14 +7773,6 @@ internal static unsafe class VulkanVideoPresenter
                     $"[LOADER][TRACE] vk.global_buffer base=0x{guestBuffer.BaseAddress:X16} " +
                     $"bytes={guestBuffer.Length}");
             }
-            if (_setDebugUtilsObjectName is not null)
-            {
-                SetDebugName(
-                    ObjectType.Buffer,
-                    allocation.Buffer.Handle,
-                    $"SharpEmu global 0x{guestBuffer.BaseAddress:X16} {guestBuffer.Length}b");
-            }
-
             if (guestBuffer.Pooled)
             {
                 GuestDataPool.Return(guestBuffer.Data);
@@ -7951,7 +8009,7 @@ internal static unsafe class VulkanVideoPresenter
         {
             ReadOnlySpan<byte> source = guestBuffer.Data.AsSpan(0, guestBuffer.Length);
             byte[]? forcedVertexColors = null;
-            if (Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_VERTEX_COLOR_WHITE") == "1" &&
+            if (_forceTitleVertexColorWhite &&
                 guestBuffer.Location == 0 &&
                 guestBuffer.ComponentCount == 4 &&
                 guestBuffer.DataFormat == 10 &&
@@ -9477,37 +9535,67 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
-            if (targetFormats
-                .Select((format, index) => format.IsInteger && work.Draw.RenderState.Blends[index].Enable)
-                .Any(invalid => invalid))
+            for (var index = 0; index < targetFormats.Length; index++)
             {
-                Console.Error.WriteLine(
-                    "[LOADER][WARN] Vulkan skipped MRT draw with blending enabled for an integer attachment.");
-                ReturnPooledGuestData(work.Draw);
-                return;
+                if (targetFormats[index].IsInteger &&
+                    work.Draw.RenderState.Blends[index].Enable)
+                {
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Vulkan skipped MRT draw with blending enabled for an integer attachment.");
+                    ReturnPooledGuestData(work.Draw);
+                    return;
+                }
             }
 
-            if (!_supportsIndependentBlend &&
-                work.Draw.RenderState.Blends.Skip(1).Any(blend => blend != work.Draw.RenderState.Blends[0]))
+            if (!_supportsIndependentBlend)
             {
-                Console.Error.WriteLine(
-                    "[LOADER][WARN] Vulkan skipped MRT draw requiring unsupported independentBlend.");
-                ReturnPooledGuestData(work.Draw);
-                return;
+                for (var index = 1; index < work.Draw.RenderState.Blends.Count; index++)
+                {
+                    if (work.Draw.RenderState.Blends[index] !=
+                        work.Draw.RenderState.Blends[0])
+                    {
+                        Console.Error.WriteLine(
+                            "[LOADER][WARN] Vulkan skipped MRT draw requiring unsupported independentBlend.");
+                        ReturnPooledGuestData(work.Draw);
+                        return;
+                    }
+                }
             }
 
-            var formats = targetFormats.Select(target => target.Format).ToArray();
+            var formats = new Format[targetFormats.Length];
+            for (var index = 0; index < targetFormats.Length; index++)
+            {
+                formats[index] = targetFormats[index].Format;
+            }
 
-            var targetAddresses = work.Targets
-                .Where(target => target.Address != 0)
-                .Select(target => target.Address)
-                .ToHashSet();
-            if (work.Draw.Textures.Any(texture =>
-                    texture.IsStorage && targetAddresses.Contains(texture.Address)))
+            var hasStorageFeedback = false;
+            foreach (var texture in work.Draw.Textures)
+            {
+                if (!texture.IsStorage || texture.Address == 0)
+                {
+                    continue;
+                }
+
+                foreach (var target in work.Targets)
+                {
+                    if (target.Address != 0 && target.Address == texture.Address)
+                    {
+                        hasStorageFeedback = true;
+                        break;
+                    }
+                }
+
+                if (hasStorageFeedback)
+                {
+                    break;
+                }
+            }
+
+            if (hasStorageFeedback)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Vulkan skipped storage render-target feedback loop " +
-                    $"targets={string.Join(',', targetAddresses.Select(address => $"0x{address:X16}"))}; " +
+                    $"targets={string.Join(',', work.Targets.Where(target => target.Address != 0).Select(target => $"0x{target.Address:X16}"))}; " +
                     "sampled aliases use ordered snapshots");
                 ReturnPooledGuestData(work.Draw);
                 return;
@@ -9542,6 +9630,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 var extent = new Extent2D(firstTarget.Width, firstTarget.Height);
                 var draw = work.Draw;
+                var clearDepthForDraw = draw.RenderState.Depth.ClearEnable;
                 if (work.DepthTarget?.ReadOnly == true && draw.RenderState.Depth.WriteEnable)
                 {
                     draw = draw with
@@ -9554,9 +9643,10 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 GuestDepthResource? depth = null;
                 DepthFramebufferResource? depthFramebuffer = null;
-                if (work.DepthTarget is { } depthTarget &&
-                    (draw.RenderState.Depth.TestEnable ||
-                     draw.RenderState.Depth.WriteEnable))
+                if (ShouldAttachGuestDepth(
+                        work.DepthTarget,
+                        draw.RenderState.Depth) &&
+                    work.DepthTarget is { } depthTarget)
                 {
                     var effectiveDepthTarget = depthTarget;
                     if (depthTarget.Width < firstTarget.Width || depthTarget.Height < firstTarget.Height)
@@ -9603,10 +9693,34 @@ internal static unsafe class VulkanVideoPresenter
 
                     depth = GetOrCreateGuestDepth(effectiveDepthTarget);
                     PrepareFirstUseDepth(depth, draw.RenderState.Depth);
+                    if (clearDepthForDraw)
+                    {
+                        depth.GuestClearDepth = effectiveDepthTarget.ClearDepth;
+                        depth.ClearDepth = effectiveDepthTarget.ClearDepth;
+                    }
                     if (targets.Length == 1)
                     {
                         depthFramebuffer = GetOrCreateDepthFramebuffer(firstTarget, depth);
                     }
+                }
+
+                if (clearDepthForDraw)
+                {
+                    // DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE makes this a DB
+                    // clear operation. The draw still produces color, but its
+                    // interpolated vertex Z is not the guest clear value.
+                    draw = draw with
+                    {
+                        RenderState = draw.RenderState with
+                        {
+                            Depth = draw.RenderState.Depth with
+                            {
+                                TestEnable = false,
+                                WriteEnable = false,
+                                ClearEnable = false,
+                            },
+                        },
+                    };
                 }
 
                 var renderPass = depthFramebuffer is null
@@ -9614,10 +9728,10 @@ internal static unsafe class VulkanVideoPresenter
                         ? firstTarget.RenderPass
                         : firstTarget.InitialRenderPass
                     : firstTarget.Initialized
-                        ? depth!.Initialized
+                        ? depth!.Initialized && !clearDepthForDraw
                             ? depthFramebuffer.LoadRenderPass
                             : depthFramebuffer.DepthClearRenderPass
-                        : depth!.Initialized
+                        : depth!.Initialized && !clearDepthForDraw
                             ? depthFramebuffer.ColorClearRenderPass
                             : depthFramebuffer.BothClearRenderPass;
                 var framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
@@ -9633,7 +9747,7 @@ internal static unsafe class VulkanVideoPresenter
                         targets.Select(target =>
                             target.Initialized || target.InitialUploadPending).ToArray(),
                         depth,
-                        depth?.Initialized == true);
+                        depth?.Initialized == true && !clearDepthForDraw);
                     transientRenderPass = renderPass;
                     transientFramebuffer = framebuffer;
                 }
@@ -9821,7 +9935,12 @@ internal static unsafe class VulkanVideoPresenter
                 if (depth is not null)
                 {
                     depth.Initialized = true;
-                    if (draw.RenderState.Depth.WriteEnable)
+                    depth.Layout = ImageLayout.DepthStencilAttachmentOptimal;
+                    if (clearDepthForDraw)
+                    {
+                        depth.InitializationSource = "guest-depth-clear";
+                    }
+                    else if (draw.RenderState.Depth.WriteEnable)
                     {
                         depth.InitializationSource = "translated-depth-write";
                     }
@@ -9848,64 +9967,34 @@ internal static unsafe class VulkanVideoPresenter
                     }
                 }
 
-                var guestWritesMode = Environment.GetEnvironmentVariable(
-                    "SHARPEMU_TRACE_GUEST_WRITES");
-                var traceAddressWriteOrdinal = 0L;
-                _ = long.TryParse(
-                    Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITE_ORDINAL"),
-                    out traceAddressWriteOrdinal);
-                var traceLargeWriteOrdinal = 0L;
-                if (guestWritesMode is not null &&
-                    guestWritesMode.StartsWith("large@", StringComparison.Ordinal) &&
-                    long.TryParse(
-                        guestWritesMode.AsSpan("large@".Length),
-                        out var parsedTraceLargeWriteOrdinal) &&
-                    parsedTraceLargeWriteOrdinal > 0)
-                {
-                    traceLargeWriteOrdinal = parsedTraceLargeWriteOrdinal;
-                }
-
                 var tracePixelSpirv = false;
-                if (int.TryParse(
-                        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SPIRV_BYTES"),
-                        out var tracePixelSpirvBytes) &&
-                    tracePixelSpirvBytes == work.Draw.PixelSpirv.Length)
+                if (_tracePixelSpirvBytes > 0 &&
+                    _tracePixelSpirvBytes == work.Draw.PixelSpirv.Length)
                 {
                     var pixelWriteCount = _pixelSpirvWriteCounts.TryGetValue(
-                        tracePixelSpirvBytes,
+                        _tracePixelSpirvBytes,
                         out var previousPixelWriteCount)
                             ? previousPixelWriteCount + 1
                             : 1;
-                    _pixelSpirvWriteCounts[tracePixelSpirvBytes] = pixelWriteCount;
-                    var tracePixelSpirvOccurrence = 1;
-                    _ = int.TryParse(
-                        Environment.GetEnvironmentVariable(
-                            "SHARPEMU_TRACE_PIXEL_SPIRV_OCCURRENCE"),
-                        out tracePixelSpirvOccurrence);
+                    _pixelSpirvWriteCounts[_tracePixelSpirvBytes] = pixelWriteCount;
                     tracePixelSpirv =
-                        pixelWriteCount == Math.Max(tracePixelSpirvOccurrence, 1);
+                        pixelWriteCount == _tracePixelSpirvOccurrence;
                 }
                 var traceTitleDraw =
                     !_tracedTitleDraw &&
-                    Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_DRAW") == "1" &&
-                    work.Draw.VertexBuffers.Any(buffer =>
-                        buffer.Location == 0 &&
-                        buffer.ComponentCount == 4 &&
-                        buffer.DataFormat == 10 &&
-                        buffer.NumberFormat == 0 &&
-                        buffer.Stride == 16 &&
-                        buffer.OffsetBytes == 12 &&
-                        buffer.Length == 67568);
+                    _traceTitleDrawEnabled &&
+                    IsTitleDraw(work.Draw.VertexBuffers);
                 _tracedTitleDraw |= traceTitleDraw;
 
                 foreach (var target in targets)
                 {
                     var traceAddressWrite =
                         ShouldTraceGuestImageWriteForDiagnostics(target.Address);
-                    var traceSmallWrites = guestWritesMode == "small" &&
+                    var traceSmallWrites = _traceGuestWritesMode == "small" &&
                         target.Width <= 512 && target.Height <= 256;
                     var traceLargeWrites =
-                        (guestWritesMode == "large" || traceLargeWriteOrdinal != 0) &&
+                        (_traceGuestWritesMode == "large" ||
+                         _traceLargeGuestWriteOrdinal != 0) &&
                         target.Width >= 2560 && target.Height >= 1440;
                     if (traceAddressWrite || traceSmallWrites ||
                         traceLargeWrites || tracePixelSpirv || traceTitleDraw)
@@ -9918,10 +10007,10 @@ internal static unsafe class VulkanVideoPresenter
                         _tracedGuestWriteCounts[target.Address] = writeCount;
                         var shouldTraceWrite = tracePixelSpirv || traceTitleDraw
                             ? true
-                            : traceAddressWrite && traceAddressWriteOrdinal > 0
-                                ? writeCount == traceAddressWriteOrdinal
-                            : traceLargeWriteOrdinal != 0
-                                ? writeCount == traceLargeWriteOrdinal
+                            : traceAddressWrite && _traceGuestWriteOrdinal > 0
+                                ? writeCount == _traceGuestWriteOrdinal
+                            : _traceLargeGuestWriteOrdinal != 0
+                                ? writeCount == _traceLargeGuestWriteOrdinal
                             : writeCount <=
                                 (traceLargeWrites ? 2 : traceSmallWrites ? 48 : 3);
                         if (traceAddressWrite || shouldTraceWrite)
@@ -9955,10 +10044,13 @@ internal static unsafe class VulkanVideoPresenter
                         }
                     }
                 }
-                TraceVulkanShader(
-                    $"vk.offscreen_draw mrt={targets.Length} " +
-                    $"size={firstTarget.Width}x{firstTarget.Height} " +
-                    $"textures={work.Draw.Textures.Count}");
+                if (_traceVulkanShaderEnabled)
+                {
+                    TraceVulkanShader(
+                        $"vk.offscreen_draw mrt={targets.Length} " +
+                        $"size={firstTarget.Width}x{firstTarget.Height} " +
+                        $"textures={work.Draw.Textures.Count}");
+                }
             }
             catch (Exception exception)
             {
@@ -12892,6 +12984,20 @@ internal static unsafe class VulkanVideoPresenter
         // Diagnostics toggles are read once: these run per draw / per cached
         // texture hit, and env lookups plus string parsing are far too
         // expensive there (and non-trivially so under Rosetta 2).
+        private static readonly bool _vulkanValidationEnabled =
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_VK_VALIDATION"),
+                "1",
+                StringComparison.Ordinal);
+        // Object names and command labels are useful in RenderDoc and validation
+        // captures, but formatting them and calling the debug-utils driver hooks
+        // for every draw is measurable overhead in normal gameplay.
+        private static readonly bool _vulkanDebugUtilsEnabled =
+            _vulkanValidationEnabled ||
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_VK_DEBUG_LABELS"),
+                "1",
+                StringComparison.Ordinal);
         private static readonly string? _traceGuestImagesMode =
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
         private static readonly bool _traceGuestImagesEnabled =
@@ -12955,9 +13061,79 @@ internal static unsafe class VulkanVideoPresenter
             !string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable(
                     "SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
+        private static readonly bool _forceFullscreenPipeline =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_FULLSCREEN_PIPELINE") == "1";
+        private static readonly bool _forceFullscreenVertex =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_FULLSCREEN_VERTEX") == "1";
+        private static readonly bool _forceTitleFullscreenVertex =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_FULLSCREEN_VERTEX") == "1";
+        private static readonly bool _forceDefaultRasterState =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_DEFAULT_RASTER_STATE") == "1";
+        private static readonly bool _forceTitleDefaultRasterState =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DEFAULT_RASTER_STATE") == "1";
+        private static readonly bool _forceTitleSolidFragment =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_SOLID_FRAGMENT") == "1";
+        private static readonly bool _forceSolidFragment =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_SOLID_FRAGMENT") == "1";
+        private static readonly uint? _forceAttributeFragmentLocation =
+            uint.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT"),
+                out var forceAttributeFragmentLocation)
+                    ? forceAttributeFragmentLocation
+                    : null;
+        private static readonly string? _fixedFragmentDumpPath =
+            Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FIXED_SOLID_FRAGMENT");
+        private static readonly bool _forceTitleDefaultBlend =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DEFAULT_BLEND") == "1";
+        private static readonly bool _forceTitleDefaultViewportScissor =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DEFAULT_VIEWPORT_SCISSOR") == "1";
+        private static readonly bool _forceTitleDisableCull =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DISABLE_CULL") == "1";
+        private static readonly bool _forceTitleDisableDepth =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DISABLE_DEPTH") == "1";
+        private static readonly bool _traceTitleState =
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_STATE") == "1";
+        private static readonly bool _forceTitleVertexColorWhite =
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_VERTEX_COLOR_WHITE") == "1";
+        private static readonly bool _chunkedDrawsEnabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_CHUNKED_DRAWS") == "1";
+        private static readonly string? _traceGuestWritesMode =
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITES");
+        private static readonly long _traceGuestWriteOrdinal =
+            long.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITE_ORDINAL"),
+                out var traceGuestWriteOrdinal)
+                    ? traceGuestWriteOrdinal
+                    : 0;
+        private static readonly long _traceLargeGuestWriteOrdinal =
+            ParseTraceLargeGuestWriteOrdinal(_traceGuestWritesMode);
+        private static readonly int _tracePixelSpirvBytes =
+            int.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SPIRV_BYTES"),
+                out var tracePixelSpirvBytes)
+                    ? tracePixelSpirvBytes
+                    : 0;
+        private static readonly int _tracePixelSpirvOccurrence =
+            int.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SPIRV_OCCURRENCE"),
+                out var tracePixelSpirvOccurrence)
+                    ? Math.Max(tracePixelSpirvOccurrence, 1)
+                    : 1;
+        private static readonly bool _traceTitleDrawEnabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_DRAW") == "1";
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<
             string,
             (bool Wildcard, ulong[] Addresses)> _cachedAddressLists = new();
+
+        private static long ParseTraceLargeGuestWriteOrdinal(string? mode)
+        {
+            return mode is not null &&
+                mode.StartsWith("large@", StringComparison.Ordinal) &&
+                long.TryParse(mode.AsSpan("large@".Length), out var ordinal) &&
+                ordinal > 0
+                    ? ordinal
+                    : 0;
+        }
 
         private static bool ShouldTraceGuestImageContentsForDiagnostics() =>
             _traceGuestImagesEnabled;
@@ -13156,8 +13332,7 @@ internal static unsafe class VulkanVideoPresenter
             // MoltenVK this starves the render thread and makes the guest fall
             // behind its own flip queue. Vulkan clips a normal fullscreen draw
             // efficiently; keep tiling only as an explicit driver diagnostic.
-            var maxPixelsPerDraw = Environment.GetEnvironmentVariable(
-                "SHARPEMU_ENABLE_CHUNKED_DRAWS") == "1"
+            var maxPixelsPerDraw = _chunkedDrawsEnabled
                 ? 512u * 512u
                 : uint.MaxValue;
             var rowsPerDraw = Math.Max(

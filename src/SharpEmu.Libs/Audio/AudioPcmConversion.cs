@@ -52,8 +52,19 @@ internal static class AudioPcmConversion
         }
 
         var bits = BinaryPrimitives.ReadInt32LittleEndian(sample);
-        var value = Math.Clamp(BitConverter.Int32BitsToSingle(bits), -1.0f, 1.0f);
-        return checked((short)MathF.Round(value * short.MaxValue));
+        return ConvertFloatSample(BitConverter.Int32BitsToSingle(bits));
+    }
+
+    private static short ConvertFloatSample(float value)
+    {
+        if (float.IsNaN(value))
+        {
+            return 0;
+        }
+
+        value = Math.Clamp(value, -1.0f, 1.0f);
+        var scale = value < 0.0f ? 32768.0f : short.MaxValue;
+        return checked((short)MathF.Round(value * scale));
     }
 
     private static short ApplyVolume(short sample, float volume)

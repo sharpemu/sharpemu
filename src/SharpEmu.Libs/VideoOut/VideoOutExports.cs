@@ -1646,8 +1646,12 @@ public static class VideoOutExports
     // Maps the PS5 VideoOut pixel format space to the AGC "guest texture format" tags
     // the backend keys its guest-image registry on (see VulkanVideoPresenter.
     // GetGuestTextureFormat: format=10 => 56 for 8-bit RGBA variants, format=9 => 9 for 10-bit).
-    private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat) =>
-        NormalizePixelFormat(pixelFormat) switch
+    // Unknown formats default to 56 (8-bit RGBA) with a logged warning so games
+    // display something rather than silently failing the flip pipeline.
+    private static uint MapPixelFormatToGuestTextureFormat(ulong pixelFormat)
+    {
+        var normalized = NormalizePixelFormat(pixelFormat);
+        var result = normalized switch
         {
             SceVideoOutPixelFormatA8R8G8B8Srgb or
             SceVideoOutPixelFormatA8B8G8R8Srgb or
@@ -1664,6 +1668,17 @@ public static class VideoOutExports
             SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq => 9u,
             _ => 0u,
         };
+
+        if (result == 0u)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] vk: unknown pixel format 0x{pixelFormat:X16} (normalized=0x{normalized:X16}) " +
+                $"— falling back to format 56 (8-bit RGBA). Report this format to the project.");
+            result = 56u;
+        }
+
+        return result;
+    }
 
     internal static bool TryPackRgba8Pixel(
         ulong pixelFormat,

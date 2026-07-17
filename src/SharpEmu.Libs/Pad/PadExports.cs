@@ -128,6 +128,19 @@ public static class PadExports
     }
 
     [SysAbiExport(
+        Nid = "vDLMoJLde8I",
+        ExportName = "scePadSetTiltCorrectionState",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadSetTiltCorrectionState(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return IsPrimaryPadHandle(handle)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+    }
+
+    [SysAbiExport(
         Nid = "gjP9-KQzoUk",
         ExportName = "scePadGetControllerInformation",
         Target = Generation.Gen4 | Generation.Gen5,

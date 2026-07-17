@@ -333,11 +333,35 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 Classes="sectionTitle"
                                 Text="ABOUT" />
 
+                      <!--Latest commit info-->
                       <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                          <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
-                          <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
-                                     Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/commit-icon.png"
+                                    Width="24" Height="24" VerticalAlignment="Center" />
+                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
+                            <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                          </StackPanel>
+                        </StackPanel>
+
+                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
+                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
+                          VerticalAlignment="Center" IsEnabled="False" />
+
+                      </Grid>
+
+                      <!--Update-->
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                          <Image Source="avares://SharpEmu.GUI/Assets/update-icon.png"
+                                    Width="24"
+                                    Height="24"
+                                    VerticalAlignment="Center" />
+                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
+                            <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
+                                      Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                          </StackPanel>
                         </StackPanel>
                         <Button Grid.Column="1" x:Name="UpdateButton" Classes="ghost"
                                 Content="Check for updates" VerticalAlignment="Center" />

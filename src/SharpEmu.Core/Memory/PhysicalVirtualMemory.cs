@@ -198,6 +198,24 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return true;
     }
 
+    public string DescribeAddressForDiagnostics(ulong address)
+    {
+        if (!_hostMemory.Query(address, out var info))
+        {
+            return "unable to query host memory at this address";
+        }
+
+        return info.State switch
+        {
+            HostRegionState.Free => "address reports free, but the exact-address reservation still failed",
+            HostRegionState.Reserved =>
+                $"already reserved by another host allocation (base=0x{info.AllocationBase:X16}, size=0x{info.RegionSize:X})",
+            HostRegionState.Committed =>
+                $"already committed by another host allocation (base=0x{info.AllocationBase:X16}, size=0x{info.RegionSize:X}, protect=0x{info.RawProtection:X})",
+            _ => $"in an unexpected host state (raw=0x{info.RawState:X})",
+        };
+    }
+
     public ulong AllocateAt(ulong desiredAddress, ulong size, bool executable = true, bool allowAlternative = true)
     {
         if (size == 0)
