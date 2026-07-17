@@ -214,6 +214,22 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    public static bool UnregisterGuestPathMount(string guestMountPoint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(guestMountPoint);
+
+        var normalizedMountPoint = NormalizeGuestStatCachePath(guestMountPoint);
+        if (normalizedMountPoint is null || normalizedMountPoint == "/")
+        {
+            throw new ArgumentException("Guest mount point must name a directory.", nameof(guestMountPoint));
+        }
+
+        lock (_guestMountGate)
+        {
+            return _guestMounts.Remove(normalizedMountPoint);
+        }
+    }
+
     internal static bool TryAllocateHleData(
         CpuContext ctx,
         ulong length,
