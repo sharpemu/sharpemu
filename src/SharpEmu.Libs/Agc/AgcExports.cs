@@ -2946,12 +2946,28 @@ public static partial class AgcExports
         // guest-memory writes have finished. Put the notification on that same
         // logical graphics queue instead of approximating completion with a
         // timer, which can wake Unity while its upload data is still stale.
-        if (VulkanVideoPresenter.SubmitOrderedGuestAction(
+        if (EnqueueSubmittedDcbCompletion(
+                state.QueueName,
+                submissionId,
                 TriggerCompletionEvents,
-                $"agc submit completion {submissionId}") == 0)
+                VulkanVideoPresenter.SubmitOrderedGuestAction) == 0)
         {
             TriggerCompletionEvents();
         }
+    }
+
+    internal static long EnqueueSubmittedDcbCompletion(
+        string queueName,
+        ulong submissionId,
+        Action completion,
+        Func<Action, string, long> submitOrderedAction)
+    {
+        using var guestQueueScope = VulkanVideoPresenter.EnterGuestQueue(
+            queueName,
+            submissionId);
+        return submitOrderedAction(
+            completion,
+            $"agc submit completion {submissionId}");
     }
 
     // Returns true only when parsing stopped on an unsatisfied WAIT_REG_MEM.
