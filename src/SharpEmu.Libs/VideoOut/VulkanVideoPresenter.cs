@@ -1706,6 +1706,43 @@ internal static unsafe class VulkanVideoPresenter
     private static bool IsKnownGuestTextureFormat(uint format) =>
         format is >= 1 and <= 19 or 34 or >= 169 and <= 182;
 
+    internal static string GetMrtRenderPassLayoutKey(
+        IReadOnlyList<Format> formats,
+        IReadOnlyList<bool> initialized,
+        bool hasDepth,
+        bool depthInitialized)
+    {
+        if (formats.Count is < 1 or > 8 || formats.Count != initialized.Count)
+        {
+            throw new ArgumentException(
+                "MRT formats and initialization states must have matching counts");
+        }
+
+        var initializedMask = 0u;
+        var key = new StringBuilder(formats.Count * 12 + 8);
+        for (var index = 0; index < formats.Count; index++)
+        {
+            if (index != 0)
+            {
+                key.Append(',');
+            }
+
+            key.Append((uint)formats[index]);
+            if (initialized[index])
+            {
+                initializedMask |= 1u << index;
+            }
+        }
+
+        key.Append('|').Append(initializedMask).Append('|');
+        if (hasDepth)
+        {
+            key.Append(depthInitialized ? "DL" : "DC");
+        }
+
+        return key.ToString();
+    }
+
     private static byte[] CreateBlackFrame(uint width, uint height)
     {
         if (width == 0 || height == 0 || width > 8192 || height > 8192)
@@ -2600,6 +2637,7 @@ internal static unsafe class VulkanVideoPresenter
         // program content and descriptor-layout shape instead.
         private readonly Dictionary<ComputePipelineKey, Pipeline> _computePipelines = new();
         private readonly Dictionary<GraphicsPipelineKey, Pipeline> _graphicsPipelines = new();
+        private readonly Dictionary<string, RenderPass> _mrtRenderPasses = new();
         private readonly Dictionary<GuestSampler, Sampler> _samplers = new();
         private readonly Dictionary<byte[], string> _shaderDigests =
             new(ReferenceEqualityComparer.Instance);
@@ -2690,7 +2728,6 @@ internal static unsafe class VulkanVideoPresenter
             // descriptor-layout lookup); cache the built strings.
             public string? ResourceLayoutKey;
             public string? VertexLayoutKey;
-            public RenderPass TransientRenderPass;
             public Framebuffer TransientFramebuffer;
         }
 
@@ -9865,7 +9902,6 @@ internal static unsafe class VulkanVideoPresenter
             TranslatedDrawResources? resources = null;
             CommandBuffer commandBuffer = default;
             var submitted = false;
-            RenderPass transientRenderPass = default;
             Framebuffer transientFramebuffer = default;
             try
             {
@@ -9978,18 +10014,25 @@ internal static unsafe class VulkanVideoPresenter
                 var framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
                 if (targets.Length > 1)
                 {
-                    (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
-                        formats,
-                        targets.Select(target => target.MipViews.Length > 0
+                    var attachmentViews = targets.Select(target =>
+                        target.MipViews.Length > 0
                             ? target.MipViews[0]
-                            : target.View).ToArray(),
+                            : target.View).ToArray();
+                    var initialized = targets.Select(target =>
+                        target.Initialized || target.InitialUploadPending).ToArray();
+                    var depthInitialized =
+                        depth?.Initialized == true && !clearDepthForDraw;
+                    renderPass = GetOrCreateMrtRenderPass(
+                        formats,
+                        initialized,
+                        depth is not null,
+                        depthInitialized);
+                    framebuffer = CreateFramebuffer(
+                        renderPass,
+                        attachmentViews,
                         firstTarget.Width,
                         firstTarget.Height,
-                        targets.Select(target =>
-                            target.Initialized || target.InitialUploadPending).ToArray(),
-                        depth,
-                        depth?.Initialized == true && !clearDepthForDraw);
-                    transientRenderPass = renderPass;
+                        depth?.View ?? default);
                     transientFramebuffer = framebuffer;
                 }
 
@@ -10001,9 +10044,7 @@ internal static unsafe class VulkanVideoPresenter
                     targets,
                     hasDepthAttachment: depth is not null,
                     feedbackDepth: depth);
-                resources.TransientRenderPass = transientRenderPass;
                 resources.TransientFramebuffer = transientFramebuffer;
-                transientRenderPass = default;
                 transientFramebuffer = default;
                 resources.DebugName =
                     $"SharpEmu offscreen mrt={targets.Length} " +
@@ -10331,11 +10372,6 @@ internal static unsafe class VulkanVideoPresenter
                 if (transientFramebuffer.Handle != 0)
                 {
                     _vk.DestroyFramebuffer(_device, transientFramebuffer, null);
-                }
-
-                if (transientRenderPass.Handle != 0)
-                {
-                    _vk.DestroyRenderPass(_device, transientRenderPass, null);
                 }
             }
         }
@@ -10813,49 +10849,72 @@ internal static unsafe class VulkanVideoPresenter
             uint width,
             uint height)
         {
-            var load = CreateRenderPassAndFramebuffer(
-                [format], [attachmentView], width, height, [true], null, false);
-            var initial = CreateRenderPassAndFramebuffer(
-                [format], [attachmentView], width, height, [false], null, false);
-            _vk.DestroyFramebuffer(_device, initial.Framebuffer, null);
-            return (load.RenderPass, initial.RenderPass, load.Framebuffer);
+            var loadRenderPass = CreateRenderPass([format], [true], false, false);
+            var initialRenderPass = CreateRenderPass([format], [false], false, false);
+            try
+            {
+                return (
+                    loadRenderPass,
+                    initialRenderPass,
+                    CreateFramebuffer(
+                        loadRenderPass,
+                        [attachmentView],
+                        width,
+                        height,
+                        default));
+            }
+            catch
+            {
+                _vk.DestroyRenderPass(_device, initialRenderPass, null);
+                _vk.DestroyRenderPass(_device, loadRenderPass, null);
+                throw;
+            }
         }
 
-        private (RenderPass RenderPass, Framebuffer Framebuffer) CreateRenderPassAndFramebuffer(
+        private RenderPass GetOrCreateMrtRenderPass(
             IReadOnlyList<Format> formats,
-            IReadOnlyList<ImageView> attachmentViews,
-            uint width,
-            uint height) =>
-            CreateRenderPassAndFramebuffer(
-                formats,
-                attachmentViews,
-                width,
-                height,
-                Enumerable.Repeat(true, formats.Count).ToArray(),
-                null,
-                false);
-
-        private (RenderPass RenderPass, Framebuffer Framebuffer) CreateRenderPassAndFramebuffer(
-            IReadOnlyList<Format> formats,
-            IReadOnlyList<ImageView> attachmentViews,
-            uint width,
-            uint height,
             IReadOnlyList<bool> initialized,
-            GuestDepthResource? depth,
+            bool hasDepth,
             bool depthInitialized)
         {
-            if (formats.Count == 0 ||
-                formats.Count != attachmentViews.Count ||
-                formats.Count != initialized.Count)
+            var key = GetMrtRenderPassLayoutKey(
+                formats,
+                initialized,
+                hasDepth,
+                depthInitialized);
+            if (_mrtRenderPasses.TryGetValue(key, out var renderPass))
             {
-                throw new InvalidOperationException(
-                    "render target formats, views, and initialization states must have matching counts");
+                return renderPass;
             }
 
-            var attachmentCount = formats.Count + (depth is null ? 0 : 1);
+            renderPass = CreateRenderPass(
+                formats,
+                initialized,
+                hasDepth,
+                depthInitialized);
+            _mrtRenderPasses.Add(key, renderPass);
+            SetDebugName(
+                ObjectType.RenderPass,
+                renderPass.Handle,
+                $"SharpEmu MRT renderpass {key}");
+            return renderPass;
+        }
+
+        private RenderPass CreateRenderPass(
+            IReadOnlyList<Format> formats,
+            IReadOnlyList<bool> initialized,
+            bool hasDepth,
+            bool depthInitialized)
+        {
+            if (formats.Count is < 1 or > 8 || formats.Count != initialized.Count)
+            {
+                throw new ArgumentException(
+                    "render target formats and initialization states must have matching counts");
+            }
+
+            var attachmentCount = formats.Count + (hasDepth ? 1 : 0);
             var attachments = stackalloc AttachmentDescription[attachmentCount];
             var colorReferences = stackalloc AttachmentReference[formats.Count];
-            var views = stackalloc ImageView[attachmentCount];
             for (var index = 0; index < formats.Count; index++)
             {
                 attachments[index] = new AttachmentDescription
@@ -10876,11 +10935,10 @@ internal static unsafe class VulkanVideoPresenter
                     Attachment = (uint)index,
                     Layout = ImageLayout.ColorAttachmentOptimal,
                 };
-                views[index] = attachmentViews[index];
             }
 
             AttachmentReference depthReference = default;
-            if (depth is not null)
+            if (hasDepth)
             {
                 attachments[formats.Count] = new AttachmentDescription
                 {
@@ -10902,7 +10960,6 @@ internal static unsafe class VulkanVideoPresenter
                     Attachment = (uint)formats.Count,
                     Layout = ImageLayout.DepthStencilAttachmentOptimal,
                 };
-                views[formats.Count] = depth.View;
             }
 
             var subpass = new SubpassDescription
@@ -10910,7 +10967,7 @@ internal static unsafe class VulkanVideoPresenter
                 PipelineBindPoint = PipelineBindPoint.Graphics,
                 ColorAttachmentCount = (uint)formats.Count,
                 PColorAttachments = colorReferences,
-                PDepthStencilAttachment = depth is null ? null : &depthReference,
+                PDepthStencilAttachment = hasDepth ? &depthReference : null,
             };
             var renderPassInfo = new RenderPassCreateInfo
             {
@@ -10923,6 +10980,31 @@ internal static unsafe class VulkanVideoPresenter
             Check(
                 _vk.CreateRenderPass(_device, &renderPassInfo, null, out var renderPass),
                 "vkCreateRenderPass(offscreen)");
+            return renderPass;
+        }
+
+        private Framebuffer CreateFramebuffer(
+            RenderPass renderPass,
+            IReadOnlyList<ImageView> attachmentViews,
+            uint width,
+            uint height,
+            ImageView depthView)
+        {
+            if (attachmentViews.Count is < 1 or > 8)
+            {
+                throw new ArgumentOutOfRangeException(nameof(attachmentViews));
+            }
+
+            var attachmentCount = attachmentViews.Count + (depthView.Handle == 0 ? 0 : 1);
+            var views = stackalloc ImageView[attachmentCount];
+            for (var index = 0; index < attachmentViews.Count; index++)
+            {
+                views[index] = attachmentViews[index];
+            }
+            if (depthView.Handle != 0)
+            {
+                views[attachmentViews.Count] = depthView;
+            }
 
             var framebufferInfo = new FramebufferCreateInfo
             {
@@ -10937,8 +11019,7 @@ internal static unsafe class VulkanVideoPresenter
             Check(
                 _vk.CreateFramebuffer(_device, &framebufferInfo, null, out var framebuffer),
                 "vkCreateFramebuffer(offscreen)");
-
-            return (renderPass, framebuffer);
+            return framebuffer;
         }
 
         private (Image Image, DeviceMemory Memory, ImageView View) CreateDepthAttachment(
@@ -13716,11 +13797,6 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.DestroyFramebuffer(_device, resources.TransientFramebuffer, null);
             }
 
-            if (resources.TransientRenderPass.Handle != 0)
-            {
-                _vk.DestroyRenderPass(_device, resources.TransientRenderPass, null);
-            }
-
             foreach (var texture in resources.Textures)
             {
                 if (texture is null || texture.Cached)
@@ -14423,6 +14499,11 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.DestroyPipeline(_device, pipeline, null);
             }
             _graphicsPipelines.Clear();
+            foreach (var renderPass in _mrtRenderPasses.Values)
+            {
+                _vk.DestroyRenderPass(_device, renderPass, null);
+            }
+            _mrtRenderPasses.Clear();
             foreach (var layout in _descriptorLayouts.Values)
             {
                 _vk.DestroyPipelineLayout(_device, layout.PipelineLayout, null);
