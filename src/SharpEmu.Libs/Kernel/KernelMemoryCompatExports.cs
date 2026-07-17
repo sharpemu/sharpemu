@@ -5227,7 +5227,7 @@ public static partial class KernelMemoryCompatExports
         return !string.IsNullOrWhiteSpace(guestPath);
     }
 
-    private static bool TryReadCompat(CpuContext ctx, ulong address, Span<byte> destination)
+    internal static bool TryReadCompat(CpuContext ctx, ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty)
         {
@@ -5293,7 +5293,7 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    private static bool TryWriteCompat(CpuContext ctx, ulong address, ReadOnlySpan<byte> source)
+    internal static bool TryWriteCompat(CpuContext ctx, ulong address, ReadOnlySpan<byte> source)
     {
         if (source.IsEmpty)
         {

@@ -1836,4 +1836,194 @@ public static class KernelPthreadCompatExports
 
         return addresses.Count == 0 ? null : addresses;
     }
+
+    // -----------------------------------------------------------------------
+    // C11 threading primitives: _Mtx_init / _Mtx_lock / _Mtx_unlock / _Cnd_init
+    //
+    // PS5 games (e.g. Arise: A Simple Story) call these C11 standard
+    // functions during C++ static-init for std::mutex / std::condition_variable
+    // implementations. Without them, the game spins forever in an unresolved
+    // import stub and never reaches main().
+    //
+    // Each C11 function delegates to the corresponding POSIX pthread core
+    // which already handles the actual mutex/cond state.
+    // -----------------------------------------------------------------------
+
+    [SysAbiExport(
+        Nid = "YaHc3GS7y7g",
+        ExportName = "_Mtx_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxInit(CpuContext ctx)
+    {
+        // _Mtx_init(_Mtx_t* mtx, int type)
+        // type: 0=plain, 1=try, 2=timed, 8=recursive (C11 mtx types)
+        var mtx = ctx[CpuRegister.Rdi];
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        // Map C11 type to pthread type
+        var pthreadType = (type & 8) != 0 ? MutexTypeRecursive : MutexTypeErrorCheck;
+        // Write the type into the attr slot (Rsi) so PthreadMutexInitCore picks it up.
+        // PthreadMutexInitCore(mtx, attr) — attr==0 means default (errorcheck).
+        // For C11, we pass 0 as attr and let the core use the default type.
+        // To honor the C11 type, we need to set the attr state first.
+        // Simpler: call PthreadMutexInitCore with attr=0 then patch the type.
+        var result = PthreadMutexInitCore(ctx, mtx, 0);
+        if (result == 0)
+        {
+            // Patch the type directly in the mutex state
+            if (_mutexStates.TryGetValue(mtx, out var state))
+            {
+                state.Type = pthreadType;
+            }
+        }
+        return result;
+    }
+
+    [SysAbiExport(
+        Nid = "iS4aWbUonl0",
+        ExportName = "_Mtx_lock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxLock(CpuContext ctx) =>
+        PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false);
+
+    [SysAbiExport(
+        Nid = "gTuXQwP9rrs",
+        ExportName = "_Mtx_unlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11MtxUnlock(CpuContext ctx) =>
+        PthreadMutexUnlockCore(ctx, ctx[CpuRegister.Rdi], requireOwner: false);
+
+    [SysAbiExport(
+        Nid = "SreZybSRWpU",
+        ExportName = "_Cnd_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11CndInit(CpuContext ctx) =>
+        PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
+
+    // _Cnd_timedwait: C11 condition variable timed wait.
+    // Delegates to the existing pthread_cond_timedwait implementation.
+    [SysAbiExport(
+        Nid = "McaImWKXong",
+        ExportName = "_Cnd_timedwait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int C11CndTimedwait(CpuContext ctx)
+    {
+        // args: rdi=cnd*, rsi=mtx*, rdx=timespec*
+        // Delegate to the existing PthreadCondTimedwait which reads the same args
+        return PthreadCondTimedwait(ctx);
+    }
+
+    // _ZSt14_Throw_C_errori — libstdc++ __throw_C_error(int).
+    // Called only on C library errors. Stub: log and return (don't actually throw).
+    [SysAbiExport(
+        Nid = "bRujIheWlB0",
+        ExportName = "_ZSt14_Throw_C_errori",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int StdThrowCError(CpuContext ctx)
+    {
+        var code = unchecked((int)ctx[CpuRegister.Rdi]);
+        Console.Error.WriteLine($"[HLE][WARN] __throw_C_error({code}) called — stubbed (no exception thrown)");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // std::call_once — _ZSt13_Execute_onceRSt9once_flagPFiPv
+    // NID: DiGVep5yB5w
+    // This is the C++ std::call_once implementation. It delegates to pthread_once
+    // which is already implemented. The once_flag structure is compatible with
+    // pthread_once_t on PS5 (both are 4-byte integers).
+    [SysAbiExport(
+        Nid = "DiGVep5yB5w",
+        ExportName = "_ZSt13_Execute_onceRSt9once_flagPFiPv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int StdExecuteOnce(CpuContext ctx)
+    {
+        // args: rdi=once_flag*, rsi=init_func, rdx=arg
+        var onceFlagAddress = ctx[CpuRegister.Rdi];
+        var initFunc = ctx[CpuRegister.Rsi];
+        var arg = ctx[CpuRegister.Rdx];
+
+        if (onceFlagAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Read current once_flag value
+        if (!ctx.TryReadInt32(onceFlagAddress, out var onceValue))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // PthreadOnceDone = 2 (already executed)
+        if (onceValue == PthreadOnceDone)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        // Mark as in progress
+        if (!ctx.TryWriteInt32(onceFlagAddress, PthreadOnceInProgress))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // Call the init function with the argument
+        if (initFunc != 0)
+        {
+            try
+            {
+                var scheduler = GuestThreadExecution.Scheduler;
+                string? error = null;
+                if (scheduler != null &&
+                    scheduler.TryCallGuestFunction(ctx, initFunc, arg, 0, 0, 0, "std::call_once", out error))
+                {
+                    // Success — mark as done
+                    ctx.TryWriteInt32(onceFlagAddress, PthreadOnceDone);
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+                }
+                else
+                {
+                    // Failed — reset to uninitialized
+                    ctx.TryWriteInt32(onceFlagAddress, PthreadOnceUninitialized);
+                    Console.Error.WriteLine($"[HLE][WARN] std::call_once init function failed: {error}");
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+                }
+            }
+            catch (Exception ex)
+            {
+                ctx.TryWriteInt32(onceFlagAddress, PthreadOnceUninitialized);
+                Console.Error.WriteLine($"[HLE][ERROR] std::call_once exception: {ex.Message}");
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+            }
+        }
+
+        // No init function — just mark as done
+        ctx.TryWriteInt32(onceFlagAddress, PthreadOnceDone);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // __cxa_decrement_exception_refcount — C++ exception handling
+    // NID: MQFPAqQPt1s
+    // Decrements the reference count of an exception object. When it reaches
+    // zero, the exception is freed. For now, we stub this as a no-op since
+    // we don't fully implement C++ exception handling.
+    [SysAbiExport(
+        Nid = "MQFPAqQPt1s",
+        ExportName = "__cxa_decrement_exception_refcount",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int CxaDecrementExceptionRefcount(CpuContext ctx)
+    {
+        // rdi = exception header pointer
+        var exceptionPtr = ctx[CpuRegister.Rdi];
+        // Stub: do nothing. In a full implementation, we would decrement
+        // the refcount and potentially free the exception object.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

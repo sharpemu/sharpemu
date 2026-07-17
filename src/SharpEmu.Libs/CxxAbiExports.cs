@@ -219,4 +219,36 @@ public static class CxaGuardExports
         Console.Error.WriteLine(
             $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} result={result} init={initialized} in_progress={inProgress} owner_thread={ownerThreadId}");
     }
+
+    // __dynamic_cast: C++ RTTI dynamic_cast operation.
+    // This is a complex function that walks the class hierarchy to determine
+    // if a pointer can be cast to a target type. For now we return 0 (cast failed)
+    // which means the result is null. Games that rely on dynamic_cast returning
+    // non-null will need the full implementation, but many games handle null
+    // results gracefully.
+    [SysAbiExport(
+        Nid = "hMAe+TWS9mQ",
+        ExportName = "__dynamic_cast",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int DynamicCast(CpuContext ctx)
+    {
+        // args: rdi=src_ptr, rsi=src_type_info, rdx=dst_type_info, rcx=src2dst
+        var srcPtr = ctx[CpuRegister.Rdi];
+        if (srcPtr == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        // Full __dynamic_cast implementation requires walking the C++ type_info
+        // hierarchy stored in guest memory. For now, return the source pointer
+        // unchanged (assuming the cast succeeds to the same type). This is wrong
+        // for cross-hierarchy casts but allows the game to proceed.
+        // TODO: implement proper RTTI walking
+        ctx[CpuRegister.Rax] = srcPtr;
+        Console.Error.WriteLine(
+            $"[HLE][TRACE] __dynamic_cast: src=0x{srcPtr:X16} (stubbed — returning src unchanged)");
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

@@ -379,7 +379,35 @@ public static class KernelSemaphoreCompatExports
             MaxCount = int.MaxValue,
             Count = initialCount,
         };
-        if (!TryWriteUInt32(ctx, semaphoreAddress, handle))
+        // The semaphore address may be a host-heap pointer (from Marshal.AllocHGlobal
+        // in the libc malloc path). Try guest memory first, then host memory directly.
+        Span<byte> handleBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(handleBytes, handle);
+        bool wrote = false;
+        if (ctx.Memory.TryWrite(semaphoreAddress, handleBytes))
+        {
+            wrote = true;
+        }
+        else
+        {
+            // Try writing directly to host memory (the address may be a host pointer)
+            try
+            {
+                unsafe
+                {
+                    System.Runtime.InteropServices.Marshal.Copy(handleBytes.ToArray(), 0,
+                        (nint)semaphoreAddress, sizeof(uint));
+                    wrote = true;
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] sema.posix-init: host-write fallback addr=0x{semaphoreAddress:X16}");
+                }
+            }
+            catch
+            {
+                wrote = false;
+            }
+        }
+        if (!wrote)
         {
             _semaphores.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -396,10 +424,14 @@ public static class KernelSemaphoreCompatExports
         LibraryName = "libKernel")]
     public static int PosixSemWait(CpuContext ctx)
     {
-        if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
+        var semaphoreAddress = ctx[CpuRegister.Rdi];
+        Console.Error.WriteLine($"[HLE][DEBUG] sem_wait: addr=0x{semaphoreAddress:X16}");
+        if (!TryGetPosixSemaphoreHandle(ctx, semaphoreAddress, out var handle))
         {
+            Console.Error.WriteLine($"[HLE][DEBUG] sem_wait: TryGetPosixSemaphoreHandle failed for addr=0x{semaphoreAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
+        Console.Error.WriteLine($"[HLE][DEBUG] sem_wait: handle=0x{handle:X8}");
 
         ctx[CpuRegister.Rdi] = handle;
         ctx[CpuRegister.Rsi] = 1;
@@ -513,9 +545,43 @@ public static class KernelSemaphoreCompatExports
     private static bool TryGetPosixSemaphoreHandle(CpuContext ctx, ulong semaphoreAddress, out uint handle)
     {
         handle = 0;
-        return semaphoreAddress != 0 &&
-               TryReadUInt32(ctx, semaphoreAddress, out handle) &&
-               handle != 0;
+        if (semaphoreAddress == 0)
+        {
+            return false;
+        }
+
+        // The semaphore address may be a host-heap pointer (from
+        // Marshal.AllocHGlobal in the libc malloc path). Try guest memory first,
+        // then try reading directly from host memory.
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        if (ctx.Memory.TryRead(semaphoreAddress, buffer))
+        {
+            handle = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+            return handle != 0;
+        }
+
+        // Direct host memory read — the address is a host pointer from
+        // Marshal.AllocHGlobal. PosixHostMemory.Query doesn't track these,
+        // so TryReadCompat fails. We read directly with Marshal.Copy.
+        try
+        {
+            unsafe
+            {
+                var bytes = new byte[4];
+                System.Runtime.InteropServices.Marshal.Copy(
+                    (nint)semaphoreAddress, bytes, 0, 4);
+                handle = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+                Console.Error.WriteLine(
+                    $"[HLE][DEBUG] sem: host-read addr=0x{semaphoreAddress:X16} handle=0x{handle:X8}");
+                return handle != 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"[HLE][DEBUG] sem: host-read failed addr=0x{semaphoreAddress:X16}: {ex.Message}");
+            return false;
+        }
     }
 
     private static int SetReturn(CpuContext ctx, OrbisGen2Result result)
@@ -528,7 +594,9 @@ public static class KernelSemaphoreCompatExports
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, buffer))
+        // Use TryReadCompat: semaphore addresses may be host-heap pointers
+        // (from Marshal.AllocHGlobal in the libc malloc path).
+        if (!KernelMemoryCompatExports.TryReadCompat(ctx, address, buffer))
         {
             value = 0;
             return false;
@@ -542,7 +610,8 @@ public static class KernelSemaphoreCompatExports
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
-        return ctx.Memory.TryWrite(address, buffer);
+        // Use TryWriteCompat: same host-pointer fallback as TryReadUInt32.
+        return KernelMemoryCompatExports.TryWriteCompat(ctx, address, buffer);
     }
 
     private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int maxLength, out string value)
