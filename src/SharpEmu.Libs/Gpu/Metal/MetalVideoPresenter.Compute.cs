@@ -144,20 +144,19 @@ internal static partial class MetalVideoPresenter
         var encoder = MetalNative.Send(commandBuffer, MetalNative.Selector("computeCommandEncoder"));
         MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
 
-        var buffers = new List<nint>();
-        var writeBackBuffers = new List<(nint Buffer, GuestMemoryBuffer Guest, uint Bias)>();
+        var writeBackBuffers = new List<(nint Pointer, GuestMemoryBuffer Guest)>();
         var selSetBuffer = MetalNative.Selector("setBuffer:offset:atIndex:");
         var bufferCount = dispatch.GlobalMemoryBuffers.Length;
-        var boundBytes = new uint[Math.Max(bufferCount, 1)];
+        Span<uint> boundBytes = stackalloc uint[Math.Max(bufferCount, 1)];
         for (var index = 0; index < bufferCount; index++)
         {
             var guest = dispatch.GlobalMemoryBuffers[index];
-            var buffer = CreateGlobalBuffer(device, guest, out var bias, out boundBytes[index]);
-            buffers.Add(buffer);
-            MetalNative.SendSetBuffer(encoder, selSetBuffer, buffer, 0, (nuint)index);
+            var pointer = UploadGlobalBuffer(
+                device, guest, out var buffer, out var offset, out boundBytes[index]);
+            MetalNative.SendSetBuffer(encoder, selSetBuffer, buffer, (nuint)offset, (nuint)index);
             if (guest.Writable && guest.WriteBackToGuest)
             {
-                writeBackBuffers.Add((buffer, guest, bias));
+                writeBackBuffers.Add((pointer, guest));
             }
         }
 
@@ -165,27 +164,30 @@ internal static partial class MetalVideoPresenter
         // last threadgroup row, then each bound buffer's byte length follows
         // (including the alignment-bias prefix the shader indexes past).
         var shader = dispatch.Shader.Shader;
-        var uniforms = new byte[16 + (Math.Max(bufferCount, 1) * sizeof(uint))];
+        var uniforms = AllocateUpload(
+            device,
+            16 + (Math.Max(bufferCount, 1) * sizeof(uint)),
+            out var uniformsBuffer,
+            out var uniformsOffset);
         WriteDispatchLimit(uniforms, 0, dispatch.ThreadCountX, dispatch.GroupCountX, shader.ThreadgroupSizeX);
         WriteDispatchLimit(uniforms, 4, dispatch.ThreadCountY, dispatch.GroupCountY, shader.ThreadgroupSizeY);
         WriteDispatchLimit(uniforms, 8, dispatch.ThreadCountZ, dispatch.GroupCountZ, shader.ThreadgroupSizeZ);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms[12..], 0);
         for (var index = 0; index < bufferCount; index++)
         {
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-                uniforms.AsSpan(16 + (index * sizeof(uint))),
+                uniforms[(16 + (index * sizeof(uint)))..],
                 boundBytes[index]);
         }
 
         // Bind at the stage's declared SharpEmuUniforms slot (see the draw path:
         // stages compute their own index from globalBufferBase + total count).
-        var uniformsBuffer = CreateBuffer(device, uniforms, uniforms.Length);
-        buffers.Add(uniformsBuffer);
         var uniformsIndex = shader.UniformsBufferIndex;
         MetalNative.SendSetBuffer(
             encoder,
             selSetBuffer,
             uniformsBuffer,
-            0,
+            (nuint)uniformsOffset,
             (nuint)(uniformsIndex >= 0 ? uniformsIndex : bufferCount));
 
         var selSetTexture = MetalNative.Selector("setTexture:atIndex:");
@@ -235,14 +237,13 @@ internal static partial class MetalVideoPresenter
             });
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+        TagUploadPages(commandBuffer);
 
         if (writeBackBuffers.Count > 0)
         {
             MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
             WriteBuffersBackToGuest(writeBackBuffers);
         }
-
-        ReleaseBuffers(buffers);
 
         foreach (var descriptor in dispatch.Textures)
         {
@@ -386,7 +387,7 @@ internal static partial class MetalVideoPresenter
     }
 
     private static void WriteDispatchLimit(
-        byte[] uniforms,
+        Span<byte> uniforms,
         int offset,
         uint threadCount,
         uint groupCount,
@@ -396,7 +397,7 @@ internal static partial class MetalVideoPresenter
             ? threadCount
             : groupCount * Math.Max(threadgroupSize, 1);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-            uniforms.AsSpan(offset),
+            uniforms[offset..],
             limit);
     }
 

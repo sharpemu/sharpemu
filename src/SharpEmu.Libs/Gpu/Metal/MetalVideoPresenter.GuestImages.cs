@@ -558,6 +558,7 @@ internal static partial class MetalVideoPresenter
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks;
         var completedWork = 0;
         _drawSnapshotQueue = queue;
+        RecycleCompletedUploadPages();
         while (completedWork < MaxGuestWorkPerRender)
         {
             if (!TryTakeGuestWork(out var pendingGuestWork))
