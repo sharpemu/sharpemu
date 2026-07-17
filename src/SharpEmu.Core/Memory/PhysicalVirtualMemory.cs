@@ -873,6 +873,15 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        // A managed write into a page the guest-image write tracker has
+        // protected surfaces as a fatal AccessViolation — the runtime turns
+        // SIGSEGV in managed code into an exception before the resumable
+        // signal bridge can restore access (native guest stores recover
+        // there). Pre-visit the span so tracked pages are unprotected and
+        // their owners dirtied before the copy; guest addresses are
+        // host-identical, matching the tracker's fault addresses.
+        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
+
         var requiresExclusiveAccess = false;
         _gate.EnterReadLock();
         try
