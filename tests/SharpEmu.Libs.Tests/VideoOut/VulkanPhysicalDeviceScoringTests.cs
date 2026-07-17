@@ -14,24 +14,22 @@ public sealed class VulkanPhysicalDeviceScoringTests
     private const uint IntelVendorId = 0x8086;
     private const uint QualcommVendorId = 0x5143;
 
+    private static PhysicalDeviceProperties Device(PhysicalDeviceType type, uint vendorId = 0)
+        => new() { DeviceType = type, VendorID = vendorId };
+
     private static int Score(PhysicalDeviceType type, uint vendorId = 0)
-        => VulkanVideoPresenter.ScorePhysicalDevice(
-            new PhysicalDeviceProperties { DeviceType = type, VendorID = vendorId },
-            name: string.Empty,
-            deviceOverride: null);
+        => VulkanVideoPresenter.ScorePhysicalDevice(Device(type, vendorId), name: string.Empty, deviceOverride: null);
 
     [Fact]
     public void RealIntegratedGpuOutranksSoftwareRasterizer()
     {
-        // Regression for #325: a Cpu-type software rasterizer (Mesa lavapipe)
-        // must not be preferred over a real integrated GPU.
         Assert.True(Score(PhysicalDeviceType.IntegratedGpu) > Score(PhysicalDeviceType.Cpu));
     }
 
     [Theory]
     [InlineData(IntelVendorId)]
     [InlineData(QualcommVendorId)]
-    [InlineData(0)] // Apple/MoltenVK reports Apple Silicon as an integrated GPU.
+    [InlineData(0u)]
     public void NonAmdIntegratedGpuBeatsSoftware(uint vendorId)
     {
         Assert.True(Score(PhysicalDeviceType.IntegratedGpu, vendorId) > Score(PhysicalDeviceType.Cpu));
@@ -52,29 +50,45 @@ public sealed class VulkanPhysicalDeviceScoringTests
     }
 
     [Fact]
-    public void AmdIntegratedGpuStaysLastResort()
-    {
-        // #97: AMD's integrated driver crashes compiling translated shaders, so
-        // it must rank below every other candidate, including software.
-        var amd = Score(PhysicalDeviceType.IntegratedGpu, AmdVendorId);
-        Assert.True(amd < Score(PhysicalDeviceType.Cpu));
-        Assert.True(amd < Score(PhysicalDeviceType.IntegratedGpu, IntelVendorId));
-        Assert.True(amd < Score(PhysicalDeviceType.DiscreteGpu));
-    }
-
-    [Fact]
-    public void AmdDiscreteGpuIsNotPenalized()
-    {
-        // The #97 penalty is specific to AMD integrated parts; an AMD discrete
-        // card must keep the full discrete score.
-        Assert.Equal(Score(PhysicalDeviceType.DiscreteGpu), Score(PhysicalDeviceType.DiscreteGpu, AmdVendorId));
-    }
-
-    [Fact]
     public void DeviceOverridePinsMatchingAdapterAndExcludesOthers()
     {
-        var properties = new PhysicalDeviceProperties { DeviceType = PhysicalDeviceType.Cpu };
+        var properties = Device(PhysicalDeviceType.Cpu);
         Assert.Equal(1000, VulkanVideoPresenter.ScorePhysicalDevice(properties, "Radeon Graphics", "radeon"));
         Assert.Equal(-1000, VulkanVideoPresenter.ScorePhysicalDevice(properties, "Radeon Graphics", "nvidia"));
+    }
+
+    [Fact]
+    public void AmdIntegratedGpuIsLastResortOnWindows()
+    {
+        var penalty = VulkanVideoPresenter.ComputeDevicePenalty(
+            Device(PhysicalDeviceType.IntegratedGpu, AmdVendorId), isWindows: true);
+        Assert.True(penalty > 0);
+        Assert.True(50 - penalty < 10);
+    }
+
+    [Fact]
+    public void AmdApuIsNotPenalizedOffWindows()
+    {
+        var penalty = VulkanVideoPresenter.ComputeDevicePenalty(
+            Device(PhysicalDeviceType.IntegratedGpu, AmdVendorId), isWindows: false);
+        Assert.Equal(0, penalty);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AmdDiscreteGpuIsNeverPenalized(bool isWindows)
+    {
+        Assert.Equal(0, VulkanVideoPresenter.ComputeDevicePenalty(
+            Device(PhysicalDeviceType.DiscreteGpu, AmdVendorId), isWindows));
+    }
+
+    [Theory]
+    [InlineData(IntelVendorId)]
+    [InlineData(QualcommVendorId)]
+    public void NonAmdIntegratedGpuIsNeverPenalized(uint vendorId)
+    {
+        Assert.Equal(0, VulkanVideoPresenter.ComputeDevicePenalty(
+            Device(PhysicalDeviceType.IntegratedGpu, vendorId), isWindows: true));
     }
 }
