@@ -785,6 +785,46 @@ internal static partial class MetalVideoPresenter
         }
     }
 
+    /// <summary>Builds and binds a stage's sampler argument buffer: one 8-byte
+    /// Tier 2 resource ID per sampled image, written into an arena slice and
+    /// bound at the shader's SamplerArgBufferIndex. The stage's images are
+    /// draw.Textures[ImageBindingBase + j] for its j-th image, matching how the
+    /// translator numbered SamplerSlots. No-op for stages that sample nothing.</summary>
+    private static void BindSamplerArgumentBuffer(
+        nint device,
+        nint encoder,
+        nint selSetBuffer,
+        MetalCompiledGuestShader shader,
+        GuestDrawTexture[] textures)
+    {
+        var slots = shader.Shader.SamplerSlots;
+        var count = shader.Shader.SamplerCount;
+        var argIndex = shader.Shader.SamplerArgBufferIndex;
+        if (slots is null || count == 0 || argIndex < 0)
+        {
+            return;
+        }
+
+        var imageBase = shader.Shader.ImageBindingBase;
+        var slice = AllocateUpload(device, count * sizeof(ulong), out var buffer, out var offset);
+        slice.Clear();
+        for (var j = 0; j < slots.Count; j++)
+        {
+            var slot = slots[j];
+            if (slot < 0)
+            {
+                continue;
+            }
+
+            var sampler = GetOrCreateSampler(device, textures[imageBase + j].Sampler);
+            var resourceId = MetalNative.SendGpuResourceId(sampler, MetalNative.Selector("gpuResourceID"));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
+                slice[(slot * sizeof(ulong))..], resourceId);
+        }
+
+        MetalNative.SendSetBuffer(encoder, selSetBuffer, buffer, (nuint)offset, (nuint)argIndex);
+    }
+
     /// <summary>Resolves every texture a draw samples, encoding any snapshot
     /// blits into <paramref name="blitCommandBuffer"/>; must run before the
     /// consuming encoder opens on that command buffer.</summary>
@@ -878,16 +918,9 @@ internal static partial class MetalVideoPresenter
 
         var selSetVertexTexture = MetalNative.Selector("setVertexTexture:atIndex:");
         var selSetFragmentTexture = MetalNative.Selector("setFragmentTexture:atIndex:");
-        var selSetVertexSampler = MetalNative.Selector("setVertexSamplerState:atIndex:");
-        var selSetFragmentSampler = MetalNative.Selector("setFragmentSamplerState:atIndex:");
         // Texture slots are global across the draw's stages ([0, vertexImageBase)
         // is the pixel stage's block), so textures bind to both stage tables at
-        // their global index. Sampler slots are per-stage and compact (Metal has
-        // 16 against 31 texture slots) — bind each stage's samplers at the slots
-        // its shader declared, from that shader's SamplerSlots map.
-        var pixelSamplerSlots = draw.PixelShader.Shader.SamplerSlots;
-        var vertexSamplerSlots = draw.VertexShader?.Shader.SamplerSlots;
-        var vertexImageBase = draw.VertexShader?.Shader.ImageBindingBase ?? int.MaxValue;
+        // their global index.
         for (var index = 0; index < draw.Textures.Length; index++)
         {
             var texture = textureHandles[index];
@@ -900,26 +933,15 @@ internal static partial class MetalVideoPresenter
                     MetalNative.SendVoid(texture, MetalNative.Selector("release"));
                 }
             }
+        }
 
-            var sampler = GetOrCreateSampler(device, draw.Textures[index].Sampler);
-            if (index >= vertexImageBase)
-            {
-                var local = index - vertexImageBase;
-                if (vertexSamplerSlots is not null &&
-                    local < vertexSamplerSlots.Count &&
-                    vertexSamplerSlots[local] >= 0)
-                {
-                    MetalNative.SendSetAtIndex(
-                        encoder, selSetVertexSampler, sampler, (nuint)vertexSamplerSlots[local]);
-                }
-            }
-            else if (pixelSamplerSlots is not null &&
-                     index < pixelSamplerSlots.Count &&
-                     pixelSamplerSlots[index] >= 0)
-            {
-                MetalNative.SendSetAtIndex(
-                    encoder, selSetFragmentSampler, sampler, (nuint)pixelSamplerSlots[index]);
-            }
+        // Samplers travel in a per-stage argument buffer (Metal caps direct
+        // sampler slots at 16 per stage, but shaders sample more), one entry
+        // per sampled image.
+        BindSamplerArgumentBuffer(device, encoder, selSetFragmentBuffer, draw.PixelShader, draw.Textures);
+        if (draw.VertexShader is { } vertexShader)
+        {
+            BindSamplerArgumentBuffer(device, encoder, selSetVertexBuffer, vertexShader, draw.Textures);
         }
 
         Span<nuint> vertexSlots = stackalloc nuint[draw.VertexBuffers.Length];

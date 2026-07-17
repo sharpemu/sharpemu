@@ -160,6 +160,12 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector);
 
+    /// <summary>objc_msgSend for -gpuResourceID. MTLResourceID is a one-field
+    /// 8-byte struct, returned in a register on the x86-64 ABI, so it maps to a
+    /// ulong return — the value written into a Tier 2 argument buffer slot.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial ulong SendGpuResourceId(nint receiver, nint selector);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument);
 

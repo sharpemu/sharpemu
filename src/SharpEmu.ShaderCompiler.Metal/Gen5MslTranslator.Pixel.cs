@@ -30,6 +30,18 @@ public static partial class Gen5MslTranslator
                 var isStorage = Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
                 _imageKinds.Add((isStorage, DecodeImageComponentKind(binding.ResourceDescriptor)));
             }
+
+            // Assign one sampler per sampled image (storage images take none).
+            // Computed before body emission because the sample calls reference
+            // the slots. Samplers live in an argument buffer (see
+            // EmitImageArguments), so there is no 16-slot cap to dedup against —
+            // each image keeps its own sampler, matching the SPIR-V/Vulkan path.
+            _samplerSlots = new int[_imageKinds.Count];
+            _samplerCount = 0;
+            for (var index = 0; index < _imageKinds.Count; index++)
+            {
+                _samplerSlots[index] = _imageKinds[index].IsStorage ? -1 : _samplerCount++;
+            }
         }
 
         /// <summary>"float", "int", or "uint" from the descriptor's unified format.</summary>
@@ -54,40 +66,60 @@ public static partial class Gen5MslTranslator
             };
         }
 
-        /// <summary>Metal exposes 16 sampler slots per stage.</summary>
-        private const int MaxSamplerSlots = 16;
-
+        /// <summary>Per image binding: its sampler's [[id(N)]] inside the sampler
+        /// argument buffer, or -1 for storage images. Set by DeclareImageKinds.</summary>
         private int[] _samplerSlots = [];
 
+        /// <summary>Number of sampled images (= sampler argument-buffer entries).</summary>
+        private int _samplerCount;
+
+        /// <summary>Buffer slot the sampler argument buffer binds to, past this
+        /// stage's global buffers, uniforms, and scalar-state buffer.</summary>
+        private int SamplerArgBufferIndex =>
+            Math.Max(UniformsBufferIndex, _initialScalarBufferIndex) + 1;
+
+        /// <summary>Emits the texture arguments (direct [[texture(N)]] slots, which
+        /// run to 31 — enough) plus, when the stage samples anything, the sampler
+        /// argument buffer. Samplers go through an argument buffer rather than
+        /// [[sampler(N)]] slots because Metal caps those at 16 per stage while
+        /// real shaders sample more (void Terrarium's scene shader: 17); argument
+        /// buffers have no such limit on Apple Silicon.</summary>
         private void EmitImageArguments(StringBuilder source)
         {
-            _samplerSlots = new int[_imageKinds.Count];
-            var samplerCount = 0;
             for (var index = 0; index < _imageKinds.Count; index++)
             {
                 var (isStorage, kind) = _imageKinds[index];
-                var slot = _imageBindingBase + index;
+                var textureSlot = _imageBindingBase + index;
                 source.AppendLine(isStorage
-                    ? $"    texture2d<{kind}, access::read_write> tex{index} [[texture({slot})]],"
-                    : $"    texture2d<{kind}> tex{index} [[texture({slot})]],");
-                if (isStorage)
-                {
-                    _samplerSlots[index] = -1;
-                    continue;
-                }
-
-                // Sampler slots are per-stage and compact: texture slots run to
-                // 30, but [[sampler(N)]] must stay below 16, so samplers count
-                // sampled images only — never the shared texture slot.
-                if (samplerCount >= MaxSamplerSlots)
-                {
-                    throw new InvalidOperationException(
-                        $"stage samples {samplerCount + 1}+ images; Metal exposes only {MaxSamplerSlots} sampler slots per stage");
-                }
-
-                source.AppendLine($"    sampler smp{index} [[sampler({samplerCount})]],");
-                _samplerSlots[index] = samplerCount++;
+                    ? $"    texture2d<{kind}, access::read_write> tex{index} [[texture({textureSlot})]],"
+                    : $"    texture2d<{kind}> tex{index} [[texture({textureSlot})]],");
             }
+
+            if (_samplerCount > 0)
+            {
+                source.AppendLine(
+                    $"    constant Gen5Samplers& sharpemu_samplers [[buffer({SamplerArgBufferIndex})]],");
+            }
+        }
+
+        /// <summary>Declares the sampler argument-buffer struct at file scope (one
+        /// sampler per sampled image). Empty when the stage samples nothing.</summary>
+        private void EmitSamplerArgumentBufferStruct(StringBuilder source)
+        {
+            if (_samplerCount == 0)
+            {
+                return;
+            }
+
+            source.AppendLine("struct Gen5Samplers");
+            source.AppendLine("{");
+            for (var slot = 0; slot < _samplerCount; slot++)
+            {
+                source.AppendLine($"    sampler smp{slot} [[id({slot})]];");
+            }
+
+            source.AppendLine("};");
+            source.AppendLine();
         }
 
         private bool TryResolveDominatingImageBinding(
@@ -332,7 +364,7 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             var opcode = instruction.Opcode;
             var texture = $"tex{bindingIndex}";
-            var samplerName = $"smp{bindingIndex}";
+            var samplerName = $"sharpemu_samplers.smp{_samplerSlots[bindingIndex]}";
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
             var hasGradients = opcode.Contains("SampleD", StringComparison.Ordinal);
@@ -439,7 +471,7 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             var opcode = instruction.Opcode;
             var texture = $"tex{bindingIndex}";
-            var samplerName = $"smp{bindingIndex}";
+            var samplerName = $"sharpemu_samplers.smp{_samplerSlots[bindingIndex]}";
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("Gather4C", StringComparison.Ordinal);
             var addressCursor = 0;

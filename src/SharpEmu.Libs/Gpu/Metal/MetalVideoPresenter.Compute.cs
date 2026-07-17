@@ -213,13 +213,8 @@ internal static partial class MetalVideoPresenter
             (nuint)(uniformsIndex >= 0 ? uniformsIndex : bufferCount));
 
         var selSetTexture = MetalNative.Selector("setTexture:atIndex:");
-        var selSetSampler = MetalNative.Selector("setSamplerState:atIndex:");
-        // Sampler slots are per-stage and compact (see the draw path): bind at
-        // the slots the kernel declared, skipping storage images.
-        var samplerSlots = shader.SamplerSlots;
         for (var index = 0; index < dispatch.Textures.Length; index++)
         {
-            var descriptor = dispatch.Textures[index];
             var texture = textureHandles[index];
             if (texture != 0)
             {
@@ -229,18 +224,11 @@ internal static partial class MetalVideoPresenter
                     MetalNative.SendVoid(texture, MetalNative.Selector("release"));
                 }
             }
-
-            if (samplerSlots is not null &&
-                index < samplerSlots.Count &&
-                samplerSlots[index] >= 0)
-            {
-                MetalNative.SendSetAtIndex(
-                    encoder,
-                    selSetSampler,
-                    GetOrCreateSampler(device, descriptor.Sampler),
-                    (nuint)samplerSlots[index]);
-            }
         }
+
+        // Samplers travel in an argument buffer bound at setBuffer (see the draw
+        // path), sidestepping Metal's 16-sampler-per-stage cap.
+        BindSamplerArgumentBuffer(device, encoder, selSetBuffer, dispatch.Shader, dispatch.Textures);
 
         MetalNative.SendDispatch(
             encoder,

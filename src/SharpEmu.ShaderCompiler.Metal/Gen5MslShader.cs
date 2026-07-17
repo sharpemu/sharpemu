@@ -32,11 +32,13 @@ public enum Gen5MslStage
 /// stage's has a higher base — so the presenter must bind the uniforms buffer
 /// per stage at this exact index rather than assuming one shared slot.</para>
 /// <para>Texture slots are global across a draw's stages ([[texture(
-/// ImageBindingBase + i)]]), but sampler slots are per-stage and compact:
-/// Metal exposes only 16 sampler slots per stage against 31 texture slots, so
-/// samplers count sampled (non-storage) images from zero within each stage.
-/// <see cref="SamplerSlots"/> maps this stage's image binding index to its
-/// [[sampler(N)]] slot, -1 for storage images that take none.</para>
+/// ImageBindingBase + i)]]). Samplers live in a per-stage argument buffer
+/// bound at <see cref="SamplerArgBufferIndex"/> (Metal caps direct
+/// [[sampler(N)]] slots at 16 per stage, but shaders sample more), holding one
+/// sampler per sampled image. <see cref="SamplerSlots"/> maps this stage's
+/// image binding index to its [[id(N)]] entry in that argument buffer, -1 for
+/// storage images that take none; <see cref="SamplerCount"/> is the entry
+/// count.</para>
 /// </remarks>
 public sealed record Gen5MslShader(
     string Source,
@@ -51,4 +53,6 @@ public sealed record Gen5MslShader(
     uint ThreadgroupSizeZ = 1,
     int UniformsBufferIndex = -1,
     int ImageBindingBase = 0,
-    IReadOnlyList<int>? SamplerSlots = null);
+    IReadOnlyList<int>? SamplerSlots = null,
+    int SamplerCount = 0,
+    int SamplerArgBufferIndex = -1);

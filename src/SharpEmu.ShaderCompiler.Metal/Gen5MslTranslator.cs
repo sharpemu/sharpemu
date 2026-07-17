@@ -422,7 +422,9 @@ public static partial class Gen5MslTranslator
                     _localSizeZ,
                     UniformsBufferIndex: UniformsBufferIndex,
                     ImageBindingBase: _imageBindingBase,
-                    SamplerSlots: _samplerSlots);
+                    SamplerSlots: _samplerSlots,
+                    SamplerCount: _samplerCount,
+                    SamplerArgBufferIndex: _samplerCount > 0 ? SamplerArgBufferIndex : -1);
                 return true;
             }
             catch (Exception exception)
@@ -528,6 +530,7 @@ public static partial class Gen5MslTranslator
             source.AppendLine($"    uint buffer_bytes[{Math.Max(_totalGlobalBufferCount, 1)}];");
             source.AppendLine("};");
             source.AppendLine();
+            EmitSamplerArgumentBufferStruct(source);
             EmitPrelude(source);
             source.AppendLine();
 
