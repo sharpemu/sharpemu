@@ -472,7 +472,11 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
-        var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+        var commandBuffer = BeginBatchedGuestCommands(queue);
+        Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
+        Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
+        ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
+
         var pass = MetalNative.Send(
             MetalNative.Class("MTLRenderPassDescriptor"),
             MetalNative.Selector("renderPassDescriptor"));
@@ -504,20 +508,19 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
 
         EncodeRenderState(device, encoder, draw.RenderState, depthState, depth is not null, firstWidth, firstHeight);
-        _ = EncodeDrawBindings(device, encoder, work, out var writeBackBuffers);
+        EncodeDrawBindings(device, encoder, work, textureHandles, textureOwned, out var writeBackBuffers);
         EncodeDrawCall(encoder, draw);
 
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
-        TagUploadPages(commandBuffer);
-        TagSnapshotResources(commandBuffer);
 
         // CPU-visible GPU writes are ordering points in the guest command
         // stream: completing this work item is the signal WaitForGuestWork
-        // relies on, so the write-back must land before completion.
+        // relies on, so the batch must land and the write-back must complete
+        // before this item does. Pure-GPU draws stay in the open batch.
         if (writeBackBuffers.Count > 0)
         {
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
+            var committed = FlushBatchedGuestCommands();
+            MetalNative.SendVoid(committed, MetalNative.Selector("waitUntilCompleted"));
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
@@ -589,13 +592,16 @@ internal static partial class MetalVideoPresenter
         }
 
         var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+        Span<nint> textureHandles = stackalloc nint[draw.Textures.Length];
+        Span<bool> textureOwned = stackalloc bool[draw.Textures.Length];
+        ResolveDrawTextures(device, commandBuffer, draw.Textures, textureHandles, textureOwned);
         var encoder = MetalNative.Send(
             commandBuffer,
             MetalNative.Selector("renderCommandEncoderWithDescriptor:"),
             CreateClearPass(target, new MtlClearColor { Alpha = 1 }));
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
         var work = new OffscreenGuestDraw(draw, [], null, PublishTarget: false, ShaderAddress: 0);
-        _ = EncodeDrawBindings(device, encoder, work, out var writeBackBuffers);
+        EncodeDrawBindings(device, encoder, work, textureHandles, textureOwned, out var writeBackBuffers);
         EncodeDrawCall(encoder, draw);
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
@@ -727,18 +733,37 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Uploads and binds everything the translation contract names: global
-    /// buffers and SharpEmuUniforms to both stages, textures/samplers to both
-    /// stages, vertex streams at the high slots. Returns the transient MTLBuffers
-    /// to release and collects the writable ones for guest write-back.</summary>
-    private static List<nint> EncodeDrawBindings(
+    /// <summary>Resolves every texture a draw samples, encoding any snapshot
+    /// blits into <paramref name="blitCommandBuffer"/>; must run before the
+    /// consuming encoder opens on that command buffer.</summary>
+    private static void ResolveDrawTextures(
+        nint device,
+        nint blitCommandBuffer,
+        GuestDrawTexture[] textures,
+        Span<nint> handles,
+        Span<bool> owned)
+    {
+        for (var index = 0; index < textures.Length; index++)
+        {
+            handles[index] = CreateDrawTexture(
+                device, blitCommandBuffer, textures[index], out var ownedTexture);
+            owned[index] = ownedTexture;
+        }
+    }
+
+    /// <summary>Binds everything the translation contract names: global buffers
+    /// and SharpEmuUniforms to both stages, the pre-resolved textures/samplers
+    /// to both stages, vertex streams at the high slots. Collects the writable
+    /// buffers for guest write-back.</summary>
+    private static void EncodeDrawBindings(
         nint device,
         nint encoder,
         OffscreenGuestDraw work,
+        ReadOnlySpan<nint> textureHandles,
+        ReadOnlySpan<bool> textureOwned,
         out List<(nint Pointer, GuestMemoryBuffer Guest)> writeBackBuffers)
     {
         var draw = work.Draw;
-        var buffers = new List<nint>();
         writeBackBuffers = [];
 
         var selSetVertexBuffer = MetalNative.Selector("setVertexBuffer:offset:atIndex:");
@@ -805,12 +830,12 @@ internal static partial class MetalVideoPresenter
         var selSetFragmentSampler = MetalNative.Selector("setFragmentSamplerState:atIndex:");
         for (var index = 0; index < draw.Textures.Length; index++)
         {
-            var texture = CreateDrawTexture(device, draw.Textures[index], out var ownedTexture);
+            var texture = textureHandles[index];
             if (texture != 0)
             {
                 MetalNative.SendSetAtIndex(encoder, selSetVertexTexture, texture, (nuint)index);
                 MetalNative.SendSetAtIndex(encoder, selSetFragmentTexture, texture, (nuint)index);
-                if (ownedTexture)
+                if (textureOwned[index])
                 {
                     MetalNative.SendVoid(texture, MetalNative.Selector("release"));
                 }
@@ -834,8 +859,6 @@ internal static partial class MetalVideoPresenter
             MetalNative.SendSetBuffer(
                 encoder, selSetVertexBuffer, buffer, (nuint)offset, VertexBufferSlotBase + (nuint)index);
         }
-
-        return buffers;
     }
 
     private static void EncodeDrawCall(nint encoder, TranslatedGuestDraw draw)
@@ -1323,7 +1346,16 @@ internal static partial class MetalVideoPresenter
 
     private static int _missingTextureTraces;
 
-    private static nint CreateDrawTexture(nint device, GuestDrawTexture texture, out bool ownedByCaller)
+    /// <summary>Resolves one draw texture. Snapshot copies for feedback reads
+    /// are encoded into <paramref name="blitCommandBuffer"/>, so this must be
+    /// called before the consuming render or compute encoder opens on that
+    /// same command buffer — encoder order is what keeps the snapshot after
+    /// earlier batched passes that render to the source image.</summary>
+    private static nint CreateDrawTexture(
+        nint device,
+        nint blitCommandBuffer,
+        GuestDrawTexture texture,
+        out bool ownedByCaller)
     {
         ownedByCaller = true;
         if (texture.Width == 0 || texture.Height == 0)
@@ -1339,14 +1371,14 @@ internal static partial class MetalVideoPresenter
         // retired variant at the same address, scored by descriptor match.
         if (texture.RgbaPixels.Length == 0 && texture.Address != 0)
         {
-            if (TryCreateDepthSampleTexture(device, texture, out var depthSample))
+            if (TryCreateDepthSampleTexture(device, blitCommandBuffer, texture, out var depthSample))
             {
                 ownedByCaller = false;
                 return depthSample;
             }
 
             var live = ResolveGuestImageAlias(texture);
-            if (live is { Initialized: true } && _drawSnapshotQueue != 0)
+            if (live is { Initialized: true } && blitCommandBuffer != 0)
             {
                 // ShaderRead | RenderTarget (5), matching CreateGuestTexture:
                 // the source image was created with the same usage and blit
@@ -1355,7 +1387,7 @@ internal static partial class MetalVideoPresenter
                     device, live.Format, live.Width, live.Height, usage: 5);
                 if (snapshot != 0)
                 {
-                    CopyTexture(_drawSnapshotQueue, live.Texture, snapshot);
+                    EncodeCopyTexture(blitCommandBuffer, live.Texture, snapshot);
                     ownedByCaller = false;
                     return snapshot;
                 }
@@ -1524,13 +1556,14 @@ internal static partial class MetalVideoPresenter
     /// buffer into an R32Float texture the translated shader can sample.</summary>
     private static bool TryCreateDepthSampleTexture(
         nint device,
+        nint blitCommandBuffer,
         GuestDrawTexture texture,
         out nint sample)
     {
         sample = 0;
         // Identity channel select only; swizzled depth reads keep the
         // unresolved-texture warning until a title needs them.
-        if (texture.DstSelect != 0xFAC)
+        if (texture.DstSelect != 0xFAC || blitCommandBuffer == 0)
         {
             return false;
         }
@@ -1549,12 +1582,6 @@ internal static partial class MetalVideoPresenter
             !depth.Initialized ||
             texture.Width > depth.Width ||
             texture.Height > depth.Height)
-        {
-            return false;
-        }
-
-        var queue = _drawSnapshotQueue;
-        if (queue == 0)
         {
             return false;
         }
@@ -1578,8 +1605,7 @@ internal static partial class MetalVideoPresenter
             return false;
         }
 
-        var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
-        var blit = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
+        var blit = MetalNative.Send(blitCommandBuffer, MetalNative.Selector("blitCommandEncoder"));
         var size = new MtlSize { Width = depth.Width, Height = depth.Height, Depth = 1 };
         MetalNative.SendCopyTextureToBuffer(
             blit,
@@ -1610,12 +1636,8 @@ internal static partial class MetalVideoPresenter
             0,
             default);
         MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         return true;
     }
-
-    [ThreadStatic]
-    private static nint _drawSnapshotQueue;
 
     private static nint GetOrCreateSampler(nint device, GuestSampler sampler)
     {

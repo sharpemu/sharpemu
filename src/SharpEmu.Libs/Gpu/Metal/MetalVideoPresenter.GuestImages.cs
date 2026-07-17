@@ -557,70 +557,86 @@ internal static partial class MetalVideoPresenter
     {
         var deadline = System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks;
         var completedWork = 0;
-        _drawSnapshotQueue = queue;
         RecycleCompletedUploadPages();
         RecycleCompletedSnapshotResources();
         EvictDirtyCachedDrawTextures();
-        while (completedWork < MaxGuestWorkPerRender)
+        try
         {
-            if (!TryTakeGuestWork(out var pendingGuestWork))
+            while (completedWork < MaxGuestWorkPerRender)
             {
-                return;
-            }
-
-            Volatile.Write(ref _executingGuestWorkSequence, pendingGuestWork.Sequence);
-            using var guestQueueScope = EnterGuestQueue(
-                pendingGuestWork.Queue.Name,
-                pendingGuestWork.Queue.SubmissionId);
-            _enqueueAsImmediateQueueFollowup = true;
-            _immediateFollowupTail = null;
-            try
-            {
-                switch (pendingGuestWork.Work)
+                if (!TryTakeGuestWork(out var pendingGuestWork))
                 {
-                    case GuestImageWrite write:
-                        ExecuteGuestImageWrite(device, queue, write);
-                        break;
-                    case OrderedGuestAction action:
-                        ExecuteOrderedGuestAction(action);
-                        break;
-                    case OrderedGuestFlip flip:
-                        ExecuteOrderedGuestFlip(device, queue, flip);
-                        break;
-                    case OrderedGuestFlipWait:
-                        // Reaching this marker in queue order is the guarantee:
-                        // the flip it follows has already captured its image.
-                        break;
-                    case GuestImageBlit blit:
-                        ExecuteGuestImageBlit(queue, blit);
-                        break;
-                    case OffscreenGuestDraw offscreenDraw:
-                        ExecuteOffscreenDraw(device, queue, offscreenDraw);
-                        break;
-                    case ComputeGuestDispatch computeDispatch:
-                        ExecuteComputeDispatch(device, queue, computeDispatch);
-                        break;
+                    return;
+                }
+
+                Volatile.Write(ref _executingGuestWorkSequence, pendingGuestWork.Sequence);
+                using var guestQueueScope = EnterGuestQueue(
+                    pendingGuestWork.Queue.Name,
+                    pendingGuestWork.Queue.SubmissionId);
+                _enqueueAsImmediateQueueFollowup = true;
+                _immediateFollowupTail = null;
+                try
+                {
+                    // Draws and compute dispatches encode into the shared batch
+                    // command buffer; everything else must observe their output
+                    // on the serial queue, so it flushes the batch first.
+                    switch (pendingGuestWork.Work)
+                    {
+                        case GuestImageWrite write:
+                            FlushBatchedGuestCommands();
+                            ExecuteGuestImageWrite(device, queue, write);
+                            break;
+                        case OrderedGuestAction action:
+                            FlushBatchedGuestCommands();
+                            ExecuteOrderedGuestAction(action);
+                            break;
+                        case OrderedGuestFlip flip:
+                            FlushBatchedGuestCommands();
+                            ExecuteOrderedGuestFlip(device, queue, flip);
+                            break;
+                        case OrderedGuestFlipWait:
+                            // Reaching this marker in queue order is the guarantee:
+                            // the flip it follows has already captured its image.
+                            break;
+                        case GuestImageBlit blit:
+                            FlushBatchedGuestCommands();
+                            ExecuteGuestImageBlit(queue, blit);
+                            break;
+                        case OffscreenGuestDraw offscreenDraw:
+                            ExecuteOffscreenDraw(device, queue, offscreenDraw);
+                            break;
+                        case ComputeGuestDispatch computeDispatch:
+                            ExecuteComputeDispatch(device, queue, computeDispatch);
+                            break;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][ERROR] Metal guest work failed " +
+                        $"({pendingGuestWork.Work.GetType().Name}): {exception.Message}");
+                }
+                finally
+                {
+                    CompleteGuestWork(pendingGuestWork);
+                    _enqueueAsImmediateQueueFollowup = false;
+                    _immediateFollowupTail = null;
+                    Volatile.Write(ref _executingGuestWorkSequence, 0);
+                }
+
+                completedWork++;
+                if (System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                {
+                    return;
                 }
             }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][ERROR] Metal guest work failed " +
-                    $"({pendingGuestWork.Work.GetType().Name}): {exception.Message}");
-            }
-            finally
-            {
-                CompleteGuestWork(pendingGuestWork);
-                _enqueueAsImmediateQueueFollowup = false;
-                _immediateFollowupTail = null;
-                Volatile.Write(ref _executingGuestWorkSequence, 0);
-            }
-
-            completedWork++;
-            if (System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
-            {
-                return;
-            }
+        }
+        finally
+        {
+            // Whatever path exits the drain, batched work must reach the queue:
+            // the present pass and the next drain's recyclers both assume every
+            // encoded command buffer has been committed.
+            _ = FlushBatchedGuestCommands();
         }
     }
 
@@ -1151,6 +1167,15 @@ internal static partial class MetalVideoPresenter
     private static void CopyTexture(nint queue, nint source, nint destination)
     {
         var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+        EncodeCopyTexture(commandBuffer, source, destination);
+        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
+    }
+
+    /// <summary>Encodes a full-texture copy into an existing command buffer;
+    /// used by the batched draw path, where the copy must be ordered after the
+    /// batch's earlier passes rather than committed ahead of them.</summary>
+    private static void EncodeCopyTexture(nint commandBuffer, nint source, nint destination)
+    {
         var encoder = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
         MetalNative.SendVoidCopyTexture(
             encoder,
@@ -1158,6 +1183,5 @@ internal static partial class MetalVideoPresenter
             source,
             destination);
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
     }
 }

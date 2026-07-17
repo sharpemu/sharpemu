@@ -140,7 +140,29 @@ internal static partial class MetalVideoPresenter
             return;
         }
 
-        var commandBuffer = MetalNative.Send(queue, MetalNative.Selector("commandBuffer"));
+        var commandBuffer = BeginBatchedGuestCommands(queue);
+
+        // Pre-resolve textures before the compute encoder opens: snapshot
+        // blits for feedback reads encode into the batch and encoder order
+        // must place them ahead of this dispatch.
+        Span<nint> textureHandles = stackalloc nint[dispatch.Textures.Length];
+        Span<bool> textureOwned = stackalloc bool[dispatch.Textures.Length];
+        for (var index = 0; index < dispatch.Textures.Length; index++)
+        {
+            var descriptor = dispatch.Textures[index];
+            if (descriptor.IsStorage && descriptor.Address != 0)
+            {
+                textureHandles[index] = EnsureStorageImage(device, descriptor)?.Texture ?? 0;
+                textureOwned[index] = false;
+            }
+            else
+            {
+                textureHandles[index] = CreateDrawTexture(
+                    device, commandBuffer, descriptor, out var ownedTexture);
+                textureOwned[index] = ownedTexture;
+            }
+        }
+
         var encoder = MetalNative.Send(commandBuffer, MetalNative.Selector("computeCommandEncoder"));
         MetalNative.SendVoid(encoder, MetalNative.Selector("setComputePipelineState:"), pipeline);
 
@@ -195,22 +217,11 @@ internal static partial class MetalVideoPresenter
         for (var index = 0; index < dispatch.Textures.Length; index++)
         {
             var descriptor = dispatch.Textures[index];
-            nint texture;
-            var transient = false;
-            if (descriptor.IsStorage && descriptor.Address != 0)
-            {
-                texture = EnsureStorageImage(device, descriptor)?.Texture ?? 0;
-            }
-            else
-            {
-                texture = CreateDrawTexture(device, descriptor, out var ownedTexture);
-                transient = texture != 0 && ownedTexture;
-            }
-
+            var texture = textureHandles[index];
             if (texture != 0)
             {
                 MetalNative.SendSetAtIndex(encoder, selSetTexture, texture, (nuint)index);
-                if (transient)
+                if (textureOwned[index])
                 {
                     MetalNative.SendVoid(texture, MetalNative.Selector("release"));
                 }
@@ -236,13 +247,14 @@ internal static partial class MetalVideoPresenter
                 Depth = Math.Max(shader.ThreadgroupSizeZ, 1),
             });
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
-        MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
-        TagUploadPages(commandBuffer);
-        TagSnapshotResources(commandBuffer);
 
+        // CPU-visible writes are ordering points (see the draw path): flush
+        // the batch and wait so the write-back lands before this work item
+        // completes. Pure-GPU dispatches stay in the open batch.
         if (writeBackBuffers.Count > 0)
         {
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
+            var committed = FlushBatchedGuestCommands();
+            MetalNative.SendVoid(committed, MetalNative.Selector("waitUntilCompleted"));
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
