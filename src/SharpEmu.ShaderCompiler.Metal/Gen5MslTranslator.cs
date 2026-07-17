@@ -25,6 +25,13 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// inside the divergent dispatcher loop. Compute threads map one-to-one onto real
 /// simdgroup lanes and shuffle for real.
 ///
+/// Wave64: lane indices never exceed 31 (graphics is lane 0; compute lanes are
+/// 32-wide simdgroups), but 64-bit masks are carried faithfully as data — every
+/// B64 mask op, saveexec, and VCCZ/EXECZ test reads and writes the full register
+/// pair. A wave64 compute program whose semantics actually depend on the wave
+/// width (any wave-sensitive operation) is rejected at translation; one without
+/// them executes identically per-thread and translates normally.
+///
 /// Buffer argument contract (documented for the Metal backend):
 ///   [[buffer(globalBufferBase + i)]]  global memory binding i, in
 ///                                     Gen5ShaderEvaluation.GlobalMemoryBindings order
