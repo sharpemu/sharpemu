@@ -76,6 +76,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Test release helper
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
       - name: Run REUSE lint
         uses: fsfe/reuse-action@v6
 

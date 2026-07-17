@@ -12,7 +12,13 @@ import sys
 from pathlib import Path
 
 
-VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+VERSION_PATTERN = re.compile(
+    r"^(0|[1-9]\d*)\."
+    r"(0|[1-9]\d*)\."
+    r"(0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+)
 VERSION_ELEMENT_PATTERN = re.compile(
     r"(<SharpEmuVersion>)([^<]+)(</SharpEmuVersion>)"
 )
@@ -162,14 +168,20 @@ def read_version(props_path: Path) -> str:
         raise ReleaseError(f"Version file not found: {props_path}")
 
     content = props_path.read_text(encoding="utf-8")
-    match = VERSION_ELEMENT_PATTERN.search(content)
+    matches = list(VERSION_ELEMENT_PATTERN.finditer(content))
 
-    if match is None:
+    if not matches:
         raise ReleaseError(
             f"SharpEmuVersion was not found in {props_path.name}."
         )
 
-    return match.group(2).strip()
+    if len(matches) != 1:
+        raise ReleaseError(
+            f"Expected exactly one SharpEmuVersion element in "
+            f"{props_path.name}, found {len(matches)}."
+        )
+
+    return matches[0].group(2).strip()
 
 
 def update_version(props_path: Path, version: str) -> str:
