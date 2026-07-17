@@ -166,7 +166,12 @@ public static class AudioOutExports
         var sourceAddress = ctx[CpuRegister.Rsi];
         if (!Ports.TryGetValue(handle, out var port))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            // Host shutdown disposes the ports while guest audio threads are
+            // still draining their last buffers; report success so the guest
+            // winds down without a per-buffer error (and its WARN log flood).
+            return ctx.SetReturn(_shutdown
+                ? 0
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         if (sourceAddress == 0)
@@ -268,6 +273,7 @@ public static class AudioOutExports
 
     public static void ShutdownAllPorts()
     {
+        Volatile.Write(ref _shutdown, true);
         foreach (var handle in Ports.Keys)
         {
             if (Ports.TryRemove(handle, out var port))
@@ -276,6 +282,8 @@ public static class AudioOutExports
             }
         }
     }
+
+    private static bool _shutdown;
 
     private static bool TryGetFormat(
         int rawFormat,
