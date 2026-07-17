@@ -66,6 +66,34 @@ internal static partial class MetalVideoPresenter
         /// guest write produced this content; false while it only holds a
         /// speculative guest-memory seed. Flips prefer produced content.</summary>
         public bool GpuWritten;
+
+        /// <summary>Bumped whenever anything changes this image's content;
+        /// feedback-read snapshots are reused until it moves. Games that
+        /// composite by sampling their render target otherwise force a
+        /// full-texture blit on every draw.</summary>
+        public int ContentVersion;
+
+        /// <summary>Cached feedback-read snapshot (one retain held here) and
+        /// the content version it captured. Command buffers that sampled it
+        /// retain it through completion, so replacing releases immediately.</summary>
+        public nint SnapshotTexture;
+        public int SnapshotVersion;
+
+        public void MarkContentChanged()
+        {
+            Initialized = true;
+            GpuWritten = true;
+            ContentVersion++;
+        }
+
+        public void ReleaseSnapshot()
+        {
+            if (SnapshotTexture != 0)
+            {
+                MetalNative.SendVoid(SnapshotTexture, MetalNative.Selector("release"));
+                SnapshotTexture = 0;
+            }
+        }
     }
 
     // PS5 exposes independent graphics and asynchronous-compute queues; keep FIFO
@@ -705,8 +733,10 @@ internal static partial class MetalVideoPresenter
             ClearTexture(queue, image.Texture, write.FillValue);
         }
 
-        image.Initialized = true;
-        image.GpuWritten = true;
+        // The pixel path swapped the texture out entirely; either way the
+        // cached snapshot no longer reflects this image.
+        image.ReleaseSnapshot();
+        image.MarkContentChanged();
     }
 
     private static void ExecuteOrderedGuestFlip(nint device, nint queue, OrderedGuestFlip flip)
@@ -803,8 +833,7 @@ internal static partial class MetalVideoPresenter
         }
 
         CopyTexture(queue, source.Texture, destination.Texture);
-        destination.Initialized = true;
-        destination.GpuWritten = true;
+        destination.MarkContentChanged();
     }
 
     private static bool _tracedFlipAlias;
@@ -916,6 +945,7 @@ internal static partial class MetalVideoPresenter
             // layout is the image's native one.
             ReplaceTextureContents(image.Texture, width, height, initialData, width, bytesPerPixel);
             image.Initialized = true;
+            image.ContentVersion++;
         }
         else if (_guestMemory is { } memory)
         {
@@ -929,6 +959,7 @@ internal static partial class MetalVideoPresenter
                 {
                     ReplaceTextureContents(image.Texture, width, height, guestPixels, pitch, bytesPerPixel);
                     image.Initialized = true;
+                    image.ContentVersion++;
                 }
             }
             finally

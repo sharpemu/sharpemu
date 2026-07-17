@@ -581,12 +581,11 @@ internal static partial class MetalVideoPresenter
         {
             if (publishedTargets[index] is { } published)
             {
-                published.Initialized = true;
-                published.GpuWritten = true;
+                published.MarkContentChanged();
             }
         }
 
-        depth?.Initialized = true;
+        depth?.MarkContentChanged();
         ReturnPooledGuestData(draw);
     }
 
@@ -1356,7 +1355,10 @@ internal static partial class MetalVideoPresenter
         {
             ReplaceTextureContents(
                 image.Texture, target.Width, target.Height, initialData, target.Width, bytesPerPixel: 4);
+            // A guest-memory seed initializes content without marking it
+            // GPU-produced; the version still moves so snapshots refresh.
             image.Initialized = true;
+            image.ContentVersion++;
         }
 
         return image;
@@ -1367,6 +1369,7 @@ internal static partial class MetalVideoPresenter
         var key = (address, retired.Width, retired.Height, retired.Format);
         if (_guestImageVariants.Remove(key, out var previous))
         {
+            previous.ReleaseSnapshot();
             MetalNative.SendVoid(previous.Texture, MetalNative.Selector("release"));
         }
         else
@@ -1376,6 +1379,7 @@ internal static partial class MetalVideoPresenter
                 var evicted = _guestImageVariantOrder.Dequeue();
                 if (_guestImageVariants.Remove(evicted, out var old))
                 {
+                    old.ReleaseSnapshot();
                     MetalNative.SendVoid(old.Texture, MetalNative.Selector("release"));
                 }
             }
@@ -1430,6 +1434,7 @@ internal static partial class MetalVideoPresenter
         {
             if (_guestDepthImages.Remove(address, out var replaced))
             {
+                replaced.ReleaseSnapshot();
                 MetalNative.SendVoid(replaced.Texture, MetalNative.Selector("release"));
             }
 
@@ -1495,14 +1500,25 @@ internal static partial class MetalVideoPresenter
             var live = ResolveGuestImageAlias(texture);
             if (live is { Initialized: true } && blitCommandBuffer != 0)
             {
-                // ShaderRead | RenderTarget (5), matching CreateGuestTexture:
-                // the source image was created with the same usage and blit
-                // sources/destinations need no extra flags.
-                var snapshot = AcquireSnapshotTexture(
-                    device, live.Format, live.Width, live.Height, usage: 5);
+                // One snapshot per content version: draws sampling the same
+                // unchanged image share it, so the blit happens per content
+                // change instead of per draw — compositing games otherwise
+                // copy a full render target for every draw. The image holds
+                // the retain; consuming command buffers keep replaced
+                // snapshots alive until they complete.
+                if (live.SnapshotTexture != 0 && live.SnapshotVersion == live.ContentVersion)
+                {
+                    ownedByCaller = false;
+                    return live.SnapshotTexture;
+                }
+
+                var snapshot = CreateGuestTexture(device, live.Format, live.Width, live.Height);
                 if (snapshot != 0)
                 {
                     EncodeCopyTexture(blitCommandBuffer, live.Texture, snapshot);
+                    live.ReleaseSnapshot();
+                    live.SnapshotTexture = snapshot;
+                    live.SnapshotVersion = live.ContentVersion;
                     ownedByCaller = false;
                     return snapshot;
                 }
