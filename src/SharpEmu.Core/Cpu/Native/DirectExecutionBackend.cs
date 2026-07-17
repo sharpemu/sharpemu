@@ -4765,6 +4765,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var exitReason = resumeContinuation
 				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
+			var guestThreadExited = false;
 			using (LockGate("RunGuestThread.exit"))
 			{
 				switch (exitReason)
@@ -4772,6 +4773,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					case GuestNativeCallExitReason.Returned:
 						thread.ExitValue = thread.Context[CpuRegister.Rax];
 						thread.State = GuestThreadRunState.Exited;
+						guestThreadExited = true;
 						if (_logGuestThreads)
 						Console.Error.WriteLine(
 							$"[LOADER][INFO] Guest thread exited: name='{thread.Name}' " +
@@ -4798,6 +4800,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						thread.BlockReason = blockReason;
 						break;
 				}
+			}
+
+			// Release any mutex ownership or queued lock waiters the thread left
+			// behind, now that the gate is released (the cleanup takes per-mutex
+			// locks and may wake blocked threads, mirroring pthread_mutex_unlock).
+			// A stranded owner or waiter would otherwise wedge that mutex forever.
+			if (guestThreadExited)
+			{
+				GuestThreadExecution.NotifyGuestThreadExited(thread.ThreadHandle);
 			}
 			if (_logGuestThreads)
 			{

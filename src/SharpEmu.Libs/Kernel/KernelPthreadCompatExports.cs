@@ -84,6 +84,77 @@ public static class KernelPthreadCompatExports
     static KernelPthreadCompatExports()
     {
         RunSynchronizationSelfChecks();
+        GuestThreadExecution.GuestThreadExited += ReleaseThreadSynchronizationState;
+    }
+
+    /// <summary>
+    /// Releases the mutex ownership and dequeues the lock waiters left behind by
+    /// a guest thread that has terminated. Without this, a thread that exits
+    /// while owning a mutex — or while queued waiting for one — strands that
+    /// mutex forever: the fast-acquire path refuses a mutex whose wait queue is
+    /// non-empty (see PthreadMutexLockCore), and ownership is otherwise cleared
+    /// only by an explicit unlock, so every future locker blocks permanently.
+    /// </summary>
+    public static void ReleaseThreadSynchronizationState(ulong threadHandle)
+    {
+        if (threadHandle == 0)
+        {
+            return;
+        }
+
+        // _mutexStates maps both the guest address and the opaque handle to the
+        // same state instance, so dedupe on the object to visit each mutex once.
+        var visited = new HashSet<PthreadMutexState>(ReferenceEqualityComparer.Instance);
+        foreach (var state in _mutexStates.Values)
+        {
+            if (!visited.Add(state))
+            {
+                continue;
+            }
+
+            string? wakeKey = null;
+            lock (state)
+            {
+                // Drop every waiter node this thread left in the queue.
+                var node = state.Waiters.First;
+                while (node is not null)
+                {
+                    var next = node.Next;
+                    if (node.Value.ThreadId == threadHandle)
+                    {
+                        state.Waiters.Remove(node);
+                        node.Value.Node = null;
+                    }
+
+                    node = next;
+                }
+
+                // Release the lock if the dead thread still owned it.
+                if (state.OwnerThreadId == threadHandle)
+                {
+                    state.OwnerThreadId = 0;
+                    state.RecursionCount = 0;
+                }
+
+                // If the mutex is now free but others are still queued, hand it
+                // to the new head so a surviving thread actually proceeds.
+                if (state.OwnerThreadId == 0 && state.Waiters.First is { } headNode)
+                {
+                    if (TryGrantMutexWaiterLocked(state, headNode.Value) &&
+                        headNode.Value.Cooperative)
+                    {
+                        wakeKey = headNode.Value.WakeKey;
+                    }
+
+                    Monitor.PulseAll(state);
+                }
+            }
+
+            if (wakeKey is not null)
+            {
+                _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+            }
+        }
     }
 
     [SysAbiExport(
