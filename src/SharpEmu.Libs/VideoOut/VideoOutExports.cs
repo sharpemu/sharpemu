@@ -34,6 +34,8 @@ public static class VideoOutExports
     private const int VideoOutBufferAttributeSize = 0x28;
     private const int VideoOutBufferAttribute2Size = 0x50;
     private const int VideoOutBuffersEntrySize = 0x20;
+    private const int VideoOutFlipStatusGen4Size = 0x40;
+    private const int VideoOutFlipStatusGen5Size = 0x80;
     private const int VideoOutOutputStatusSize = 0x30;
     private const int VideoOutVblankStatusSize = 0x28;
     private const ulong SceVideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
@@ -173,6 +175,7 @@ public static class VideoOutExports
         public int FlipRate { get; set; }
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
+        public long FlipArg { get; set; } = -1;
         public int CurrentBuffer { get; set; } = -1;
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
@@ -645,19 +648,26 @@ public static class VideoOutExports
         }
 
         ulong count;
-        uint currentBuffer;
+        long flipArg;
+        int currentBuffer;
         lock (_stateGate)
         {
             count = port.FlipCount;
-            currentBuffer = unchecked((uint)port.CurrentBuffer);
+            flipArg = port.FlipArg;
+            currentBuffer = port.CurrentBuffer;
         }
 
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var statusSize = ctx.TargetGeneration == Generation.Gen5
+            ? VideoOutFlipStatusGen5Size
+            : VideoOutFlipStatusGen4Size;
+        Span<byte> status = stackalloc byte[statusSize];
+        status.Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x00..], count);
+        BinaryPrimitives.WriteInt64LittleEndian(status[0x18..], flipArg);
+        BinaryPrimitives.WriteInt32LittleEndian(status[0x38..], currentBuffer);
+        return ctx.Memory.TryWrite(statusAddress, status)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
     [SysAbiExport(
@@ -1089,6 +1099,7 @@ public static class VideoOutExports
 
             port.CurrentBuffer = bufferIndex;
             port.FlipCount++;
+            port.FlipArg = flipArg;
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;
