@@ -1032,6 +1032,12 @@ public static class VideoOutExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        // SceVideoOutBufferCategory is a 32-bit enum passed on the stack; the
+        // upper 32 bits of the slot are stale (games leave GNM magic there), so
+        // mask before validating. UNCOMPRESSED (0) and COMPRESSED (1) are both
+        // valid — we present either identically, so accept both.
+        var category = (uint)categoryRaw;
+
         if (!TryGetPort(handle, out var port))
         {
             return OrbisVideoOutErrorInvalidHandle;
@@ -1052,7 +1058,7 @@ public static class VideoOutExports
             return OrbisVideoOutErrorInvalidValue;
         }
 
-        if (categoryRaw != 0 || option != 0)
+        if (category > 1 || option != 0)
         {
             return OrbisVideoOutErrorInvalidValue;
         }
