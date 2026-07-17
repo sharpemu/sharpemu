@@ -2219,6 +2219,47 @@ internal static unsafe class VulkanVideoPresenter
         target is not null &&
         (state.TestEnable || state.WriteEnable || state.ClearEnable);
 
+    /// <summary>
+    /// Ranks a Vulkan candidate; the highest score presents. SHARPEMU_VK_DEVICE
+    /// pins an adapter by name substring and overrides the ranking entirely.
+    /// </summary>
+    /// <remarks>
+    /// Discrete parts outrank integrated because an integrated AMD driver
+    /// access-violates inside vkCreateGraphicsPipelines while compiling some
+    /// translated guest shaders (#97). That penalty must not extend below
+    /// <see cref="PhysicalDeviceType.Cpu"/>, which is a software rasterizer
+    /// (Mesa's lavapipe, SwiftShader): rendering the guest on the CPU is slower
+    /// than any real GPU by orders of magnitude, so it stays the last resort.
+    /// MoltenVK also reports every Apple Silicon GPU as integrated, which would
+    /// otherwise lose to a software device on those hosts.
+    /// </remarks>
+    internal static int ScorePhysicalDevice(
+        PhysicalDeviceProperties properties,
+        string name,
+        string? deviceOverride)
+    {
+        if (!string.IsNullOrWhiteSpace(deviceOverride))
+        {
+            return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
+        }
+
+        var score = properties.DeviceType switch
+        {
+            PhysicalDeviceType.DiscreteGpu => 300,
+            PhysicalDeviceType.VirtualGpu => 100,
+            PhysicalDeviceType.IntegratedGpu => 50,
+            PhysicalDeviceType.Cpu => -100,
+            _ => 10,
+        };
+
+        if (properties.VendorID == NvidiaVendorId)
+        {
+            score += 500;
+        }
+
+        return score;
+    }
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -3198,33 +3239,6 @@ internal static unsafe class VulkanVideoPresenter
                 $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
             VideoOutExports.SetSelectedGpuName(selectedName);
             _window.Title = VideoOutExports.GetWindowTitle();
-        }
-
-        private static int ScorePhysicalDevice(
-            PhysicalDeviceProperties properties,
-            string name,
-            string? deviceOverride)
-        {
-            if (!string.IsNullOrWhiteSpace(deviceOverride))
-            {
-                return name.Contains(deviceOverride, StringComparison.OrdinalIgnoreCase) ? 1000 : -1000;
-            }
-
-            var score = properties.DeviceType switch
-            {
-                PhysicalDeviceType.DiscreteGpu => 300,
-                PhysicalDeviceType.VirtualGpu => 100,
-                PhysicalDeviceType.Cpu => 50,
-                PhysicalDeviceType.IntegratedGpu => -100,
-                _ => 10,
-            };
-
-            if (properties.VendorID == NvidiaVendorId)
-            {
-                score += 500;
-            }
-
-            return score;
         }
 
         private void LoadComputeDeviceLimits()
