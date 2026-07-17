@@ -406,6 +406,8 @@ internal static partial class MetalVideoPresenter
             var imp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnRenderTimer;
             // "v@:@": void return, self, _cmd, one object argument (the timer).
             MetalNative.class_addMethod(cls, MetalNative.Selector("onFrame:"), imp, "v@:@");
+            var wakeImp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnGuestWorkWake;
+            MetalNative.class_addMethod(cls, MetalNative.Selector("onGuestWork:"), wakeImp, "v@:@");
             MetalNative.objc_registerClassPair(cls);
         }
         else
@@ -427,6 +429,61 @@ internal static partial class MetalVideoPresenter
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[LOADER][ERROR] Metal render frame failed: {exception}");
+        }
+    }
+
+    /// <summary>Set while an onGuestWork: wake is scheduled on the main run
+    /// loop; coalesces enqueue-side wake requests to one in-flight message.</summary>
+    private static int _guestWorkWakeScheduled;
+
+    /// <summary>Wakes the main run loop to drain guest work now instead of at
+    /// the next render tick. Guest submit→wait round-trips (release-mem labels,
+    /// CPU-visible write-backs) otherwise cost a full frame interval each —
+    /// games that chain several per frame crawl at a fraction of the display
+    /// rate. Safe from any thread; no-op until the presenter starts.</summary>
+    internal static void ScheduleGuestWorkDrain()
+    {
+        if (Interlocked.CompareExchange(ref _guestWorkWakeScheduled, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var target = _renderTimerTarget;
+        if (target == 0)
+        {
+            Volatile.Write(ref _guestWorkWakeScheduled, 0);
+            return;
+        }
+
+        MetalNative.SendVoidPerformSelector(
+            target,
+            MetalNative.Selector("performSelectorOnMainThread:withObject:waitUntilDone:"),
+            MetalNative.Selector("onGuestWork:"),
+            0,
+            waitUntilDone: false);
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void OnGuestWorkWake(nint self, nint cmd, nint argument)
+    {
+        Volatile.Write(ref _guestWorkWakeScheduled, 0);
+        if (_device == 0 || _commandQueue == 0 || Volatile.Read(ref _closeRequested))
+        {
+            return;
+        }
+
+        var pool = MetalNative.objc_autoreleasePoolPush();
+        try
+        {
+            DrainGuestWork(_device, _commandQueue);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][ERROR] Metal guest work wake failed: {exception}");
+        }
+        finally
+        {
+            MetalNative.objc_autoreleasePoolPop(pool);
         }
     }
 

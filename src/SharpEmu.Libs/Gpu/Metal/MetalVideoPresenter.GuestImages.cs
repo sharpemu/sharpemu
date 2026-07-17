@@ -442,6 +442,9 @@ internal static partial class MetalVideoPresenter
                  payloadBytes > MaxPendingGuestWorkBytes -
                      Math.Min(_pendingGuestWorkBytes, MaxPendingGuestWorkBytes))))
         {
+            // Full queue: ask the render loop to drain now rather than at its
+            // next timer tick, or this producer stalls a frame per admission.
+            ScheduleGuestWorkDrain();
             Monitor.Wait(_gate);
         }
 
@@ -479,6 +482,15 @@ internal static partial class MetalVideoPresenter
         _pendingGuestWorkCount++;
         var total = _pendingGuestWorkBytes + payloadBytes;
         _pendingGuestWorkBytes = total < _pendingGuestWorkBytes ? ulong.MaxValue : total;
+        if (!_enqueueAsImmediateQueueFollowup)
+        {
+            // Drain promptly: guests that submit work and then wait on its
+            // side effects (release-mem labels, write-backs) round-trip
+            // through this queue several times per frame, and a timer-tick
+            // drain cadence turns each round-trip into a full frame interval.
+            ScheduleGuestWorkDrain();
+        }
+
         return sequence;
     }
 

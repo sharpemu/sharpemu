@@ -176,6 +176,17 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoid(nint receiver, nint selector, nint argument);
 
+    /// <summary>performSelectorOnMainThread:withObject:waitUntilDone: — the SEL
+    /// to perform is itself an argument, followed by the object and the wait
+    /// flag.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoidPerformSelector(
+        nint receiver,
+        nint selector,
+        nint performedSelector,
+        nint argument,
+        [MarshalAs(UnmanagedType.I1)] bool waitUntilDone);
+
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidBool(nint receiver, nint selector, [MarshalAs(UnmanagedType.I1)] bool argument);
 
