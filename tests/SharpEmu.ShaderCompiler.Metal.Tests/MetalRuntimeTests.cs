@@ -156,6 +156,71 @@ public sealed class MetalRuntimeTests(ITestOutputHelper output)
         Assert.Equal(0x1234u, ReadDword(result, 0));
     }
 
+    [Fact]
+    public void Wave64CrossLaneEmitsValidMsl()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; compile validation skipped.");
+            return;
+        }
+
+        // A wave64 program with a cross-lane op emits the threadgroup-scratch
+        // bridge and its barriers; the runtime Metal compiler must accept it.
+        var shader = Gen5ComputeFixtures.CompileOrThrow(
+            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
+        Assert.Contains("sharpemu_wave_scratch", shader.Source);
+        Assert.Contains("threadgroup_barrier", shader.Source);
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out _, out var error),
+            $"Metal rejected the wave64 MSL: {error}\n{shader.Source}");
+    }
+
+    [Fact]
+    public void Wave64BroadcastExecutesAcrossBothHalvesWithoutDeadlock()
+    {
+        if (!MetalNative.IsAvailable)
+        {
+            output.WriteLine("No Metal device on this host; execution test skipped.");
+            return;
+        }
+
+        // 64 threads = one guest wave (two 32-wide simdgroups). The read-first-
+        // lane bridge takes a threadgroup_barrier reached by all 64 lanes; if
+        // the two halves did not rendezvous this would deadlock (the command
+        // buffer would never complete). Every lane holds 42, so the broadcast
+        // result is 42 — proving the bridge runs to completion and returns the
+        // published value.
+        var shader = Gen5ComputeFixtures.CompileOrThrow(
+            Gen5ComputeFixtures.Wave64Broadcast, waveLaneCount: 64, localSizeX: 64);
+        Assert.True(
+            MetalNative.TryCompileLibrary(shader.Source, out var library, out var compileError),
+            $"{compileError}\n{shader.Source}");
+
+        var buffer = new byte[16];
+        var uniforms = new byte[16 + sizeof(uint)];
+        // Dispatch limit 64: all 64 lanes active (see WriteDispatchLimit contract).
+        BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(0), 64);
+        BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(8), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(uniforms.AsSpan(16), (uint)buffer.Length);
+
+        Assert.True(
+            MetalNative.TryExecuteThreadgroup(
+                library,
+                shader.EntryPoint,
+                buffer,
+                uniforms,
+                dataIndex: 0,
+                uniformsIndex: (nuint)shader.GlobalMemoryBindings.Count,
+                threadsPerThreadgroup: 64,
+                out var result,
+                out var runError),
+            runError);
+
+        Assert.Equal(42u, ReadDword(result, 0));
+    }
+
     private static byte[] ExecuteOrThrow(Gen5ComputeFixture fixture, byte[] buffer)
     {
         var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);

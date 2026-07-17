@@ -25,12 +25,17 @@ namespace SharpEmu.ShaderCompiler.Metal;
 /// inside the divergent dispatcher loop. Compute threads map one-to-one onto real
 /// simdgroup lanes and shuffle for real.
 ///
-/// Wave64: lane indices never exceed 31 (graphics is lane 0; compute lanes are
-/// 32-wide simdgroups), but 64-bit masks are carried faithfully as data — every
-/// B64 mask op, saveexec, and VCCZ/EXECZ test reads and writes the full register
-/// pair. A wave64 compute program whose semantics actually depend on the wave
-/// width (any wave-sensitive operation) is rejected at translation; one without
-/// them executes identically per-thread and translates normally.
+/// Wave64: 64-bit masks are carried faithfully as data — every B64 mask op,
+/// saveexec, and VCCZ/EXECZ test reads and writes the full register pair. A
+/// wave64 guest wave is two 32-wide Apple simdgroups co-resident in one
+/// threadgroup; cross-lane ops that span the full 64 lanes (ballots into
+/// EXEC/VCC, read-first-lane) rendezvous the two halves through threadgroup
+/// scratch with a barrier — the guest's scalar PC keeps all 64 lanes lockstep
+/// through the dispatcher, so the barriers are reached uniformly. This mirrors
+/// the SPIR-V translator's bridge and shares its scope: the scratch is indexed
+/// by half, so it is correct for a one-wave (64-thread) workgroup; readlane
+/// across halves stays a 32-wide shuffle (same as the SPIR-V path). Wave-
+/// agnostic wave64 kernels translate per-thread unchanged.
 ///
 /// Buffer argument contract (documented for the Metal backend):
 ///   [[buffer(globalBufferBase + i)]]  global memory binding i, in
@@ -261,6 +266,12 @@ public static partial class Gen5MslTranslator
         private int _nextTemp;
         private bool _usesLds;
         private bool _usesFormatLoads;
+        private bool _usesWaveScratch;
+
+        /// <summary>True when this stage emulates a 64-lane guest wave across two
+        /// 32-wide Apple simdgroups (compute only; graphics stages use the
+        /// single-lane model regardless of guest wave size).</summary>
+        private bool IsWave64 => _waveLaneCount == 64 && _stage == Gen5MslStage.Compute;
 
         public CompilationContext(
             Gen5MslStage stage,
@@ -316,16 +327,11 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             try
             {
-                if (_waveLaneCount != 32 && UsesWaveSensitiveOperations())
-                {
-                    // Apple simdgroups are 32 wide; wave64 lane math needs the
-                    // SPIR-V translator's two-half emulation scheme. A wave64
-                    // program without wave-sensitive ops executes identically
-                    // per-thread, so only the combination is fatal — and it
-                    // fails loudly instead of translating with wrong lane math.
-                    error = "wave64 compute with cross-lane operations is not supported by the MSL translator yet";
-                    return false;
-                }
+                // A 64-lane guest wave that uses cross-lane ops needs the
+                // threadgroup-scratch bridge (ballots span both 32-wide halves,
+                // read-first-lane broadcasts across them). Programs without such
+                // ops are wave-size-agnostic and need no scratch.
+                _usesWaveScratch = IsWave64 && UsesWaveSensitiveOperations();
 
                 var blocks = BuildBasicBlocks(_state.Program.Instructions);
                 if (blocks.Count == 0)
@@ -636,6 +642,16 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    uint sharpemu_vertex_id [[vertex_id]],");
                 source.AppendLine("    uint sharpemu_instance_id [[instance_id]],");
             }
+            else if (_stage == Gen5MslStage.Compute && IsWave64)
+            {
+                // A 64-lane guest wave is two 32-wide Apple simdgroups. Metal
+                // packs a threadgroup's threads into simdgroups in ascending
+                // thread_index order, so thread_index_in_threadgroup & 63 is the
+                // guest lane and its low bit-5 selects the half. Both halves sit
+                // in one threadgroup, so a threadgroup_barrier rendezvous bridges
+                // the wave for 64-wide ballots (see EmitWave64Ballot).
+                source.AppendLine("    uint sharpemu_tg_index [[thread_index_in_threadgroup]],");
+            }
             else if (_stage == Gen5MslStage.Compute)
             {
                 // Compute threads map one-to-one onto guest lanes, so wave ops
@@ -645,6 +661,19 @@ public static partial class Gen5MslTranslator
 
             CloseParameterList(source);
             source.AppendLine("{");
+            if (_stage == Gen5MslStage.Compute && IsWave64)
+            {
+                source.AppendLine("    uint sharpemu_lane = sharpemu_tg_index & 63u;");
+                if (_usesWaveScratch)
+                {
+                    // Two dwords bridge each half's ballot; the third carries a
+                    // broadcast value for read-first-lane. Indexed only by half,
+                    // so correct for a one-wave (64-thread) workgroup — larger
+                    // workgroups would need per-wave scratch (matches the SPIR-V
+                    // translator's bridge scope).
+                    source.AppendLine("    threadgroup uint sharpemu_wave_scratch[3];");
+                }
+            }
             if (_stage != Gen5MslStage.Compute)
             {
                 // Graphics stages model a single logical wave lane — the SPIR-V
@@ -946,8 +975,39 @@ public static partial class Gen5MslTranslator
             // first instruction.
             source.AppendLine($"    s[{VccLoRegister}] = 0u;");
             source.AppendLine($"    s[{VccHiRegister}] = 0u;");
-            source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
-            source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
+            if (IsWave64)
+            {
+                // All 64 lanes are active at entry (before the dispatcher masks
+                // any off), and this runs at a uniform point, so the bridge
+                // barriers are safe here too.
+                EmitBallotStoreAtEntry(source, ExecLoRegister, "true");
+            }
+            else
+            {
+                source.AppendLine($"    s[{ExecLoRegister}] = sharpemu_ballot(true);");
+                source.AppendLine($"    s[{ExecHiRegister}] = 0u;");
+            }
+        }
+
+        /// <summary>Entry-time form of <see cref="EmitBallotStore"/> writing to
+        /// <paramref name="source"/> at the fixed indent of the module prologue.</summary>
+        private void EmitBallotStoreAtEntry(StringBuilder source, uint loRegister, string condition)
+        {
+            if (!_usesWaveScratch)
+            {
+                // No cross-lane ops: the high half stays zero and the low half
+                // is this simdgroup's ballot, matching the wave-agnostic path.
+                source.AppendLine($"    s[{loRegister}] = sharpemu_ballot({condition});");
+                source.AppendLine($"    s[{loRegister + 1}] = 0u;");
+                return;
+            }
+
+            source.AppendLine(
+                $"    sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
+            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
+            source.AppendLine($"    s[{loRegister}] = sharpemu_wave_scratch[0];");
+            source.AppendLine($"    s[{loRegister + 1}] = sharpemu_wave_scratch[1];");
+            source.AppendLine("    threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
 
         private static void EmitComputeSystemRegister(

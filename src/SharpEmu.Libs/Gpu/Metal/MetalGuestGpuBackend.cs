@@ -108,9 +108,9 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
-        // Wave64 is rejected inside the translator, and only when the program
-        // actually contains wave-sensitive operations — a wave64 kernel without
-        // them executes identically per-thread on 32-wide Apple simdgroups.
+        // Wave64 compute is emulated by the translator: cross-lane ops bridge
+        // the two 32-wide Apple simdgroups of a guest wave through threadgroup
+        // scratch, and wave-agnostic kernels run per-thread unchanged.
         if (!Gen5MslTranslator.TryCompileComputeShader(
                 state,
                 evaluation,

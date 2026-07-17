@@ -110,6 +110,24 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
+    // Wave64 cross-lane: v_readfirstlane routes through the translator's
+    // two-half threadgroup-scratch broadcast bridge. All lanes hold the same
+    // value (42), so the broadcast result is 42 on every lane regardless of
+    // which lane is "first" — the fixture's job is to prove the emitted wave64
+    // MSL compiles and that a full 64-lane dispatch runs through the bridge
+    // barriers without deadlocking, returning the broadcast value.
+    public static readonly Gen5ComputeFixture Wave64Broadcast = new(
+        "wave64-broadcast",
+        [
+            0x7E0002FF, 0x0000002A, // v_mov_b32 v0, 42
+            0x7E000500,             // v_readfirstlane_b32 s0, v0
+            0x7E020200,             // v_mov_b32 v1, s0
+            0xE0700000, 0x80020100, // buffer_store_dword v1, off, s[8:11], 0
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 16);
+
     public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop, Lds];
 
     // Minimal pixel program: two interpolated attribute channels plus two
@@ -194,7 +212,13 @@ internal static class Gen5ComputeFixtures
     }
 
     /// <summary>Drives the real decoder and the MSL emitter for one fixture.</summary>
-    public static Gen5MslShader CompileOrThrow(Gen5ComputeFixture fixture)
+    public static Gen5MslShader CompileOrThrow(Gen5ComputeFixture fixture) =>
+        CompileOrThrow(fixture, waveLaneCount: 32, localSizeX: 32);
+
+    public static Gen5MslShader CompileOrThrow(
+        Gen5ComputeFixture fixture,
+        uint waveLaneCount,
+        uint localSizeX)
     {
         var program = DecodeOrThrow(fixture);
 
@@ -236,11 +260,12 @@ internal static class Gen5ComputeFixtures
         if (!Gen5MslTranslator.TryCompileComputeShader(
                 state,
                 evaluation,
-                32,
+                localSizeX,
                 1,
                 1,
                 out var shader,
-                out var compileError))
+                out var compileError,
+                waveLaneCount: waveLaneCount))
         {
             throw new InvalidOperationException($"[{fixture.Name}] MSL emit failed: {compileError}");
         }

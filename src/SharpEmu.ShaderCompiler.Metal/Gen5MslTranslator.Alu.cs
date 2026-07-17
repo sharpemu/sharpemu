@@ -71,6 +71,14 @@ public static partial class Gen5MslTranslator
                         return true;
                     }
 
+                    if (IsWave64)
+                    {
+                        StoreScalar(
+                            instruction.Destinations[0].Value,
+                            EmitWave64ReadFirstLane(value));
+                        return true;
+                    }
+
                     var mask = Temp("uint", "sharpemu_ballot(exec)");
                     var firstLane = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
                     StoreScalar(
@@ -274,10 +282,18 @@ public static partial class Gen5MslTranslator
                     $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)ctz({RawSource(instruction, 0)}))",
 
                 // ---- wave / lane ----
-                "VMbcntLoU32B32" =>
-                    $"(popcount(({RawSource(instruction, 0)}) & ((1u << sharpemu_lane) - 1u)) + ({RawSource(instruction, 1)}))",
-                // Wave32: the high mask half holds no lanes; pass the addend.
-                "VMbcntHiU32B32" => RawSource(instruction, 1),
+                // mbcnt reads the mask dword the guest passes (no cross-lane
+                // op), so only the per-lane thread-mask math differs by wave
+                // size. Wave64 lanes 32..63 count the whole low half in mbcnt_lo
+                // and their own partial in mbcnt_hi; a 1u << lane for lane>=32
+                // would be undefined, so those are split out.
+                "VMbcntLoU32B32" => IsWave64
+                    ? $"((sharpemu_lane >= 32u ? popcount({RawSource(instruction, 0)}) : popcount(({RawSource(instruction, 0)}) & ((1u << sharpemu_lane) - 1u))) + ({RawSource(instruction, 1)}))"
+                    : $"(popcount(({RawSource(instruction, 0)}) & ((1u << sharpemu_lane) - 1u)) + ({RawSource(instruction, 1)}))",
+                "VMbcntHiU32B32" => IsWave64
+                    ? $"((sharpemu_lane >= 32u ? popcount(({RawSource(instruction, 0)}) & ((1u << (sharpemu_lane - 32u)) - 1u)) : 0u) + ({RawSource(instruction, 1)}))"
+                    // Wave32: the high mask half holds no lanes; pass the addend.
+                    : RawSource(instruction, 1),
                 "VPermlane16B32" => EmitPermlane16(instruction, exchangeRows: false),
                 "VPermlanex16B32" => EmitPermlane16(instruction, exchangeRows: true),
 
@@ -644,8 +660,7 @@ public static partial class Gen5MslTranslator
             {
                 // GFX10 VCMPX writes EXEC only.
                 Line($"exec = {active};");
-                Line($"s[{ExecLoRegister}] = sharpemu_ballot(exec);");
-                Line($"s[{ExecHiRegister}] = 0u;");
+                EmitBallotStore(ExecLoRegister, "exec");
             }
             else
             {
@@ -717,26 +732,78 @@ public static partial class Gen5MslTranslator
             {
                 case VccLoRegister:
                     Line($"vcc = {condition};");
-                    Line($"s[{VccLoRegister}] = sharpemu_ballot(vcc);");
-                    Line($"s[{VccHiRegister}] = 0u;");
+                    EmitBallotStore(VccLoRegister, "vcc");
                     return;
                 case ExecLoRegister:
                     Line($"exec = {condition};");
-                    Line($"s[{ExecLoRegister}] = sharpemu_ballot(exec);");
-                    Line($"s[{ExecHiRegister}] = 0u;");
+                    EmitBallotStore(ExecLoRegister, "exec");
                     return;
                 default:
                     if (register < ScalarRegisterFileCount)
                     {
-                        Line($"s[{register}] = sharpemu_ballot({condition});");
-                        if (register + 1 < ScalarRegisterFileCount)
-                        {
-                            Line($"s[{register + 1}] = 0u;");
-                        }
+                        EmitBallotStore(register, condition);
                     }
 
                     return;
             }
+        }
+
+        /// <summary>Broadcasts <paramref name="value"/> from the first guest-active
+        /// lane (lowest set bit of the 64-lane EXEC mask) to all lanes, through the
+        /// threadgroup broadcast slot — mirroring the SPIR-V translator's
+        /// BroadcastFirstWave64Active. Returns the temp holding the result.</summary>
+        private string EmitWave64ReadFirstLane(string value)
+        {
+            Line("if (sharpemu_lane == 0u) { sharpemu_wave_scratch[2] = 0u; }");
+            // 64-lane EXEC mask across both halves (slots 0/1), broadcast in 2.
+            Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            var lo = Temp("uint", "sharpemu_wave_scratch[0]");
+            var hi = Temp("uint", "sharpemu_wave_scratch[1]");
+            var first = Temp(
+                "uint",
+                $"({lo} != 0u) ? (uint)ctz({lo}) : (({hi} != 0u) ? (32u + (uint)ctz({hi})) : 0u)");
+            var anyActive = Temp("bool", $"(({lo}) | ({hi})) != 0u");
+            Line($"if ({anyActive} && sharpemu_lane == {first}) {{ sharpemu_wave_scratch[2] = {value}; }}");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            var result = Temp("uint", "sharpemu_wave_scratch[2]");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            return result;
+        }
+
+        /// <summary>Stores the wave ballot of <paramref name="condition"/> into the
+        /// mask register pair (low, low+1). Wave32 fills the low dword and clears
+        /// the high; wave64 bridges both 32-wide halves through threadgroup
+        /// scratch so the pair holds the full 64-lane mask. The bridging barriers
+        /// are safe because the guest program's scalar PC keeps all 64 lanes in
+        /// lockstep through the dispatcher (one wave per threadgroup).</summary>
+        private void EmitBallotStore(uint loRegister, string condition)
+        {
+            var hiRegister = loRegister + 1;
+            if (!IsWave64)
+            {
+                Line($"s[{loRegister}] = sharpemu_ballot({condition});");
+                if (hiRegister < ScalarRegisterFileCount)
+                {
+                    Line($"s[{hiRegister}] = 0u;");
+                }
+
+                return;
+            }
+
+            // simd_ballot is uniform across a simdgroup, so every lane of a half
+            // writes the same 32-bit value to that half's slot — no first-lane
+            // guard needed. Barrier, read both halves, barrier before the slot
+            // can be reused by the next ballot.
+            Line($"sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot({condition});");
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            Line($"s[{loRegister}] = sharpemu_wave_scratch[0];");
+            if (hiRegister < ScalarRegisterFileCount)
+            {
+                Line($"s[{hiRegister}] = sharpemu_wave_scratch[1];");
+            }
+
+            Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
 
         // ---- permlane / cube ----

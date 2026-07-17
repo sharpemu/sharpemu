@@ -136,6 +136,24 @@ internal static partial class MetalNative
         nuint dataIndex,
         nuint uniformsIndex,
         out byte[] result,
+        out string error) =>
+        TryExecuteThreadgroup(
+            library, entryPoint, bufferContents, uniformsContents,
+            dataIndex, uniformsIndex, threadsPerThreadgroup: 1, out result, out error);
+
+    /// <summary>Runs the kernel as a single threadgroup of
+    /// <paramref name="threadsPerThreadgroup"/> threads, so wave64 fixtures can
+    /// exercise both 32-wide simdgroups of one guest wave under a threadgroup
+    /// barrier.</summary>
+    public static bool TryExecuteThreadgroup(
+        nint library,
+        string entryPoint,
+        byte[] bufferContents,
+        byte[] uniformsContents,
+        nuint dataIndex,
+        nuint uniformsIndex,
+        uint threadsPerThreadgroup,
+        out byte[] result,
         out string error)
     {
         result = [];
@@ -201,8 +219,9 @@ internal static partial class MetalNative
         SendVoid(encoder, Selector("setComputePipelineState:"), pipeline);
         SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, dataIndex);
         SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), uniforms, 0, uniformsIndex);
-        var one = new MtlSize { Width = 1, Height = 1, Depth = 1 };
-        SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), one, one);
+        var oneGroup = new MtlSize { Width = 1, Height = 1, Depth = 1 };
+        var threads = new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 };
+        SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), oneGroup, threads);
         SendVoid(encoder, Selector("endEncoding"));
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));
