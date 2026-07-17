@@ -4444,9 +4444,31 @@ internal static unsafe class VulkanVideoPresenter
 
             var waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var fence = target.Fence;
-            Check(
-                _vk.WaitForFences(_device, 1, &fence, true, ulong.MaxValue),
-                $"vkWaitForFences(queue visibility: {_activeGuestQueue.Name})");
+
+            // Diagnostic-only: wait in bounded chunks instead of ulong.MaxValue
+            // so a fence that GPU submission never actually signals (e.g. a
+            // MoltenVK quirk, or a queued guest action whose command buffer
+            // was never submitted) shows up as a clear, repeating log line
+            // instead of a silent, permanent hang on this thread. The overall
+            // wait is unchanged: on VK_TIMEOUT we log and keep waiting.
+            const ulong ChunkTimeoutNanoseconds = 3_000_000_000UL;
+            Result waitResult;
+            var chunk = 0;
+            while ((waitResult = _vk.WaitForFences(_device, 1, &fence, true, ChunkTimeoutNanoseconds))
+                   == Result.Timeout)
+            {
+                chunk++;
+                var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) *
+                    1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] vk.queue_visibility_stall queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} target_timeline={targetTimeline} " +
+                    $"completed_timeline={_completedTimeline} chunk={chunk} elapsed_ms={elapsedMs:F0} " +
+                    "-- vkWaitForFences has not returned; the GPU fence for this submission " +
+                    "was never signaled.");
+            }
+
+            Check(waitResult, $"vkWaitForFences(queue visibility: {_activeGuestQueue.Name})");
             CollectCompletedGuestSubmissions(waitForOldest: false);
             var waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waitStart) *
                 1000.0 / System.Diagnostics.Stopwatch.Frequency;

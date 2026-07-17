@@ -1504,6 +1504,32 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    // open(2) follows the libc/POSIX ABI like stat/PosixStat below: failures
+    // return -1 and expose the reason through errno. Returning the raw Orbis
+    // kernel code here (e.g. ORBIS_GEN2_ERROR_NOT_FOUND = 0x80020002) makes a
+    // caller that checks "fd == -1" treat a missing file as a valid,
+    // wildly out-of-range descriptor, which then corrupts every subsequent
+    // fstat/lseek/close/read on that "fd".
+    public static int PosixOpen(CpuContext ctx)
+    {
+        var result = KernelOpenUnderscore(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => 13, // EACCES
+            _ => 2, // ENOENT
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
+
     [SysAbiExport(
         Nid = "NNtFaKJbPt0",
         ExportName = "_close",
@@ -1791,6 +1817,27 @@ public static partial class KernelMemoryCompatExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // fstat(2) follows the libc/POSIX ABI like stat/PosixStat above: failures
+    // return -1 and expose the reason through errno, not the raw Orbis code.
+    public static int PosixFstat(CpuContext ctx)
+    {
+        var result = KernelFstat(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
+            _ => 9, // EBADF
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
     }
 
     [SysAbiExport(

@@ -3141,6 +3141,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					continue;
 				}
 
+				// BlockWaiter and BlockWakeHandler are mutually exclusive (set by
+				// the two RegisterBlockedGuestThreadContinuation overloads), but a
+				// thread parked via the resume/wake-handler overload (e.g.
+				// sceKernelWaitEventFlag) has BlockWaiter == null, so the check
+				// above never runs for it. Without this, WakeBlockedThreads marks
+				// it Ready unconditionally on any matching wake key, without ever
+				// confirming its actual wait condition (event-flag pattern, etc.)
+				// is satisfied -- the thread resumes later still unsatisfied.
+				if (thread.BlockWakeHandler is not null && !thread.BlockWakeHandler())
+				{
+					continue;
+				}
+
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
