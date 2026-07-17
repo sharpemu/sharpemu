@@ -26,6 +26,15 @@ public static class HostSystemInfo
 
     private static string GetCpuName()
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            var brand = GetSysctlString("machdep.cpu.brand_string");
+            if (!string.IsNullOrWhiteSpace(brand))
+            {
+                return $"{brand} ({Environment.ProcessorCount} logical processors)";
+            }
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             return $"{Environment.ProcessorCount} logical processors";
@@ -58,6 +67,11 @@ public static class HostSystemInfo
 
     private static string GetPreferredGpuName()
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            return GetMetalDeviceName() ?? "unknown";
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             return "unknown";
@@ -124,28 +138,97 @@ public static class HostSystemInfo
 
     private static string GetMemoryDescription()
     {
-        if (OperatingSystem.IsWindows())
+        // Reports the cgroup/job-object limit when the process is constrained,
+        // which is the figure that actually bounds the emulator.
+        var totalBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        if (totalBytes <= 0)
         {
-            try
-            {
-                var status = new MemoryStatusEx
-                {
-                    dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>(),
-                };
-                if (GlobalMemoryStatusEx(ref status))
-                {
-                    var megabytes = status.ullTotalPhys / (1024 * 1024);
-                    var gigabytes = status.ullTotalPhys / (1024d * 1024 * 1024);
-                    return $"{megabytes:N0} MB ({gigabytes:N1} GB)";
-                }
-            }
-            catch (Exception)
-            {
-                // Hardware information is diagnostic only.
-            }
+            return "unknown";
         }
 
-        return "unknown";
+        var megabytes = totalBytes / (1024 * 1024);
+        var gigabytes = totalBytes / (1024d * 1024 * 1024);
+        return $"{megabytes:N0} MB ({gigabytes:N1} GB)";
+    }
+
+    /// <summary>
+    /// Names the system default Metal device, or null when unavailable.
+    /// </summary>
+    /// <remarks>
+    /// Metal is the only version-stable way to name an Apple GPU: no sysctl
+    /// exposes it, and the Vulkan presenter that also knows the name lives
+    /// downstream of this assembly and initializes long after the startup
+    /// banner is emitted. Like the Windows path, this reports the host's
+    /// preferred GPU, which on a multi-GPU Mac need not be the device the
+    /// presenter later selects; that one is logged separately as
+    /// "Vulkan device: ...".
+    /// </remarks>
+    private static string? GetMetalDeviceName()
+    {
+        try
+        {
+            var device = MTLCreateSystemDefaultDevice();
+            if (device == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            try
+            {
+                var name = objc_msgSend(device, sel_registerName("name"));
+                if (name == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                var utf8 = objc_msgSend(name, sel_registerName("UTF8String"));
+                return utf8 == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(utf8);
+            }
+            finally
+            {
+                // MTLCreateSystemDefaultDevice returns a +1 retained device.
+                objc_msgSend(device, sel_registerName("release"));
+            }
+        }
+        catch (Exception)
+        {
+            // Hardware information is diagnostic only.
+            return null;
+        }
+    }
+
+    /// <summary>Reads a string sysctl by name, or null when unavailable.</summary>
+    private static string? GetSysctlString(string name)
+    {
+        try
+        {
+            nuint length = 0;
+            if (sysctlbyname(name, IntPtr.Zero, ref length, IntPtr.Zero, 0) != 0 || length == 0)
+            {
+                return null;
+            }
+
+            var buffer = Marshal.AllocHGlobal((int)length);
+            try
+            {
+                if (sysctlbyname(name, buffer, ref length, IntPtr.Zero, 0) != 0)
+                {
+                    return null;
+                }
+
+                // length counts the trailing NUL, which PtrToStringUTF8 must not include.
+                return Marshal.PtrToStringUTF8(buffer, (int)length - 1);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        catch (Exception)
+        {
+            // Hardware information is diagnostic only.
+            return null;
+        }
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -163,25 +246,19 @@ public static class HostSystemInfo
         public string? DeviceKey;
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-    private struct MemoryStatusEx
-    {
-        public uint dwLength;
-        public uint dwMemoryLoad;
-        public ulong ullTotalPhys;
-        public ulong ullAvailPhys;
-        public ulong ullTotalPageFile;
-        public ulong ullAvailPageFile;
-        public ulong ullTotalVirtual;
-        public ulong ullAvailVirtual;
-        public ulong ullAvailExtendedVirtual;
-    }
-
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplayDevices(string? deviceName, uint deviceNum, ref DisplayDevice displayDevice, uint flags);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+    [DllImport("libc", SetLastError = true)]
+    private static extern int sysctlbyname(string name, IntPtr oldp, ref nuint oldlenp, IntPtr newp, nuint newlen);
+
+    [DllImport("/System/Library/Frameworks/Metal.framework/Metal")]
+    private static extern IntPtr MTLCreateSystemDefaultDevice();
+
+    [DllImport("/usr/lib/libobjc.dylib")]
+    private static extern IntPtr sel_registerName(string name);
+
+    [DllImport("/usr/lib/libobjc.dylib")]
+    private static extern IntPtr objc_msgSend(IntPtr receiver, IntPtr selector);
 }
