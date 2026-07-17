@@ -48,6 +48,85 @@ public sealed class SelfLoaderTests
             new SelfLoader().Load(imageData, new VirtualMemory()));
     }
 
+    [Theory]
+    [InlineData(0xDEADBEEF)]
+    [InlineData(0x7F454C47)] // bare ELF magic read big-endian as a "SELF" candidate is not a SELF
+    public void Load_RejectsUnrecognizedLeadingMagic(uint magic)
+    {
+        var imageData = new byte[SelfHeaderSize + ElfHeaderSize];
+        BinaryPrimitives.WriteUInt32BigEndian(imageData, magic);
+
+        Assert.Throws<InvalidDataException>(() =>
+            new SelfLoader().Load(imageData, new VirtualMemory()));
+    }
+
+    [Fact]
+    public void Load_RejectsImageSmallerThanElfHeader()
+    {
+        // A few bytes short of ElfHeaderSize (0x40); ParseLayout guards this
+        // before any magic dispatch, so the error is deterministic for both
+        // SELF and ELF inputs.
+        var imageData = new byte[ElfHeaderSize - 1];
+
+        Assert.Throws<InvalidDataException>(() =>
+            new SelfLoader().Load(imageData, new VirtualMemory()));
+    }
+
+    [Fact]
+    public void Load_RejectsTruncatedSelfHeader()
+    {
+        // SELF magic is present and recognized, but the image ends before the
+        // SELF header + embedded ELF header can be read. ParseLayout computes
+        // elfOffset = SelfHeaderSize + segments*SelfSegmentSize and then
+        // EnsureRange must fail.
+        var imageData = new byte[SelfHeaderSize + ElfHeaderSize];
+        BinaryPrimitives.WriteUInt32BigEndian(imageData, Ps5SelfMagic);
+        imageData[0x05] = 0x01;
+        imageData[0x06] = 0x01;
+        imageData[0x07] = 0x12;
+        var truncated = imageData.AsSpan(0, SelfHeaderSize + 0x10).ToArray();
+
+        Assert.Throws<InvalidDataException>(() =>
+            new SelfLoader().Load(truncated, new VirtualMemory()));
+    }
+
+    [Fact]
+    public void Load_ParsesEmbeddedElfHeaderFromSelfContainer()
+    {
+        var imageData = CreateSelfImage(Ps5SelfMagic, 0x10, 0x1000_0101, 0x32);
+
+        var image = new SelfLoader().Load(imageData, new VirtualMemory());
+
+        Assert.True(image.IsSelf);
+        // The ELF header parsed out of the SELF container must be a valid x86-64
+        // ELF64 little-endian image with the PS5 ABI marker that drives Gen5
+        // selection in SharpEmuRuntime.
+        Assert.True(image.ElfHeader.HasElfMagic);
+        Assert.True(image.ElfHeader.Is64Bit);
+        Assert.True(image.ElfHeader.IsLittleEndian);
+        Assert.Equal(2, image.ElfHeader.AbiVersion);
+        Assert.Equal(62, image.ElfHeader.Machine);
+    }
+
+    [Fact]
+    public void Load_AcceptsBareDecryptedElf()
+    {
+        // A decrypted eboot that has already been stripped of its SELF wrapper
+        // is accepted directly; IsSelf must be false and the ELF header is read
+        // from offset 0.
+        var imageData = new byte[ElfHeaderSize];
+        WriteMinimalElfHeader(imageData);
+
+        var image = new SelfLoader().Load(imageData, new VirtualMemory());
+
+        Assert.False(image.IsSelf);
+        Assert.True(image.ElfHeader.HasElfMagic);
+        Assert.True(image.ElfHeader.Is64Bit);
+        Assert.Equal(62, image.ElfHeader.Machine);
+        Assert.Empty(image.ProgramHeaders);
+        Assert.Empty(image.MappedRegions);
+    }
+
     private static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)
     {
         var imageData = new byte[SelfHeaderSize + ElfHeaderSize];

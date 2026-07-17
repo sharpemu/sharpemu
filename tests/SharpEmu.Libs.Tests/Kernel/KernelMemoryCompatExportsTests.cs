@@ -164,4 +164,149 @@ public sealed class KernelMemoryCompatExportsTests
 
         Assert.Equal(0, KernelMemoryCompatExports.KernelReleaseDirectMemory(context));
     }
+
+    [Fact]
+    public void MapNamedFlexibleMemory_NullInOutPointerReturnsInvalidArgument()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = 0x1000;
+        context[CpuRegister.Rdx] = 0x03; // CPU read|write
+        context[CpuRegister.Rcx] = 0;
+
+        var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void MapNamedFlexibleMemory_ZeroLengthReturnsInvalidArgument()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong inOutAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.TryWrite(inOutAddress, BitConverter.GetBytes(0UL));
+        context[CpuRegister.Rdi] = inOutAddress;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0x03;
+        context[CpuRegister.Rcx] = 0;
+
+        var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void MapNamedFlexibleMemory_UnreadableInOutPointerReturnsMemoryFault()
+    {
+        // The in-out pointer points outside the FakeCpuMemory backing store, so
+        // the first TryReadUInt64 must fail before any reservation is attempted.
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong unreachableInOut = memoryBase + 0x10_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = unreachableInOut;
+        context[CpuRegister.Rsi] = 0x1000;
+        context[CpuRegister.Rdx] = 0x03;
+        context[CpuRegister.Rcx] = 0;
+
+        var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, result);
+    }
+
+    [Fact]
+    public void Mprotect_ZeroAddressReturnsInvalidArgument()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = 0x4000;
+        context[CpuRegister.Rdx] = 0x03;
+
+        var result = KernelMemoryCompatExports.KernelMprotect(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void Mprotect_ZeroLengthReturnsInvalidArgument()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = memoryBase;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0x03;
+
+        var result = KernelMemoryCompatExports.KernelMprotect(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void Mprotect_UnmappedRangeReturnsNotFound()
+    {
+        // A plausible guest address that FakeCpuMemory does not back and that
+        // has no host reservation. TryProtectHostRange calls VirtualProtect,
+        // which fails on an unmapped range, yielding NOT_FOUND rather than
+        // mutating protection or throwing.
+        const ulong unmappedAddress = 0x2_0000_0000;
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = unmappedAddress;
+        context[CpuRegister.Rsi] = 0x4000;
+        context[CpuRegister.Rdx] = 0x03;
+
+        var result = KernelMemoryCompatExports.KernelMprotect(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void Munmap_ZeroAddressReturnsInvalidArgument()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = 0x4000;
+
+        var result = KernelMemoryCompatExports.KernelMunmap(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void Munmap_OverflowRangeReturnsInvalidArgument()
+    {
+        // address + length would overflow; KernelMunmap guards this explicitly
+        // before touching any region accounting.
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = ulong.MaxValue - 0x10;
+        context[CpuRegister.Rsi] = 0x20;
+
+        var result = KernelMemoryCompatExports.KernelMunmap(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void Munmap_UnmappedRangeReturnsNotFound()
+    {
+        // No flexible region is registered at this address and FakeCpuMemory
+        // does not back it, so both physicallyBacked and removedRegions are
+        // empty and the export reports NOT_FOUND.
+        const ulong unmappedAddress = 0x2_0000_0000;
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = unmappedAddress;
+        context[CpuRegister.Rsi] = 0x4000;
+
+        var result = KernelMemoryCompatExports.KernelMunmap(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
 }
