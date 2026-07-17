@@ -121,6 +121,91 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
     }
 
+    [Fact]
+    public void LargeExactReservationReservesInsteadOfCommitting()
+    {
+        const ulong desiredAddress = 0x0000_8000_0000_0000;
+        const ulong reservationSize = 0x80_0000_0000; // 512 GiB
+        const ulong commitLimit = 0x8_0000_0000;      // 32 GiB
+        var host = new CommitLimitedHostMemory(commitLimit);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.True(memory.TryAllocateAtExact(desiredAddress, reservationSize, executable: false, out var actualAddress));
+        Assert.Equal(desiredAddress, actualAddress);
+
+        // The range was reserved, never committed: exactly one reserve at the
+        // requested base/size, and no reserve+commit was attempted for it.
+        Assert.Equal([(desiredAddress, reservationSize)], host.ReserveCalls);
+        Assert.DoesNotContain((desiredAddress, reservationSize), host.AllocateCalls);
+    }
+
+    [Fact]
+    public void SmallExactAllocationStillCommits()
+    {
+        // Below the large-reservation threshold, allocations must still be
+        // committed up front (reserve+commit), not switched to lazy reserve.
+        const ulong desiredAddress = 0x0000_9000_0000_0000;
+        const ulong smallSize = 0x1000; // 4 KiB
+        const ulong commitLimit = 0x8_0000_0000;
+        var host = new CommitLimitedHostMemory(commitLimit);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.True(memory.TryAllocateAtExact(desiredAddress, smallSize, executable: false, out var actualAddress));
+        Assert.Equal(desiredAddress, actualAddress);
+
+        Assert.Equal([(desiredAddress, smallSize)], host.AllocateCalls);
+        Assert.Empty(host.ReserveCalls);
+    }
+
+    private sealed class CommitLimitedHostMemory(ulong commitLimit) : IHostMemory
+    {
+        public List<(ulong Address, ulong Size)> AllocateCalls { get; } = [];
+
+        public List<(ulong Address, ulong Size)> ReserveCalls { get; } = [];
+
+        // Reserve+commit: fails when the request exceeds the host commit limit,
+        // exactly like VirtualAlloc(MEM_COMMIT) rejecting an over-large charge.
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            AllocateCalls.Add((desiredAddress, size));
+            return size > commitLimit ? 0 : desiredAddress;
+        }
+
+        // Reserve only: succeeds at the exact address, since claiming address
+        // space (without backing it) is cheap regardless of size.
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            ReserveCalls.Add((desiredAddress, size));
+            return desiredAddress;
+        }
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            info = default;
+            return false;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+    }
+
     private sealed class FakeHostMemory : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
