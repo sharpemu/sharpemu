@@ -5578,6 +5578,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			int num6 = -1;
 			try
 			{
+				// The process entry point returns an int exit status. Guest callbacks
+				// and continuations preserve the full-width RAX value in the paths above.
 				num6 = unchecked((int)CallNativeEntry(ptr));
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest

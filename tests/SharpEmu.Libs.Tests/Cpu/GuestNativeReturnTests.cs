@@ -20,19 +20,19 @@ public sealed class GuestNativeReturnTests
     [Fact]
     public unsafe void NativeEntryAndCompletedContextPreserveFullPointerReturn()
     {
-        var nativeEntry = typeof(DirectExecutionBackend).GetMethod(
-            "CallNativeEntry",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        Assert.NotNull(nativeEntry);
+        var nativeEntry = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(DirectExecutionBackend).GetMethod(
+                "CallNativeEntry",
+                BindingFlags.Static | BindingFlags.NonPublic));
         Assert.Equal(typeof(ulong), nativeEntry.ReturnType);
         var target = (delegate* unmanaged[Cdecl]<ulong>)&ReturnGuestPointer;
         var boxedTarget = Pointer.Box((void*)target, typeof(void*));
         Assert.Equal(GuestPointer, Assert.IsType<ulong>(nativeEntry.Invoke(null, [boxedTarget])));
 
-        var storeReturn = typeof(DirectExecutionBackend).GetMethod(
-            "StoreCompletedGuestNativeReturn",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        Assert.NotNull(storeReturn);
+        var storeReturn = Assert.IsAssignableFrom<MethodInfo>(
+            typeof(DirectExecutionBackend).GetMethod(
+                "StoreCompletedGuestNativeReturn",
+                BindingFlags.Static | BindingFlags.NonPublic));
 
         var context = new CpuContext(new FakeCpuMemory(0x1_0000, 0x1000), Generation.Gen5);
         storeReturn.Invoke(null, [context, GuestPointer]);
