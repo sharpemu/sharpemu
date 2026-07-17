@@ -120,8 +120,8 @@ public static class AudioOut2Exports
         }
 
         // The second argument is a pointer to one uint64_t, not a larger memory-info
-        // structure. Writing past these eight bytes corrupts callers that keep the
-        // output in a stack slot (including GTA V's saved stack canary).
+        // structure. Writing past these eight bytes can corrupt adjacent caller state
+        // when the output occupies a tightly packed stack slot.
         return ctx.TryWriteUInt64(outMemorySizeAddress, AudioOut2ContextMemorySize)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -245,8 +245,8 @@ public static class AudioOut2Exports
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // Both outputs are uint32_t values. GTA V places the level output four
-        // bytes before its stack canary, so an eight-byte write corrupts it.
+        // Both outputs are uint32_t values. Writing eight bytes to the level output
+        // can corrupt adjacent caller state.
         if (outQueueLevelAddress != 0 && !ctx.TryWriteUInt32(outQueueLevelAddress, 0))
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
