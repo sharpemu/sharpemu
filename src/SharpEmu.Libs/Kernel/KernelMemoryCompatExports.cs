@@ -195,7 +195,14 @@ public static partial class KernelMemoryCompatExports
 
     private readonly record struct DirectAllocation(ulong Start, ulong Length, int MemoryType);
     private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
-    private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible, bool IsDirect, ulong DirectStart);
+    private readonly record struct MappedRegion(
+        ulong Address,
+        ulong Length,
+        int Protection,
+        bool IsFlexible,
+        bool IsDirect,
+        ulong DirectStart,
+        bool IsReserved = false);
     private readonly record struct BatchMapEntry(ulong Start, ulong Offset, ulong Length, byte Protection, byte Type, int Operation);
 
     public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot)
@@ -222,6 +229,37 @@ public static partial class KernelMemoryCompatExports
                 string.Equals(path, normalizedMountPoint, StringComparison.OrdinalIgnoreCase) ||
                 path.StartsWith(normalizedMountPoint + "/", StringComparison.OrdinalIgnoreCase));
         }
+    }
+
+    public static bool TryUnregisterGuestPathMount(string guestMountPoint)
+    {
+        if (string.IsNullOrWhiteSpace(guestMountPoint))
+        {
+            return false;
+        }
+
+        var normalizedMountPoint = NormalizeGuestStatCachePath(guestMountPoint);
+        if (normalizedMountPoint is null || normalizedMountPoint == "/")
+        {
+            return false;
+        }
+
+        lock (_guestMountGate)
+        {
+            if (!_guestMounts.Remove(normalizedMountPoint))
+            {
+                return false;
+            }
+        }
+
+        lock (_statCacheGate)
+        {
+            _negativeStatCache.RemoveWhere(path =>
+                string.Equals(path, normalizedMountPoint, StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith(normalizedMountPoint + "/", StringComparison.OrdinalIgnoreCase));
+        }
+
+        return true;
     }
 
     internal static bool TryAllocateHleData(
@@ -288,7 +326,8 @@ public static partial class KernelMemoryCompatExports
                 Protection: 0,
                 IsFlexible: false,
                 IsDirect: false,
-                DirectStart: 0);
+                DirectStart: 0,
+                IsReserved: true);
         }
     }
 
@@ -2292,23 +2331,35 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int ClockGettime(CpuContext ctx)
     {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
         var timespecAddress = ctx[CpuRegister.Rsi];
         if (timespecAddress == 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            KernelRuntimeCompatExports.TrySetErrno(ctx, 22);
+            ctx[CpuRegister.Rax] = ulong.MaxValue;
+            return -1;
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var seconds = now.ToUnixTimeSeconds();
-        var nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+        if (!KernelRuntimeCompatExports.ResolveClockTime(
+                clockId,
+                out var seconds,
+                out var nanoseconds))
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, 22);
+            ctx[CpuRegister.Rax] = ulong.MaxValue;
+            return -1;
+        }
+
         if (!ctx.TryWriteUInt64(timespecAddress, unchecked((ulong)seconds)) ||
             !ctx.TryWriteUInt64(timespecAddress + sizeof(long), unchecked((ulong)nanoseconds)))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            KernelRuntimeCompatExports.TrySetErrno(ctx, 14);
+            ctx[CpuRegister.Rax] = ulong.MaxValue;
+            return -1;
         }
 
         ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return 0;
     }
 
     [SysAbiExport(
@@ -2822,7 +2873,11 @@ public static partial class KernelMemoryCompatExports
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] map_direct: inout=0x{inOutAddressPointer:X16} len=0x{length:X16} prot=0x{protection:X8} flags=0x{flags:X16} direct=0x{directMemoryStart:X16} align=0x{alignment:X16}");
         }
-        if (inOutAddressPointer == 0 || length == 0)
+        if (inOutAddressPointer == 0 ||
+            length == 0 ||
+            (length & (OrbisPageSize - 1)) != 0 ||
+            (directMemoryStart & (OrbisPageSize - 1)) != 0 ||
+            !IsValidMapAlignment(alignment))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
@@ -2832,89 +2887,130 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        ulong mappedAddress;
+        ulong mappedAddress = 0;
         lock (_memoryGate)
         {
             var effectiveAlignment = alignment == 0 ? OrbisPageSize : alignment;
             var fixedMapping = (flags & 0x10UL) != 0;
-            var desiredAddress = requestedAddress != 0
+            var noOverwrite = fixedMapping && (flags & 0x80UL) != 0;
+            if (fixedMapping &&
+                (requestedAddress == 0 ||
+                 (requestedAddress & (OrbisPageSize - 1)) != 0))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            var desiredBase = requestedAddress != 0
                 ? requestedAddress
                 : directMemoryStart != 0
-                    ? AlignUp(directMemoryStart, effectiveAlignment)
-                    : AlignUp(_nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress, effectiveAlignment);
-
-            var reserved = false;
-            if (fixedMapping && requestedAddress != 0)
+                    ? directMemoryStart
+                    : _nextVirtualAddress == 0
+                        ? DefaultMapSearchBase
+                        : _nextVirtualAddress;
+            if (!TryAlignUpToMultiple(
+                    desiredBase,
+                    fixedMapping ? OrbisPageSize : effectiveAlignment,
+                    out var desiredAddress) ||
+                !TryAddU64(desiredAddress, length, out var desiredEnd) ||
+                directMemoryStart > DirectMemorySizeBytes ||
+                length > DirectMemorySizeBytes - directMemoryStart)
             {
-                mappedAddress = requestedAddress;
-                reserved = IsGuestRangeBacked(ctx, requestedAddress, length);
-                if (!reserved)
-                {
-                    TryReserveExactGuestVirtualRange(ctx, requestedAddress, length, protection);
-                    reserved = IsGuestRangeBacked(ctx, requestedAddress, length);
-                }
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
 
-                if (!reserved)
-                {
-                    // Rosetta places the x86-64 process stack in the low
-                    // address window used by some fixed PS5 mappings. Do not
-                    // clobber that host memory: relocate the mapping and
-                    // return the actual address through the in/out pointer.
-                    if (OperatingSystem.IsMacOS())
-                    {
-                        var fallbackAddress = AlignUp(
-                            _nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress,
-                            effectiveAlignment);
-                        reserved = TryReserveGuestVirtualRange(
-                            ctx,
-                            fallbackAddress,
-                            length,
-                            protection,
-                            effectiveAlignment,
-                            out mappedAddress);
+            if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            }
 
-                        if (reserved && ShouldTraceDirectMemory())
-                        {
-                            Console.Error.WriteLine(
-                                $"[LOADER][WARN] map_direct relocated fixed mapping: requested=0x{requestedAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16}");
-                        }
-                    }
+            if (noOverwrite &&
+                (HasMappedRegionOverlapLocked(desiredAddress, length) ||
+                 addressSpace.IsAccessible(desiredAddress, length)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_OUT_OF_MEMORY;
+            }
 
-                    if (!reserved)
-                    {
-                        mappedAddress = 0;
-                    }
-                }
+            var replacedDirectRegions = fixedMapping && !noOverwrite
+                ? GetOverlappingDirectRegionsLocked(desiredAddress, desiredEnd)
+                : [];
+            bool mapped;
+            if (replacedDirectRegions.Length != 0)
+            {
+                mapped = addressSpace.TryReplaceDirectMemory(
+                    desiredAddress,
+                    length,
+                    directMemoryStart,
+                    DirectMemorySizeBytes,
+                    ResolveGuestProtection(protection),
+                    out mappedAddress);
             }
             else
             {
-                reserved = TryReserveGuestVirtualRange(ctx, desiredAddress, length, protection, effectiveAlignment, out mappedAddress);
-            }
-            if (ShouldTraceDirectMemory())
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][TRACE] map_direct reserve: requested=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} reserved={reserved} mapped=0x{mappedAddress:X16}");
-            }
-            if (!reserved && !fixedMapping)
-            {
-                if (mappedAddress == 0)
+                if (fixedMapping &&
+                    !PreparePartiallyOverlappedReservationsLocked(
+                        addressSpace,
+                        desiredAddress,
+                        length,
+                        desiredEnd))
                 {
-                    mappedAddress = requestedAddress != 0
-                        ? requestedAddress
-                        : AllocateMappedGuestAddress(ctx, length, effectiveAlignment);
-                    if (ShouldTraceDirectMemory())
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                }
+
+                mapped = addressSpace.TryMapDirectMemory(
+                    desiredAddress,
+                    length,
+                    directMemoryStart,
+                    DirectMemorySizeBytes,
+                    ResolveGuestProtection(protection),
+                    effectiveAlignment,
+                    allowSearch: !fixedMapping,
+                    out mappedAddress);
+
+                if ((!mapped || mappedAddress == 0) &&
+                    fixedMapping &&
+                    OperatingSystem.IsMacOS())
+                {
+                    var fallbackAddress = AlignUp(
+                        _nextVirtualAddress == 0 ? DefaultMapSearchBase : _nextVirtualAddress,
+                        effectiveAlignment);
+                    mapped = addressSpace.TryMapDirectMemory(
+                        fallbackAddress,
+                        length,
+                        directMemoryStart,
+                        DirectMemorySizeBytes,
+                        ResolveGuestProtection(protection),
+                        effectiveAlignment,
+                        allowSearch: true,
+                        out mappedAddress);
+                    if (mapped && ShouldTraceDirectMemory())
                     {
-                        Console.Error.WriteLine($"[LOADER][TRACE] map_direct fallback mapped=0x{mappedAddress:X16}");
+                        Console.Error.WriteLine(
+                            $"[LOADER][WARN] map_direct relocated fixed mapping: requested=0x{requestedAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16}");
                     }
                 }
             }
 
-            if (mappedAddress == 0)
+            if (ShouldTraceDirectMemory())
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] map_direct shared: requested=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} mapped={mapped} va=0x{mappedAddress:X16}");
+            }
+
+            if (!mapped || mappedAddress == 0)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
+            if (replacedDirectRegions.Length != 0)
+            {
+                CommitFixedDirectReplacementLocked(
+                    desiredAddress,
+                    desiredEnd,
+                    replacedDirectRegions);
+            }
+
             _nextVirtualAddress = Math.Max(_nextVirtualAddress, mappedAddress + length);
+            CarveReservedMappedRegionLocked(mappedAddress, length);
             _mappedRegions[mappedAddress] = new MappedRegion(
                 mappedAddress,
                 length,
@@ -3097,46 +3193,242 @@ public static partial class KernelMemoryCompatExports
     {
         var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
-        if (address == 0 || length == 0 || ulong.MaxValue - address < length)
+        if (address == 0 || length == 0 || !TryAddU64(address, length, out var end))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var rangeEnd = address + length;
-        var physicallyBacked = IsGuestRangeBacked(ctx, address, length);
-        var removedAny = false;
         lock (_memoryGate)
         {
-            var removedRegions = _mappedRegions.Values
-                .Where(region =>
-                    region.Address >= address &&
-                    region.Address < rangeEnd &&
-                    region.Length <= rangeEnd - region.Address)
-                .ToArray();
+            if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            }
 
-            if (removedRegions.Length == 0 && !physicallyBacked)
+            var affectedRegions = _mappedRegions.Values
+                .Where(region =>
+                    TryAddU64(region.Address, region.Length, out var regionEnd) &&
+                    address < regionEnd &&
+                    region.Address < end)
+                .OrderBy(static region => region.Address)
+                .ToArray();
+            if (affectedRegions.Length == 0)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
-            foreach (var mappedRegion in removedRegions)
+            foreach (var mappedRegion in affectedRegions)
             {
-                removedAny |= _mappedRegions.Remove(mappedRegion.Address);
+                var mappedRegionEnd = mappedRegion.Address + mappedRegion.Length;
+                var unmapStart = Math.Max(address, mappedRegion.Address);
+                var unmapEnd = Math.Min(end, mappedRegionEnd);
+                var unmapLength = unmapEnd - unmapStart;
+                var isWholeRegion = unmapStart == mappedRegion.Address &&
+                    unmapLength == mappedRegion.Length;
+                if (mappedRegion.IsDirect)
+                {
+                    if (!addressSpace.TryUnmapDirectMemoryRange(unmapStart, unmapLength))
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                    }
+
+                    // A direct view may have replaced a host reservation. Once
+                    // the view is gone, release the restored placeholder too.
+                    _ = addressSpace.TryUnmapReservedMemory(unmapStart, unmapLength);
+                }
+                else if (mappedRegion.IsReserved)
+                {
+                    if (!addressSpace.TryUnmapReservedMemory(unmapStart, unmapLength))
+                    {
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                    }
+                }
+                else if (!isWholeRegion)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                }
+
+                _mappedRegions.Remove(mappedRegion.Address);
+                _mappedRegionNames.Remove(mappedRegion.Address, out var mappedName);
+                if (mappedRegion.Address < unmapStart)
+                {
+                    AddMunmapRemainderLocked(
+                        mappedRegion,
+                        mappedRegion.Address,
+                        unmapStart - mappedRegion.Address,
+                        mappedName);
+                }
+
+                if (unmapEnd < mappedRegionEnd)
+                {
+                    AddMunmapRemainderLocked(
+                        mappedRegion,
+                        unmapEnd,
+                        mappedRegionEnd - unmapEnd,
+                        mappedName);
+                }
+
                 if (mappedRegion.IsFlexible)
                 {
-                    _allocatedFlexibleBytes = mappedRegion.Length >= _allocatedFlexibleBytes
+                    _allocatedFlexibleBytes = unmapLength >= _allocatedFlexibleBytes
                         ? 0
-                        : _allocatedFlexibleBytes - mappedRegion.Length;
+                        : _allocatedFlexibleBytes - unmapLength;
                 }
             }
         }
 
-        if (physicallyBacked || removedAny)
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static void AddMunmapRemainderLocked(
+        MappedRegion source,
+        ulong address,
+        ulong length,
+        string? name)
+    {
+        var directStart = source.IsDirect
+            ? source.DirectStart + (address - source.Address)
+            : source.DirectStart;
+        _mappedRegions[address] = source with
         {
-            KernelRuntimeCompatExports.RegisterReleasedVirtualRange(address, length);
+            Address = address,
+            Length = length,
+            DirectStart = directStart,
+        };
+        if (name is not null)
+        {
+            _mappedRegionNames[address] = name;
+        }
+    }
+
+    private static void CarveReservedMappedRegionLocked(ulong address, ulong length)
+    {
+        if (!TryAddU64(address, length, out var end))
+        {
+            return;
         }
 
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var reservations = _mappedRegions.Values
+            .Where(region =>
+                region.IsReserved &&
+                TryAddU64(region.Address, region.Length, out var regionEnd) &&
+                address < regionEnd &&
+                region.Address < end)
+            .ToArray();
+        foreach (var reservation in reservations)
+        {
+            var reservationEnd = reservation.Address + reservation.Length;
+            var overlapStart = Math.Max(address, reservation.Address);
+            var overlapEnd = Math.Min(end, reservationEnd);
+            _mappedRegions.Remove(reservation.Address);
+            _mappedRegionNames.Remove(reservation.Address, out var name);
+            if (reservation.Address < overlapStart)
+            {
+                AddMunmapRemainderLocked(
+                    reservation,
+                    reservation.Address,
+                    overlapStart - reservation.Address,
+                    name);
+            }
+
+            if (overlapEnd < reservationEnd)
+            {
+                AddMunmapRemainderLocked(
+                    reservation,
+                    overlapEnd,
+                    reservationEnd - overlapEnd,
+                    name);
+            }
+        }
+    }
+
+    private static MappedRegion[] GetOverlappingDirectRegionsLocked(
+        ulong address,
+        ulong end)
+    {
+        return _mappedRegions.Values
+            .Where(region =>
+                region.IsDirect &&
+                TryAddU64(region.Address, region.Length, out var regionEnd) &&
+                address < regionEnd &&
+                region.Address < end)
+            .ToArray();
+    }
+
+    private static void CommitFixedDirectReplacementLocked(
+        ulong address,
+        ulong end,
+        IReadOnlyList<MappedRegion> directRegions)
+    {
+        foreach (var region in directRegions)
+        {
+            var regionEnd = region.Address + region.Length;
+            var overlapStart = Math.Max(address, region.Address);
+            var overlapEnd = Math.Min(end, regionEnd);
+            _mappedRegions.Remove(region.Address);
+            _mappedRegionNames.Remove(region.Address, out var name);
+            if (region.Address < overlapStart)
+            {
+                AddMunmapRemainderLocked(
+                    region,
+                    region.Address,
+                    overlapStart - region.Address,
+                    name);
+            }
+
+            if (overlapEnd < regionEnd)
+            {
+                AddMunmapRemainderLocked(region, overlapEnd, regionEnd - overlapEnd, name);
+            }
+        }
+    }
+
+    private static bool HasMappedRegionOverlapLocked(ulong address, ulong length)
+    {
+        if (!TryAddU64(address, length, out var end))
+        {
+            return true;
+        }
+
+        return _mappedRegions.Values.Any(region =>
+            TryAddU64(region.Address, region.Length, out var regionEnd) &&
+            address < regionEnd &&
+            region.Address < end);
+    }
+
+    private static bool PreparePartiallyOverlappedReservationsLocked(
+        IGuestAddressSpace addressSpace,
+        ulong address,
+        ulong length,
+        ulong end)
+    {
+        var reservations = _mappedRegions.Values
+            .Where(region =>
+                region.IsReserved &&
+                TryAddU64(region.Address, region.Length, out var regionEnd) &&
+                address < regionEnd &&
+                region.Address < end)
+            .ToArray();
+        if (reservations.Length == 0 || reservations.Any(region =>
+                address >= region.Address &&
+                end <= region.Address + region.Length))
+        {
+            return true;
+        }
+
+        foreach (var reservation in reservations)
+        {
+            var reservationEnd = reservation.Address + reservation.Length;
+            var overlapStart = Math.Max(address, reservation.Address);
+            var overlapEnd = Math.Min(end, reservationEnd);
+            if (!addressSpace.TryUnmapReservedMemory(overlapStart, overlapEnd - overlapStart))
+            {
+                return false;
+            }
+        }
+
+        CarveReservedMappedRegionLocked(address, length);
+        return true;
     }
 
     [SysAbiExport(
@@ -3225,7 +3517,10 @@ public static partial class KernelMemoryCompatExports
             stateFlags |= 0x02u;
         }
 
-        stateFlags |= 0x10u;
+        if (!region.IsReserved)
+        {
+            stateFlags |= 0x10u;
+        }
 
         BinaryPrimitives.WriteUInt64LittleEndian(payload[0..8], region.Address);
         BinaryPrimitives.WriteUInt64LittleEndian(payload[8..16], regionEnd);
@@ -4449,6 +4744,7 @@ public static partial class KernelMemoryCompatExports
             desiredAddress,
             length,
             executable,
+            reserveOnly: false,
             alignment,
             allowSearch: true,
             allowAllocateAtAlternative: false,
@@ -4468,6 +4764,7 @@ public static partial class KernelMemoryCompatExports
             desiredAddress,
             length,
             executable,
+            reserveOnly: false,
             alignment: 0,
             allowSearch: false,
             allowAllocateAtAlternative: false,
@@ -5677,6 +5974,27 @@ public static partial class KernelMemoryCompatExports
                 : HostPageNoAccess;
     }
 
+    private static GuestPageProtection ResolveGuestProtection(int orbisProtection)
+    {
+        var protection = GuestPageProtection.None;
+        if ((orbisProtection & (OrbisProtCpuRead | OrbisProtGpuRead)) != 0)
+        {
+            protection |= GuestPageProtection.Read;
+        }
+
+        if ((orbisProtection & (OrbisProtCpuWrite | OrbisProtGpuWrite)) != 0)
+        {
+            protection |= GuestPageProtection.Write;
+        }
+
+        if ((orbisProtection & OrbisProtCpuExec) != 0)
+        {
+            protection |= GuestPageProtection.Execute;
+        }
+
+        return protection;
+    }
+
     private static bool TryFindVirtualQueryRegionLocked(ulong queryAddress, bool findNext, out MappedRegion region)
     {
         region = default;
@@ -5994,6 +6312,117 @@ public static partial class KernelMemoryCompatExports
         return highWaterMark;
     }
 
+    private static bool TryUnmapReleasedDirectMappingsLocked(
+        CpuContext ctx,
+        ulong releaseStart,
+        ulong releaseEnd)
+    {
+        if (releaseStart >= releaseEnd ||
+            !KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace))
+        {
+            return releaseStart < releaseEnd;
+        }
+
+        var affectedMappings = _mappedRegions.Values
+            .Where(static region => region.IsDirect)
+            .Where(region =>
+                TryAddU64(region.DirectStart, region.Length, out var directEnd) &&
+                releaseEnd > region.DirectStart &&
+                releaseStart < directEnd)
+            .OrderBy(static region => region.Address)
+            .ToArray();
+        foreach (var mapping in affectedMappings)
+        {
+            if (!TryAddU64(mapping.DirectStart, mapping.Length, out var directEnd) ||
+                !addressSpace.TryUnmapDirectMemory(mapping.Address, mapping.Length))
+            {
+                return false;
+            }
+
+            _mappedRegions.Remove(mapping.Address);
+            _mappedRegionNames.Remove(mapping.Address, out var mappingName);
+
+            var overlapStart = Math.Max(releaseStart, mapping.DirectStart);
+            var overlapEnd = Math.Min(releaseEnd, directEnd);
+            if (mapping.DirectStart < overlapStart &&
+                !TryRemapDirectFragmentLocked(
+                    addressSpace,
+                    mapping,
+                    mapping.Address,
+                    mapping.DirectStart,
+                    overlapStart - mapping.DirectStart,
+                    mappingName))
+            {
+                return false;
+            }
+
+            if (overlapEnd < directEnd)
+            {
+                var fragmentAddress = mapping.Address + (overlapEnd - mapping.DirectStart);
+                if (!TryRemapDirectFragmentLocked(
+                        addressSpace,
+                        mapping,
+                        fragmentAddress,
+                        overlapEnd,
+                        directEnd - overlapEnd,
+                        mappingName))
+                {
+                    return false;
+                }
+            }
+
+            if (ShouldTraceDirectMemory())
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] release_direct unmap: phys=0x{overlapStart:X16}-0x{overlapEnd:X16} " +
+                    $"va=0x{mapping.Address:X16} size=0x{mapping.Length:X}");
+            }
+
+            var releasedVirtualAddress = mapping.Address + (overlapStart - mapping.DirectStart);
+            _ = addressSpace.TryUnmapReservedMemory(
+                releasedVirtualAddress,
+                overlapEnd - overlapStart);
+        }
+
+        return true;
+    }
+
+    private static bool TryRemapDirectFragmentLocked(
+        IGuestAddressSpace addressSpace,
+        MappedRegion source,
+        ulong address,
+        ulong directStart,
+        ulong length,
+        string? name)
+    {
+        if (!addressSpace.TryMapDirectMemory(
+                address,
+                length,
+                directStart,
+                DirectMemorySizeBytes,
+                ResolveGuestProtection(source.Protection),
+                OrbisPageSize,
+                allowSearch: false,
+                out var mappedAddress) ||
+            mappedAddress != address)
+        {
+            return false;
+        }
+
+        _mappedRegions[address] = source with
+        {
+            Address = address,
+            Length = length,
+            DirectStart = directStart,
+        };
+        if (name is not null)
+        {
+            _mappedRegionNames[address] = name;
+        }
+
+        return true;
+    }
+
     private static bool TryReadHostMemory(ulong address, Span<byte> destination)
     {
         if (destination.IsEmpty || !IsHostRangeAccessible(address, (ulong)destination.Length, writeAccess: false))
@@ -6039,6 +6468,37 @@ public static partial class KernelMemoryCompatExports
                 }
 
                 return TryReadHostMemory(address, destination);
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool TryWriteTrackedLibcHeap(
+        ulong address,
+        ReadOnlySpan<byte> source)
+    {
+        if (source.IsEmpty)
+        {
+            return true;
+        }
+
+        var length = (ulong)source.Length;
+        lock (_libcAllocGate)
+        {
+            foreach (var (allocationAddress, allocation) in _libcAllocations)
+            {
+                var allocationSize = (ulong)allocation.Size;
+                var offset = address >= allocationAddress
+                    ? address - allocationAddress
+                    : ulong.MaxValue;
+                if (offset > allocationSize ||
+                    length > allocationSize - offset)
+                {
+                    continue;
+                }
+
+                return TryWriteHostMemory(address, source);
             }
         }
 
@@ -6876,6 +7336,26 @@ public static partial class KernelMemoryCompatExports
 
         var mask = alignment - 1;
         return value & ~mask;
+    }
+
+    private static bool IsValidMapAlignment(ulong alignment) =>
+        alignment == 0 ||
+        (alignment & (alignment - 1)) == 0 ||
+        alignment % OrbisPageSize == 0;
+
+    private static bool TryAlignUpToMultiple(
+        ulong value,
+        ulong alignment,
+        out ulong aligned)
+    {
+        var remainder = value % alignment;
+        if (remainder == 0)
+        {
+            aligned = value;
+            return true;
+        }
+
+        return TryAddU64(value, alignment - remainder, out aligned);
     }
 
     private static bool TryAddU64(ulong left, ulong right, out ulong sum)

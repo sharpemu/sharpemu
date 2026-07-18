@@ -16,7 +16,7 @@ public static class CxaGuardExports
 
     private sealed class GuardState
     {
-        public int OwnerThreadId { get; set; }
+        public ulong OwnerThreadId { get; set; }
         public int RecursionDepth { get; set; }
     }
 
@@ -36,7 +36,7 @@ public static class CxaGuardExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var currentThreadId = Environment.CurrentManagedThreadId;
+        var currentThreadId = GetCurrentThreadIdentity();
         var spinner = new SpinWait();
         while (true)
         {
@@ -107,7 +107,7 @@ public static class CxaGuardExports
         }
 
         if (_inProgress.TryGetValue(guardPtr, out var state) &&
-            state.OwnerThreadId != Environment.CurrentManagedThreadId)
+            state.OwnerThreadId != GetCurrentThreadIdentity())
         {
             ctx[CpuRegister.Rax] = 0;
             LogGuardResult("guard_release", guardPtr, result: 0, initialized: false, inProgress: true, ownerThreadId: state.OwnerThreadId);
@@ -156,7 +156,7 @@ public static class CxaGuardExports
         }
 
         if (_inProgress.TryGetValue(guardPtr, out var state) &&
-            state.OwnerThreadId != Environment.CurrentManagedThreadId)
+            state.OwnerThreadId != GetCurrentThreadIdentity())
         {
             ctx[CpuRegister.Rax] = 0;
             LogGuardResult("guard_abort", guardPtr, result: 0, initialized: false, inProgress: true, ownerThreadId: state.OwnerThreadId);
@@ -186,6 +186,14 @@ public static class CxaGuardExports
         return true;
     }
 
+    private static ulong GetCurrentThreadIdentity()
+    {
+        var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+        return guestThreadHandle != 0
+            ? guestThreadHandle
+            : 0x8000_0000_0000_0000UL | unchecked((uint)Environment.CurrentManagedThreadId);
+    }
+
     private static bool TryWriteGuardState(CpuContext ctx, ulong guardPtr, ulong stateValue)
     {
         if (!ctx.TryReadUInt64(guardPtr, out var word))
@@ -209,7 +217,7 @@ public static class CxaGuardExports
             $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} init={initialized} in_progress={inProgress} word={(readable ? $"0x{word:X16}" : "<unreadable>")}");
     }
 
-    private static void LogGuardResult(string op, ulong guardPtr, int result, bool initialized, bool inProgress, int ownerThreadId)
+    private static void LogGuardResult(string op, ulong guardPtr, int result, bool initialized, bool inProgress, ulong ownerThreadId)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUARDS"), "1", StringComparison.Ordinal))
         {
@@ -217,6 +225,6 @@ public static class CxaGuardExports
         }
 
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} result={result} init={initialized} in_progress={inProgress} owner_thread={ownerThreadId}");
+            $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} result={result} init={initialized} in_progress={inProgress} owner_thread=0x{ownerThreadId:X16}");
     }
 }

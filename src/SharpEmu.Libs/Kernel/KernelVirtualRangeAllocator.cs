@@ -14,6 +14,7 @@ internal static class KernelVirtualRangeAllocator
         ulong desiredAddress,
         ulong length,
         bool executable,
+        bool reserveOnly,
         ulong alignment,
         bool allowSearch,
         bool allowAllocateAtAlternative,
@@ -35,14 +36,27 @@ internal static class KernelVirtualRangeAllocator
             }
 
             if (allowSearch &&
-                addressSpace.TryAllocateAtOrAbove(desiredAddress, length, executable, alignment, out var searchedAddress) &&
+                (reserveOnly
+                    ? addressSpace.TryReserveAtOrAbove(desiredAddress, length, executable, alignment, out var searchedAddress)
+                    : addressSpace.TryAllocateAtOrAbove(desiredAddress, length, executable, alignment, out searchedAddress)) &&
                 searchedAddress != 0)
             {
                 mappedAddress = searchedAddress;
                 return true;
             }
 
-            var allocated = addressSpace.AllocateAt(desiredAddress, length, executable, allowAllocateAtAlternative);
+            if (!allowSearch && desiredAddress != 0 &&
+                addressSpace.IsAccessible(desiredAddress, length))
+            {
+                // MAP_FIXED over an already-reserved range succeeds (POSIX
+                // replace semantics); the host mapping is already in place.
+                mappedAddress = desiredAddress;
+                return true;
+            }
+
+            var allocated = reserveOnly
+                ? addressSpace.ReserveAt(desiredAddress, length, executable, allowAllocateAtAlternative)
+                : addressSpace.AllocateAt(desiredAddress, length, executable, allowAllocateAtAlternative);
             if (allocated == 0)
             {
                 Console.Error.WriteLine($"[LOADER][TRACE] {traceName}: AllocateAt returned {typeof(ulong).FullName} value=0");

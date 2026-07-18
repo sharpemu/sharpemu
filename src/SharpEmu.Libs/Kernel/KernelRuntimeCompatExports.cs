@@ -17,6 +17,20 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelRuntimeCompatExports
 {
+    internal const int ClockRealtime = 0;
+    internal const int ClockVirtual = 1;
+    internal const int ClockProf = 2;
+    internal const int ClockMonotonic = 4;
+    internal const int ClockUptime = 5;
+    internal const int ClockUptimePrecise = 7;
+    internal const int ClockUptimeFast = 8;
+    internal const int ClockRealtimePrecise = 9;
+    internal const int ClockRealtimeFast = 10;
+    internal const int ClockMonotonicPrecise = 11;
+    internal const int ClockMonotonicFast = 12;
+    internal const int ClockSecond = 13;
+    internal const int ClockThreadCputimeId = 14;
+    internal const int ClockProcTime = 15;
     private const ulong TlsErrnoOffset = 0x40;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
     private const ulong StackChkGuardFieldOffset = 0x10;
@@ -38,6 +52,11 @@ public static class KernelRuntimeCompatExports
     private const ulong ModuleInfoExSegmentsOffset = 0x160;
     private const ulong ModuleInfoExSegmentCountOffset = 0x1A0;
     private const int ModuleInfoSegmentSize = 16;
+    private const int UnwindInfoSize = 0x130;
+    private const int UnwindInfoNameOffset = 0x8;
+    private const int UnwindInfoNameMaxBytes = 256;
+    private const uint ElfPtLoad = 1;
+    private const uint ElfPtGnuEhFrame = 0x6474E550;
     private const ulong DefaultKernelTscFrequency = 10_000_000UL;
     private const ulong PrtAreaStartAddress = 0x0000001000000000UL;
     private const ulong PrtAreaSize = 0x000000EC00000000UL;
@@ -62,6 +81,8 @@ public static class KernelRuntimeCompatExports
     private static readonly List<ReleasedVirtualRange> _releasedVirtualRanges = new();
     private static uint _gpoStateBits;
     private static readonly HashSet<int> _loadedSysmodules = new();
+    private static readonly object _moduleUnwindGate = new();
+    private static readonly Dictionary<int, ModuleUnwindInfo?> _moduleUnwindCache = new();
     private static readonly object _prtApertureGate = new();
     private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
     private static int _stackChkFailCount;
@@ -204,29 +225,9 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        long seconds;
-        long nanoseconds;
-        if (clockId == 0)
+        if (!ResolveClockTime(clockId, out var seconds, out var nanoseconds))
         {
-            var now = DateTimeOffset.UtcNow;
-            seconds = now.ToUnixTimeSeconds();
-            nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
-        }
-        else
-        {
-            var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
-            if (_stopwatchTicksAreNanoseconds)
-            {
-                // Constant divisors let the JIT strength-reduce the division;
-                // games call this thousands of times per second.
-                seconds = elapsedTicks / 1_000_000_000L;
-                nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
-            }
-            else
-            {
-                seconds = elapsedTicks / Stopwatch.Frequency;
-                nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
@@ -647,6 +648,66 @@ public static class KernelRuntimeCompatExports
         return address != 0 && TryWriteInt32(ctx, address, value);
     }
 
+    internal static bool ResolveClockTime(
+        int clockId,
+        out long seconds,
+        out long nanoseconds)
+    {
+        switch (clockId)
+        {
+            case ClockRealtime:
+            case ClockRealtimePrecise:
+            case ClockRealtimeFast:
+            case ClockVirtual:
+            case ClockProf:
+            {
+                var now = DateTimeOffset.UtcNow;
+                seconds = now.ToUnixTimeSeconds();
+                nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+                return true;
+            }
+
+            case ClockSecond:
+                seconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                nanoseconds = 0;
+                return true;
+
+            case ClockMonotonic:
+            case ClockMonotonicPrecise:
+            case ClockMonotonicFast:
+            case ClockUptime:
+            case ClockUptimePrecise:
+            case ClockUptimeFast:
+            case ClockThreadCputimeId:
+            case ClockProcTime:
+                GetProcessMonotonicTime(out seconds, out nanoseconds);
+                return true;
+
+            default:
+                seconds = 0;
+                nanoseconds = 0;
+                return false;
+        }
+    }
+
+    internal static void GetProcessMonotonicTime(
+        out long seconds,
+        out long nanoseconds)
+    {
+        var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
+        if (_stopwatchTicksAreNanoseconds)
+        {
+            seconds = elapsedTicks / 1_000_000_000L;
+            nanoseconds = elapsedTicks - seconds * 1_000_000_000L;
+            return;
+        }
+
+        seconds = elapsedTicks / Stopwatch.Frequency;
+        nanoseconds =
+            (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L /
+            Stopwatch.Frequency;
+    }
+
     [SysAbiExport(
         Nid = "bnZxYgAFeA0",
         ExportName = "sceKernelGetSanitizerNewReplaceExternal",
@@ -760,19 +821,23 @@ public static class KernelRuntimeCompatExports
                 : AlignUp(_nextReservedVirtualBase, effectiveAlignment);
         }
 
+        // MAP_FIXED replaces an existing mapping. Remove direct-memory views
+        // first; their containing reservation remains in place and can be
+        // reused as the new reserved range.
+        if (fixedMapping &&
+            requestedAddress != 0 &&
+            KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace))
+        {
+            _ = addressSpace.TryUnmapDirectMemoryRange(requestedAddress, length);
+        }
+
         ulong releasedAddress = 0;
         var reusedReleasedRange = !fixedMapping && requestedAddress == 0 &&
             TryTakeReleasedVirtualRange(length, effectiveAlignment, out releasedAddress);
-        var alreadyBacked = fixedMapping && requestedAddress != 0 &&
-            KernelMemoryCompatExports.IsGuestRangeBacked(ctx, requestedAddress, length);
         ulong mappedAddress;
         if (reusedReleasedRange)
         {
             mappedAddress = releasedAddress;
-        }
-        else if (alreadyBacked)
-        {
-            mappedAddress = requestedAddress;
         }
         else if (!TryReserveVirtualRange(
                      ctx,
@@ -788,7 +853,7 @@ public static class KernelRuntimeCompatExports
         if (ShouldTraceVirtualMemory())
         {
             Console.Error.WriteLine(
-                $"[LOADER][TRACE] reserve_virtual_range: req=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16} flags=0x{flags:X8} align=0x{effectiveAlignment:X16} already_backed={alreadyBacked} reused={reusedReleasedRange}");
+                $"[LOADER][TRACE] reserve_virtual_range: req=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16} flags=0x{flags:X8} align=0x{effectiveAlignment:X16} reused={reusedReleasedRange}");
         }
 
         if (!ctx.TryWriteUInt64(inOutAddressPointer, mappedAddress))
@@ -978,10 +1043,20 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetModuleInfoForUnwind(CpuContext ctx)
     {
+        // Sony's libunwind calls this on every C++ throw and trusts the eh_frame fields;
+        // returning success without filling them makes _Unwind_RaiseException dereference
+        // stack garbage and abort the process.
         var queriedAddress = ctx[CpuRegister.Rdi];
         var flags = unchecked((int)ctx[CpuRegister.Rsi]);
         var outInfoAddress = ctx[CpuRegister.Rdx];
         if (outInfoAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (flags >= 3 ||
+            !ctx.TryReadUInt64(outInfoAddress, out var callerStructSize) ||
+            callerStructSize < UnwindInfoSize)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
@@ -993,7 +1068,9 @@ public static class KernelRuntimeCompatExports
 
         if (!ctx.TryReadUInt64(outInfoAddress, out var callerSize))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            // Fail cleanly so the unwinder gives up on this frame; success with zeroed
+            // eh_frame fields would send it dereferencing address zero instead.
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         if (callerSize < 0x130)
@@ -1523,6 +1600,68 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "tU5e3f9gSiU",
+        ExportName = "sceKernelIsTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsTrinityMode(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "YFC3dBBipj8",
+        ExportName = "sceKernelWriteThrottlingStatus",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelWriteThrottlingStatus(CpuContext ctx)
+    {
+        var outStatusAddress = ctx[CpuRegister.Rdi];
+        if (outStatusAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // Callers scale the first qword by <<16 and classify it against write-bandwidth
+        // tiers topping out at 0x4AF00001; 0x4B00 << 16 lands in the unthrottled tier.
+        if (!ctx.TryWriteUInt64(outStatusAddress, 0x4B00))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "PI7jIZj4pcE",
+        ExportName = "sceRandomGetRandomNumber",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceRandom")]
+    public static int RandomGetRandomNumber(CpuContext ctx)
+    {
+        const int maxSize = 64;
+        var bufferAddress = ctx[CpuRegister.Rdi];
+        var size = ctx[CpuRegister.Rsi];
+        if (bufferAddress == 0 || size > maxSize)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        Span<byte> random = stackalloc byte[maxSize];
+        var payload = random[..(int)size];
+        RandomNumberGenerator.Fill(payload);
+        if (!ctx.Memory.TryWrite(bufferAddress, payload))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "Xjoosiw+XPI",
         ExportName = "sceKernelUuidCreate",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1732,6 +1871,179 @@ public static class KernelRuntimeCompatExports
         // Loaded modules are represented as a single aggregate readable and
         // executable range until per-program-header registry data is exposed.
         BinaryPrimitives.WriteInt32LittleEndian(payload.Slice(offset + 12), 5);
+    }
+
+    private sealed record ModuleUnwindInfo(
+        ulong EhFrameHdrOffset,
+        ulong EhFrameOffset,
+        ulong EhFrameSize,
+        ulong Segment0Offset,
+        ulong Segment0Size);
+
+    private static ModuleUnwindInfo? GetOrLoadModuleUnwindInfo(
+        CpuContext ctx,
+        KernelModuleRegistry.ModuleEntry module)
+    {
+        lock (_moduleUnwindGate)
+        {
+            if (_moduleUnwindCache.TryGetValue(module.Handle, out var cached))
+            {
+                return cached;
+            }
+        }
+
+        var info = LoadModuleUnwindInfo(ctx, module);
+        lock (_moduleUnwindGate)
+        {
+            _moduleUnwindCache[module.Handle] = info;
+        }
+
+        return info;
+    }
+
+    private static ModuleUnwindInfo? LoadModuleUnwindInfo(
+        CpuContext ctx,
+        KernelModuleRegistry.ModuleEntry module)
+    {
+        // ELF headers are not mapped into guest memory, so segment layout comes from the
+        // module's file on disk; the eh_frame_hdr contents themselves live inside a
+        // PT_LOAD and are read back from guest memory.
+        if (!TryReadProgramHeaders(module.Path, out var programHeaders))
+        {
+            return null;
+        }
+
+        var hasLoad = false;
+        var hasEhFrameHdr = false;
+        ulong segment0Offset = 0;
+        ulong segment0Size = 0;
+        ulong ehFrameHdrOffset = 0;
+        foreach (var (type, virtualAddress, memorySize) in programHeaders)
+        {
+            if (type == ElfPtLoad && !hasLoad)
+            {
+                segment0Offset = virtualAddress;
+                segment0Size = memorySize;
+                hasLoad = true;
+            }
+            else if (type == ElfPtGnuEhFrame)
+            {
+                ehFrameHdrOffset = virtualAddress;
+                hasEhFrameHdr = true;
+            }
+        }
+
+        if (!hasLoad ||
+            !hasEhFrameHdr ||
+            !TryDecodeEhFrameHdrPointer(ctx, module.BaseAddress + ehFrameHdrOffset, out var ehFrameAddress) ||
+            ehFrameAddress < module.BaseAddress ||
+            ehFrameAddress >= module.EndAddress)
+        {
+            return null;
+        }
+
+        // .eh_frame either directly precedes .eh_frame_hdr or fills the rest of the
+        // mapped image behind it; an over-estimated size is fine for FDE lookups.
+        var ehFrameOffset = ehFrameAddress - module.BaseAddress;
+        var moduleSize = module.EndAddress - module.BaseAddress;
+        var ehFrameSize = ehFrameHdrOffset > ehFrameOffset
+            ? ehFrameHdrOffset - ehFrameOffset
+            : moduleSize - ehFrameHdrOffset;
+        return new ModuleUnwindInfo(ehFrameHdrOffset, ehFrameOffset, ehFrameSize, segment0Offset, segment0Size);
+    }
+
+    private static bool TryReadProgramHeaders(
+        string modulePath,
+        out List<(uint Type, ulong VirtualAddress, ulong MemorySize)> programHeaders)
+    {
+        programHeaders = new();
+        try
+        {
+            if (string.IsNullOrEmpty(modulePath) || !File.Exists(modulePath))
+            {
+                return false;
+            }
+
+            using var stream = File.OpenRead(modulePath);
+            // The ELF header and program header table are stored in plaintext even inside
+            // SELF containers, directly after the SELF entry table.
+            var probe = new byte[0x10000];
+            var probeLength = stream.Read(probe, 0, probe.Length);
+            var elfOffset = probe.AsSpan(0, probeLength).IndexOf("\u007FELF"u8);
+            if (elfOffset < 0 ||
+                probeLength < elfOffset + 0x40 ||
+                probe[elfOffset + 4] != 2) // ELFCLASS64
+            {
+                return false;
+            }
+
+            var header = probe.AsSpan(elfOffset, 0x40);
+            var phdrTableOffset = BinaryPrimitives.ReadUInt64LittleEndian(header[0x20..]);
+            var phdrEntrySize = BinaryPrimitives.ReadUInt16LittleEndian(header[0x36..]);
+            var phdrCount = BinaryPrimitives.ReadUInt16LittleEndian(header[0x38..]);
+            if (phdrEntrySize < 0x38 || phdrCount == 0 || phdrCount > 128)
+            {
+                return false;
+            }
+
+            var table = new byte[phdrCount * phdrEntrySize];
+            stream.Position = elfOffset + (long)phdrTableOffset;
+            stream.ReadExactly(table);
+            for (var i = 0; i < phdrCount; i++)
+            {
+                var entry = table.AsSpan(i * phdrEntrySize, phdrEntrySize);
+                programHeaders.Add((
+                    BinaryPrimitives.ReadUInt32LittleEndian(entry),
+                    BinaryPrimitives.ReadUInt64LittleEndian(entry[0x10..]),
+                    BinaryPrimitives.ReadUInt64LittleEndian(entry[0x28..])));
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryDecodeEhFrameHdrPointer(CpuContext ctx, ulong hdrAddress, out ulong ehFrameAddress)
+    {
+        ehFrameAddress = 0;
+        Span<byte> hdr = stackalloc byte[12];
+        if (!ctx.Memory.TryRead(hdrAddress, hdr) || hdr[0] != 1)
+        {
+            return false;
+        }
+
+        // DWARF-encoded eh_frame_ptr at offset 4. Toolchains emit pcrel|sdata4 (0x1B),
+        // but decode the format/application nibbles properly to be safe.
+        var encoding = hdr[1];
+        ulong value;
+        switch (encoding & 0x0F)
+        {
+            case 0x03: // udata4
+                value = BinaryPrimitives.ReadUInt32LittleEndian(hdr[4..]);
+                break;
+            case 0x0B: // sdata4
+                value = unchecked((ulong)BinaryPrimitives.ReadInt32LittleEndian(hdr[4..]));
+                break;
+            case 0x00: // absptr
+            case 0x04: // udata8
+            case 0x0C: // sdata8
+                value = BinaryPrimitives.ReadUInt64LittleEndian(hdr[4..]);
+                break;
+            default:
+                return false;
+        }
+
+        ehFrameAddress = (encoding & 0x70) switch
+        {
+            0x00 => value, // absolute
+            0x10 => unchecked(hdrAddress + 4 + value), // pcrel
+            0x30 => unchecked(hdrAddress + value), // datarel
+            _ => 0,
+        };
+        return ehFrameAddress != 0;
     }
 
     private static bool TryReadUtf8Z(CpuContext ctx, ulong address, int maxLength, out string value)
@@ -2029,6 +2341,7 @@ public static class KernelRuntimeCompatExports
             desiredAddress,
             length,
             executable: false,
+            reserveOnly: true,
             alignment,
             allowSearch,
             allowAllocateAtAlternative: allowSearch,

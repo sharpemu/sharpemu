@@ -125,6 +125,23 @@ public static class KernelExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // libc's exported __cxa_thread_atexit (nid BKSCW2bCACA) is a thin wrapper
+    // that forwards straight to this import, so this is the kernel-side
+    // thread-atexit implementation (its plain name doesn't hash to this NID).
+    // Accepted but never run: thread-local dtors are skipped on thread exit.
+    #pragma warning disable SHEM006 // This NID names a private wrapper target, not a catalog export.
+    [SysAbiExport(
+        Nid = "qBS714-Jr3g",
+        ExportName = "__cxa_thread_atexit_impl",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int CxaThreadAtexitImpl(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+    #pragma warning restore SHEM006
+
     [SysAbiExport(
         Nid = "H2e8t5ScQGc",
         ExportName = "__cxa_finalize",

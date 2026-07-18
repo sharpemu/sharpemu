@@ -9,7 +9,9 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu.Disasm;
+using SharpEmu.Core.Cpu.Native.Windows;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -17,6 +19,7 @@ public sealed partial class DirectExecutionBackend
 {
 	private const ulong LazyCommitWindowBytes = 0x0200_0000UL;
 	private static int _lazyCommitTraceCount;
+	private static int _tlsFaultEmulationTraceCount;
 	private static int _guestAllocatorHoleRecoveries;
 	private static int _auxiliaryThreadExecuteFaultRecoveries;
 
@@ -133,6 +136,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (exceptionCode == WindowsFaultCodes.AccessViolation &&
+				TryHandleTlsAccessFault(exceptionRecord, rip, contextRecord))
+			{
+				return -1;
+			}
 			if (IsBenignHostDebugException(exceptionCode))
 			{
 				return -1;
@@ -181,13 +189,17 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][INFO]   Host thread: managed={Environment.CurrentManagedThreadId} " +
 				$"name='{Thread.CurrentThread.Name ?? "<unnamed>"}'");
-			if (_activeGuestThreadState is { } activeGuestThread)
-			{
-				Console.Error.WriteLine(
-					$"[LOADER][INFO]   Guest thread: handle=0x{activeGuestThread.ThreadHandle:X16} " +
-					$"name='{activeGuestThread.Name}' state={activeGuestThread.State} " +
-					$"last_import={activeGuestThread.LastImportNid ?? "<none>"} " +
-					$"last_ret=0x{activeGuestThread.LastReturnRip:X16}");
+				if (_activeGuestThreadState is { } activeGuestThread)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO]   Guest thread: handle=0x{activeGuestThread.ThreadHandle:X16} " +
+						$"name='{activeGuestThread.Name}' state={activeGuestThread.State} " +
+						$"managed={Environment.CurrentManagedThreadId} " +
+						$"host={Volatile.Read(ref activeGuestThread.HostThreadId)} " +
+						$"imports={Interlocked.Read(ref activeGuestThread.ImportCount)} " +
+						$"last_import={activeGuestThread.LastImportNid ?? "<none>"} " +
+						$"last_ret=0x{activeGuestThread.LastReturnRip:X16} " +
+						$"fs=0x{activeGuestThread.Context.FsBase:X16}");
 				Console.Error.WriteLine(
 					$"[LOADER][INFO]   Last import registers: " +
 					$"rax=0x{Volatile.Read(ref activeGuestThread.LastImportRax):X16} " +
@@ -228,7 +240,6 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][INFO]   R14: 0x{r14:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   R15: 0x{r15:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   Flags: 0x{exceptionFlags:X8}");
-
 			ulong accessType = 0;
 			ulong target = 0;
 			if (exceptionCode == 3221225477u && exceptionRecord->NumberParameters >= 2)
@@ -262,7 +273,6 @@ public sealed partial class DirectExecutionBackend
 				}
 				Console.Error.WriteLine($"[LOADER][INFO]     [rsp+0x{i * 8:X2}] @0x{stackAddr:X16} = 0x{value:X16}");
 			}
-
 			if (string.Equals(
 					Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FAULT_STACK_WINDOW"),
 					"1",
@@ -1218,6 +1228,108 @@ public sealed partial class DirectExecutionBackend
 			? $"{symbol.Key} (0x{symbol.Value:X16})"
 			: $"{symbol.Key}+0x{delta:X} (0x{symbol.Value:X16})";
 		return true;
+	}
+
+	// Guest code that reads the FS-relative TLS self pointer (`mov reg, fs:[0]`)
+	// faults on Windows hosts, where the FS segment base is 0 and the access
+	// resolves to linear address 0. The startup scan rewrites matching loads in
+	// the main image, but module initializers can call back into a different,
+	// distant image. Emulate those exact loads in the faulting context. Do not
+	// patch live code from VEH: another guest thread could execute a partially
+	// rewritten instruction. Any other AV falls through to normal fault handling.
+	private unsafe bool TryHandleTlsAccessFault(
+		EXCEPTION_RECORD* exceptionRecord,
+		ulong rip,
+		void* contextRecord)
+	{
+		if (exceptionRecord == null ||
+			exceptionRecord->NumberParameters < 2 ||
+			*exceptionRecord->ExceptionInformation != WindowsFaultCodes.AccessRead ||
+			exceptionRecord->ExceptionInformation[1] != 0 ||
+			_guestTlsBaseTlsIndex == uint.MaxValue ||
+			rip == 0 ||
+			contextRecord == null)
+		{
+			return false;
+		}
+		if (!_hostMemory.Query(rip, out var region) || region.State != HostRegionState.Committed)
+		{
+			return false;
+		}
+		uint protect = region.RawProtection & 0xFF;
+		bool executable = protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ
+			|| protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+		if (!executable)
+		{
+			return false;
+		}
+		ulong regionEnd = region.BaseAddress + region.RegionSize;
+		if (regionEnd <= rip)
+		{
+			return false;
+		}
+		int available = (int)Math.Min(16UL, regionEnd - rip);
+		if (available < MinTlsPatchInstructionBytes)
+		{
+			return false;
+		}
+
+		if (!TryDecodeTlsLoadInstruction(
+				(byte*)rip,
+				available,
+				out var instructionLength,
+				out var destinationRegister))
+		{
+			return false;
+		}
+
+		nint tlsBase = _hostThreading.GetTlsValue(_guestTlsBaseTlsIndex);
+		var cpuContext = ActiveCpuContext;
+		if (tlsBase == 0 && cpuContext is { FsBase: not 0 })
+		{
+			tlsBase = unchecked((nint)cpuContext.FsBase);
+		}
+		if (tlsBase == 0 ||
+			cpuContext is null ||
+			!cpuContext.TryReadUInt64(unchecked((ulong)tlsBase), out var tlsSelfPointer) ||
+			!TryGetContextRegisterOffset(destinationRegister, out var registerOffset))
+		{
+			return false;
+		}
+
+		WriteCtxU64(contextRecord, registerOffset, tlsSelfPointer);
+		WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instructionLength);
+		if (Interlocked.Increment(ref _tlsFaultEmulationTraceCount) <= 8)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Emulated TLS load at 0x{rip:X16}: r{destinationRegister}=0x{tlsSelfPointer:X16}");
+		}
+		return true;
+	}
+
+	private static bool TryGetContextRegisterOffset(int register, out int contextOffset)
+	{
+		contextOffset = register switch
+		{
+			0 => CTX_RAX,
+			1 => CTX_RCX,
+			2 => CTX_RDX,
+			3 => CTX_RBX,
+			4 => CTX_RSP,
+			5 => CTX_RBP,
+			6 => CTX_RSI,
+			7 => CTX_RDI,
+			8 => CTX_R8,
+			9 => CTX_R9,
+			10 => CTX_R10,
+			11 => CTX_R11,
+			12 => CTX_R12,
+			13 => CTX_R13,
+			14 => CTX_R14,
+			15 => CTX_R15,
+			_ => -1,
+		};
+		return contextOffset >= 0;
 	}
 
 	private unsafe bool TryHandleLazyCommittedPage(EXCEPTION_RECORD* exceptionRecord, ulong rip, ulong rsp)

@@ -13,6 +13,7 @@ using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -746,6 +747,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private nint _selfHandlePtr;
 
+	private readonly IHostThreading _hostThreading;
+
+	private readonly IHostMemory _hostMemory;
+
 	private const int MinTlsPatchInstructionBytes = 9;
 
 	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
@@ -1032,6 +1037,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	public unsafe DirectExecutionBackend(IModuleManager moduleManager)
 	{
 		_moduleManager = moduleManager ?? throw new ArgumentNullException("moduleManager");
+		_hostThreading = HostPlatform.Current.Threading;
+		_hostMemory = HostPlatform.Current.Memory;
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = TlsAlloc();
@@ -1880,7 +1887,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
 			return false;
 		}
-
 		Span<byte> ripProbe = stackalloc byte[1];
 		if (!memory.TryRead(target.Rip, ripProbe))
 		{
@@ -2663,7 +2669,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool TryPatchTlsLoadInstruction(nint address, byte* source, int availableLength)
 	{
-		if (availableLength < MinTlsPatchInstructionBytes)
+		if (!TryDecodeTlsLoadInstruction(
+				source,
+				availableLength,
+				out var instructionLength,
+				out var destinationRegister))
+		{
+			return false;
+		}
+
+		return PatchTlsLoadInstruction(address, instructionLength, destinationRegister);
+	}
+
+	private unsafe static bool TryDecodeTlsLoadInstruction(
+		byte* source,
+		int availableLength,
+		out int instructionLength,
+		out int destinationRegister)
+	{
+		instructionLength = 0;
+		destinationRegister = 0;
+		if (source == null || availableLength < MinTlsPatchInstructionBytes)
 		{
 			return false;
 		}
@@ -2691,6 +2717,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			rex = source[offset];
 			offset++;
 		}
+		// The rewrite and VEH fallback both produce a 64-bit pointer. Refuse the
+		// 16/32-bit encodings rather than silently changing their register semantics.
+		if ((rex & 0x08) == 0)
+		{
+			return false;
+		}
 
 		if (offset + 7 > availableLength || source[offset] != 0x8B)
 		{
@@ -2704,24 +2736,25 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
-		var displacement = *(int*)(source + offset + 3);
-		if (displacement != 0)
+		if (*(int*)(source + offset + 3) != 0)
 		{
 			return false;
 		}
 
-		var destinationRegister = ((modRm >> 3) & 7) | (((rex & 4) != 0) ? 8 : 0);
-		var instructionLength = offset + 7;
-		if (instructionLength < MinTlsPatchInstructionBytes)
-		{
-			return false;
-		}
-
-		return PatchTlsLoadInstruction(address, instructionLength, destinationRegister);
+		destinationRegister = ((modRm >> 3) & 7) | (((rex & 4) != 0) ? 8 : 0);
+		instructionLength = offset + 7;
+		return instructionLength >= MinTlsPatchInstructionBytes;
 	}
 
 	private unsafe bool PatchTlsLoadInstruction(nint address, int instructionLength, int destinationRegister)
 	{
+		long relativeDisplacement = _tlsHandlerAddress - (address + 5);
+		if (relativeDisplacement < int.MinValue || relativeDisplacement > int.MaxValue)
+		{
+			Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
+			return false;
+		}
+
 		uint flNewProtect = default(uint);
 		if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &flNewProtect))
 		{
@@ -2730,16 +2763,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		try
 		{
 			*(sbyte*)address = -24;
-			long num = _tlsHandlerAddress;
-			long num2 = address + 5;
-			long num3 = num - num2;
-			if (num3 < int.MinValue || num3 > int.MaxValue)
-			{
-				Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
-				return false;
-			}
-
-			*(int*)(address + 1) = (int)num3;
+			*(int*)(address + 1) = (int)relativeDisplacement;
 			var offset = 5;
 			if (destinationRegister != 0)
 			{
@@ -3301,6 +3325,40 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		return wakeCount;
+	}
+
+	internal static bool WaitForBlockedGuestCallbackCore(
+		IGuestThreadBlockWaiter waiter,
+		long deadlineTimestamp,
+		Func<bool> stopRequested,
+		Func<IGuestThreadBlockWaiter, bool> tryWake,
+		out int resumeResult,
+		out string? error)
+	{
+		resumeResult = 0;
+		error = null;
+		var spinner = new SpinWait();
+		while (!stopRequested())
+		{
+			if (tryWake(waiter) ||
+				(deadlineTimestamp != 0 && Stopwatch.GetTimestamp() >= deadlineTimestamp))
+			{
+				resumeResult = waiter.Resume();
+				return true;
+			}
+
+			if (spinner.NextSpinWillYield)
+			{
+				Thread.Sleep(1);
+			}
+			else
+			{
+				spinner.SpinOnce();
+			}
+		}
+
+		error = "guest callback wait was interrupted by guest shutdown";
+		return false;
 	}
 
 	private void PumpUntilGuestThreadsIdle(CpuContext callerContext, string reason)

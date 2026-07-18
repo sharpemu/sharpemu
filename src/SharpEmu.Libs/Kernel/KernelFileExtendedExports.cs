@@ -400,8 +400,6 @@ public static partial class KernelMemoryCompatExports
 
     // ---- fcntl ----
 
-    [SysAbiExport(Nid = "8nY19bKoiZk", ExportName = "fcntl",
-        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int PosixFcntl(CpuContext ctx) => KernelFcntlCore(ctx);
 
     [SysAbiExport(Nid = "SoZkxZkCHaw", ExportName = "sceKernelFcntl",

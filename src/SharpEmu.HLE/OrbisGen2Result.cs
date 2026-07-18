@@ -41,6 +41,11 @@ public enum OrbisGen2Result : int
     ORBIS_GEN2_ERROR_DEADLOCK = unchecked((int)0x8002000B),
 
     /// <summary>
+    /// Indicates that a memory mapping or allocation cannot be satisfied.
+    /// </summary>
+    ORBIS_GEN2_ERROR_OUT_OF_MEMORY = unchecked((int)0x8002000C),
+
+    /// <summary>
     /// Indicates that the waited-on object was deleted while the caller was
     /// blocked on it. Matches the SCE kernel EACCES code that waiters of a
     /// deleted semaphore observe.

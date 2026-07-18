@@ -12,6 +12,7 @@ namespace SharpEmu.Libs.Kernel;
 public static class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
+    public const short KernelEventFilterRead = -1;
     public const short KernelEventFilterGraphics = -14;
     public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -16;
@@ -208,6 +209,43 @@ public static class KernelEventQueueCompatExports
             ctx[CpuRegister.Rsi],
             KernelEventFilterUser);
         TraceEventQueue(ctx, "delete_user", handle);
+        return deleted
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+    }
+
+    [SysAbiExport(
+        Nid = "VHCS3rCd0PM",
+        ExportName = "sceKernelAddReadEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAddReadEvent(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var registered = RegisterEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterRead,
+            ctx[CpuRegister.Rcx]);
+        TraceEventQueue(ctx, "add_read", handle);
+        return registered
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+    }
+
+    [SysAbiExport(
+        Nid = "JxJ4tfgKlXA",
+        ExportName = "sceKernelDeleteReadEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDeleteReadEvent(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var deleted = DeleteRegisteredEvent(
+            handle,
+            ctx[CpuRegister.Rsi],
+            KernelEventFilterRead);
+        TraceEventQueue(ctx, "delete_read", handle);
         return deleted
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;

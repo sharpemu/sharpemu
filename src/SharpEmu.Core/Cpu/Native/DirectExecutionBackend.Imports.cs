@@ -1434,7 +1434,8 @@ public sealed partial class DirectExecutionBackend
 			string.Equals(nid, "fzyMKs9kim0", StringComparison.Ordinal) &&
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
 		var expectedMutexTrylockBusy =
-			string.Equals(nid, "K-jXhbt2gn4", StringComparison.Ordinal) &&
+			(string.Equals(nid, "K-jXhbt2gn4", StringComparison.Ordinal) ||
+			 string.Equals(nid, "upoVrzMHFeE", StringComparison.Ordinal)) &&
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
 		var expectedNetAcceptWouldBlock =
 			string.Equals(nid, "PIWqhn9oSxc", StringComparison.Ordinal) &&

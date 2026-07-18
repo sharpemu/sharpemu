@@ -554,10 +554,10 @@ public static class KernelPthreadExtendedCompatExports
 				TryInferNativeGuestStack(ctx[CpuRegister.Rsp], out var stackAddress))
 			{
 				threadState.Attributes = threadState.Attributes with
-				{
-					StackAddress = stackAddress,
-					StackSize = NativeGuestStackSize,
-				};
+					{
+						StackAddress = stackAddress,
+						StackSize = NativeGuestStackSize,
+					};
 			}
             _attrStates[outAttrAddress] = threadState.Attributes;
         }
@@ -1134,6 +1134,65 @@ public static class KernelPthreadExtendedCompatExports
     public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockWrlock(ctx);
 
     [SysAbiExport(
+        Nid = "bIHoZCTomsI",
+        ExportName = "scePthreadRwlockTrywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTrywrlock(CpuContext ctx)
+        => PthreadRwlockTryWrlockCore(ctx, ctx[CpuRegister.Rdi]);
+
+    // Non-blocking write acquire. The blocking wrlock path (PthreadRwlockLockCore)
+    // parks the caller on contention; a try-lock must never block, so this
+    // acquires only when the lock is free and returns EBUSY otherwise. Some
+    // guests spin while trywrlock returns busy, so an unimplemented export
+    // returning the error sentinel would leave that loop permanently stuck.
+    private static int PthreadRwlockTryWrlockCore(CpuContext ctx, ulong rwlockAddress)
+    {
+        if (rwlockAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out _, out var rwlock))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        lock (rwlock.SyncRoot)
+        {
+            if (rwlock.WriterThreadId == currentThreadId || rwlock.GetReaderCount(currentThreadId) > 0)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+            }
+
+            if (rwlock.CompatWriterCounts.GetValueOrDefault(currentThreadId) > 0)
+            {
+                rwlock.AddCompatWriter(currentThreadId);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            if (rwlock.WriterThreadId == 0 &&
+                rwlock.ReaderTotalCount == 0 &&
+                rwlock.CompatWriterTotalCount == 0)
+            {
+                if (GuestThreadExecution.IsGuestThread && !_strictRwlockWriterPreference)
+                {
+                    rwlock.AddCompatWriter(currentThreadId);
+                }
+                else
+                {
+                    rwlock.WriterThreadId = currentThreadId;
+                }
+
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
+    }
+
+    [SysAbiExport(
         Nid = "+L98PIbGttk",
         ExportName = "scePthreadRwlockUnlock",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1634,14 +1693,9 @@ public static class KernelPthreadExtendedCompatExports
             return 0;
         }
 
-        lock (_stateGate)
-        {
-            if (_rwlockStates.ContainsKey(rwlockAddress))
-            {
-                return rwlockAddress;
-            }
-        }
-
+        // Init indexes the same state by both the public pthread object and its
+        // synthetic handle. Prefer the value stored in the public object so a
+        // destroy/re-init removes the handle entry as well as the public alias.
         if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, rwlockAddress, out var pointedHandle) && pointedHandle != 0)
         {
             lock (_stateGate)
@@ -1650,6 +1704,14 @@ public static class KernelPthreadExtendedCompatExports
                 {
                     return pointedHandle;
                 }
+            }
+        }
+
+        lock (_stateGate)
+        {
+            if (_rwlockStates.ContainsKey(rwlockAddress))
+            {
+                return rwlockAddress;
             }
         }
 
@@ -1701,17 +1763,30 @@ public static class KernelPthreadExtendedCompatExports
             return false;
         }
 
-        var createdRwlock = new PthreadRwlockState();
-        var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
+        // Publish a lazy rwlock and its guest-visible handle as one operation.
+        // Previously two callers could both observe a zero slot, create distinct
+        // host states, and then acquire both "locks" concurrently.
         lock (_stateGate)
         {
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            {
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+
+            var createdRwlock = new PthreadRwlockState();
+            var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
+            if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle))
+            {
+                return false;
+            }
+
             _rwlockStates[rwlockAddress] = createdRwlock;
             _rwlockStates[syntheticHandle] = createdRwlock;
+            resolvedAddress = syntheticHandle;
+            rwlock = createdRwlock;
         }
 
-        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, rwlockAddress, syntheticHandle);
-        resolvedAddress = syntheticHandle;
-        rwlock = createdRwlock;
         return true;
     }
 

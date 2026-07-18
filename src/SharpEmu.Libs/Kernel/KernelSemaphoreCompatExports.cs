@@ -386,11 +386,6 @@ public static class KernelSemaphoreCompatExports
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
-    [SysAbiExport(
-        Nid = "pDuPEf3m4fI",
-        ExportName = "sem_init",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemInit(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
@@ -428,11 +423,6 @@ public static class KernelSemaphoreCompatExports
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
-    [SysAbiExport(
-        Nid = "YCV5dGGBcCo",
-        ExportName = "sem_wait",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemWait(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
@@ -446,11 +436,6 @@ public static class KernelSemaphoreCompatExports
         return KernelWaitSema(ctx);
     }
 
-    [SysAbiExport(
-        Nid = "WBWzsRifCEA",
-        ExportName = "sem_trywait",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemTryWait(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
@@ -463,11 +448,6 @@ public static class KernelSemaphoreCompatExports
         return KernelPollSema(ctx, handle, 1);
     }
 
-    [SysAbiExport(
-        Nid = "w5IHyvahg-o",
-        ExportName = "sem_timedwait",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemTimedWait(CpuContext ctx)
     {
         var timeoutAddress = ctx[CpuRegister.Rsi];
@@ -482,11 +462,6 @@ public static class KernelSemaphoreCompatExports
         return KernelWaitSema(ctx);
     }
 
-    [SysAbiExport(
-        Nid = "IKP8typ0QUk",
-        ExportName = "sem_post",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemPost(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
@@ -499,11 +474,6 @@ public static class KernelSemaphoreCompatExports
         return KernelSignalSema(ctx, handle, 1);
     }
 
-    [SysAbiExport(
-        Nid = "Bq+LRV-N6Hk",
-        ExportName = "sem_getvalue",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemGetValue(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
@@ -526,11 +496,6 @@ public static class KernelSemaphoreCompatExports
             : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    [SysAbiExport(
-        Nid = "cDW233RAwWo",
-        ExportName = "sem_destroy",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
     public static int PosixSemDestroy(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
