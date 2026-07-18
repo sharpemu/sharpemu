@@ -777,9 +777,21 @@ public static class KernelPthreadCompatExports
             if (state.RecursionCount == 0)
             {
                 state.OwnerThreadId = 0;
-                nextWakeKey = state.Waiters.First?.Value.Cooperative == true
-                    ? state.Waiters.First.Value.WakeKey
-                    : null;
+
+                // Hand the mutex directly to the head waiter instead of only
+                // waking it and relying on it to re-acquire. A woken waiter that
+                // fails to self-grant (its wake races or is lost) would leave the
+                // mutex "free with a queued waiter"; the fast-acquire path refuses
+                // such a mutex (OwnerThreadId == 0 && Waiters.Count == 0), so every
+                // later locker — including the game's main thread — then queues
+                // behind a head that never advances and the process wedges.
+                if (state.Waiters.First is { } headNode &&
+                    TryGrantMutexWaiterLocked(state, headNode.Value) &&
+                    headNode.Value.Cooperative)
+                {
+                    nextWakeKey = headNode.Value.WakeKey;
+                }
+
                 Monitor.PulseAll(state);
             }
         }
