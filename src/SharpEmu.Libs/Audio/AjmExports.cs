@@ -17,7 +17,8 @@ public static class AjmExports
     private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
     private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
     private const int OrbisAjmErrorWrongRevisionFlag = unchecked((int)0x8093000B);
-    private const uint MaxCodecType = 23;
+    private const uint Gen4CodecTypeCount = 23;
+    private const uint Gen5CodecTypeCount = 32;
     private const int MaxInstanceIndex = 0x2FFF;
     private static readonly ConcurrentDictionary<uint, AjmContextState> Contexts = new();
     private static int _nextContextId;
@@ -83,7 +84,7 @@ public static class AjmExports
         var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
         var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
         var reserved = ctx[CpuRegister.Rdx];
-        if (codecType >= MaxCodecType || reserved != 0)
+        if (!IsCodecTypeSupported(ctx, codecType) || reserved != 0)
         {
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
@@ -127,7 +128,7 @@ public static class AjmExports
             return ctx.SetReturn(OrbisAjmErrorInvalidContext);
         }
 
-        if (codecType >= MaxCodecType || outputAddress == 0)
+        if (!IsCodecTypeSupported(ctx, codecType) || outputAddress == 0)
         {
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
@@ -203,6 +204,55 @@ public static class AjmExports
     }
 
     [SysAbiExport(
+        Nid = "bkRHEYG6lEM",
+        ExportName = "sceAjmMemoryRegister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryRegister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        var pageCount = ctx[CpuRegister.Rdx];
+        if (!Contexts.ContainsKey(contextId))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0 || pageCount == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        // Guest memory is already directly visible to the software AJM path,
+        // so registration only validates the lifetime contract.
+        Trace($"memory_register context={contextId} address=0x{address:X} pages={pageCount}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "pIpGiaYkHkM",
+        ExportName = "sceAjmMemoryUnregister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryUnregister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        if (!Contexts.ContainsKey(contextId))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Trace($"memory_unregister context={contextId} address=0x{address:X}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "Wi7DtlLV+KI",
         ExportName = "sceAjmModuleUnregister",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -231,6 +281,17 @@ public static class AjmExports
     {
         Contexts.Clear();
         Interlocked.Exchange(ref _nextContextId, 0);
+    }
+
+    private static bool IsCodecTypeSupported(CpuContext ctx, uint codecType)
+    {
+        // PS4 defines 23 as the exclusive upper bound. PS5 keeps the codec
+        // type in the same five-bit instance-ID field but extends the set;
+        // observed Gen5 titles register codec 24 during normal startup.
+        var codecTypeCount = (ctx.TargetGeneration & Generation.Gen5) != 0
+            ? Gen5CodecTypeCount
+            : Gen4CodecTypeCount;
+        return codecType < codecTypeCount;
     }
 
     private static void Trace(string message)

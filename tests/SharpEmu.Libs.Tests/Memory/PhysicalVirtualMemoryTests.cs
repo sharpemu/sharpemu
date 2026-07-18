@@ -111,6 +111,76 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.Equal(first, coalesced);
     }
 
+    [Fact]
+    public void ExactAllocationCommitsAdjacentRangeInOwnedHostReservation()
+    {
+        const ulong allocationBase = 0x0000_0080_0160_0000;
+        var host = new GranularityHostMemory(allocationBase, allowInitialAllocation: true);
+        using (var memory = new PhysicalVirtualMemory(host))
+        {
+            Assert.True(memory.TryAllocateAtExact(allocationBase, 0x4000, executable: false, out var first));
+            Assert.Equal(allocationBase, first);
+
+            var second = memory.AllocateAt(
+                allocationBase + 0x4000,
+                0x4000,
+                executable: false,
+                allowAlternative: false);
+            Assert.Equal(allocationBase + 0x4000, second);
+            var expectedCommits = OperatingSystem.IsWindows()
+                ? new[]
+                {
+                    (allocationBase, 0x4000UL, HostPageProtection.ReadWrite),
+                    (allocationBase + 0x4000, 0x4000UL, HostPageProtection.ReadWrite),
+                }
+                : new[]
+                {
+                    (allocationBase + 0x4000, 0x4000UL, HostPageProtection.ReadWrite),
+                };
+            Assert.Equal(expectedCommits, host.CommitCalls);
+        }
+
+        Assert.Equal([allocationBase], host.FreeCalls);
+    }
+
+    [Fact]
+    public void ExactAllocationDoesNotCommitUnownedHostReservation()
+    {
+        const ulong allocationBase = 0x0000_0080_0160_0000;
+        var host = new GranularityHostMemory(allocationBase, allowInitialAllocation: false);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.False(memory.TryAllocateAtExact(
+            allocationBase + 0x4000,
+            0x4000,
+            executable: false,
+            out var actualAddress));
+        Assert.Equal(0UL, actualAddress);
+        Assert.Empty(host.CommitCalls);
+    }
+
+    [Fact]
+    public void TryWriteSpansAdjacentMappedRegions()
+    {
+        using var host = new ContiguousHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+        var firstAddress = host.Address;
+        var secondAddress = firstAddress + 0x1000;
+
+        Assert.True(memory.TryAllocateAtExact(firstAddress, 0x1000, executable: false, out _));
+        Assert.True(memory.TryAllocateAtExact(secondAddress, 0x1000, executable: false, out _));
+
+        var source = Enumerable.Range(0, 0x1800).Select(index => unchecked((byte)index)).ToArray();
+        Assert.True(memory.TryWrite(firstAddress + 0x800, source));
+
+        var firstPage = new byte[0x800];
+        var secondPage = new byte[0x1000];
+        Assert.True(memory.TryRead(firstAddress + 0x800, firstPage));
+        Assert.True(memory.TryRead(secondAddress, secondPage));
+        Assert.True(source.AsSpan(0, 0x800).SequenceEqual(firstPage));
+        Assert.True(source.AsSpan(0x800).SequenceEqual(secondPage));
+    }
+
     /// <summary>
     /// Host memory backed by a single real, zero-initialised page. Reserve/Allocate
     /// report the page-aligned buffer address so lazy-commit read paths can actually
@@ -224,6 +294,135 @@ public sealed class PhysicalVirtualMemoryTests
 
         public void FlushInstructionCache(ulong address, ulong size)
         {
+        }
+    }
+
+    private sealed class GranularityHostMemory(ulong allocationBase, bool allowInitialAllocation) : IHostMemory
+    {
+        private bool _initialAllocationAvailable = allowInitialAllocation;
+
+        public List<(ulong Address, ulong Size, HostPageProtection Protection)> CommitCalls { get; } = [];
+
+        public List<ulong> FreeCalls { get; } = [];
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            if (!_initialAllocationAvailable || desiredAddress != allocationBase)
+            {
+                return 0;
+            }
+
+            _initialAllocationAvailable = false;
+            return allocationBase;
+        }
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            Allocate(desiredAddress, size, protection);
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection)
+        {
+            CommitCalls.Add((address, size, protection));
+            return true;
+        }
+
+        public bool Free(ulong address)
+        {
+            FreeCalls.Add(address);
+            return true;
+        }
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            var reservedStart = allocationBase + 0x4000;
+            var reservedEnd = allocationBase + 0x10000;
+            if (address < reservedStart || address >= reservedEnd)
+            {
+                info = default;
+                return false;
+            }
+
+            info = new HostRegionInfo(
+                reservedStart,
+                allocationBase,
+                reservedEnd - reservedStart,
+                HostRegionState.Reserved,
+                0x2000,
+                HostPageProtection.NoAccess,
+                0x01,
+                0x04);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+    }
+
+    private sealed unsafe class ContiguousHostMemory : IHostMemory, IDisposable
+    {
+        private readonly void* _allocation;
+
+        public ContiguousHostMemory()
+        {
+            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x4000);
+            Address = ((ulong)_allocation + 0xFFF) & ~0xFFFUL;
+        }
+
+        public ulong Address { get; }
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => desiredAddress;
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => desiredAddress;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = rawProtection;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            info = new HostRegionInfo(
+                address & ~0xFFFUL,
+                Address,
+                0x1000,
+                HostRegionState.Committed,
+                0x1000,
+                HostPageProtection.ReadWrite,
+                0x04,
+                0x04);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose()
+        {
+            System.Runtime.InteropServices.NativeMemory.Free(_allocation);
         }
     }
 }

@@ -81,6 +81,48 @@ public sealed class AjmExportsTests : IDisposable
     }
 
     [Fact]
+    public void ModuleRegister_UsesGenerationSpecificCodecRange()
+    {
+        var gen5ContextId = Initialize();
+
+        Assert.Equal(0, RegisterCodec(gen5ContextId, 31));
+        Assert.Equal(InvalidParameter, RegisterCodec(gen5ContextId, 32));
+
+        AjmExports.ResetForTests();
+        var gen4Context = new CpuContext(_memory, Generation.Gen4);
+        var gen4ContextId = Initialize(gen4Context);
+
+        Assert.Equal(0, RegisterCodec(gen4ContextId, 22, gen4Context));
+        Assert.Equal(InvalidParameter, RegisterCodec(gen4ContextId, 23, gen4Context));
+    }
+
+    [Fact]
+    public void InstanceLifecycle_Gen5ExtendedCodecCreatesEncodedInstance()
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, RegisterCodec(contextId, 24));
+        Assert.Equal(0, CreateInstance(contextId, 24, 0x401, InstanceAddress));
+        Assert.Equal(0x60001u, ReadUInt32(InstanceAddress));
+        Assert.Equal(0, DestroyInstance(contextId, 0x60001));
+    }
+
+    [Fact]
+    public void MemoryRegistration_ValidatesContextAndArguments()
+    {
+        var contextId = Initialize();
+        const ulong address = 0x3_FA60_0000;
+
+        Assert.Equal(0, RegisterMemory(contextId, address, 5));
+        Assert.Equal(0, UnregisterMemory(contextId, address));
+        Assert.Equal(InvalidContext, RegisterMemory(contextId + 1, address, 5));
+        Assert.Equal(InvalidContext, UnregisterMemory(contextId + 1, address));
+        Assert.Equal(InvalidParameter, RegisterMemory(contextId, 0, 5));
+        Assert.Equal(InvalidParameter, RegisterMemory(contextId, address, 0));
+        Assert.Equal(InvalidParameter, UnregisterMemory(contextId, 0));
+    }
+
+    [Fact]
     public void InstanceDestroy_RejectsUnknownContextAndSlot()
     {
         var contextId = Initialize();
@@ -142,6 +184,10 @@ public sealed class AjmExportsTests : IDisposable
             Assert.Equal("sceAjmInstanceCreate", create.Name);
             Assert.True(manager.TryGetExport("RbLbuKv8zho", out var destroy));
             Assert.Equal("sceAjmInstanceDestroy", destroy.Name);
+            Assert.True(manager.TryGetExport("bkRHEYG6lEM", out var memoryRegister));
+            Assert.Equal("sceAjmMemoryRegister", memoryRegister.Name);
+            Assert.True(manager.TryGetExport("pIpGiaYkHkM", out var memoryUnregister));
+            Assert.Equal("sceAjmMemoryUnregister", memoryUnregister.Name);
         }
     }
 
@@ -150,20 +196,22 @@ public sealed class AjmExportsTests : IDisposable
         AjmExports.ResetForTests();
     }
 
-    private uint Initialize()
+    private uint Initialize(CpuContext? context = null)
     {
-        _ctx[CpuRegister.Rdi] = 0;
-        _ctx[CpuRegister.Rsi] = ContextAddress;
-        Assert.Equal(0, AjmExports.AjmInitialize(_ctx));
+        context ??= _ctx;
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = ContextAddress;
+        Assert.Equal(0, AjmExports.AjmInitialize(context));
         return ReadUInt32(ContextAddress);
     }
 
-    private int RegisterCodec(uint contextId, uint codecType)
+    private int RegisterCodec(uint contextId, uint codecType, CpuContext? context = null)
     {
-        _ctx[CpuRegister.Rdi] = contextId;
-        _ctx[CpuRegister.Rsi] = codecType;
-        _ctx[CpuRegister.Rdx] = 0;
-        return AjmExports.AjmModuleRegister(_ctx);
+        context ??= _ctx;
+        context[CpuRegister.Rdi] = contextId;
+        context[CpuRegister.Rsi] = codecType;
+        context[CpuRegister.Rdx] = 0;
+        return AjmExports.AjmModuleRegister(context);
     }
 
     private int CreateInstance(uint contextId, uint codecType, ulong flags, ulong outputAddress)
@@ -180,6 +228,21 @@ public sealed class AjmExportsTests : IDisposable
         _ctx[CpuRegister.Rdi] = contextId;
         _ctx[CpuRegister.Rsi] = instanceId;
         return AjmExports.AjmInstanceDestroy(_ctx);
+    }
+
+    private int RegisterMemory(uint contextId, ulong address, ulong pageCount)
+    {
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = address;
+        _ctx[CpuRegister.Rdx] = pageCount;
+        return AjmExports.AjmMemoryRegister(_ctx);
+    }
+
+    private int UnregisterMemory(uint contextId, ulong address)
+    {
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = address;
+        return AjmExports.AjmMemoryUnregister(_ctx);
     }
 
     private uint ReadUInt32(ulong address)

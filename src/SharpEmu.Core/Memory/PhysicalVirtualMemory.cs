@@ -21,6 +21,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
     private const ulong PageSize = 0x1000;
+    private const ulong WindowsAllocationGranularity = 0x10000;
     private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
     private const ulong GuestAllocationArenaSize = 0x0100_0000;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
@@ -162,10 +163,27 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var alignedSize = (size + 0xFFF) & ~0xFFFUL;
         var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         var hostProtection = executable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
+        if (TryReserveWindowsAllocationUnitAtExact(
+                desiredAddress,
+                alignedSize,
+                executable,
+                protection,
+                hostProtection,
+                out actualAddress))
+        {
+            return true;
+        }
+
         var result = _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
         if (result == 0)
         {
-            return false;
+            return TryCommitOwnedReservationAtExact(
+                desiredAddress,
+                alignedSize,
+                executable,
+                protection,
+                hostProtection,
+                out actualAddress);
         }
 
         actualAddress = result;
@@ -185,7 +203,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 Size = alignedSize,
                 IsExecutable = executable,
                 IsReservedOnly = false,
-                Protection = protection
+                Protection = protection,
+                HostAllocationBase = actualAddress
             });
         }
         finally
@@ -195,6 +214,157 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         var allocationKind = executable ? "executable memory" : "data memory";
         TraceVmem($"Allocated exact {allocationKind}: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes)");
+        return true;
+    }
+
+    private bool TryReserveWindowsAllocationUnitAtExact(
+        ulong desiredAddress,
+        ulong alignedSize,
+        bool executable,
+        uint protection,
+        HostPageProtection hostProtection,
+        out ulong actualAddress)
+    {
+        actualAddress = 0;
+        if (!OperatingSystem.IsWindows() ||
+            desiredAddress == 0 ||
+            alignedSize >= WindowsAllocationGranularity ||
+            ulong.MaxValue - desiredAddress < alignedSize)
+        {
+            return false;
+        }
+
+        var requestedEnd = desiredAddress + alignedSize;
+        if ((desiredAddress & (WindowsAllocationGranularity - 1)) == 0 &&
+            (requestedEnd & (WindowsAllocationGranularity - 1)) == 0)
+        {
+            return false;
+        }
+
+        var reservationBase = desiredAddress & ~(WindowsAllocationGranularity - 1);
+        var reservationEnd = AlignUp(requestedEnd, WindowsAllocationGranularity);
+        var reservationSize = reservationEnd - reservationBase;
+        var reservedAddress = _hostMemory.Reserve(reservationBase, reservationSize, hostProtection);
+        if (reservedAddress == 0)
+        {
+            return false;
+        }
+
+        if (reservedAddress != reservationBase)
+        {
+            _hostMemory.Free(reservedAddress);
+            return false;
+        }
+
+        if (!_hostMemory.Commit(desiredAddress, alignedSize, hostProtection))
+        {
+            _hostMemory.Free(reservationBase);
+            return false;
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            InsertRegionSorted(new MemoryRegion
+            {
+                VirtualAddress = desiredAddress,
+                Size = alignedSize,
+                IsExecutable = executable,
+                IsReservedOnly = false,
+                Protection = protection,
+                HostAllocationBase = reservationBase
+            });
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+
+        actualAddress = desiredAddress;
+        var allocationKind = executable ? "executable memory" : "data memory";
+        TraceVmem(
+            $"Reserved Windows allocation unit for exact {allocationKind}: requested=0x{desiredAddress:X16}+0x{alignedSize:X} reservation=0x{reservationBase:X16}+0x{reservationSize:X}");
+        return true;
+    }
+
+    private bool TryCommitOwnedReservationAtExact(
+        ulong desiredAddress,
+        ulong alignedSize,
+        bool executable,
+        uint protection,
+        HostPageProtection hostProtection,
+        out ulong actualAddress)
+    {
+        actualAddress = 0;
+        if (desiredAddress == 0 ||
+            ulong.MaxValue - desiredAddress < alignedSize ||
+            !_hostMemory.Query(desiredAddress, out var info) ||
+            info.State != HostRegionState.Reserved ||
+            info.AllocationBase == 0)
+        {
+            return false;
+        }
+
+        var requestedEnd = desiredAddress + alignedSize;
+        var allocationBase = info.AllocationBase;
+        TraceVmem(
+            $"Exact allocation fallback: requested=0x{desiredAddress:X16} len=0x{alignedSize:X} region=0x{info.BaseAddress:X16}+0x{info.RegionSize:X} allocation=0x{allocationBase:X16} state={info.State}");
+
+        _gate.EnterWriteLock();
+        try
+        {
+            if (!_regions.Any(region => region.HostAllocationBase == allocationBase))
+            {
+                TraceVmem($"Exact allocation fallback rejected unowned allocation 0x{allocationBase:X16}");
+                return false;
+            }
+
+            var cursor = desiredAddress;
+            while (cursor < requestedEnd)
+            {
+                if (!_hostMemory.Query(cursor, out var rangeInfo) ||
+                    rangeInfo.State != HostRegionState.Reserved ||
+                    rangeInfo.AllocationBase != allocationBase ||
+                    rangeInfo.RegionSize == 0 ||
+                    rangeInfo.BaseAddress > cursor ||
+                    ulong.MaxValue - rangeInfo.BaseAddress < rangeInfo.RegionSize)
+                {
+                    return false;
+                }
+
+                var rangeEnd = Math.Min(requestedEnd, rangeInfo.BaseAddress + rangeInfo.RegionSize);
+                if (rangeEnd <= cursor)
+                {
+                    return false;
+                }
+
+                cursor = rangeEnd;
+            }
+
+            if (!_hostMemory.Commit(desiredAddress, alignedSize, hostProtection))
+            {
+                return false;
+            }
+
+            InsertRegionSorted(new MemoryRegion
+            {
+                VirtualAddress = desiredAddress,
+                Size = alignedSize,
+                IsExecutable = executable,
+                IsReservedOnly = false,
+                Protection = protection,
+                HostAllocationBase = allocationBase
+            });
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+
+        actualAddress = desiredAddress;
+        var allocationKind = executable ? "executable memory" : "data memory";
+        TraceVmem(
+            $"Committed exact {allocationKind} in owned reservation: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes), allocation=0x{allocationBase:X16}");
         return true;
     }
 
@@ -230,6 +400,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             alignedSize >= LargeDataReserveThreshold &&
             alignedSize > FullCommitRegionLimit;
 
+        if (TryReserveWindowsAllocationUnitAtExact(
+                desiredAddress,
+                alignedSize,
+                executable,
+                protection,
+                hostProtection,
+                out var exactSubGranularAddress))
+        {
+            return exactSubGranularAddress;
+        }
+
         ulong result = 0;
         if (preferReserveOnly)
         {
@@ -252,6 +433,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         if (result == 0)
         {
+            if (desiredAddress != 0 &&
+                TryCommitOwnedReservationAtExact(
+                    desiredAddress,
+                    alignedSize,
+                    executable,
+                    protection,
+                    hostProtection,
+                    out var committedAddress))
+            {
+                return committedAddress;
+            }
+
             if (!allowAlternative)
             {
                 throw new InvalidOperationException($"Failed to allocate exact mapping at 0x{desiredAddress:X16} ({alignedSize} bytes)");
@@ -333,7 +526,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 Size = alignedSize,
                 IsExecutable = executable,
                 IsReservedOnly = reservedOnly,
-                Protection = protection
+                Protection = protection,
+                HostAllocationBase = actualAddress
             });
         }
         finally
@@ -601,9 +795,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.EnterWriteLock();
             try
             {
-                foreach (var region in _regions)
+                foreach (var allocationBase in _regions
+                             .Select(region => region.HostAllocationBase)
+                             .Distinct())
                 {
-                    _hostMemory.Free(region.VirtualAddress);
+                    _hostMemory.Free(allocationBase);
                 }
                 _regions.Clear();
                 _pageProtections.Clear();
@@ -873,6 +1069,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
+        if (!source.IsEmpty)
+        {
+            var firstPageBytes = (int)(PageSize - (virtualAddress & (PageSize - 1)));
+            if (source.Length > firstPageBytes)
+            {
+                var sourceOffset = 0;
+                while (sourceOffset < source.Length)
+                {
+                    var chunkAddress = virtualAddress + (ulong)sourceOffset;
+                    var pageBytes = (int)(PageSize - (chunkAddress & (PageSize - 1)));
+                    var chunkLength = Math.Min(pageBytes, source.Length - sourceOffset);
+                    if (!TryWrite(chunkAddress, source.Slice(sourceOffset, chunkLength)))
+                    {
+                        return false;
+                    }
+
+                    sourceOffset += chunkLength;
+                }
+
+                return true;
+            }
+        }
+
         var requiresExclusiveAccess = false;
         _gate.EnterReadLock();
         try
@@ -1400,6 +1619,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         public bool IsExecutable { get; set; }
         public bool IsReservedOnly { get; set; }
         public uint Protection { get; set; }
+        public ulong HostAllocationBase { get; set; }
     }
 
 }

@@ -80,6 +80,32 @@ public static class AudioOut2Exports
     }
 
     [SysAbiExport(
+        Nid = "XHl38ZNknbs",
+        ExportName = "sceAudioOut2MasteringInit",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2MasteringInit(CpuContext ctx)
+    {
+        // Mastering is host-owned on hardware. There is no caller-owned output
+        // structure to initialize here; the guest only requires the service
+        // initialization call to succeed before setting up its audio graph.
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "TViD1EZXkNI",
+        ExportName = "sceAudioOut2Set3DLatency",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2Set3DLatency(CpuContext ctx)
+    {
+        // This configures the hardware output pipeline's latency profile.
+        // The software output path is paced by ContextPush/ContextAdvance,
+        // so no additional host-side state is required.
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
         Nid = "t5YrizufpQc",
         ExportName = "sceAudioOut2ContextResetParam",
         Target = Generation.Gen5,
@@ -234,6 +260,18 @@ public static class AudioOut2Exports
     }
 
     [SysAbiExport(
+        Nid = "4dq2rblWlg0",
+        ExportName = "sceAudioOut2ContextSetAttributes",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2ContextSetAttributes(CpuContext ctx)
+    {
+        // Attributes select hardware rendering features. The current software
+        // path accepts them while retaining the context's pacing parameters.
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
         Nid = "R7d0F1g2qsU",
         ExportName = "sceAudioOut2ContextGetQueueLevel",
         Target = Generation.Gen5,
@@ -241,13 +279,19 @@ public static class AudioOut2Exports
     public static int AudioOut2ContextGetQueueLevel(CpuContext ctx)
     {
         // The advance path paces synchronously, so the queue is always drained.
+        // Both ABI outputs are 32-bit values. Writing a 64-bit value to the
+        // first output overwrites an adjacent stack canary in PS5 callers.
         var levelAddress = ctx[CpuRegister.Rsi];
-        if (levelAddress != 0)
+        var availableAddress = ctx[CpuRegister.Rdx];
+        if (levelAddress == 0 || availableAddress == 0)
         {
-            _ = TryWriteUInt64(ctx, levelAddress, 0);
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return SetReturn(ctx, 0);
+        return ctx.TryWriteUInt32(levelAddress, 0) &&
+               ctx.TryWriteUInt32(availableAddress, 0)
+            ? SetReturn(ctx, 0)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -257,17 +301,31 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2PortCreate(CpuContext ctx)
     {
-        var type = unchecked((int)ctx[CpuRegister.Rdi]);
+        var contextHandle = ctx[CpuRegister.Rdi];
         var paramAddress = ctx[CpuRegister.Rsi];
         var outPortAddress = ctx[CpuRegister.Rdx];
-        var contextAddress = ctx[CpuRegister.Rcx];
-        if (type < 0 || type > 255 || paramAddress == 0 || outPortAddress == 0 || contextAddress == 0)
+        if (!Contexts.ContainsKey(contextHandle) || paramAddress == 0 || outPortAddress == 0)
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        Span<byte> param = stackalloc byte[0x20];
+        if (!ctx.Memory.TryRead(paramAddress, param))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var type = BinaryPrimitives.ReadUInt32LittleEndian(param);
+        if (type > byte.MaxValue)
+        {
+            type = 0;
+        }
+
         var portId = unchecked((uint)Interlocked.Increment(ref _nextPortId)) & 0xFF;
-        var handle = 0x2000_0000UL | ((ulong)(uint)type << 16) | portId;
+        var handle = 0x2000_0000UL | ((ulong)type << 16) | portId;
+        TraceAudioOut2(
+            $"port-create context=0x{contextHandle:X} type={type} user=0x{ctx[CpuRegister.Rcx]:X} " +
+            $"handle=0x{handle:X} param={Convert.ToHexString(param)}");
         return TryWriteUInt64(ctx, outPortAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -365,6 +423,15 @@ public static class AudioOut2Exports
         return TryWriteUInt64(ctx, outUserAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    internal static void ResetForTests()
+    {
+        Contexts.Clear();
+        Interlocked.Exchange(ref _nextContextHandle, 1);
+        Interlocked.Exchange(ref _nextUserHandle, 1);
+        Interlocked.Exchange(ref _nextPortId, 0);
+        Interlocked.Exchange(ref _pushTraceCount, 0);
     }
 
     private static bool TryWriteUInt64(CpuContext ctx, ulong address, ulong value)
