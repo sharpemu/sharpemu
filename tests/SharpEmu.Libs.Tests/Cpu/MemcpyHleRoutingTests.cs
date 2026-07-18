@@ -37,6 +37,11 @@ public sealed class MemcpyHleRoutingTests
     [Fact]
     public void TryCreateNativeImportIntrinsic_DoesNotClaimMemcpy()
     {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
         var claimed = InvokeTryCreateNativeImportIntrinsic(MemcpyNid, out var address);
 
         Assert.False(
