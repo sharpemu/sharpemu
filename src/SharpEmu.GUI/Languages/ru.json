@@ -15,6 +15,7 @@
   "Library.Context.OpenFolder": "Открыть папку с игрой",
   "Library.Context.CopyPath": "Скопировать путь",
   "Library.Context.CopyTitleId": "Скопировать ID игры",
+  "Library.Context.GameSettings": "Настройки игры…",
   "Library.Context.Remove": "Удалить из библиотеки",
 
   "Library.Empty.Title": "Ваша библиотека пуста",
@@ -26,6 +27,17 @@
   "Library.Loading": "Загрузка библиотеки…",
 
   "Options.General": "Основные",
+  "Options.Env.Tab": "Окружение",
+  "Options.Section.Environment": "ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ",
+  "Options.Env.Desc": "Параметры, передаваемые эмулятору как переменные окружения при запуске.",
+  "Options.Env.Bthid.Desc": "Сообщать об отсутствии Bluetooth HID для игр, чьи библиотеки руля и обратной связи опрашивают устройство бесконечно.\nОбычно оставляйте выключенным. Некоторые игры зависают при сбое инициализации.",
+  "Options.Env.LoopGuard.Desc": "Не завершать принудительно игры, которые слишком долго повторяют один и тот же вызов.\nПопробуйте этот параметр, если игра сама закрывается во время загрузки.",
+  "Options.Env.WritableApp0.Desc": "Разрешить играм создавать и записывать файлы в папке установки.\nТребуется для неупакованных дампов, которые сохраняют данные или настройки в /app0.",
+  "Options.Env.VkValidation.Desc": "Включить слои валидации Vulkan для отладки GPU.\nЗамедляет работу. Требуется установленный Vulkan SDK.",
+  "Options.Env.DumpSpirv.Desc": "Сохранять шейдеры AGC и их переводы в SPIR-V в папку shader-dumps.\nИспользуйте при сообщении об ошибках шейдеров или рендеринга.",
+  "Options.Env.LogDirectMemory.Desc": "Выводить в консоль выделения прямой памяти и ошибки выделения.\nИспользуйте, если игра аварийно завершает работу или закрывается при запуске.",
+  "Options.Env.LogIo.Desc": "Выводить в консоль операции открытия и чтения файлов, а также разрешение путей.\nИспользуйте, если игра не может найти файлы данных при запуске.",
+  "Options.Env.LogNp.Desc": "Выводить в консоль вызовы библиотеки NP (PlayStation Network).",
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
   "Options.Section.Launcher": "ЛАУНЧЕР",
@@ -70,6 +82,13 @@
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",
+  "Common.Save": "Сохранить",
+  "Common.Cancel": "Отмена",
+
+  "PerGame.Title": "Настройки игры — {0} ({1})",
+  "PerGame.InheritNote": "Неотмеченные строки наследуют глобальные настройки.",
+  "PerGame.EnvToggles.Label": "Переключатели окружения",
+  "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей SHARPEMU_* для этой игры.",
 
   "Console.Title": "КОНСОЛЬ",
   "Console.SearchWatermark": "Поиск...",
@@ -125,5 +144,30 @@
   "Dialog.PsExecutables": "Исполняемые файлы PS",
   "Dialog.SaveLogFile": "Выберите, куда сохранить файл с логами",
   "Dialog.PlainTextFiles": "Текстовые файлы",
-  "Dialog.LogFiles": "Логи"
+  "Dialog.LogFiles": "Логи",
+
+  "Options.About": "О программе",
+  "About.Github.Label": "GitHub",
+  "About.Github.Desc": "Исходный код, отчёты об ошибках и разработка проекта.",
+  "About.Github.LatestCommitLabel": "Последний коммит",
+  "About.Github.LatestCommitDescription": "Последний коммит в основной ветке",
+  "About.Discord.Label": "Discord",
+  "About.Discord.Desc": "Присоединяйтесь к сообществу, получайте поддержку и следите за разработкой.",
+  "About.GithubButton": "Участвовать в разработке на GitHub!",
+  "About.DiscordButton": "Присоединиться к нашему Discord!",
+
+  "Updater.Auto.Label": "Проверять обновления при запуске",
+  "Updater.Auto.Desc": "Проверяет GitHub без задержки запуска.",
+  "Updater.Label": "Обновления",
+  "Updater.Check": "Проверить обновления",
+  "Updater.DownloadRestart": "Скачать и перезапустить",
+  "Updater.Status.Ready": "Текущая сборка: {0}",
+  "Updater.Status.Checking": "Проверка обновлений…",
+  "Updater.Status.Current": "Установлена актуальная версия ({0}).",
+  "Updater.Status.Available": "Доступна новая сборка: {0}",
+  "Updater.Status.Downloading": "Скачивание обновления… {0}%",
+  "Updater.Status.Installing": "Установка обновления…",
+  "Updater.Status.Timeout": "Проверка обновлений превысила лимит времени в 10 секунд.",
+  "Updater.Status.Failed": "Не удалось проверить наличие обновлений.",
+  "Updater.Status.Unsupported": "Автоматическое обновление требует сборку Windows, Linux или macOS x64."
 }
