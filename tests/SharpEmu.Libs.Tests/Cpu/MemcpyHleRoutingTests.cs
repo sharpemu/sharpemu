@@ -5,6 +5,7 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.HLE;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
@@ -49,6 +50,11 @@ public sealed class MemcpyHleRoutingTests
     [Fact]
     public void TryCreateNativeImportIntrinsic_StillClaimsNonHleNids()
     {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
         var claimed = InvokeTryCreateNativeImportIntrinsic(RdtscNid, out var address);
 
         Assert.True(
