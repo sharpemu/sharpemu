@@ -362,7 +362,26 @@ public static class KernelExports
         ExportName = "open",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int Open(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
+    public static int Open(CpuContext ctx)
+    {
+        var result = KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            // RAX already holds the fd, return it
+            return unchecked((int)ctx[CpuRegister.Rax]);
+        }
+
+        // POSIX ABI: return -1, set errno
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => 13, // EACCES
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => 22, // EINVAL
+            _ => 2, // ENOENT
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
 
     [SysAbiExport(
         Nid = "1G3lF1Gg1k8",
@@ -376,7 +395,24 @@ public static class KernelExports
         ExportName = "fstat",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
-    public static int Fstat(CpuContext ctx) => KernelMemoryCompatExports.KernelFstat(ctx);
+    public static int Fstat(CpuContext ctx)
+    {
+        var result = KernelMemoryCompatExports.KernelFstat(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => 22, // EINVAL
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => 14, // EFAULT
+            _ => 9, // EBADF
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
 
     [SysAbiExport(
         Nid = "hcuQgD53UxM",

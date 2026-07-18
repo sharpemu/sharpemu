@@ -255,7 +255,6 @@ public static class KernelSemaphoreCompatExports
                 if (isMainThread && HostMainThread.HasPendingException)
                 {
                     HostMainThread.ClearPendingException();
-                    semaphore.Count -= needCount;
                     semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
                     HostMainThread.SetBlocked(false, null);
                     if (timeoutAddress != 0)
@@ -283,8 +282,13 @@ public static class KernelSemaphoreCompatExports
                     if (isMainThread && HostMainThread.HasPendingException)
                     {
                         HostMainThread.ClearPendingException();
-                        semaphore.Count = Math.Max(semaphore.Count, needCount);
-                        break;
+                        semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                        HostMainThread.SetBlocked(false, null);
+                        if (timeoutAddress != 0)
+                        {
+                            _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        }
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
                     }
                 }
 
