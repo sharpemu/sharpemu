@@ -1900,6 +1900,15 @@ internal static unsafe class VulkanVideoPresenter
             ? 0x8000_0000u | ((format & 0x1FFu) << 8) | (numberType & 0xFFu)
             : 0;
 
+    internal static bool TryGetVulkanTextureFormat(
+        uint format,
+        uint numberType,
+        out Format vkFormat)
+    {
+        vkFormat = Presenter.GetTextureFormat(format, numberType);
+        return vkFormat != Format.Undefined;
+    }
+
     internal static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,

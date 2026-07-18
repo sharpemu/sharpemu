@@ -20,4 +20,5 @@ public sealed record Gen5SpirvShader(
     IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
     IReadOnlyList<Gen5ImageBinding> ImageBindings,
     uint AttributeCount,
-    IReadOnlyList<Gen5VertexInputBinding> VertexInputs);
+    IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
+    Gen5ShaderSubgroupRequirements SubgroupRequirements);

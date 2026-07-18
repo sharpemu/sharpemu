@@ -35,6 +35,21 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Fact]
+    public void BufferAtomics_MarkGlobalBindingWritable()
+    {
+        Assert.True(
+            TryEvaluateCompute(
+                [0xE0E04008, 0x80000100],
+                BufferDescriptorRegisters(),
+                out _,
+                out var evaluation,
+                out var error),
+            error);
+
+        Assert.True(Assert.Single(evaluation.GlobalMemoryBindings).Writable);
+    }
+
+    [Fact]
     public void DataShareAtomics_EmitAtomicOpcodes()
     {
         // DS_ADD_RTN_U32 v3, v0, v1; DS_CMPST_RTN_B32 v3, v0, v1, v2; DS_MAX_U32 v0, v1.
@@ -56,15 +71,38 @@ public sealed class Gen5SpirvAtomicTranslationTests
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc against an R32ui T#.
         var opcodes = CompileCompute(
-            [0xF0442100, 0x00010200],
+            [0xF0442108, 0x00010200],
             new Dictionary<uint, uint>
             {
                 // Descriptor word1 dataFormat (bits 28:20) = 20 selects R32ui/Uint.
                 [5] = 20u << 20,
+                // Descriptor word3 type = 9 selects a 2D texture.
+                [7] = 9u << 28,
             });
 
         Assert.Contains((ushort)SpirvOp.ImageTexelPointer, opcodes);
         Assert.Contains((ushort)SpirvOp.AtomicIAdd, opcodes);
+    }
+
+    [Fact]
+    public void Rgb32StorageImage_IsRejectedExplicitly()
+    {
+        var success = TryCompileCompute(
+            [0xF0442108, 0x00010200],
+            new Dictionary<uint, uint>
+            {
+                // Unified format 72 is 32_32_32_UINT.
+                [5] = 72u << 20,
+                [7] = 9u << 28,
+            },
+            out _,
+            out var error);
+
+        Assert.False(success);
+        Assert.Contains(
+            "storage RGB32 images are not representable",
+            error,
+            StringComparison.Ordinal);
     }
 
     private static Dictionary<uint, uint> BufferDescriptorRegisters() => new()
@@ -80,44 +118,85 @@ public sealed class Gen5SpirvAtomicTranslationTests
         uint[] programWords,
         Dictionary<uint, uint> userDataSgprs)
     {
-        var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        // COMPUTE_PGM_RSRC2 advertises 16 user SGPRs; the user data words at
-        // COMPUTE_USER_DATA_0 + index seed s[0..15] for the scalar evaluator.
-        var shaderRegisters = new Dictionary<uint, uint>
-        {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
-        foreach (var (sgpr, value) in userDataSgprs)
-        {
-            shaderRegisters[Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister + sgpr] = value;
-        }
-
         Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
+            TryCompileCompute(
+                programWords,
+                userDataSgprs,
+                out var opcodes,
                 out var error),
             error);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error),
-            error);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
+        return opcodes;
+    }
+
+    private static bool TryCompileCompute(
+        uint[] programWords,
+        Dictionary<uint, uint> shaderRegisters,
+        out HashSet<ushort> opcodes,
+        out string error)
+    {
+        if (!TryEvaluateCompute(
+                programWords,
+                shaderRegisters,
+                out var state,
+                out var evaluation,
+                out error) ||
+            !Gen5SpirvTranslator.TryCompileComputeShader(
                 state,
                 evaluation,
                 1,
                 1,
                 1,
                 out var shader,
-                out error),
-            error);
-        return CollectOpcodes(shader.Spirv);
+                out error))
+        {
+            opcodes = [];
+            return false;
+        }
+
+        opcodes = CollectOpcodes(shader.Spirv);
+        return true;
+    }
+
+    private static bool TryEvaluateCompute(
+        uint[] programWords,
+        Dictionary<uint, uint> userDataSgprs,
+        out Gen5ShaderState state,
+        out Gen5ShaderEvaluation evaluation,
+        out string error)
+    {
+        var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
+        var shaderRegisters = new Dictionary<uint, uint>
+        {
+            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] =
+                16u << 1,
+        };
+        foreach (var (sgpr, value) in userDataSgprs)
+        {
+            shaderRegisters[Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister + sgpr] = value;
+        }
+
+        if (Gen5ShaderTranslator.TryCreateState(
+                ctx,
+                ShaderAddress,
+                0,
+                shaderRegisters,
+                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
+                out state,
+                out error) &&
+            Gen5ShaderScalarEvaluator.TryEvaluate(
+                ctx,
+                state,
+                out evaluation,
+                out error))
+        {
+            return true;
+        }
+
+        state = null!;
+        evaluation = null!;
+        return false;
     }
 
     private static HashSet<ushort> CollectOpcodes(byte[] spirv)

@@ -54,6 +54,21 @@ public readonly record struct Gen5PixelOutputBinding(
     uint HostLocation,
     Gen5PixelOutputKind Kind);
 
+[Flags]
+public enum Gen5ShaderSubgroupFeatures
+{
+    None = 0,
+    LaneIdentity = 1 << 0,
+    Vote = 1 << 1,
+    Shuffle = 1 << 2,
+}
+
+public readonly record struct Gen5ShaderSubgroupRequirements(
+    Gen5ShaderSubgroupFeatures Features)
+{
+    public bool RequiresWave32 => Features != Gen5ShaderSubgroupFeatures.None;
+}
+
 public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,
     uint Slot,
@@ -124,7 +139,8 @@ public sealed record Gen5ShaderState(
     IReadOnlyList<uint> UserData,
     Gen5ShaderMetadata? Metadata,
     Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
-    uint UserDataScalarRegisterBase = 0);
+    uint UserDataScalarRegisterBase = 0,
+    Gen5GraphicsStageMode GraphicsStageMode = Gen5GraphicsStageMode.Vertex);
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
@@ -321,7 +337,8 @@ public sealed record Gen5ShaderEvaluation(
     IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
     Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
     IReadOnlySet<uint>? RuntimeScalarRegisters = null,
-    IReadOnlyList<Gen5VertexInputBinding>? VertexInputs = null);
+    IReadOnlyList<Gen5VertexInputBinding>? VertexInputs = null,
+    IReadOnlyDictionary<uint, IReadOnlyList<uint>>? ScalarRegistersByPc = null);
 
 public sealed record Gen5ShaderInstruction(
     uint Pc,

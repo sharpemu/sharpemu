@@ -53,7 +53,7 @@ public sealed class Gen5ShaderAtomicDecodeTests
     public void ImageAtomicAdd_KeepsDataRegisterAsDestination()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc
-        var instruction = DecodeSingle(0xF0442100, 0x00010200);
+        var instruction = DecodeSingle(0xF0442108, 0x00010200);
 
         Assert.Equal("ImageAtomicAdd", instruction.Opcode);
         var control = Assert.IsType<Gen5ImageControl>(instruction.Control);

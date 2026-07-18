@@ -1447,10 +1447,14 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                var compareDestination = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : 106u;
+                var compareDestination = instruction.Control switch
+                {
+                    Gen5SdwaControl { ScalarDestination: { } scalarDestination } =>
+                        scalarDestination,
+                    Gen5Vop3Control { ScalarDestination: { } scalarDestination } =>
+                        scalarDestination,
+                    _ => 106u,
+                };
                 StoreWaveMask(compareDestination, activeCondition);
             }
 
@@ -1477,10 +1481,15 @@ public static partial class Gen5SpirvTranslator
             var destination = instruction.Destinations[0].Value;
             if (instruction.Encoding == Gen5ShaderEncoding.Sopk)
             {
-                var immediate = unchecked((uint)(short)(instruction.Words[0] & 0xFFFF));
+                var encodedImmediate = instruction.Words[0] & 0xFFFF;
+                var immediate = unchecked((uint)(short)encodedImmediate);
                 if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
                 {
-                    return TryEmitScalarCompareK(instruction, destination, immediate, out error);
+                    return TryEmitScalarCompareK(
+                        instruction,
+                        destination,
+                        encodedImmediate,
+                        out error);
                 }
 
                 var current = LoadS(destination);
@@ -1502,6 +1511,16 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 StoreS(destination, value);
+                if (instruction.Opcode == "SAddkI32")
+                {
+                    Store(
+                        _scc,
+                        SignedAddOverflow(
+                            current,
+                            UInt(immediate),
+                            value));
+                }
+
                 return true;
             }
 
@@ -1586,7 +1605,6 @@ public static partial class Gen5SpirvTranslator
                 case "SBrevB32":
                     result = _module.AddInstruction(SpirvOp.BitReverse, _uintType, left);
                     StoreS(destination, result);
-                    Store(_scc, IsNotZero(result));
                     return true;
                 case "SBcnt1I32B32":
                     result = _module.AddInstruction(SpirvOp.BitCount, _uintType, left);
@@ -1596,7 +1614,6 @@ public static partial class Gen5SpirvTranslator
                 case "SFF1I32B32":
                     result = Ext(73, _uintType, left);
                     StoreS(destination, result);
-                    Store(_scc, IsNotZero(result));
                     return true;
                 case "SBitset1B32":
                     result = _module.AddInstruction(
@@ -2027,7 +2044,12 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var left = LoadS(destination);
-            var right = UInt(immediate);
+            var rightValue = instruction.Opcode.EndsWith(
+                    "U32",
+                    StringComparison.Ordinal)
+                ? immediate & 0xFFFFu
+                : unchecked((uint)(short)(immediate & 0xFFFFu));
+            var right = UInt(rightValue);
             var operation = instruction.Opcode switch
             {
                 "SCmpkEqI32" or "SCmpkEqU32" => SpirvOp.IEqual,
@@ -2392,6 +2414,7 @@ public static partial class Gen5SpirvTranslator
 
             StoreS64(destination, value);
             if (instruction.Opcode is
+                "SWqmB64" or
                 "SNotB64" or
                 "SAndB64" or
                 "SOrB64" or
@@ -2408,6 +2431,40 @@ public static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        private uint EmitWholeQuadMask64(uint value)
+        {
+            var quadActive = value;
+            for (ulong shift = 1; shift <= 3; shift++)
+            {
+                quadActive = _module.AddInstruction(
+                    SpirvOp.BitwiseOr,
+                    _ulongType,
+                    quadActive,
+                    ShiftRightLogical64(
+                        value,
+                        _module.Constant64(_ulongType, shift)));
+            }
+
+            quadActive = BitwiseAnd64(
+                quadActive,
+                _module.Constant64(_ulongType, 0x1111_1111UL));
+            var expanded = quadActive;
+            for (ulong shift = 1; shift <= 3; shift++)
+            {
+                expanded = _module.AddInstruction(
+                    SpirvOp.BitwiseOr,
+                    _ulongType,
+                    expanded,
+                    ShiftLeftLogical64(
+                        quadActive,
+                        _module.Constant64(_ulongType, shift)));
+            }
+
+            return BitwiseAnd64(
+                expanded,
+                _module.Constant64(_ulongType, 0xFFFF_FFFFUL));
         }
 
         private uint GetRawSource(
@@ -2908,6 +2965,11 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadS64(uint register)
         {
+            if (register == NullScalarRegister)
+            {
+                return _module.Constant64(_ulongType, 0);
+            }
+
             var low = _module.AddInstruction(SpirvOp.UConvert, _ulongType, LoadS(register));
             var high = _module.AddInstruction(
                 SpirvOp.UConvert,
@@ -2919,6 +2981,11 @@ public static partial class Gen5SpirvTranslator
 
         private void StoreS64(uint register, uint value)
         {
+            if (register == NullScalarRegister)
+            {
+                return;
+            }
+
             StoreS(
                 register,
                 _module.AddInstruction(SpirvOp.UConvert, _uintType, value));
@@ -3312,22 +3379,25 @@ public static partial class Gen5SpirvTranslator
             return result;
         }
 
+        private uint GetCarryOrBorrowIn(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Control is Gen5Vop3Control)
+            {
+                return IsCurrentLaneSet32(GetRawSource(instruction, 2));
+            }
+
+            return Load(_boolType, _vcc);
+        }
+
         private void StoreCarryOut(
             Gen5ShaderInstruction instruction,
             uint carry)
         {
-            var activeCarry = _module.AddInstruction(
-                SpirvOp.LogicalAnd,
-                _boolType,
-                Load(_boolType, _exec),
-                carry);
-            if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } register })
-            {
-                StoreWaveMask(register, activeCarry);
-                return;
-            }
-
-            StoreWaveMask(106, activeCarry);
+            var register = instruction.Control is Gen5Vop3Control
+                { ScalarDestination: { } scalarDestination }
+                ? scalarDestination
+                : 106u;
+            StoreWave32LaneMask(register, carry);
         }
 
         private bool TryEmitReadlane(

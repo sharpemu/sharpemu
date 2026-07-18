@@ -9,6 +9,13 @@ namespace SharpEmu.Libs.Gpu;
 // graphics-API values must never appear here: each backend owns the guest -> native
 // translation for its API.
 
+internal enum GuestImageKind
+{
+    Type2D,
+    Type3D,
+    Cube,
+}
+
 /// <summary>A guest texture referenced by a draw or dispatch. Format/NumberType/
 /// TileMode/DstSelect are raw guest descriptor codes.</summary>
 internal sealed record GuestDrawTexture(
@@ -27,7 +34,13 @@ internal sealed record GuestDrawTexture(
     uint Pitch = 0,
     uint TileMode = 0,
     uint DstSelect = 0xFAC,
-    GuestSampler Sampler = default);
+    GuestSampler Sampler = default,
+    bool IsArray = false,
+    uint ResourceArrayLayers = 1,
+    uint BaseArrayLayer = 0,
+    uint ViewArrayLayers = 1,
+    uint Depth = 1,
+    GuestImageKind ImageKind = GuestImageKind.Type2D);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(
@@ -147,7 +160,9 @@ internal sealed record GuestRenderTarget(
     uint Height,
     uint Format,
     uint NumberType,
-    uint MipLevels = 1);
+    uint MipLevels = 1,
+    uint Depth = 1,
+    GuestImageKind ImageKind = GuestImageKind.Type2D);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
 internal sealed record GuestDepthTarget(

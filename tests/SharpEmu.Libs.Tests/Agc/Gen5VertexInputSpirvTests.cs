@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -9,6 +10,88 @@ namespace SharpEmu.Libs.Tests.Agc;
 
 public sealed class Gen5VertexInputSpirvTests
 {
+    [Fact]
+    public void ScalarEvaluatorCapturesVertexInputDataBeforeReturning()
+    {
+        const ulong vertexAddress = 0x2000;
+        const uint stride = 16;
+        var expected = Enumerable.Range(0, 32)
+            .Select(index => (byte)(0x80 + index))
+            .ToArray();
+        var memory = new FakeCpuMemory(vertexAddress, 0x100);
+        Assert.True(memory.TryWrite(vertexAddress, expected));
+        var context = new CpuContext(memory, Generation.Gen5);
+        var load = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mubuf,
+            "BufferLoadFormatXyzw",
+            [],
+            [
+                Gen5Operand.Vector(0),
+                Gen5Operand.Scalar(0),
+                new Gen5Operand(Gen5OperandKind.LiteralConstant, 0),
+            ],
+            [
+                Gen5Operand.Vector(4),
+                Gen5Operand.Vector(5),
+                Gen5Operand.Vector(6),
+                Gen5Operand.Vector(7),
+            ],
+            new Gen5BufferMemoryControl(
+                4,
+                0,
+                4,
+                0,
+                0,
+                IndexEnabled: true,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false));
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [load, end]),
+            [
+                (uint)vertexAddress,
+                stride << 16,
+                2,
+                0,
+            ],
+            null);
+
+        Assert.True(
+            Gen5ShaderScalarEvaluator.TryEvaluate(
+                context,
+                state,
+                out var evaluation,
+                out var error,
+                resolveVertexInputs: true,
+                requiredVertexRecordCount: 2),
+            error);
+        var binding = Assert.Single(evaluation.VertexInputs!);
+
+        try
+        {
+            Assert.True(binding.DataPooled);
+            Assert.Equal(expected.Length, binding.DataLength);
+            Assert.True(binding.Data.Length >= binding.DataLength);
+            Assert.Equal(expected, binding.Data.AsSpan(0, binding.DataLength).ToArray());
+        }
+        finally
+        {
+            if (binding.DataPooled)
+            {
+                Gen5ShaderScalarEvaluator.GlobalMemoryPool.Return(binding.Data);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(0u, null)]
     [InlineData(4u, 0u)]

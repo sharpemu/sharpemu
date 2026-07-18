@@ -197,7 +197,8 @@ public static class Gen5ShaderTranslator
         out Gen5ShaderState state,
         out string error,
         Gen5ComputeSystemRegisters? computeSystemRegisters = null,
-        uint userDataScalarRegisterBase = 0)
+        uint userDataScalarRegisterBase = 0,
+        Gen5GraphicsStageMode graphicsStageMode = Gen5GraphicsStageMode.Vertex)
     {
         ValidateUserSgprCountDecoding();
         state = default!;
@@ -272,7 +273,8 @@ public static class Gen5ShaderTranslator
             userData,
             metadata,
             computeSystemRegisters,
-            userDataScalarRegisterBase);
+            userDataScalarRegisterBase,
+            graphicsStageMode);
         return true;
     }
 
@@ -420,54 +422,293 @@ public static class Gen5ShaderTranslator
             return false;
         }
 
-        var instructions = new List<Gen5ShaderInstruction>();
-        var instructionCount = 0;
-        for (uint pc = 0; instructionCount < MaxInstructions;)
+        if ((address & (sizeof(uint) - 1)) != 0)
         {
-            if (!TryReadUInt32(ctx, address + pc, out var word))
-            {
-                error = $"read-failed pc=0x{pc:X}";
-                return false;
-            }
+            error = $"misaligned address=0x{address:X}";
+            return false;
+        }
 
-            if (!TryDecodeInstruction(
-                    ctx,
-                    address,
-                    pc,
-                    word,
-                    out var encoding,
-                    out var name,
-                    out var sizeDwords,
+        var instructionsByPc = new Dictionary<uint, Gen5ShaderInstruction>();
+        var instructionOwnersByPc = new Dictionary<uint, uint>();
+        var pendingBlocks = new Queue<uint>();
+        var discoveredBlocks = new HashSet<uint>();
+        pendingBlocks.Enqueue(0);
+        discoveredBlocks.Add(0);
+
+        while (pendingBlocks.TryDequeue(out var blockPc))
+        {
+            if (!TryValidateInstructionBoundary(
+                    blockPc,
+                    instructionOwnersByPc,
                     out error))
             {
                 return false;
             }
 
-            var words = new uint[sizeDwords];
-            words[0] = word;
-            for (uint wordIndex = 1; wordIndex < sizeDwords; wordIndex++)
+            if (instructionsByPc.ContainsKey(blockPc))
             {
-                if (!TryReadUInt32(ctx, address + pc + wordIndex * sizeof(uint), out words[wordIndex]))
-                {
-                    error = $"read-failed pc=0x{pc + wordIndex * sizeof(uint):X}";
-                    return false;
-                }
+                continue;
             }
 
-            instructions.Add(CreateInstruction(pc, encoding, name, words));
-            instructionCount++;
-
-            pc += sizeDwords * sizeof(uint);
-            if (string.Equals(name, "SEndpgm", StringComparison.Ordinal))
+            var pc = blockPc;
+            while (true)
             {
-                program = new Gen5ShaderProgram(address, instructions);
-                return true;
+                if (!TryValidateInstructionBoundary(
+                        pc,
+                        instructionOwnersByPc,
+                        out error))
+                {
+                    return false;
+                }
+
+                if (instructionsByPc.ContainsKey(pc))
+                {
+                    break;
+                }
+
+                if (instructionsByPc.Count >= MaxInstructions)
+                {
+                    error = "unterminated";
+                    return false;
+                }
+
+                if (!TryGetGuestAddress(address, pc, out var instructionAddress))
+                {
+                    error = $"invalid guest address pc=0x{pc:X}";
+                    return false;
+                }
+
+                if (!ctx.TryReadUInt32(instructionAddress, out var word))
+                {
+                    error = instructionsByPc.Count == 0 && pc == 0
+                        ? "read-failed pc=0x0"
+                        : $"unterminated-path read-failed pc=0x{pc:X}";
+                    return false;
+                }
+
+                if (!TryDecodeInstruction(
+                        ctx,
+                        address,
+                        pc,
+                        word,
+                        out var encoding,
+                        out var name,
+                        out var sizeDwords,
+                        out error))
+                {
+                    if (!error.Contains("pc=", StringComparison.Ordinal))
+                    {
+                        error = $"decode-failed pc=0x{pc:X} {error}";
+                    }
+                    return false;
+                }
+
+                var nextPcValue = (long)pc + checked((long)sizeDwords * sizeof(uint));
+                if (sizeDwords == 0 || nextPcValue > uint.MaxValue)
+                {
+                    error = $"invalid instruction range pc=0x{pc:X} size={sizeDwords}";
+                    return false;
+                }
+
+                var words = new uint[sizeDwords];
+                words[0] = word;
+                for (uint wordIndex = 1; wordIndex < sizeDwords; wordIndex++)
+                {
+                    var wordPc = pc + wordIndex * sizeof(uint);
+                    if (!TryGetGuestAddress(address, wordPc, out var wordAddress))
+                    {
+                        error = $"invalid guest address pc=0x{wordPc:X}";
+                        return false;
+                    }
+
+                    if (!ctx.TryReadUInt32(wordAddress, out words[wordIndex]))
+                    {
+                        error = $"read-failed pc=0x{wordPc:X}";
+                        return false;
+                    }
+                }
+
+                for (uint wordIndex = 0; wordIndex < sizeDwords; wordIndex++)
+                {
+                    var wordPc = pc + wordIndex * sizeof(uint);
+                    if (instructionOwnersByPc.TryGetValue(wordPc, out var ownerPc))
+                    {
+                        error =
+                            $"overlapping instruction pc=0x{pc:X} " +
+                            $"word-pc=0x{wordPc:X} owner=0x{ownerPc:X}";
+                        return false;
+                    }
+                }
+
+                var instruction = CreateInstruction(pc, encoding, name, words);
+                instructionsByPc.Add(pc, instruction);
+                for (uint wordIndex = 0; wordIndex < sizeDwords; wordIndex++)
+                {
+                    instructionOwnersByPc.Add(
+                        pc + wordIndex * sizeof(uint),
+                        pc);
+                }
+
+                var nextPc = (uint)nextPcValue;
+                if (string.Equals(name, "SEndpgm", StringComparison.Ordinal) ||
+                    IsIndirectControlFlow(name))
+                {
+                    break;
+                }
+
+                if (string.Equals(name, "SBranch", StringComparison.Ordinal))
+                {
+                    if (!TryQueueBranchTarget(
+                            instruction,
+                            pendingBlocks,
+                            discoveredBlocks,
+                            instructionOwnersByPc,
+                            out error))
+                    {
+                        return false;
+                    }
+
+                    break;
+                }
+
+                if (IsConditionalBranch(name))
+                {
+                    if (!TryQueueInstructionPc(
+                            nextPc,
+                            pc,
+                            pendingBlocks,
+                            discoveredBlocks,
+                            instructionOwnersByPc,
+                            out error) ||
+                        !TryQueueBranchTarget(
+                            instruction,
+                            pendingBlocks,
+                            discoveredBlocks,
+                            instructionOwnersByPc,
+                            out error))
+                    {
+                        return false;
+                    }
+
+                    break;
+                }
+
+                pc = nextPc;
             }
         }
 
-        error = "unterminated";
-        return false;
+        program = new Gen5ShaderProgram(
+            address,
+            instructionsByPc.Values.OrderBy(instruction => instruction.Pc).ToArray());
+        return true;
     }
+
+    private static bool TryQueueBranchTarget(
+        Gen5ShaderInstruction instruction,
+        Queue<uint> pendingBlocks,
+        HashSet<uint> discoveredBlocks,
+        IReadOnlyDictionary<uint, uint> instructionOwnersByPc,
+        out string error)
+    {
+        var offsetDwords = (short)(instruction.Words[0] & 0xFFFF);
+        var targetPc =
+            (long)instruction.Pc + sizeof(uint) +
+            (long)offsetDwords * sizeof(uint);
+        return TryQueueInstructionPc(
+            targetPc,
+            instruction.Pc,
+            pendingBlocks,
+            discoveredBlocks,
+            instructionOwnersByPc,
+            out error);
+    }
+
+    private static bool TryQueueInstructionPc(
+        long targetPc,
+        uint sourcePc,
+        Queue<uint> pendingBlocks,
+        HashSet<uint> discoveredBlocks,
+        IReadOnlyDictionary<uint, uint> instructionOwnersByPc,
+        out string error)
+    {
+        error = string.Empty;
+        if (targetPc < 0 || targetPc > uint.MaxValue)
+        {
+            error = $"invalid branch target pc=0x{sourcePc:X} target={targetPc}";
+            return false;
+        }
+
+        if ((targetPc & (sizeof(uint) - 1)) != 0)
+        {
+            error = $"misaligned branch target pc=0x{sourcePc:X} target=0x{targetPc:X}";
+            return false;
+        }
+
+        var target = (uint)targetPc;
+        if (!TryValidateInstructionBoundary(
+                target,
+                instructionOwnersByPc,
+                out error))
+        {
+            error = $"branch pc=0x{sourcePc:X} {error}";
+            return false;
+        }
+
+        if (discoveredBlocks.Add(target))
+        {
+            pendingBlocks.Enqueue(target);
+        }
+
+        return true;
+    }
+
+    private static bool TryValidateInstructionBoundary(
+        uint pc,
+        IReadOnlyDictionary<uint, uint> instructionOwnersByPc,
+        out string error)
+    {
+        error = string.Empty;
+        if ((pc & (sizeof(uint) - 1)) != 0)
+        {
+            error = $"misaligned instruction pc=0x{pc:X}";
+            return false;
+        }
+
+        if (instructionOwnersByPc.TryGetValue(pc, out var ownerPc) && ownerPc != pc)
+        {
+            error = $"interior instruction target pc=0x{pc:X} owner=0x{ownerPc:X}";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryGetGuestAddress(
+        ulong baseAddress,
+        ulong pc,
+        out ulong guestAddress)
+    {
+        guestAddress = 0;
+        if (baseAddress > ulong.MaxValue - pc)
+        {
+            return false;
+        }
+
+        guestAddress = baseAddress + pc;
+        return true;
+    }
+
+    private static bool IsConditionalBranch(string name) => name is
+        "SCbranchScc0" or
+        "SCbranchScc1" or
+        "SCbranchVccz" or
+        "SCbranchVccnz" or
+        "SCbranchExecz" or
+        "SCbranchExecnz";
+
+    private static bool IsIndirectControlFlow(string name) => name is
+        "SSetpcB64" or
+        "SSwappcB64";
 
     [Conditional("DEBUG")]
     private static void ValidateDppControlVectors()
@@ -589,7 +830,11 @@ public static class Gen5ShaderTranslator
             case 0x34:
             case 0x35:
                 encoding = Gen5ShaderEncoding.Vop3;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var vop3Extra))
+                if (!TryGetGuestAddress(
+                        baseAddress,
+                        (ulong)pc + sizeof(uint),
+                        out var vop3ExtraAddress) ||
+                    !ctx.TryReadUInt32(vop3ExtraAddress, out var vop3Extra))
                 {
                     error = $"vop3-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -610,7 +855,11 @@ public static class Gen5ShaderTranslator
                 return DecodeFlat(word, out name, out sizeDwords, out error);
             case 0x38:
                 encoding = Gen5ShaderEncoding.Mubuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mubufExtra))
+                if (!TryGetGuestAddress(
+                        baseAddress,
+                        (ulong)pc + sizeof(uint),
+                        out var mubufExtraAddress) ||
+                    !ctx.TryReadUInt32(mubufExtraAddress, out var mubufExtra))
                 {
                     error = $"mubuf-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -619,7 +868,11 @@ public static class Gen5ShaderTranslator
                 return DecodeMubuf(word, mubufExtra, out name, out sizeDwords, out error);
             case 0x3A:
                 encoding = Gen5ShaderEncoding.Mtbuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mtbufExtra))
+                if (!TryGetGuestAddress(
+                        baseAddress,
+                        (ulong)pc + sizeof(uint),
+                        out var mtbufExtraAddress) ||
+                    !ctx.TryReadUInt32(mtbufExtraAddress, out var mtbufExtra))
                 {
                     error = $"mtbuf-extra-read-failed pc=0x{pc:X}";
                     return false;
@@ -1091,7 +1344,9 @@ public static class Gen5ShaderTranslator
         name = isVop3B
             ? opcode switch
             {
-                0x128 => "VAddCoCiU32",
+                0x128 => "VAddcU32",
+                0x129 => "VSubbU32",
+                0x12A => "VSubbrevU32",
                 0x30F => "VAddCoU32",
                 0x310 => "VSubCoU32",
                 0x319 => "VSubrevCoU32",
@@ -1161,7 +1416,17 @@ public static class Gen5ShaderTranslator
     }
 
     private static bool IsVop3BOpcode(uint opcode) =>
-        opcode is 0x128 or 0x16D or 0x16E or 0x176 or 0x177 or 0x30F or 0x310 or 0x319;
+        opcode is
+            0x128 or
+            0x129 or
+            0x12A or
+            0x16D or
+            0x16E or
+            0x176 or
+            0x177 or
+            0x30F or
+            0x310 or
+            0x319;
 
     private static bool DecodeRaw2(
         uint word,
@@ -1597,11 +1862,6 @@ public static class Gen5ShaderTranslator
             return false;
         }
 
-        // IMAGE_LOAD itself is read-only and maps naturally to OpImageFetch,
-        // including for block-compressed textures which Vulkan cannot expose
-        // as storage images. Keep it as storage only when the same resolved
-        // descriptor is also written in this shader stage, preserving coherent
-        // read/write access through one storage-image representation.
         return stageBindings.Any(candidate =>
             IsStorageImageOperation(candidate.Opcode) &&
             binding.ResourceDescriptor.SequenceEqual(candidate.ResourceDescriptor));
@@ -1898,9 +2158,8 @@ public static class Gen5ShaderTranslator
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
                 {
-                    // V_READLANE uses the VOP3A vdst byte even though the
-                    // destination register is scalar. Bits 8-14 are the
-                    // distinct sdst field used by VOP3B encodings.
+                    // The scalar destination lives in the low vdst byte (bits 0-7);
+                    // bits 8-14 are the VOP3B carry-out sdst, which readlane lacks.
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
@@ -2269,10 +2528,10 @@ public static class Gen5ShaderTranslator
         var scalarDestination = isCompare
             ? ((word >> 15) & 1) != 0
                 ? (word >> 8) & 0x7Fu
-                : 106u
+                : null
             : (uint?)null;
         return new Gen5SdwaControl(
-            isCompare ? 6u : (word >> 8) & 0x7u,
+            isCompare ? 0u : (word >> 8) & 0x7u,
             isCompare ? 0u : (word >> 11) & 0x3u,
             (word >> 16) & 0x7u,
             hasSource1 ? (word >> 24) & 0x7u : 6u,
