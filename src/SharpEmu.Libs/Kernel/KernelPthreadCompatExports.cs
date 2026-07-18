@@ -39,109 +39,6 @@ public static class KernelPthreadCompatExports
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
     private static long _nextSynchronizationWaiterId;
 
-    // Address-independent mutex diagnostics: when enabled, every mutex op is
-    // appended to a small ring, and the history for a specific mutex is dumped
-    // automatically when an unlock hits an unexpected error (the mutex looks
-    // unlocked or foreign-owned). This survives ASLR — no need to know the
-    // guest mutex address in advance. Enable with SHARPEMU_LOG_PTHREAD_MUTEX_DIAG=1.
-    private static readonly bool _diagPthreadMutex =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_DIAG"), "1", StringComparison.Ordinal);
-
-    private sealed class MutexOpRecord
-    {
-        public long Seq;
-        public string Op = string.Empty;
-        public ulong Address;
-        public ulong Resolved;
-        public ulong Owner;
-        public int Recursion;
-        public int Waiters;
-        public ulong ThreadId;
-        public int Result;
-    }
-
-    private static readonly MutexOpRecord[] _mutexOpRing = CreateMutexOpRing();
-    private static long _mutexOpSeq;
-
-    private static MutexOpRecord[] CreateMutexOpRing()
-    {
-        var ring = new MutexOpRecord[512];
-        for (var i = 0; i < ring.Length; i++)
-        {
-            ring[i] = new MutexOpRecord();
-        }
-
-        return ring;
-    }
-
-    private static void RecordMutexOp(string op, ulong address, ulong resolved, PthreadMutexState? state, ulong threadId, int result)
-    {
-        var seq = Interlocked.Increment(ref _mutexOpSeq);
-        var slot = _mutexOpRing[(int)((ulong)(seq - 1) % (ulong)_mutexOpRing.Length)];
-        lock (slot)
-        {
-            slot.Seq = seq;
-            slot.Op = op;
-            slot.Address = address;
-            slot.Resolved = resolved;
-            slot.Owner = state?.OwnerThreadId ?? 0;
-            slot.Recursion = state?.RecursionCount ?? 0;
-            slot.Waiters = state?.Waiters.Count ?? 0;
-            slot.ThreadId = threadId;
-            slot.Result = result;
-        }
-    }
-
-    // Dumps the recorded history for one mutex address plus the current
-    // resolution candidates (by raw address and by the handle word the guest
-    // stores in the object). A recursion mismatch between candidates means the
-    // lock and unlock paths disagree on which state object owns the mutex.
-    private static void DumpMutexHistory(CpuContext ctx, ulong mutexAddress, ulong resolvedAddress, ulong currentThreadId, string reason)
-    {
-        _ = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var handleWord);
-        var byAddress = _mutexStates.TryGetValue(mutexAddress, out var addrState) ? addrState : null;
-        var byHandle = handleWord != 0 && _mutexStates.TryGetValue(handleWord, out var handleState) ? handleState : null;
-
-        Console.Error.WriteLine(
-            $"[LOADER][PTHREAD-DIAG] {reason}: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
-            $"current=0x{currentThreadId:X16} handleWord=0x{handleWord:X16} " +
-            $"byAddr(owner=0x{(byAddress?.OwnerThreadId ?? 0):X16} rec={(byAddress?.RecursionCount ?? -1)} waiters={(byAddress?.Waiters.Count ?? -1)}) " +
-            $"byHandle(owner=0x{(byHandle?.OwnerThreadId ?? 0):X16} rec={(byHandle?.RecursionCount ?? -1)} waiters={(byHandle?.Waiters.Count ?? -1)}) " +
-            $"sameObject={(byAddress is not null && ReferenceEquals(byAddress, byHandle))}");
-
-        var history = new List<MutexOpRecord>();
-        foreach (var slot in _mutexOpRing)
-        {
-            lock (slot)
-            {
-                if (slot.Seq != 0 && slot.Address == mutexAddress)
-                {
-                    history.Add(new MutexOpRecord
-                    {
-                        Seq = slot.Seq,
-                        Op = slot.Op,
-                        Address = slot.Address,
-                        Resolved = slot.Resolved,
-                        Owner = slot.Owner,
-                        Recursion = slot.Recursion,
-                        Waiters = slot.Waiters,
-                        ThreadId = slot.ThreadId,
-                        Result = slot.Result,
-                    });
-                }
-            }
-        }
-
-        history.Sort((a, b) => a.Seq.CompareTo(b.Seq));
-        foreach (var record in history)
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][PTHREAD-DIAG]   #{record.Seq} {record.Op} resolved=0x{record.Resolved:X16} " +
-                $"thread=0x{record.ThreadId:X16} owner=0x{record.Owner:X16} rec={record.Recursion} " +
-                $"waiters={record.Waiters} result=0x{unchecked((uint)record.Result):X8}");
-        }
-    }
-
     private sealed class PthreadMutexState
     {
         public ulong OwnerThreadId { get; set; }
@@ -919,10 +816,6 @@ public static class KernelPthreadCompatExports
             if (state.RecursionCount <= 0)
             {
                 TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-                if (_diagPthreadMutex)
-                {
-                    DumpMutexHistory(ctx, mutexAddress, resolvedAddress, currentThreadId, "unlock-not-locked");
-                }
 
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
@@ -930,10 +823,6 @@ public static class KernelPthreadCompatExports
             if (requireOwner && state.OwnerThreadId != currentThreadId)
             {
                 TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED);
-                if (_diagPthreadMutex)
-                {
-                    DumpMutexHistory(ctx, mutexAddress, resolvedAddress, currentThreadId, "unlock-wrong-owner");
-                }
 
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
             }
@@ -1953,10 +1842,6 @@ public static class KernelPthreadCompatExports
 
     private static void TracePthreadMutex(CpuContext ctx, string operation, ulong mutexAddress, ulong resolvedAddress, PthreadMutexState? state, ulong currentThreadId, int result)
     {
-        if (_diagPthreadMutex)
-        {
-            RecordMutexOp(operation, mutexAddress, resolvedAddress, state, currentThreadId, result);
-        }
 
         if (!ShouldTracePthreadMutex(mutexAddress, resolvedAddress))
         {
