@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Core.Cpu.Native;
+using SharpEmu.HLE;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -88,11 +89,26 @@ public sealed class Sse4aExtrqBlendPatchTests
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
 
-        fixed (byte* source = code)
+        var size = (nuint)code.Length;
+        var buffer = HostMemory.Alloc(
+            null,
+            size,
+            HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE,
+            HostMemory.PAGE_EXECUTE_READWRITE);
+        Assert.True(buffer != null);
+
+        try
         {
+            var source = (byte*)buffer;
+            new ReadOnlySpan<byte>(code).CopyTo(new Span<byte>(source, code.Length));
+
             var patched = (bool)method.Invoke(backend, [(nint)source, (nint)source])!;
             resultBytes = new ReadOnlySpan<byte>(source, code.Length).ToArray();
             return patched;
+        }
+        finally
+        {
+            HostMemory.Free(buffer, size, HostMemory.MEM_RELEASE);
         }
     }
 }
