@@ -121,6 +121,54 @@ public static class AppContentExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "SaKib2Ug0yI",
+        ExportName = "sceAppContentTemporaryDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentTemporaryDataGetAvailableSpaceKb(CpuContext ctx)
+    {
+        var availableSpaceAddress = ctx[CpuRegister.Rsi];
+        if (ctx[CpuRegister.Rdi] == 0 || availableSpaceAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        Span<byte> availableKb = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(availableKb, 1024UL * 1024); // 1 GiB
+        if (!ctx.Memory.TryWrite(availableSpaceAddress, availableKb))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "Gl6w5i0JokY",
+        ExportName = "sceAppContentDownloadDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentDownloadDataGetAvailableSpaceKb(CpuContext ctx)
+    {
+        var availableSpaceAddress = ctx[CpuRegister.Rsi];
+        if (ctx[CpuRegister.Rdi] == 0 || availableSpaceAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        Span<byte> availableKb = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(availableKb, 1024UL * 1024); // 1 GiB
+        if (!ctx.Memory.TryWrite(availableSpaceAddress, availableKb))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static bool TryReadUserDefinedParam(uint paramId, out int value)
     {
         value = 0;
