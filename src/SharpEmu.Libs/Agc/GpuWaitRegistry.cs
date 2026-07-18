@@ -51,6 +51,12 @@ internal static class GpuWaitRegistry
 
     private static readonly object _gate = new();
     private static readonly Dictionary<ulong, List<WaitingDcb>> _waiters = new();
+    // The last value each label producer wrote. Used only by the deadlock
+    // breaker: our serial submission parser cannot model two GPU queues running
+    // concurrently, so a label written -> reset -> re-waited across queues can
+    // cycle forever even though a real producer did signal it. Keyed by (memory,
+    // address) so distinct guest processes never alias.
+    private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
 
     public static int Count
     {
@@ -337,6 +343,77 @@ internal static class GpuWaitRegistry
         return expired;
     }
 
+    /// <summary>Records the value a label producer wrote, for the deadlock
+    /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
+    public static bool RecordProduced(object memory, ulong address, ulong value)
+    {
+        lock (_gate)
+        {
+            if (_lastProduced.Count >= 8192)
+            {
+                _lastProduced.Clear();
+            }
+
+            _lastProduced[(memory, address)] = value;
+        }
+
+        return LatchSatisfiedByValue(memory, address, value);
+    }
+
+    /// <summary>
+    /// Breaks cross-queue GPU deadlocks the serial parser cannot avoid: returns
+    /// (and removes) waiters that have been stuck longer than
+    /// <paramref name="minAgeTicks"/> and whose condition is satisfied by the
+    /// last value a real producer wrote to their label — even though guest
+    /// memory has since been reset. Never fabricates a value: a waiter is only
+    /// released when an actual producer signalled it at least once.
+    /// </summary>
+    public static List<WaitingDcb>? CollectDeadlockBroken(
+        object memory,
+        long nowTicks,
+        long minAgeTicks)
+    {
+        List<WaitingDcb>? broken = null;
+        lock (_gate)
+        {
+            List<ulong>? emptied = null;
+            foreach (var (address, list) in _waiters)
+            {
+                for (var i = list.Count - 1; i >= 0; i--)
+                {
+                    var waiter = list[i];
+                    if (!ReferenceEquals(waiter.Memory, memory) ||
+                        nowTicks - waiter.RegisteredTicks < minAgeTicks ||
+                        !_lastProduced.TryGetValue((memory, address), out var produced) ||
+                        !Compare(waiter, produced))
+                    {
+                        continue;
+                    }
+
+                    broken ??= new List<WaitingDcb>();
+                    broken.Add(waiter);
+                    list.RemoveAt(i);
+                }
+
+                if (list.Count == 0)
+                {
+                    emptied ??= new List<ulong>();
+                    emptied.Add(address);
+                }
+            }
+
+            if (emptied is not null)
+            {
+                foreach (var address in emptied)
+                {
+                    _waiters.Remove(address);
+                }
+            }
+        }
+
+        return broken;
+    }
+
     public static bool Compare(in WaitingDcb waiter, ulong value)
     {
         var masked = value & waiter.Mask;
@@ -361,6 +438,7 @@ internal static class GpuWaitRegistry
         lock (_gate)
         {
             _waiters.Clear();
+            _lastProduced.Clear();
         }
     }
 }

@@ -4550,6 +4550,17 @@ public static partial class AgcExports
             ? fallbackMs
             : 0L) * System.Diagnostics.Stopwatch.Frequency / 1000L;
 
+    // How long a suspended GPU wait may sit before the deadlock breaker may
+    // release it using the last value a real producer wrote to its label. Long
+    // enough that legitimate GPU work (which completes within a frame) never
+    // trips it; short enough that a wedged cross-queue cycle unblocks quickly.
+    private static readonly long _gpuDeadlockBreakTicks =
+        (long.TryParse(
+             Environment.GetEnvironmentVariable("SHARPEMU_GPU_DEADLOCK_BREAK_MS"),
+             out var deadlockMs) && deadlockMs > 0
+            ? deadlockMs
+            : 500L) * System.Diagnostics.Stopwatch.Frequency / 1000L;
+
     // Reads the WAIT_REG_MEM watched address, reference, mask, and 3-bit compare
     // function for both the AGC NOP-encapsulated (RWaitMem32/64) and the standard
     // ItWaitRegMem packet layouts.
@@ -4979,7 +4990,29 @@ public static partial class AgcExports
                 }
             }
 
-            if (woken is null && expiredRetries is null)
+            // Break cross-queue deadlocks: a waiter stuck past the deadline whose
+            // label a real producer already signalled (but guest memory has since
+            // been reset for reuse) is released using that produced value. Only
+            // fires for genuinely wedged waits, so fast-resolving ones on working
+            // titles are untouched.
+            var deadlockBroken = GpuWaitRegistry.CollectDeadlockBroken(
+                ctx.Memory, System.Diagnostics.Stopwatch.GetTimestamp(), _gpuDeadlockBreakTicks);
+            if (deadlockBroken is not null)
+            {
+                foreach (var waiter in deadlockBroken)
+                {
+                    if (tracePackets)
+                    {
+                        TraceAgc(
+                            $"agc.deadlock_break label=0x{waiter.WaitAddress:X16} " +
+                            $"queue={waiter.QueueName} submission={waiter.SubmissionId}");
+                    }
+
+                    ResumeSuspendedDcb(ctx, gpuState, waiter, tracePackets);
+                }
+            }
+
+            if (woken is null && expiredRetries is null && deadlockBroken is null)
             {
                 if (_gpuWaitStaleTicks > 0 &&
                     GpuWaitRegistry.CollectUnreportedStale(
@@ -5158,11 +5191,12 @@ public static partial class AgcExports
                     _ => false,
                 });
 
-                // Latch waiters against the written value so a same-frame label
-                // reset cannot lose the wakeup (see ApplySubmittedReleaseMem).
+                // Record + latch the written value so a same-frame label reset
+                // cannot lose the wakeup, and so the deadlock breaker can release
+                // a cross-queue waiter later (see ApplySubmittedReleaseMem).
                 if (wroteData && dataSelection is 1 or 2)
                 {
-                    GpuWaitRegistry.LatchSatisfiedByValue(
+                    GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
                 }
 
@@ -5237,7 +5271,7 @@ public static partial class AgcExports
                 // screen (Astro Bot: graphics queue waiting on a compute EOP label).
                 if (wroteData && dataSelection is 1 or 2)
                 {
-                    GpuWaitRegistry.LatchSatisfiedByValue(
+                    GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
                 }
 
