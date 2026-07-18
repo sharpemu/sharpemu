@@ -58,6 +58,36 @@ public static class NpEntitlementAccessExports
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    private const int EmptyAddcontInfoSize = 0x30;
+
+    // Singular lookup of one add-on-content entitlement (rdx = info out). We own
+    // no DLC, so report an empty/zeroed info and success — matching the list
+    // variant's "no entitlements" answer. Dead Cells calls this while loading a
+    // level; leaving it unresolved left the info struct uninitialized.
+    [SysAbiExport(
+        Nid = "xddD23+8TfQ",
+        ExportName = "sceNpEntitlementAccessGetAddcontEntitlementInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGetAddcontEntitlementInfo(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdx];
+        if (infoAddress != 0)
+        {
+            Span<byte> info = stackalloc byte[EmptyAddcontInfoSize];
+            info.Clear();
+            if (!ctx.Memory.TryWrite(infoAddress, info))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        TraceNpEntitlementAccess(
+            $"get_addcont_info service=0x{ctx[CpuRegister.Rdi]:X16} label=0x{ctx[CpuRegister.Rsi]:X16} " +
+            $"info=0x{infoAddress:X16} -> empty");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     private static void TraceNpEntitlementAccess(string message)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_NP"), "1", StringComparison.Ordinal))

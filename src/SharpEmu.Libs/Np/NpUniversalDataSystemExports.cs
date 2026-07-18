@@ -197,4 +197,16 @@ public static class NpUniversalDataSystemExports
     {
         return ctx.SetReturn(0, typeof(long));
     }
+
+    // Telemetry property setter (event property array, string value). We do not
+    // upload analytics, so accept and drop it — matching the other Set* stubs.
+    [SysAbiExport(
+        Nid = "4llLk7YJRTE",
+        ExportName = "sceNpUniversalDataSystemEventPropertyArraySetString",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemEventPropertyArraySetString(CpuContext ctx)
+    {
+        return ctx.SetReturn(0, typeof(long));
+    }
 }

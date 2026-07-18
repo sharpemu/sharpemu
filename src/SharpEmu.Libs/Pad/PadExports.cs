@@ -65,6 +65,35 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadOpenExt(CpuContext ctx) => PadOpenCore(ctx, extended: true);
 
+    // scePadGetHandle(userId, type, index): returns the handle of an already-open
+    // pad without opening a new one. Dead Cells calls it every frame to poll
+    // input; leaving it unresolved returned a garbage handle so the input path
+    // (and the game loop that drives it) misbehaved. Same validation as
+    // scePadOpen — the one primary pad — returning its handle or a not-connected
+    // error, never opening or logging.
+    [SysAbiExport(
+        Nid = "u1GRHp+oWoY",
+        ExportName = "scePadGetHandle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetHandle(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var index = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (!_initialized)
+        {
+            return ctx.SetReturn(OrbisPadErrorNotInitialized);
+        }
+
+        if (userId != PrimaryUserId || type is not (0 or 1 or 2) || index != 0)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
+        }
+
+        return ctx.SetReturn(PrimaryPadHandle);
+    }
+
     // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
     // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
     private static int PadOpenCore(CpuContext ctx, bool extended)
