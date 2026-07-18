@@ -22,18 +22,22 @@ public static class Sse4aExtrqBlendPatch
     public const int SequenceLength = 12;
 
     /// <summary>
-    /// Matches the 12-byte idiom, extracting the source (scratch) register N:
+    /// Matches the 12-byte idiom, extracting the destination register D and the
+    /// source (scratch) register N:
     /// <code>
     ///   EXTRQ    xmmN, 0x28, 0x00     ; 66 0F 78 /0 28 00      mask xmmN to low 40 bits
-    ///   VPBLENDD xmm0, xmm0, xmmN, 2  ; C4 E3 79 02 /r 02      copy dword 1 into xmm0
+    ///   VPBLENDD xmmD, xmmD, xmmN, 2  ; C4 E3 vvvv 02 /r 02    copy dword 1 into xmmD
     /// </code>
-    /// N (xmm0-xmm7) lives in the ModRM r/m field of both instructions and must
-    /// be identical in each; the destination (xmm0) is fixed by the idiom. The
-    /// VEX bytes pin src1 to xmm0 and the register range to xmm0-xmm7.
+    /// N lives in the ModRM r/m field of both instructions; D (the blend
+    /// destination and src1) lives in the VPBLENDD ModRM reg field and VEX.vvvv.
+    /// Both are xmm0-xmm7 (the VEX byte1 0xE3 pins R/X/B, so no xmm8-15 extension).
+    /// The compiler allocates whichever registers it likes — Dead Cells builds use
+    /// D=xmm0 and D=xmm3, others differ — so both are read from the encoding.
     /// </summary>
-    public static bool TryMatch(ReadOnlySpan<byte> source, out int xmmRegister)
+    public static bool TryMatch(ReadOnlySpan<byte> source, out int destRegister, out int srcRegister)
     {
-        xmmRegister = -1;
+        destRegister = -1;
+        srcRegister = -1;
         if (source.Length < SequenceLength)
         {
             return false;
@@ -46,34 +50,47 @@ public static class Sse4aExtrqBlendPatch
             return false;
         }
 
-        var register = source[3] & 0x07;
+        var n = source[3] & 0x07;
 
-        // VPBLENDD xmm0, xmm0, xmmN, 2 : C4 E3 79 02, ModRM (mod=11 reg=000 rm=N), 02.
-        // The r/m field must name the same register the EXTRQ masked.
-        if (source[6] != 0xC4 || source[7] != 0xE3 || source[8] != 0x79 || source[9] != 0x02 ||
-            source[10] != (0xC0 | register) || source[11] != 0x02)
+        // VPBLENDD xmmD, xmmD, xmmN, 2 : C4 E3 <W=0 vvvv=~D L=0 pp=01> 02 ModRM 02.
+        // VEX.byte2 fixed bits (W, L, pp) must read 0b*0000*01; vvvv encodes ~D.
+        if (source[6] != 0xC4 || source[7] != 0xE3 || (source[8] & 0x87) != 0x01 ||
+            source[9] != 0x02 || source[11] != 0x02)
         {
             return false;
         }
 
-        xmmRegister = register;
+        var d = (~(source[8] >> 3)) & 0x0F;
+        if (d > 7)
+        {
+            return false;
+        }
+
+        // ModRM: mod=11, reg=D (dest = src1), rm=N (src2 = the masked register).
+        if (source[10] != (0xC0 | (d << 3) | n))
+        {
+            return false;
+        }
+
+        destRegister = d;
+        srcRegister = n;
         return true;
     }
 
     /// <summary>
-    /// Writes the SSE4.1 equivalent for the given source register into
-    /// <paramref name="destination"/>:
+    /// Writes the SSE4.1 equivalent into <paramref name="destination"/>:
     /// <code>
     ///   PEXTRB eax, xmmN, 4  ; 66 0F 3A 14 /r 04   extract byte 4 (zero-extended)
-    ///   PINSRD xmm0, eax, 1  ; 66 0F 3A 22 /r 01   insert into xmm0 dword lane 1
+    ///   PINSRD xmmD, eax, 1  ; 66 0F 3A 22 /r 01   insert into xmmD dword lane 1
     /// </code>
     /// After EXTRQ masks xmmN to its low 40 bits, dword 1 is just byte 4
     /// zero-extended, so the two-instruction extract/insert reproduces the exact
-    /// observable result the AMD idiom left in xmm0.
+    /// observable result the AMD idiom left in xmmD. eax is a caller-dead scratch
+    /// at every site the compiler emits this idiom.
     /// </summary>
-    public static bool TryEncode(int xmmRegister, Span<byte> destination)
+    public static bool TryEncode(int destRegister, int srcRegister, Span<byte> destination)
     {
-        if ((uint)xmmRegister > 7 || destination.Length < SequenceLength)
+        if ((uint)destRegister > 7 || (uint)srcRegister > 7 || destination.Length < SequenceLength)
         {
             return false;
         }
@@ -83,15 +100,15 @@ public static class Sse4aExtrqBlendPatch
         destination[1] = 0x0F;
         destination[2] = 0x3A;
         destination[3] = 0x14;
-        destination[4] = (byte)(0xC0 | (xmmRegister << 3));
+        destination[4] = (byte)(0xC0 | (srcRegister << 3));
         destination[5] = 0x04;
 
-        // PINSRD xmm0, eax, 1 : ModRM (mod=11 reg=000 -> xmm0, rm=000 -> eax), lane 1.
+        // PINSRD xmmD, eax, 1 : ModRM (mod=11 reg=D -> xmmD, rm=000 -> eax), lane 1.
         destination[6] = 0x66;
         destination[7] = 0x0F;
         destination[8] = 0x3A;
         destination[9] = 0x22;
-        destination[10] = 0xC0;
+        destination[10] = (byte)(0xC0 | (destRegister << 3));
         destination[11] = 0x01;
         return true;
     }

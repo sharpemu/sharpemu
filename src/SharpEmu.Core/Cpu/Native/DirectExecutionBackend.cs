@@ -2500,13 +2500,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// it into an equivalent SSE4.1 sequence. Match/encode is isolated in
 		// Sse4aExtrqBlendPatch so it can be unit-tested; here we only patch bytes.
 		var window = new ReadOnlySpan<byte>(source, Sse4aExtrqBlendPatch.SequenceLength);
-		if (!Sse4aExtrqBlendPatch.TryMatch(window, out var xmmRegister))
+		if (!Sse4aExtrqBlendPatch.TryMatch(window, out var destRegister, out var srcRegister))
 		{
 			return false;
 		}
 
 		Span<byte> replacement = stackalloc byte[Sse4aExtrqBlendPatch.SequenceLength];
-		if (!Sse4aExtrqBlendPatch.TryEncode(xmmRegister, replacement))
+		if (!Sse4aExtrqBlendPatch.TryEncode(destRegister, srcRegister, replacement))
 		{
 			return false;
 		}
