@@ -2541,26 +2541,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
 	{
-		// Rosetta does not implement AMD SSE4a EXTRQ. This exact sequence masks
-		// xmm2 to its low 40 bits, then copies the resulting second dword into
-		// xmm0. PEXTRB/PINSRD provides the same observable result in 12 bytes:
-		// extract source byte 4 and insert the zero-extended value into lane 1.
-		ReadOnlySpan<byte> pattern =
-		[
-			0x66, 0x0F, 0x78, 0xC2, 0x28, 0x00,
-			0xC4, 0xE3, 0x79, 0x02, 0xC2, 0x02,
-		];
-		for (var i = 0; i < pattern.Length; i++)
+		if (!TryMatchSse4aExtrqBlend(source, out var sourceRegister))
 		{
-			if (source[i] != pattern[i])
-			{
-				return false;
-			}
+			return false;
 		}
 
-		ReadOnlySpan<byte> replacement =
+		byte pextrbModRm = (byte)(0xC0 | (sourceRegister << 3));
+		Span<byte> replacement =
 		[
-			0x66, 0x0F, 0x3A, 0x14, 0xD0, 0x04,
+			0x66, 0x0F, 0x3A, 0x14, pextrbModRm, 0x04,
 			0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x01,
 		];
 		uint oldProtect = 0;
@@ -2580,6 +2569,52 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			VirtualProtect((void*)address, (nuint)replacement.Length, oldProtect, &oldProtect);
 			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)replacement.Length);
 		}
+		return true;
+	}
+
+	private static unsafe bool TryMatchSse4aExtrqBlend(byte* source, out byte sourceRegister)
+	{
+		sourceRegister = 0;
+		ReadOnlySpan<byte> prefix = [0x66, 0x0F, 0x78];
+		ReadOnlySpan<byte> immediates = [0x28, 0x00];
+		ReadOnlySpan<byte> vpblenddOpcode = [0xC4, 0xE3, 0x79, 0x02];
+		const byte vpblenddImm = 0x02;
+		for (var i = 0; i < prefix.Length; i++)
+		{
+			if (source[i] != prefix[i])
+			{
+				return false;
+			}
+		}
+
+		byte extrqModRm = source[3];
+		if ((extrqModRm & 0xF8) != 0xC0)
+		{
+			return false;
+		}
+
+		for (var i = 0; i < immediates.Length; i++)
+		{
+			if (source[4 + i] != immediates[i])
+			{
+				return false;
+			}
+		}
+
+		for (var i = 0; i < vpblenddOpcode.Length; i++)
+		{
+			if (source[6 + i] != vpblenddOpcode[i])
+			{
+				return false;
+			}
+		}
+
+		if (source[10] != extrqModRm || source[11] != vpblenddImm)
+		{
+			return false;
+		}
+
+		sourceRegister = (byte)(extrqModRm & 0x07);
 		return true;
 	}
 
