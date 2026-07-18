@@ -2495,28 +2495,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
 	{
-		// Rosetta does not implement AMD SSE4a EXTRQ. This exact sequence masks
-		// xmm2 to its low 40 bits, then copies the resulting second dword into
-		// xmm0. PEXTRB/PINSRD provides the same observable result in 12 bytes:
-		// extract source byte 4 and insert the zero-extended value into lane 1.
-		ReadOnlySpan<byte> pattern =
-		[
-			0x66, 0x0F, 0x78, 0xC2, 0x28, 0x00,
-			0xC4, 0xE3, 0x79, 0x02, 0xC2, 0x02,
-		];
-		for (var i = 0; i < pattern.Length; i++)
+		// Rosetta does not implement AMD SSE4a EXTRQ. Recognize the compiler's
+		// EXTRQ+blend idiom (against whichever xmm0-xmm7 it allocated) and rewrite
+		// it into an equivalent SSE4.1 sequence. Match/encode is isolated in
+		// Sse4aExtrqBlendPatch so it can be unit-tested; here we only patch bytes.
+		var window = new ReadOnlySpan<byte>(source, Sse4aExtrqBlendPatch.SequenceLength);
+		if (!Sse4aExtrqBlendPatch.TryMatch(window, out var xmmRegister))
 		{
-			if (source[i] != pattern[i])
-			{
-				return false;
-			}
+			return false;
 		}
 
-		ReadOnlySpan<byte> replacement =
-		[
-			0x66, 0x0F, 0x3A, 0x14, 0xD0, 0x04,
-			0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x01,
-		];
+		Span<byte> replacement = stackalloc byte[Sse4aExtrqBlendPatch.SequenceLength];
+		if (!Sse4aExtrqBlendPatch.TryEncode(xmmRegister, replacement))
+		{
+			return false;
+		}
+
 		uint oldProtect = 0;
 		if (!VirtualProtect((void*)address, (nuint)replacement.Length, 64u, &oldProtect))
 		{
