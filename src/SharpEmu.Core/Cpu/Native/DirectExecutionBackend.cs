@@ -4310,6 +4310,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestExceptionDeliveries.Add(threadHandle);
 		}
 
+		// If a pending-exception flag was set to wake a host-semaphore wait
+		// but the exception gets delivered here instead, clear the flag so
+		// the next wait does not spuriously return OK when there is nothing
+		// left to deliver.
+		if (threadHandle == HostMainThread.ExternalGuestThreadHandle)
+		{
+			HostMainThread.ClearPendingException();
+		}
+
 		const ulong exceptionContextSize = 0x500;
 		const ulong callbackStackOffset = 0x1000;
 		const ulong callbackStackSize = 0xF000;
