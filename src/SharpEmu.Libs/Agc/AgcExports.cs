@@ -3304,17 +3304,33 @@ public static partial class AgcExports
                     indexed: false);
             }
 
-            if ((op is ItDispatchDirect or ItDispatchIndirect) &&
-                TryReadComputeDispatch(
-                    ctx,
-                    state,
-                    currentAddress,
-                    length,
-                    op,
-                out var dispatch))
+            if (op is ItDispatchDirect or ItDispatchIndirect)
             {
-                state.FrameDispatchCount++;
-                ObserveComputeDispatch(ctx, gpuState, state, dispatch);
+                if (TryReadComputeDispatch(
+                        ctx,
+                        state,
+                        currentAddress,
+                        length,
+                        op,
+                        out var dispatch,
+                        out var indirectDimsRetryAddress))
+                {
+                    state.FrameDispatchCount++;
+                    ObserveComputeDispatch(ctx, gpuState, state, dispatch);
+                }
+                else if (indirectDimsRetryAddress != 0 &&
+                         HandleSubmittedIndirectDimsWait(
+                             ctx,
+                             state,
+                             commandAddress,
+                             currentAddress,
+                             offset,
+                             dwordCount,
+                             indirectDimsRetryAddress,
+                             tracePackets))
+                {
+                    return true; // suspend until the producer computes the dims
+                }
             }
 
             if (op == ItNop &&
@@ -4598,6 +4614,85 @@ public static partial class AgcExports
     // Returns true when the DCB should suspend parsing at this wait (its
     // continuation was registered into GpuWaitRegistry); false to keep parsing
     // (already satisfied, unreadable, or legacy force-satisfy mode).
+    // How long an indirect dispatch may wait for its producing dispatch to write
+    // non-zero dimensions before we give up and drop it (matching the pre-existing
+    // reject behavior). The producer runs on the render thread within a frame or
+    // two; this only bounds the pathological/legitimately-empty case.
+    private const long IndirectDimsRetryBudgetMs = 150;
+
+    private static readonly object _indirectDimsGate = new();
+    // Keys (memory, packetAddress) whose retry deadline elapsed. Added by
+    // DrainResumableDcbs when it resumes an expired retry, consumed by the very
+    // next re-parse of that packet so it drops instead of re-suspending. Never
+    // persists across frames — a fresh submit of the same packet retries anew.
+    private static readonly HashSet<(object, ulong)> _indirectDimsExpired = new();
+
+    // Suspends an indirect-dispatch DCB until the guest buffer holding its
+    // thread-group dimensions becomes non-zero (written by a prior GPU dispatch),
+    // then re-parses the dispatch. Returns false — so the caller drops the work —
+    // when the dims already expired once (genuinely empty dispatch).
+    private static bool HandleSubmittedIndirectDimsWait(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        ulong packetAddress,
+        uint offset,
+        uint dwordCount,
+        ulong dimsAddress,
+        bool tracePacket)
+    {
+        if (!_gpuWaitSuspendEnabled ||
+            dimsAddress == 0 ||
+            dimsAddress % sizeof(uint) != 0)
+        {
+            return false;
+        }
+
+        var key = (ctx.Memory, packetAddress);
+        lock (_indirectDimsGate)
+        {
+            // This is the re-parse right after the deadline elapsed: drop the
+            // dispatch instead of suspending again.
+            if (_indirectDimsExpired.Remove(key))
+            {
+                return false;
+            }
+        }
+
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            CommandBufferAddress = commandAddress,
+            ResumeAddress = packetAddress, // re-parse this dispatch packet
+            ResumeOffset = offset,
+            TotalDwords = dwordCount,
+            WaitAddress = dimsAddress,
+            ReferenceValue = 0,
+            Mask = 0xFFFFFFFF,
+            CompareFunction = 4, // NOT_EQUAL: dims became available
+            Is64Bit = false,
+            IsStandard = false,
+            Memory = ctx.Memory,
+            QueueName = state.QueueName,
+            SubmissionId = state.ActiveSubmissionId,
+            RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            RetryDeadlineTicks = System.Diagnostics.Stopwatch.GetTimestamp() +
+                (IndirectDimsRetryBudgetMs * System.Diagnostics.Stopwatch.Frequency / 1000L),
+            State = state,
+        };
+
+        GpuWaitRegistry.Register(dimsAddress, waiter);
+        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        EnsureGpuWaitMonitor(ctx, gpuState);
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dispatch_indirect_wait dims=0x{dimsAddress:X16} " +
+                $"packet=0x{packetAddress:X16} queue={state.QueueName}");
+        }
+
+        return true;
+    }
+
     private static bool HandleSubmittedWaitRegMem(
         CpuContext ctx,
         SubmittedDcbState state,
@@ -4863,7 +4958,28 @@ public static partial class AgcExports
                     ? TryReadUInt64(ctx, address, out var value64) ? value64 : (ulong?)null
                     : TryReadUInt32(ctx, address, out var value32) ? value32 : (ulong?)null);
 
-            if (woken is null)
+            // Indirect-dispatch dimension retries whose deadline elapsed are
+            // resumed so they drop instead of stalling. Flag each so its immediate
+            // re-parse drops the dispatch rather than suspending again.
+            var expiredRetries = GpuWaitRegistry.CollectExpiredRetries(
+                ctx.Memory, System.Diagnostics.Stopwatch.GetTimestamp());
+            if (expiredRetries is not null)
+            {
+                lock (_indirectDimsGate)
+                {
+                    foreach (var retry in expiredRetries)
+                    {
+                        _indirectDimsExpired.Add((ctx.Memory, retry.ResumeAddress));
+                    }
+                }
+
+                foreach (var retry in expiredRetries)
+                {
+                    ResumeSuspendedDcb(ctx, gpuState, retry, tracePackets);
+                }
+            }
+
+            if (woken is null && expiredRetries is null)
             {
                 if (_gpuWaitStaleTicks > 0 &&
                     GpuWaitRegistry.CollectUnreportedStale(
@@ -4893,9 +5009,12 @@ public static partial class AgcExports
                 return;
             }
 
-            foreach (var waiter in woken)
+            if (woken is not null)
             {
-                ResumeSuspendedDcb(ctx, gpuState, waiter, tracePackets);
+                foreach (var waiter in woken)
+                {
+                    ResumeSuspendedDcb(ctx, gpuState, waiter, tracePackets);
+                }
             }
         }
     }
@@ -8263,9 +8382,14 @@ public static partial class AgcExports
         ulong packetAddress,
         uint packetLength,
         uint opcode,
-        out ComputeDispatch dispatch)
+        out ComputeDispatch dispatch,
+        out ulong indirectDimsRetryAddress)
     {
         dispatch = default;
+        // Non-zero only when this is an INDIRECT dispatch whose dimensions read as
+        // zero — meaning the producing GPU dispatch that computes them has not run
+        // yet. The caller suspends on this address instead of dropping the work.
+        indirectDimsRetryAddress = 0;
         ulong dimensionsAddress;
         uint initiator;
         string dispatchSource;
@@ -8314,6 +8438,17 @@ public static partial class AgcExports
 
         if (dispatchEndX == 0 || dispatchEndY == 0 || dispatchEndZ == 0)
         {
+            // Indirect dispatches read their dimensions from a guest buffer a
+            // prior GPU dispatch fills. Zero here means that producer has not run
+            // yet — signal the caller to suspend on the dims buffer and retry,
+            // rather than dropping the work (which black-screens GPU-driven games
+            // like Astro Bot). Direct dispatches carry dims inline, so a zero is
+            // genuinely malformed and still rejected.
+            if (opcode == ItDispatchIndirect)
+            {
+                indirectDimsRetryAddress = dimensionsAddress;
+            }
+
             return RejectComputeDispatch(
                 dimensionsAddress,
                 initiator,

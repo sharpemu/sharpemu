@@ -43,6 +43,10 @@ internal static class GpuWaitRegistry
         // guest memory at wake time can miss the transient satisfied window.
         // Latching records satisfaction at the moment of the write instead.
         public bool Latched;
+        // Non-zero for indirect-dispatch dimension retries: a bounded deadline
+        // (Stopwatch ticks) after which the waiter is resumed even if unsatisfied,
+        // so a legitimately empty indirect dispatch can never stall forever.
+        public long RetryDeadlineTicks;
     }
 
     private static readonly object _gate = new();
@@ -283,6 +287,54 @@ internal static class GpuWaitRegistry
         }
 
         return latchedAny;
+    }
+
+    /// <summary>
+    /// Removes and returns waiters carrying a <see cref="WaitingDcb.RetryDeadlineTicks"/>
+    /// that has elapsed. Used for indirect-dispatch dimension retries: the caller
+    /// resumes them so a genuinely empty dispatch (dims that never become non-zero)
+    /// is dropped after a bounded wait instead of stalling the queue forever.
+    /// </summary>
+    public static List<WaitingDcb>? CollectExpiredRetries(object memory, long nowTicks)
+    {
+        List<WaitingDcb>? expired = null;
+        lock (_gate)
+        {
+            List<ulong>? emptied = null;
+            foreach (var (address, list) in _waiters)
+            {
+                for (var i = list.Count - 1; i >= 0; i--)
+                {
+                    var waiter = list[i];
+                    if (waiter.RetryDeadlineTicks == 0 ||
+                        !ReferenceEquals(waiter.Memory, memory) ||
+                        nowTicks < waiter.RetryDeadlineTicks)
+                    {
+                        continue;
+                    }
+
+                    expired ??= new List<WaitingDcb>();
+                    expired.Add(waiter);
+                    list.RemoveAt(i);
+                }
+
+                if (list.Count == 0)
+                {
+                    emptied ??= new List<ulong>();
+                    emptied.Add(address);
+                }
+            }
+
+            if (emptied is not null)
+            {
+                foreach (var address in emptied)
+                {
+                    _waiters.Remove(address);
+                }
+            }
+        }
+
+        return expired;
     }
 
     public static bool Compare(in WaitingDcb waiter, ulong value)
