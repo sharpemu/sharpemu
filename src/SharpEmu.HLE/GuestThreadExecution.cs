@@ -221,6 +221,29 @@ public static class GuestThreadExecution
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
+    /// <summary>
+    /// Raised when a guest thread has terminated (returned from its entry or
+    /// called pthread_exit). Subscribers clean up per-thread kernel state such
+    /// as mutex ownership and queued lock waiters that the dead thread would
+    /// otherwise strand. The argument is the exiting thread's handle.
+    /// </summary>
+    public static event Action<ulong>? GuestThreadExited;
+
+    /// <summary>
+    /// Invoked by the execution backend once a guest thread reaches its
+    /// terminal state, so kernel primitives can release anything the thread
+    /// still held. Safe to call with a zero handle (no-op).
+    /// </summary>
+    public static void NotifyGuestThreadExited(ulong threadHandle)
+    {
+        if (threadHandle == 0)
+        {
+            return;
+        }
+
+        GuestThreadExited?.Invoke(threadHandle);
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;

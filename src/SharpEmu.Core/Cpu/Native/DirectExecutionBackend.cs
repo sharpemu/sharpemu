@@ -2493,30 +2493,58 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
 	}
 
-	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
+	// Neither Rosetta nor non-AMD host CPUs implement SSE4a EXTRQ. Compilers
+	// emit this exact two-instruction idiom to mask a scratch xmm register to
+	// its low 40 bits and blend the resulting second dword into xmm0; the
+	// scratch register varies by call site (whichever xmm happens to be
+	// free), so it is decoded from the ModRM byte rather than hardcoded.
+	// PEXTRB/PINSRD provides the same observable result in 12 bytes: extract
+	// source byte 4 into a scratch GPR and insert it into xmm0's lane 1.
+	internal static bool TryComputeSse4aExtrqBlendReplacement(ReadOnlySpan<byte> source, Span<byte> replacement)
 	{
-		// Rosetta does not implement AMD SSE4a EXTRQ. This exact sequence masks
-		// xmm2 to its low 40 bits, then copies the resulting second dword into
-		// xmm0. PEXTRB/PINSRD provides the same observable result in 12 bytes:
-		// extract source byte 4 and insert the zero-extended value into lane 1.
-		ReadOnlySpan<byte> pattern =
-		[
-			0x66, 0x0F, 0x78, 0xC2, 0x28, 0x00,
-			0xC4, 0xE3, 0x79, 0x02, 0xC2, 0x02,
-		];
-		for (var i = 0; i < pattern.Length; i++)
+		if (source.Length < 12 || replacement.Length < 12)
 		{
-			if (source[i] != pattern[i])
-			{
-				return false;
-			}
+			return false;
 		}
 
-		ReadOnlySpan<byte> replacement =
-		[
-			0x66, 0x0F, 0x3A, 0x14, 0xD0, 0x04,
-			0x66, 0x0F, 0x3A, 0x22, 0xC0, 0x01,
-		];
+		// 66 0F 78 /0 28 00   EXTRQ   xmmR, 0x28, 0x00
+		// C4 E3 79 02 /r 02   VBLENDD xmm0, xmm0, xmmR, 0x02
+		// Both ModRM bytes are register-direct (mod=11) with the scratch
+		// register R in the low 3 bits, so they must agree on R.
+		if (source[0] != 0x66 || source[1] != 0x0F || source[2] != 0x78 ||
+			source[4] != 0x28 || source[5] != 0x00 ||
+			source[6] != 0xC4 || source[7] != 0xE3 || source[8] != 0x79 ||
+			source[9] != 0x02 || source[11] != 0x02)
+		{
+			return false;
+		}
+
+		byte extrqModRm = source[3];
+		byte blendModRm = source[10];
+		if ((extrqModRm & 0xF8) != 0xC0 || extrqModRm != blendModRm)
+		{
+			return false;
+		}
+
+		int scratchRegister = extrqModRm & 0x07;
+
+		// 66 0F 3A 14 /r 04   PEXTRB eax, xmmR, 0x04
+		// 66 0F 3A 22 /r 01   PINSRD xmm0, eax, 0x01
+		replacement[0] = 0x66; replacement[1] = 0x0F; replacement[2] = 0x3A;
+		replacement[3] = 0x14; replacement[4] = (byte)(0xC0 | (scratchRegister << 3)); replacement[5] = 0x04;
+		replacement[6] = 0x66; replacement[7] = 0x0F; replacement[8] = 0x3A;
+		replacement[9] = 0x22; replacement[10] = 0xC0; replacement[11] = 0x01;
+		return true;
+	}
+
+	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
+	{
+		Span<byte> replacement = stackalloc byte[12];
+		if (!TryComputeSse4aExtrqBlendReplacement(new ReadOnlySpan<byte>(source, 12), replacement))
+		{
+			return false;
+		}
+
 		uint oldProtect = 0;
 		if (!VirtualProtect((void*)address, (nuint)replacement.Length, 64u, &oldProtect))
 		{
@@ -4765,6 +4793,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var exitReason = resumeContinuation
 				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
+			var guestThreadExited = false;
 			using (LockGate("RunGuestThread.exit"))
 			{
 				switch (exitReason)
@@ -4772,6 +4801,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					case GuestNativeCallExitReason.Returned:
 						thread.ExitValue = thread.Context[CpuRegister.Rax];
 						thread.State = GuestThreadRunState.Exited;
+						guestThreadExited = true;
 						if (_logGuestThreads)
 						Console.Error.WriteLine(
 							$"[LOADER][INFO] Guest thread exited: name='{thread.Name}' " +
@@ -4798,6 +4828,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						thread.BlockReason = blockReason;
 						break;
 				}
+			}
+
+			// Release any mutex ownership or queued lock waiters the thread left
+			// behind, now that the gate is released (the cleanup takes per-mutex
+			// locks and may wake blocked threads, mirroring pthread_mutex_unlock).
+			// A stranded owner or waiter would otherwise wedge that mutex forever.
+			if (guestThreadExited)
+			{
+				GuestThreadExecution.NotifyGuestThreadExited(thread.ThreadHandle);
 			}
 			if (_logGuestThreads)
 			{
