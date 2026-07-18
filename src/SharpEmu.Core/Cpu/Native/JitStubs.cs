@@ -252,7 +252,7 @@ public static unsafe class JitStubs
         var pattern = TlsAccessPattern;
         var end = start + length - pattern.Length;
 
-        for (var ptr = start; ptr < end; ptr++)
+        for (var ptr = start; ptr <= end; ptr++)
         {
             if (MatchesPattern(ptr, pattern))
             {
