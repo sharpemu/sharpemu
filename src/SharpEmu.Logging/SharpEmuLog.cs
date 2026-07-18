@@ -110,7 +110,8 @@ public static class SharpEmuLog
         }
 
         var normalized = text.Trim();
-        if (Enum.TryParse<LogLevel>(normalized, ignoreCase: true, out level))
+        if (Enum.TryParse<LogLevel>(normalized, ignoreCase: true, out level) &&
+            Enum.IsDefined(level))
         {
             return true;
         }
@@ -127,6 +128,7 @@ public static class SharpEmuLog
             return true;
         }
 
+        level = default;
         return false;
     }
 

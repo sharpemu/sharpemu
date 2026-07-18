@@ -10,8 +10,29 @@ namespace SharpEmu.Libs.Audio;
 
 public static class AjmExports
 {
-    private static readonly ConcurrentDictionary<uint, byte> Contexts = new();
+    private const int OrbisAjmErrorInvalidContext = unchecked((int)0x80930002);
+    private const int OrbisAjmErrorInvalidInstance = unchecked((int)0x80930003);
+    private const int OrbisAjmErrorInvalidParameter = unchecked((int)0x80930005);
+    private const int OrbisAjmErrorOutOfResources = unchecked((int)0x80930007);
+    private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
+    private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
+    private const int OrbisAjmErrorWrongRevisionFlag = unchecked((int)0x8093000B);
+    private const uint MaxCodecType = 23;
+    private const int MaxInstanceIndex = 0x2FFF;
+    private static readonly ConcurrentDictionary<uint, AjmContextState> Contexts = new();
     private static int _nextContextId;
+
+    private sealed class AjmContextState
+    {
+        public object Gate { get; } = new();
+
+        public HashSet<uint> RegisteredCodecs { get; } = new();
+
+        public Dictionary<uint, uint> InstancesBySlot { get; } = new();
+
+        public int NextInstanceIndex { get; set; }
+    }
+
     public static int AjmInitialize(CpuContext ctx)
     {
         var reserved = ctx[CpuRegister.Rdi];
@@ -29,7 +50,7 @@ public static class AjmExports
             return unchecked((int)0x806A0001);
         }
 
-        Contexts[contextId] = 0;
+        Contexts[contextId] = new AjmContextState();
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
         {
             Console.Error.WriteLine(
@@ -62,9 +83,22 @@ public static class AjmExports
         var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
         var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
         var reserved = ctx[CpuRegister.Rdx];
-        if (reserved != 0 || !Contexts.ContainsKey(contextId))
+        if (codecType >= MaxCodecType || reserved != 0)
         {
-            return unchecked((int)0x806A0001);
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        lock (state.Gate)
+        {
+            if (!state.RegisteredCodecs.Add(codecType))
+            {
+                return ctx.SetReturn(OrbisAjmErrorCodecAlreadyRegistered);
+            }
         }
 
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
@@ -75,6 +109,97 @@ public static class AjmExports
 
         ctx[CpuRegister.Rax] = 0;
         return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "AxoDrINp4J8",
+        ExportName = "sceAjmInstanceCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmInstanceCreate(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var flags = ctx[CpuRegister.Rdx];
+        var outputAddress = ctx[CpuRegister.Rcx];
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (codecType >= MaxCodecType || outputAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        if ((flags & 0x7) == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorWrongRevisionFlag);
+        }
+
+        uint instanceId;
+        lock (state.Gate)
+        {
+            if (!state.RegisteredCodecs.Contains(codecType))
+            {
+                return ctx.SetReturn(OrbisAjmErrorCodecNotRegistered);
+            }
+
+            if (state.InstancesBySlot.Count >= MaxInstanceIndex)
+            {
+                return ctx.SetReturn(OrbisAjmErrorOutOfResources);
+            }
+
+            var nextInstanceIndex = state.NextInstanceIndex;
+            uint instanceSlot;
+            do
+            {
+                nextInstanceIndex = nextInstanceIndex % MaxInstanceIndex + 1;
+                instanceSlot = unchecked((uint)nextInstanceIndex);
+            }
+            while (state.InstancesBySlot.ContainsKey(instanceSlot));
+
+            instanceId = (codecType << 14) | instanceSlot;
+            Span<byte> value = stackalloc byte[sizeof(uint)];
+            BinaryPrimitives.WriteUInt32LittleEndian(value, instanceId);
+            if (!ctx.Memory.TryWrite(outputAddress, value))
+            {
+                return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+            }
+
+            state.NextInstanceIndex = nextInstanceIndex;
+            state.InstancesBySlot.Add(instanceSlot, instanceId);
+        }
+
+        Trace($"instance_create context={contextId} codec={codecType} flags=0x{flags:X} instance=0x{instanceId:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "RbLbuKv8zho",
+        ExportName = "sceAjmInstanceDestroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmInstanceDestroy(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        var instanceSlot = instanceId & 0x3FFF;
+        lock (state.Gate)
+        {
+            if (instanceSlot == 0 || !state.InstancesBySlot.Remove(instanceSlot))
+            {
+                return ctx.SetReturn(OrbisAjmErrorInvalidInstance);
+            }
+        }
+
+        Trace($"instance_destroy context={contextId} instance=0x{instanceId:X8}");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -100,5 +225,19 @@ public static class AjmExports
         // value or an additional output object here.
         ctx[CpuRegister.Rax] = 0;
         return 0;
+    }
+
+    internal static void ResetForTests()
+    {
+        Contexts.Clear();
+        Interlocked.Exchange(ref _nextContextId, 0);
+    }
+
+    private static void Trace(string message)
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] ajm.{message}");
+        }
     }
 }

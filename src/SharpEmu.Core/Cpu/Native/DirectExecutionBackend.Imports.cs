@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Cpu;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
@@ -316,11 +317,15 @@ public sealed partial class DirectExecutionBackend
 		}
 		if (!isGuestWorker &&
 			!ActiveForcedGuestExit &&
-			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2) &&
-			TryForceGuestExitToHostStub(argPackPtr, num, num7, importStubEntry.Nid))
+			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2))
 		{
-			cpuContext[CpuRegister.Rax] = 1uL;
-			return 1uL;
+			// Break before the forced exit so the loop state is still live.
+			NotifyDebuggerStall(CpuStallKind.ImportLoop, in importStubEntry, num7, num, value, value2);
+			if (TryForceGuestExitToHostStub(argPackPtr, num, num7, importStubEntry.Nid))
+			{
+				cpuContext[CpuRegister.Rax] = 1uL;
+				return 1uL;
+			}
 		}
 		bool flag0 = importStubEntry.SuppressStrlenTrace;
 		bool flag = num7 >= 2156221920u && num7 <= 2156225024u;
@@ -1345,8 +1350,7 @@ public sealed partial class DirectExecutionBackend
 				out var blockContinuation,
 				out var hasBlockContinuation,
 				out var blockWakeKey,
-				out var blockResumeHandler,
-				out var blockWakeHandler,
+				out var blockWaiter,
 				out var blockDeadlineTimestamp);
 		if (consumedThreadBlock &&
 			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
@@ -1357,8 +1361,7 @@ public sealed partial class DirectExecutionBackend
 					GuestThreadExecution.CurrentGuestThreadHandle,
 					blockContinuation,
 					blockWakeKey,
-					blockResumeHandler,
-					blockWakeHandler,
+					blockWaiter,
 					blockDeadlineTimestamp);
 			}
 

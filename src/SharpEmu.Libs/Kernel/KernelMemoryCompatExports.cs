@@ -110,8 +110,18 @@ public static partial class KernelMemoryCompatExports
     private static readonly Dictionary<ulong, string> _mappedRegionNames = new();
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
-    private static readonly HashSet<string> _negativeStatCache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(StringComparer.OrdinalIgnoreCase);
+    // Both caches memoize host filesystem probe outcomes, so their key
+    // equivalence must match the host filesystem's: Windows resolves names
+    // case-insensitively, but Linux hosts are case-sensitive, and an
+    // ignore-case cache there aliases distinct paths — a cached miss for
+    // "/app0/DATA.BIN" keeps answering NOT_FOUND for "/app0/Data.bin" even
+    // though that file exists and a fresh probe would find it.
+    private static readonly StringComparer HostFsPathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+    private static readonly StringComparison HostFsPathComparison =
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    private static readonly HashSet<string> _negativeStatCache = new(HostFsPathComparer);
+    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPathComparer);
     private static long _nextFileDescriptor = 2;
 
     internal static int AllocateGuestFileDescriptor()
@@ -1981,6 +1991,12 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        if (KernelSocketCompatExports.TryCloseSocketFd(fd))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         FileStream? stream;
         lock (_fdGate)
         {
@@ -2474,7 +2490,20 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
 
-            if (!TryFindAvailableDirectMemorySpanLocked(searchStart, searchEnd, alignment, out var candidate, out var rangeAvailable))
+            bool foundSpan;
+            ulong candidate;
+            ulong rangeAvailable;
+            lock (_memoryGate)
+            {
+                foundSpan = TryFindAvailableDirectMemorySpanLocked(
+                    searchStart,
+                    searchEnd,
+                    alignment,
+                    out candidate,
+                    out rangeAvailable);
+            }
+
+            if (!foundSpan)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
@@ -4702,8 +4731,12 @@ public static partial class KernelMemoryCompatExports
             matchedHostRoot,
             NormalizeMountRelativePath(relativePath)));
         var rootWithSeparator = Path.TrimEndingDirectorySeparator(matchedHostRoot) + Path.DirectorySeparatorChar;
-        if (!string.Equals(candidate, matchedHostRoot, StringComparison.OrdinalIgnoreCase) &&
-            !candidate.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+        // Host-semantics comparison: an ignore-case check on a case-sensitive
+        // host would let a relative path escape into a sibling directory that
+        // differs from the mount root only by case (root ".../Save" vs
+        // sibling ".../save").
+        if (!string.Equals(candidate, matchedHostRoot, HostFsPathComparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
         {
             return false;
         }
@@ -5924,9 +5957,12 @@ public static partial class KernelMemoryCompatExports
             var gapEnd = Math.Min(allocation.Start, effectiveEnd);
             if (candidate < gapEnd)
             {
-                spanStart = candidate;
-                spanLength = gapEnd - candidate;
-                return true;
+                var candidateLength = gapEnd - candidate;
+                if (candidateLength > spanLength)
+                {
+                    spanStart = candidate;
+                    spanLength = candidateLength;
+                }
             }
 
             if (allocation.Start >= effectiveEnd)
@@ -5937,12 +5973,20 @@ public static partial class KernelMemoryCompatExports
             candidate = AlignUp(Math.Max(candidate, allocationEnd), alignment);
             if (candidate >= effectiveEnd)
             {
-                return false;
+                break;
             }
         }
 
-        spanStart = candidate;
-        spanLength = effectiveEnd - candidate;
+        if (candidate < effectiveEnd)
+        {
+            var candidateLength = effectiveEnd - candidate;
+            if (candidateLength > spanLength)
+            {
+                spanStart = candidate;
+                spanLength = candidateLength;
+            }
+        }
+
         return spanLength != 0;
     }
 

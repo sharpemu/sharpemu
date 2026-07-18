@@ -30,6 +30,7 @@ public static class PerfOverlay
         StringComparison.Ordinal);
 
     private static long _lastPresentTimestamp;
+    private static long _sessionStartTimestamp;
     private static readonly double[] _frameMilliseconds = new double[FrameHistorySize];
     private static int _frameHistoryIndex;
     private static long _presentedInWindow;
@@ -56,6 +57,7 @@ public static class PerfOverlay
     private static string _line2 = string.Empty;
     private static string _line3 = string.Empty;
     private static string _line4 = string.Empty;
+    private static string _line5 = string.Empty;
 
     public static bool Enabled => _enabled;
 
@@ -65,6 +67,7 @@ public static class PerfOverlay
     public static void RecordPresent()
     {
         var now = Stopwatch.GetTimestamp();
+        Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
         var last = _lastPresentTimestamp;
         _lastPresentTimestamp = now;
         Interlocked.Increment(ref _presentedInWindow);
@@ -110,6 +113,8 @@ public static class PerfOverlay
         DrawString(bgra, 8, y, _line3, 0xB0, 0xD0, 0xFF);
         y += LineHeight;
         DrawString(bgra, 8, y, _line4, 0xB0, 0xB0, 0xB0);
+        y += LineHeight;
+        DrawString(bgra, 8, y, _line5, 0xFF, 0xD0, 0x80);
         y += LineHeight + 4;
         DrawFrameGraph(bgra, 8, y, PanelWidth - 16, PanelHeight - y - 6);
     }
@@ -161,10 +166,18 @@ public static class PerfOverlay
             _lastCpuTime = cpuTime;
 
             var drawsPerFrame = _fps > 0.5 ? _drawsPerSecond / _fps : 0;
+            var sessionStart = Interlocked.Read(ref _sessionStartTimestamp);
+            var elapsedSeconds = sessionStart == 0
+                ? 0L
+                : (long)((now - sessionStart) / (double)Stopwatch.Frequency);
+            var elapsedHours = elapsedSeconds / 3600;
+            var elapsedMinutes = elapsedSeconds / 60 % 60;
+            var elapsedRemainingSeconds = elapsedSeconds % 60;
             _line1 = $"FPS {_fps:0.0}  FLIP {_submittedFps:0.0}  {_averageFrameMs:0.0} MS";
             _line2 = $"DRAWS {_drawsPerSecond:0}/S  {drawsPerFrame:0}/F  Q {pendingWork}+{inFlightSubmissions}";
             _line3 = $"ALLOC {_allocatedMbPerSecond:0.0} MB/S  GC {_gen0PerWindow}/{_gen1PerWindow}/{_gen2PerWindow}";
             _line4 = $"CPU {_cpuPercent:0}%  HEAP {GC.GetTotalMemory(false) / (1024 * 1024)} MB  F1 HIDE";
+            _line5 = $"TIME {elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
         }
     }
 

@@ -5956,7 +5956,9 @@ public static partial class AgcExports
 
             textures.Add(new TranslatedImageBinding(
                 texture,
-                Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode),
+                Gen5ShaderTranslator.RequiresStorageImage(
+                    binding,
+                    exportEvaluation.ImageBindings),
                 binding.MipLevel ?? 0,
                 binding.SamplerDescriptor));
         }
@@ -6279,17 +6281,22 @@ public static partial class AgcExports
             _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
+        var imageBindings = pixelEvaluation.ImageBindings
+            .Concat(exportEvaluation.ImageBindings)
+            .ToArray();
         var textures = new List<TranslatedImageBinding>(
             pixelEvaluation.ImageBindings.Count +
             exportEvaluation.ImageBindings.Count);
         if (!TryAppendTranslatedImageBindings(
                 pixelEvaluation.ImageBindings,
+                imageBindings,
                 textures,
                 pixelShaderAddress,
                 exportShaderAddress,
                 out error) ||
             !TryAppendTranslatedImageBindings(
                 exportEvaluation.ImageBindings,
+                imageBindings,
                 textures,
                 pixelShaderAddress,
                 exportShaderAddress,
@@ -6368,6 +6375,7 @@ public static partial class AgcExports
 
     private static bool TryAppendTranslatedImageBindings(
         IReadOnlyList<Gen5ImageBinding> bindings,
+        IReadOnlyList<Gen5ImageBinding> stageBindings,
         List<TranslatedImageBinding> textures,
         ulong pixelShaderAddress,
         ulong exportShaderAddress,
@@ -6392,8 +6400,9 @@ public static partial class AgcExports
                     0, 1, 1, Gen5TextureFormatR8G8B8A8Unorm, 0, 0, 0, 0, 0, 1, 0xFAC);
             }
 
-            var isStorage =
-                Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
+            var isStorage = Gen5ShaderTranslator.RequiresStorageImage(
+                binding,
+                stageBindings);
             if (_traceAgcShader || _tracePixelShaderAddress == pixelShaderAddress)
             {
                 Console.Error.WriteLine(
@@ -7569,9 +7578,11 @@ public static partial class AgcExports
     /// </summary>
     private static void ReturnPooledEvaluationArrays(Gen5ShaderEvaluation evaluation)
     {
+        var returned = new HashSet<byte[]>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
         foreach (var binding in evaluation.GlobalMemoryBindings)
         {
-            if (binding.DataPooled)
+            if (binding.DataPooled && returned.Add(binding.Data))
             {
                 GuestDataPool.Shared.Return(binding.Data);
             }
@@ -7581,7 +7592,7 @@ public static partial class AgcExports
         {
             foreach (var binding in vertexInputs)
             {
-                if (binding.DataPooled)
+                if (binding.DataPooled && returned.Add(binding.Data))
                 {
                     GuestDataPool.Shared.Return(binding.Data);
                 }
@@ -7601,11 +7612,13 @@ public static partial class AgcExports
         bool vertex,
         bool index)
     {
+        var returned = new HashSet<byte[]>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
         if (globals)
         {
             foreach (var binding in draw.GlobalMemoryBindings)
             {
-                if (binding.DataPooled)
+                if (binding.DataPooled && returned.Add(binding.Data))
                 {
                     GuestDataPool.Shared.Return(binding.Data);
                 }
@@ -7616,14 +7629,15 @@ public static partial class AgcExports
         {
             foreach (var binding in draw.VertexInputs)
             {
-                if (binding.DataPooled)
+                if (binding.DataPooled && returned.Add(binding.Data))
                 {
                     GuestDataPool.Shared.Return(binding.Data);
                 }
             }
         }
 
-        if (index && draw.IndexBuffer is { Pooled: true } indexBuffer)
+        if (index && draw.IndexBuffer is { Pooled: true } indexBuffer &&
+            returned.Add(indexBuffer.Data))
         {
             GuestDataPool.Shared.Return(indexBuffer.Data);
         }
@@ -8101,7 +8115,10 @@ public static partial class AgcExports
             return;
         }
 
-        var byteCount = (ulong)target.Width * target.Height * 4;
+        var byteCount = VulkanVideoPresenter.GetGuestImageByteCount(
+            target.Format,
+            target.Width,
+            target.Height);
         if (byteCount == 0 || byteCount > MaxPresentedTextureBytes)
         {
             return;
@@ -8733,7 +8750,8 @@ public static partial class AgcExports
         var hasStorageBinding = false;
         foreach (var binding in bindings)
         {
-            var isStorage = Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
+            var isStorage = Gen5ShaderTranslator.RequiresStorageImage(binding, bindings);
+            var writesStorage = Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
             var descriptorValid = TryDecodeTextureDescriptor(binding.ResourceDescriptor, out var texture);
             if (!descriptorValid)
             {
@@ -8754,7 +8772,7 @@ public static partial class AgcExports
                 $"0x{texture.Address:X16}:{texture.Width}x{texture.Height}:" +
                 $"fmt{texture.Format}/num{texture.NumberType}/tile{texture.TileMode}" +
                 $"{descriptorState}/{ProbeTexture(ctx, texture)}");
-            if (isStorage && descriptorValid && texture.Address != 0)
+            if (writesStorage && descriptorValid && texture.Address != 0)
             {
                 gpuState.ComputeImageWriters[texture.Address] = new ComputeImageWriter(
                     sequence,

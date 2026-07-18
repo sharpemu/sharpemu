@@ -676,10 +676,15 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                     }
 
-                    // FreeBSD maps NORMAL to checked non-recursive behavior:
-                    // self-lock is an error, never implicit recursion.
-                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+                    // Several Gen5 runtimes layer their own owner/count bookkeeping
+                    // over a NORMAL or ADAPTIVE kernel mutex. Returning EDEADLK here
+                    // leaves that guest bookkeeping out of sync with the HLE owner and
+                    // turns the wrapper into a permanent lock/unlock retry loop. Keep
+                    // the compatibility recursion used by the original implementation;
+                    // ERRORCHECK mutexes still take the strict EDEADLK path below.
+                    state.RecursionCount++;
+                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
                 else
                 {

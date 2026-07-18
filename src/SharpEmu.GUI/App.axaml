@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:SharpEmu.GUI"
              x:Class="SharpEmu.GUI.App"
              RequestedThemeVariant="Dark">
 
@@ -32,6 +33,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="InfoBrush" Color="#58A6FF" />
     <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
     <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
+
+    <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
+              <TextBlock x:Name="PART_Label" Text="{TemplateBinding Label}" FontSize="13" />
+              <TextBlock Text="{TemplateBinding Description}" FontSize="11"
+                         Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+              <ToggleSwitch OnContent="Override" OffContent="Override" MinWidth="0"
+                            VerticalAlignment="Center"
+                            IsVisible="{TemplateBinding ShowOverride}"
+                            IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
+              <ContentPresenter x:Name="PART_Slot" Content="{TemplateBinding Content}" VerticalAlignment="Center" />
+            </StackPanel>
+          </Grid>
+        </ControlTemplate>
+      </Setter>
+    </ControlTheme>
   </Application.Resources>
 
   <Application.Styles>

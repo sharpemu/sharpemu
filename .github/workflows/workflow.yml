@@ -159,6 +159,11 @@ jobs:
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
       PUBLISH_DIR: ${{ github.workspace }}/artifacts/publish/${{ matrix.rid }}
       RELEASE_DIR: ${{ github.workspace }}/artifacts/release
+      SPIRV_HEADERS_COMMIT: ad9184e76a66b1001c29db9b0a3e87f646c64de0
+      # SpirvModuleBuilder emits SPIR-V 1.5 and VulkanVideoPresenter requests Vulkan 1.2.
+      SPIRV_TARGET_ENV: vulkan1.2
+      SPIRV_TOOLS_COMMIT: 0539c81f69a3daeb706fd3477dca61435b475156
+      SPIRV_TOOLS_VERSION: v2026.2
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -182,6 +187,34 @@ jobs:
       # path handling, so a cross-platform generation regression surfaces here.
       - name: Run tests
         run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+
+      - name: Build pinned SPIRV-Tools
+        if: matrix.rid == 'linux-x64'
+        run: |
+          git clone --no-checkout --filter=blob:none https://github.com/KhronosGroup/SPIRV-Tools.git "$RUNNER_TEMP/spirv-tools"
+          git -C "$RUNNER_TEMP/spirv-tools" checkout --detach "$SPIRV_TOOLS_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/spirv-tools" rev-parse HEAD)" = "$SPIRV_TOOLS_COMMIT"
+
+          git clone --no-checkout --filter=blob:none https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/spirv-tools/external/spirv-headers"
+          git -C "$RUNNER_TEMP/spirv-tools/external/spirv-headers" checkout --detach "$SPIRV_HEADERS_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/spirv-tools/external/spirv-headers" rev-parse HEAD)" = "$SPIRV_HEADERS_COMMIT"
+
+          cmake -S "$RUNNER_TEMP/spirv-tools" -B "$RUNNER_TEMP/spirv-tools-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_SKIP_TESTS=ON \
+            -DSPIRV_WERROR=OFF
+          cmake --build "$RUNNER_TEMP/spirv-tools-build" --target spirv-val
+
+      - name: Generate and validate synthetic SPIR-V
+        if: matrix.rid == 'linux-x64'
+        run: |
+          dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
+          scripts/validate-synthetic-spirv.sh \
+            "$RUNNER_TEMP/spirv-tools-build/tools/spirv-val" \
+            "$SPIRV_TOOLS_VERSION" \
+            "$SPIRV_TARGET_ENV" \
+            artifacts/shader-dump
 
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"

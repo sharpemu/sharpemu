@@ -1576,10 +1576,36 @@ public static class Gen5ShaderTranslator
     private static bool IsMimgInstruction(string name) =>
         name.StartsWith("Image", StringComparison.Ordinal);
 
+    public static bool IsImageLoadOperation(string name) =>
+        name.StartsWith("ImageLoad", StringComparison.Ordinal);
+
     public static bool IsStorageImageOperation(string name) =>
-        name.StartsWith("ImageLoad", StringComparison.Ordinal) ||
         name.StartsWith("ImageStore", StringComparison.Ordinal) ||
         name.StartsWith("ImageAtomic", StringComparison.Ordinal);
+
+    public static bool RequiresStorageImage(
+        Gen5ImageBinding binding,
+        IReadOnlyList<Gen5ImageBinding> stageBindings)
+    {
+        if (IsStorageImageOperation(binding.Opcode))
+        {
+            return true;
+        }
+
+        if (!IsImageLoadOperation(binding.Opcode))
+        {
+            return false;
+        }
+
+        // IMAGE_LOAD itself is read-only and maps naturally to OpImageFetch,
+        // including for block-compressed textures which Vulkan cannot expose
+        // as storage images. Keep it as storage only when the same resolved
+        // descriptor is also written in this shader stage, preserving coherent
+        // read/write access through one storage-image representation.
+        return stageBindings.Any(candidate =>
+            IsStorageImageOperation(candidate.Opcode) &&
+            binding.ResourceDescriptor.SequenceEqual(candidate.ResourceDescriptor));
+    }
 
     public static bool IsDataShareAtomic(string name) => name switch
     {
@@ -1872,8 +1898,9 @@ public static class Gen5ShaderTranslator
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
                 {
-                    // The scalar destination lives in the low vdst byte (bits 0-7);
-                    // bits 8-14 are the VOP3B carry-out sdst, which readlane lacks.
+                    // V_READLANE uses the VOP3A vdst byte even though the
+                    // destination register is scalar. Bits 8-14 are the
+                    // distinct sdst field used by VOP3B encodings.
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);

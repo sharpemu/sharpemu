@@ -1,0 +1,16 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- A small, standalone console tool: it speaks the debug server's
+         line-delimited JSON protocol directly over TCP and takes no dependency
+         on the emulator assemblies, so it builds and ships independently. -->
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SharpEmu.DebugClient</AssemblyName>
+    <RootNamespace>SharpEmu.DebugClient</RootNamespace>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+</Project>

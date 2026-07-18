@@ -9,6 +9,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
@@ -235,6 +236,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private CpuContext? _cpuContext;
 
+	// Debugger seam; both null when no debugger is attached.
+	private ICpuDebugHook? _debugHook;
+
+	private ICpuDebugFrame? _activeDebugFrame;
+
 	[ThreadStatic]
 	private static DirectExecutionBackend? _activeExecutionBackend;
 
@@ -442,10 +448,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		// Stays set through the wake transition; Resume() consumes it when the thread pumps.
 		public IGuestThreadBlockWaiter? BlockWaiter { get; set; }
-
-		public Func<int>? BlockResumeHandler { get; set; }
-
-		public Func<bool>? BlockWakeHandler { get; set; }
 
 		public long BlockDeadlineTimestamp { get; set; }
 
@@ -894,6 +896,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool HasActiveExecutionThread => ReferenceEquals(_activeExecutionBackend, this);
 
+	/// <summary>
+	/// Binds the debug frame view the dispatcher created for the frame about to
+	/// run, so stall notifications reference the same frame the debugger saw at
+	/// entry. Set to null when no debugger is attached.
+	/// </summary>
+	internal void SetActiveDebugFrame(ICpuDebugFrame? frame) => _activeDebugFrame = frame;
+
+	/// <summary>
+	/// Notifies an attached debugger of a detected execution stall. No-op when no
+	/// debugger is attached or no frame is bound. The debugger may block here to
+	/// present a break before the backend forces the guest out of the loop.
+	/// </summary>
+	private void NotifyDebuggerStall(
+		CpuStallKind kind,
+		in ImportStubEntry import,
+		ulong instructionPointer,
+		long dispatchIndex,
+		ulong argument0,
+		ulong argument1)
+	{
+		var hook = _debugHook;
+		var frame = _activeDebugFrame;
+		if (hook is null || frame is null)
+		{
+			return;
+		}
+
+		var export = import.Export;
+		var exportDescription = export is null ? "unresolved" : $"{export.LibraryName}:{export.Name}";
+		var detail = $"kind={kind}, nid={import.Nid}, export={exportDescription}, dispatch#{dispatchIndex}, " +
+			$"rip=0x{instructionPointer:X16}, arg0=0x{argument0:X16}, arg1=0x{argument1:X16}";
+		hook.OnStall(frame, new CpuStallInfo(
+			kind,
+			import.Nid,
+			instructionPointer,
+			dispatchIndex,
+			argument0,
+			argument1,
+			detail,
+			export?.LibraryName,
+			export?.Name));
+	}
+
 	private CpuContext? ActiveCpuContext => HasActiveExecutionThread ? _activeCpuContext : _cpuContext;
 
 	private ulong ActiveEntryReturnSentinelRip
@@ -1055,6 +1100,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export2) ? ("[LOADER][INFO] ExportCheck map_direct: " + export2.LibraryName + ":" + export2.Name) : "[LOADER][INFO] ExportCheck map_direct: MISSING");
 		_entryPoint = entryPoint;
 		_cpuContext = context;
+		_debugHook = executionOptions.DebugHook;
 		_returnFallbackTarget = context[CpuRegister.Rsi];
 		Volatile.Write(ref _globalFallbackTarget, _returnFallbackTarget);
 		Volatile.Write(ref _globalUnresolvedReturnStub, (ulong)_unresolvedReturnStub);
@@ -3209,43 +3255,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			thread.HasBlockedContinuation = true;
 			thread.BlockWakeKey = wakeKey;
 			thread.BlockWaiter = waiter;
-			thread.BlockResumeHandler = null;
-			thread.BlockWakeHandler = null;
-			thread.BlockDeadlineTimestamp = blockDeadlineTimestamp;
-			TraceFocusedContinuation(
-				"register",
-				guestThreadHandle,
-				continuation,
-				wakeKey);
-		}
-	}
-
-	private void RegisterBlockedGuestThreadContinuation(
-		ulong guestThreadHandle,
-		GuestCpuContinuation continuation,
-		string wakeKey,
-		Func<int>? resumeHandler,
-		Func<bool>? wakeHandler,
-		long blockDeadlineTimestamp)
-	{
-		if (guestThreadHandle == 0 || continuation.Rip < 65536 || continuation.Rsp == 0)
-		{
-			return;
-		}
-
-		using (LockGate("RegisterBlockedContinuation"))
-		{
-			if (!_guestThreads.TryGetValue(guestThreadHandle, out var thread))
-			{
-				return;
-			}
-
-			thread.BlockedContinuation = continuation;
-			thread.HasBlockedContinuation = true;
-			thread.BlockWakeKey = wakeKey;
-			thread.BlockWaiter = null;
-			thread.BlockResumeHandler = resumeHandler;
-			thread.BlockWakeHandler = wakeHandler;
 			thread.BlockDeadlineTimestamp = blockDeadlineTimestamp;
 			TraceFocusedContinuation(
 				"register",
@@ -3561,11 +3570,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				owner.State = GuestThreadRunState.Blocked;
 				owner.BlockReason = callbackReason ?? reason;
-				if (owner.BlockWakeHandler is not null && owner.BlockWakeHandler())
+				if (owner.BlockWaiter is not null && owner.BlockWaiter.TryWake())
 				{
 					owner.State = GuestThreadRunState.Ready;
 					owner.BlockReason = null;
-					owner.BlockWakeHandler = null;
 					owner.BlockDeadlineTimestamp = 0;
 				}
 			}
@@ -3577,7 +3585,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 
 			GuestCpuContinuation continuation = default;
-			Func<int>? resumeHandler = null;
+			IGuestThreadBlockWaiter? blockWaiter = null;
 			while (!ActiveForcedGuestExit)
 			{
 				WakeExpiredBlockedGuestThreads();
@@ -3598,9 +3606,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						owner.BlockedContinuation = default;
 						owner.HasBlockedContinuation = false;
 						owner.BlockWakeKey = null;
-						resumeHandler = owner.BlockResumeHandler;
-						owner.BlockResumeHandler = null;
-						owner.BlockWakeHandler = null;
+						blockWaiter = owner.BlockWaiter;
+						owner.BlockWaiter = null;
 						owner.BlockDeadlineTimestamp = 0;
 						owner.BlockReason = null;
 						owner.State = GuestThreadRunState.Running;
@@ -3623,9 +3630,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return false;
 			}
 
-			if (resumeHandler is not null)
+			if (blockWaiter is not null)
 			{
-				continuation = continuation with { Rax = unchecked((ulong)(long)resumeHandler()) };
+				continuation = continuation with { Rax = unchecked((ulong)(long)blockWaiter.Resume()) };
 			}
 			if (_logGuestThreads)
 			{
@@ -3838,8 +3845,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		bool savedHasBlockedContinuation;
 		GuestCpuContinuation savedBlockedContinuation;
 		string? savedBlockWakeKey;
-		Func<int>? savedBlockResumeHandler;
-		Func<bool>? savedBlockWakeHandler;
+		IGuestThreadBlockWaiter? savedBlockWaiter;
 		long savedBlockDeadlineTimestamp;
 		ulong exceptionStackBase;
 		lock (_guestThreadGate)
@@ -3975,8 +3981,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			savedHasBlockedContinuation = target.HasBlockedContinuation;
 			savedBlockedContinuation = target.BlockedContinuation;
 			savedBlockWakeKey = target.BlockWakeKey;
-			savedBlockResumeHandler = target.BlockResumeHandler;
-			savedBlockWakeHandler = target.BlockWakeHandler;
+			savedBlockWaiter = target.BlockWaiter;
 			savedBlockDeadlineTimestamp = target.BlockDeadlineTimestamp;
 
 			target.State = GuestThreadRunState.Running;
@@ -3986,8 +3991,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			target.HasBlockedContinuation = false;
 			target.BlockedContinuation = default;
 			target.BlockWakeKey = null;
-			target.BlockResumeHandler = null;
-			target.BlockWakeHandler = null;
+			target.BlockWaiter = null;
 			target.BlockDeadlineTimestamp = 0;
 		}
 
@@ -4035,8 +4039,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			target.HasBlockedContinuation = savedHasBlockedContinuation;
 			target.BlockedContinuation = savedBlockedContinuation;
 			target.BlockWakeKey = savedBlockWakeKey;
-			target.BlockResumeHandler = savedBlockResumeHandler;
-			target.BlockWakeHandler = savedBlockWakeHandler;
+			target.BlockWaiter = savedBlockWaiter;
 			target.BlockDeadlineTimestamp = savedBlockDeadlineTimestamp;
 
 			// A condition/event wake can arrive while the parked thread is
@@ -4046,12 +4049,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			// pthread wait remains parked forever after a GC suspension races it.
 			if (target.State == GuestThreadRunState.Blocked &&
 				target.HasBlockedContinuation &&
-				target.BlockWakeHandler is not null &&
-				target.BlockWakeHandler())
+				target.BlockWaiter is not null &&
+				target.BlockWaiter.TryWake())
 			{
 				target.State = GuestThreadRunState.Ready;
 				target.BlockReason = null;
-				target.BlockWakeHandler = null;
 				target.BlockDeadlineTimestamp = 0;
 				_readyGuestThreads.Enqueue(target);
 				Interlocked.Increment(ref _readyGuestThreadCount);

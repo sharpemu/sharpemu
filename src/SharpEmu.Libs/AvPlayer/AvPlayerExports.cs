@@ -1109,7 +1109,7 @@ public static class AvPlayerExports
         return null;
     }
 
-    private static string? ResolveGuestPath(string guestPath)
+    internal static string? ResolveGuestPath(string guestPath)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
         {
@@ -1117,13 +1117,39 @@ public static class AvPlayerExports
         }
 
         var normalized = guestPath.Replace('\\', '/');
-        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri) && uri.IsFile)
+        var fileReference = normalized.StartsWith("file:", StringComparison.OrdinalIgnoreCase);
+        var unrealProjectRelative = false;
+        if (normalized.StartsWith("file://", StringComparison.OrdinalIgnoreCase) &&
+            Uri.TryCreate(normalized, UriKind.Absolute, out var uri) &&
+            uri.IsFile)
         {
-            normalized = uri.LocalPath;
+            if (!string.IsNullOrEmpty(uri.Host) &&
+                !string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            normalized = uri.LocalPath.Replace('\\', '/');
         }
-        if (File.Exists(normalized))
+        else if (normalized.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
         {
-            return Path.GetFullPath(normalized);
+            // Some console middleware emits Unreal-style project-relative
+            // media references such as file://../../../Project/Content/....
+            // System.Uri rejects these because the first ".." is parsed as
+            // an invalid authority. Treat the scheme as a guest-path marker;
+            // the app0 sandbox below resolves the relative path.
+            normalized = normalized["file://".Length..];
+            unrealProjectRelative = true;
+        }
+        else if (normalized.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized["file:".Length..];
+            unrealProjectRelative = true;
+        }
+
+        if (unrealProjectRelative)
+        {
+            normalized = RemoveUnrealLeadingDotSegments(normalized);
         }
 
         var app0 = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
@@ -1131,19 +1157,232 @@ public static class AvPlayerExports
         {
             return null;
         }
-        foreach (var prefix in new[] { "app0:/", "/app0/", "app0:", "/app0" })
+
+        var app0MountedPath = false;
+        foreach (var prefix in new[] { "app0:/", "/app0/", "app0/", "app0:" })
         {
             if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             {
                 normalized = normalized[prefix.Length..];
+                app0MountedPath = true;
                 break;
             }
         }
-        var candidate = Path.GetFullPath(Path.Combine(app0, normalized.TrimStart('/')));
-        var root = Path.GetFullPath(app0).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase) && File.Exists(candidate)
-            ? candidate
-            : null;
+
+        if (!app0MountedPath &&
+            (string.Equals(normalized, "app0:", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(normalized, "/app0", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(normalized, "app0", StringComparison.OrdinalIgnoreCase)))
+        {
+            normalized = string.Empty;
+            app0MountedPath = true;
+        }
+
+        try
+        {
+            if (fileReference)
+            {
+                if (!TryDecodeFileReference(normalized, out normalized))
+                {
+                    return null;
+                }
+            }
+            else if (ContainsInvalidMediaPathCharacters(normalized))
+            {
+                return null;
+            }
+
+            if ((!fileReference &&
+                 !app0MountedPath &&
+                 Uri.TryCreate(normalized, UriKind.Absolute, out _)) ||
+                Path.IsPathFullyQualified(normalized) ||
+                normalized.StartsWith("/", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            if (!TryNormalizeApp0RelativePath(normalized, out var relativePath) ||
+                relativePath.Length == 0)
+            {
+                return null;
+            }
+
+            var root = Path.GetFullPath(app0);
+            var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+            var relativeToRoot = Path.GetRelativePath(root, candidate);
+            if (Path.IsPathFullyQualified(relativeToRoot) ||
+                string.Equals(relativeToRoot, "..", StringComparison.Ordinal) ||
+                relativeToRoot.StartsWith(
+                    ".." + Path.DirectorySeparatorChar,
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            return TryResolveSandboxedFile(root, relativePath, out var resolved)
+                ? resolved
+                : null;
+        }
+        catch (Exception exception) when (exception is ArgumentException or
+                                             IOException or
+                                             NotSupportedException or
+                                             UnauthorizedAccessException or
+                                             UriFormatException)
+        {
+            return null;
+        }
+    }
+
+    private static string RemoveUnrealLeadingDotSegments(string guestPath)
+    {
+        while (guestPath.StartsWith("../", StringComparison.Ordinal) ||
+               guestPath.StartsWith("./", StringComparison.Ordinal))
+        {
+            guestPath = guestPath[(guestPath.IndexOf('/') + 1)..];
+        }
+
+        return guestPath;
+    }
+
+    private static bool TryDecodeFileReference(string encoded, out string decoded)
+    {
+        decoded = string.Empty;
+        for (var index = 0; index < encoded.Length; index++)
+        {
+            if (encoded[index] != '%')
+            {
+                continue;
+            }
+
+            if (index + 2 >= encoded.Length ||
+                !Uri.IsHexDigit(encoded[index + 1]) ||
+                !Uri.IsHexDigit(encoded[index + 2]))
+            {
+                return false;
+            }
+
+            var escapedByte = Convert.ToByte(encoded.Substring(index + 1, 2), 16);
+            if (escapedByte is (byte)'/' or (byte)'\\')
+            {
+                return false;
+            }
+
+            index += 2;
+        }
+
+        decoded = Uri.UnescapeDataString(encoded);
+        return !ContainsInvalidMediaPathCharacters(decoded);
+    }
+
+    private static bool ContainsInvalidMediaPathCharacters(string path) =>
+        path.IndexOfAny(['?', '#']) >= 0 || path.Any(char.IsControl);
+
+    private static bool TryNormalizeApp0RelativePath(
+        string guestPath,
+        out string relativePath)
+    {
+        var segments = new List<string>();
+        foreach (var segment in guestPath.TrimStart('/').Split(
+                     '/',
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (segments.Count == 0)
+                {
+                    relativePath = string.Empty;
+                    return false;
+                }
+
+                segments.RemoveAt(segments.Count - 1);
+                continue;
+            }
+
+            segments.Add(segment);
+        }
+
+        relativePath = string.Join(Path.DirectorySeparatorChar, segments);
+        return true;
+    }
+
+    private static bool TryResolveSandboxedFile(
+        string root,
+        string relativePath,
+        out string resolved)
+    {
+        resolved = string.Empty;
+        var current = root;
+        var segments = relativePath.Split(
+            Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var exact = Path.Combine(current, segments[index]);
+            var finalSegment = index == segments.Length - 1;
+            string? match;
+            if (finalSegment ? File.Exists(exact) : Directory.Exists(exact))
+            {
+                match = exact;
+            }
+            else
+            {
+                if (!Directory.Exists(current))
+                {
+                    return false;
+                }
+
+                match = null;
+                foreach (var entry in Directory.EnumerateFileSystemEntries(current))
+                {
+                    if (!string.Equals(
+                            Path.GetFileName(entry),
+                            segments[index],
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (match is not null)
+                    {
+                        // A case-sensitive host can contain two names that are
+                        // indistinguishable to the guest. Refuse an ambiguous
+                        // media path instead of selecting one nondeterministically.
+                        return false;
+                    }
+
+                    match = entry;
+                }
+            }
+
+            if (match is null ||
+                (finalSegment ? !File.Exists(match) : !Directory.Exists(match)))
+            {
+                return false;
+            }
+
+            if ((File.GetAttributes(match) & FileAttributes.ReparsePoint) != 0)
+            {
+                // App packages do not need host filesystem links. Refusing
+                // them keeps media resolution inside the configured app0
+                // tree even when a dump contains a symlink or junction.
+                return false;
+            }
+
+            current = match;
+        }
+
+        if (!File.Exists(current))
+        {
+            return false;
+        }
+
+        resolved = Path.GetFullPath(current);
+        return true;
     }
 
     private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int maxLength, out string value)

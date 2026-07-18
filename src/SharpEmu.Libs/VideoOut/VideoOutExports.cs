@@ -23,6 +23,7 @@ public static class VideoOutExports
     private const int OrbisVideoOutErrorInvalidHandle = unchecked((int)0x8029000B);
     private const int OrbisVideoOutErrorInvalidEventQueue = unchecked((int)0x8029000C);
     private const int OrbisVideoOutErrorInvalidEvent = unchecked((int)0x8029000D);
+    private const int OrbisVideoOutErrorUnsupportedOutputMode = unchecked((int)0x80290016);
     private const int OrbisVideoOutErrorInvalidOption = unchecked((int)0x8029001A);
     private const int SceVideoOutBusTypeMain = 0;
     private const int SceVideoOutBufferAttributeOptionNone = 0;
@@ -34,8 +35,11 @@ public static class VideoOutExports
     private const int VideoOutBufferAttributeSize = 0x28;
     private const int VideoOutBufferAttribute2Size = 0x50;
     private const int VideoOutBuffersEntrySize = 0x20;
+    private const int VideoOutOutputOptionsSize = 0x40;
     private const int VideoOutOutputStatusSize = 0x30;
     private const int VideoOutVblankStatusSize = 0x28;
+    private const ulong SceVideoOutOutputModeDefault = 1;
+    private const ulong SceVideoOutOutputMode119_88Hz = 0xF;
     private const ulong SceVideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
     private const ulong SceVideoOutPixelFormatA8B8G8R8Srgb = 0x80002200;
     private const ulong SceVideoOutPixelFormatA2R10G10B10 = 0x88060000;
@@ -282,17 +286,46 @@ public static class VideoOutExports
     [SysAbiExport(
         Nid = "Nv8c-Kb+DUM",
         ExportName = "sceVideoOutIsOutputSupported",
-        Target = Generation.Gen4 | Generation.Gen5,
+        Target = Generation.Gen5,
         LibraryName = "libSceVideoOut")]
     public static int VideoOutIsOutputSupported(CpuContext ctx)
     {
-        var busType = unchecked((int)ctx[CpuRegister.Rdi]);
-        _ = ctx[CpuRegister.Rsi]; // pixelFormat
-        _ = ctx[CpuRegister.Rdx]; // aspectRatio
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var mode = ctx[CpuRegister.Rsi];
+        var optionsAddress = ctx[CpuRegister.Rdx];
+        var reservedPointer = ctx[CpuRegister.Rcx];
+        var reserved = ctx[CpuRegister.R8];
 
-        // The emulator supports any output configuration on the main bus.
-        // Return 1 (supported) for SceVideoOutBusTypeMain, 0 otherwise.
-        return busType == SceVideoOutBusTypeMain ? 1 : 0;
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        if (reservedPointer != 0 || reserved != 0)
+        {
+            return OrbisVideoOutErrorInvalidValue;
+        }
+
+        if (optionsAddress != 0)
+        {
+            Span<byte> options = stackalloc byte[VideoOutOutputOptionsSize];
+            if (!ctx.Memory.TryRead(optionsAddress, options))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (options.ContainsAnyExcept((byte)0))
+            {
+                return OrbisVideoOutErrorInvalidOption;
+            }
+        }
+
+        if (mode != SceVideoOutOutputModeDefault && mode != SceVideoOutOutputMode119_88Hz)
+        {
+            return OrbisVideoOutErrorUnsupportedOutputMode;
+        }
+
+        return mode == SceVideoOutOutputModeDefault || port.RefreshRate >= 119 ? 1 : 0;
     }
 
     [SysAbiExport(
@@ -354,7 +387,18 @@ public static class VideoOutExports
         LibraryName = "libSceVideoOut")]
     public static int VideoOutInitializeOutputOptions(CpuContext ctx)
     {
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        const int outputOptionsSize = 0x40;
+        var optionsAddress = ctx[CpuRegister.Rdi];
+        if (optionsAddress == 0)
+        {
+            return OrbisVideoOutErrorInvalidAddress;
+        }
+
+        Span<byte> options = stackalloc byte[outputOptionsSize];
+        options.Clear();
+        return ctx.Memory.TryWrite(optionsAddress, options)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
     [SysAbiExport(
