@@ -24,8 +24,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
     private const ulong GuestAllocationArenaSize = 0x0100_0000;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
-    private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
-    private const ulong FullCommitRegionLimit = 4UL << 30;
+    private const ulong FullCommitRegionLimit = 4UL << 30; // 4 GiB
     private const ulong DefaultLazyReservePrimeBytes = 0x0400_0000UL; // 64 MiB
     private const ulong LazyReservePrimeChunkBytes = 0x0200_0000UL; // 32 MiB
 
@@ -163,9 +162,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         var hostProtection = executable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
 
-        var reserveOnly = !executable &&
-            alignedSize >= LargeDataReserveThreshold &&
-            alignedSize > FullCommitRegionLimit;
+        var reserveOnly = !executable && alignedSize > FullCommitRegionLimit;
 
         var result = reserveOnly
             ? _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.ReadWrite)
@@ -235,9 +232,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         var hostProtection = executable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
         var reservedOnly = false;
-        var preferReserveOnly = !executable &&
-            alignedSize >= LargeDataReserveThreshold &&
-            alignedSize > FullCommitRegionLimit;
+        var preferReserveOnly = !executable && alignedSize > FullCommitRegionLimit;
 
         ulong result = 0;
         if (preferReserveOnly)
@@ -248,10 +243,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 result = _hostMemory.Reserve(0, alignedSize, HostPageProtection.ReadWrite);
             }
 
-            if (result != 0)
-            {
-                reservedOnly = true;
-            }
+            reservedOnly = result != 0;
         }
 
         if (result == 0)
@@ -259,37 +251,34 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             result = _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
         }
 
+        if (result == 0 && !allowAlternative)
+        {
+            throw new InvalidOperationException($"Failed to allocate exact mapping at 0x{desiredAddress:X16} ({alignedSize} bytes)");
+        }
+
         if (result == 0)
         {
-            if (!allowAlternative)
-            {
-                throw new InvalidOperationException($"Failed to allocate exact mapping at 0x{desiredAddress:X16} ({alignedSize} bytes)");
-            }
-
             TraceVmem($"Could not allocate at 0x{desiredAddress:X16}, trying any address...");
             result = _hostMemory.Allocate(0, alignedSize, hostProtection);
+        }
 
+        // Last resort for data regions below the reserve-only threshold: the host may have
+        // address space available even when it cannot satisfy the commit. Regions that
+        // already took the reserve-only path above would just repeat those attempts.
+        if (result == 0 && !executable && !preferReserveOnly)
+        {
+            result = _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.ReadWrite);
             if (result == 0)
             {
-                if (!executable)
-                {
-                    result = _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.ReadWrite);
-                    if (result == 0 && allowAlternative)
-                    {
-                        result = _hostMemory.Reserve(0, alignedSize, HostPageProtection.ReadWrite);
-                    }
-
-                    if (result != 0)
-                    {
-                        reservedOnly = true;
-                    }
-                }
-
-                if (result == 0)
-                {
-                    throw new OutOfMemoryException($"Failed to allocate {alignedSize} bytes of virtual memory");
-                }
+                result = _hostMemory.Reserve(0, alignedSize, HostPageProtection.ReadWrite);
             }
+
+            reservedOnly = result != 0;
+        }
+
+        if (result == 0)
+        {
+            throw new OutOfMemoryException($"Failed to allocate {alignedSize} bytes of virtual memory");
         }
 
         var actualAddress = result;
