@@ -1684,6 +1684,21 @@ internal static unsafe class VulkanVideoPresenter
         return checked((ulong)width * height * bytesPerPixel);
     }
 
+    // Maps a UNORM swapchain format to the sRGB view of the same bit layout,
+    // or Undefined when no counterpart exists. Used to encode linear-float
+    // guest flips on their way into a UNORM swapchain.
+    internal static Format GetSrgbCounterpart(Format format) => format switch
+    {
+        Format.B8G8R8A8Unorm => Format.B8G8R8A8Srgb,
+        Format.R8G8B8A8Unorm => Format.R8G8B8A8Srgb,
+        _ => Format.Undefined,
+    };
+
+    // Float VideoOut flip buffers hold linear scRGB light; presenting them
+    // requires a linear->sRGB encode that a plain blit does not perform.
+    internal static bool IsLinearFloatPresentSource(Format format) =>
+        format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -14594,6 +14609,99 @@ internal static unsafe class VulkanVideoPresenter
                 &toPresent);
         }
 
+        // PS5 float VideoOut buffers (A16B16G16R16F flips) hold linear scRGB
+        // light where 1.0 is SDR white; hardware scan-out applies the display
+        // transfer. vkCmdBlitImage converts numerically only, so presenting a
+        // linear-float guest frame into a UNORM swapchain shows near-black
+        // for any dim scene. Encode linear->sRGB by blitting through an sRGB
+        // intermediate (sRGB stores encode), then raw-copying the encoded
+        // bytes into the same-class UNORM swapchain image.
+        private Image _presentEncodeImage;
+        private DeviceMemory _presentEncodeMemory;
+        private Extent2D _presentEncodeExtent;
+
+        private bool TryGetPresentEncodeImage(out Image encodeImage)
+        {
+            encodeImage = default;
+            var encodeFormat = GetSrgbCounterpart(_swapchainFormat);
+            if (encodeFormat == Format.Undefined)
+            {
+                return false;
+            }
+
+            if (_presentEncodeImage.Handle != 0 &&
+                (_presentEncodeExtent.Width != _extent.Width ||
+                 _presentEncodeExtent.Height != _extent.Height))
+            {
+                DestroyPresentEncodeImage();
+            }
+
+            if (_presentEncodeImage.Handle == 0)
+            {
+                var imageInfo = new ImageCreateInfo
+                {
+                    SType = StructureType.ImageCreateInfo,
+                    ImageType = ImageType.Type2D,
+                    Format = encodeFormat,
+                    Extent = new Extent3D(_extent.Width, _extent.Height, 1),
+                    MipLevels = 1,
+                    ArrayLayers = 1,
+                    Samples = SampleCountFlags.Count1Bit,
+                    Tiling = ImageTiling.Optimal,
+                    Usage = ImageUsageFlags.TransferDstBit |
+                            ImageUsageFlags.TransferSrcBit,
+                    SharingMode = SharingMode.Exclusive,
+                    InitialLayout = ImageLayout.Undefined,
+                };
+                Check(
+                    _vk.CreateImage(_device, &imageInfo, null, out _presentEncodeImage),
+                    "vkCreateImage(present encode)");
+                _vk.GetImageMemoryRequirements(
+                    _device,
+                    _presentEncodeImage,
+                    out var requirements);
+                var allocationInfo = new MemoryAllocateInfo
+                {
+                    SType = StructureType.MemoryAllocateInfo,
+                    AllocationSize = requirements.Size,
+                    MemoryTypeIndex = FindMemoryType(
+                        requirements.MemoryTypeBits,
+                        MemoryPropertyFlags.DeviceLocalBit),
+                };
+                Check(
+                    _vk.AllocateMemory(_device, &allocationInfo, null, out _presentEncodeMemory),
+                    "vkAllocateMemory(present encode)");
+                Check(
+                    _vk.BindImageMemory(_device, _presentEncodeImage, _presentEncodeMemory, 0),
+                    "vkBindImageMemory(present encode)");
+                _presentEncodeExtent = new Extent2D(_extent.Width, _extent.Height);
+                SetDebugName(
+                    ObjectType.Image,
+                    _presentEncodeImage.Handle,
+                    "SharpEmu present sRGB-encode image");
+            }
+
+            encodeImage = _presentEncodeImage;
+            return true;
+        }
+
+        private void DestroyPresentEncodeImage()
+        {
+            if (_presentEncodeImage.Handle != 0)
+            {
+                _vk.DestroyImage(_device, _presentEncodeImage, null);
+                _presentEncodeImage = default;
+            }
+
+            if (_presentEncodeMemory.Handle != 0)
+            {
+                _vk.FreeMemory(_device, _presentEncodeMemory, null);
+                _presentEncodeMemory = default;
+            }
+
+            _presentEncodeExtent = default;
+        }
+
         private void RecordGuestImageBlit(
             uint imageIndex,
             GuestImageResource source)
@@ -14645,9 +14753,33 @@ internal static unsafe class VulkanVideoPresenter
                 Image = _swapchainImages[imageIndex],
                 SubresourceRange = ColorSubresourceRange(),
             };
-            var barriers = stackalloc ImageMemoryBarrier[2];
+            // Linear-float flips need a linear->sRGB encode on the way to a
+            // UNORM swapchain; sRGB (or unknown-counterpart) swapchains keep
+            // the direct blit.
+            var encodeForPresent = false;
+            Image encodeImage = default;
+            if (IsLinearFloatPresentSource(source.Format) &&
+                GetSrgbCounterpart(_swapchainFormat) != Format.Undefined)
+            {
+                encodeForPresent = TryGetPresentEncodeImage(out encodeImage);
+            }
+
+            var encodeToTransferDst = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferReadBit,
+                DstAccessMask = AccessFlags.TransferWriteBit,
+                OldLayout = ImageLayout.Undefined,
+                NewLayout = ImageLayout.TransferDstOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _presentEncodeImage,
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            var barriers = stackalloc ImageMemoryBarrier[3];
             barriers[0] = sourceToTransfer;
             barriers[1] = destinationToTransfer;
+            barriers[2] = encodeToTransferDst;
             _vk.CmdPipelineBarrier(
                 _commandBuffer,
                 PipelineStageFlags.AllCommandsBit,
@@ -14657,7 +14789,7 @@ internal static unsafe class VulkanVideoPresenter
                 null,
                 0,
                 null,
-                2,
+                encodeForPresent ? 3u : 2u,
                 barriers);
 
             var sourceX = 0u;
@@ -14726,11 +14858,57 @@ internal static unsafe class VulkanVideoPresenter
                 _commandBuffer,
                 source.Image,
                 ImageLayout.TransferSrcOptimal,
-                _swapchainImages[imageIndex],
+                encodeForPresent ? encodeImage : _swapchainImages[imageIndex],
                 ImageLayout.TransferDstOptimal,
                 1,
                 &region,
                 isIntegerUpscale ? Filter.Nearest : Filter.Linear);
+
+            if (encodeForPresent)
+            {
+                var encodeToTransferSrc = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferSrcOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = encodeImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.TransferBit,
+                    0,
+                    0,
+                    null,
+                    0,
+                    null,
+                    1,
+                    &encodeToTransferSrc);
+
+                // Raw same-class copy keeps the sRGB-encoded bytes unchanged
+                // while landing them in the UNORM swapchain image.
+                var encodedCopy = new ImageCopy
+                {
+                    SrcSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    Extent = new Extent3D(_extent.Width, _extent.Height, 1),
+                };
+                _vk.CmdCopyImage(
+                    _commandBuffer,
+                    encodeImage,
+                    ImageLayout.TransferSrcOptimal,
+                    _swapchainImages[imageIndex],
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &encodedCopy);
+            }
 
             if (traceDestination)
             {
@@ -15266,6 +15444,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void DestroySwapchainResources()
         {
+            DestroyPresentEncodeImage();
             if (_stagingBuffer.Handle != 0)
             {
                 _vk.DestroyBuffer(_device, _stagingBuffer, null);
