@@ -65,6 +65,12 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadOpenExt(CpuContext ctx) => PadOpenCore(ctx, extended: true);
 
+    // scePadGetHandle(userId, type, index): returns the handle of an already-open
+    // pad without opening a new one. Dead Cells calls it every frame to poll
+    // input; leaving it unresolved returned a garbage handle so the input path
+    // (and the game loop that drives it) misbehaved. Same validation as
+    // scePadOpen — the one primary pad — returning its handle or a not-connected
+    // error, never opening or logging.
     [SysAbiExport(
         Nid = "u1GRHp+oWoY",
         ExportName = "scePadGetHandle",
@@ -72,23 +78,20 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadGetHandle(CpuContext ctx)
     {
-        // On real hardware this walks the opened pad list; we own a single
-        // standard DualSense on port 0.
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var type = unchecked((int)ctx[CpuRegister.Rsi]);
         var index = unchecked((int)ctx[CpuRegister.Rdx]);
-
         if (!_initialized)
         {
             return ctx.SetReturn(OrbisPadErrorNotInitialized);
         }
 
-        if (type == StandardPortType && index == 0 && userId == PrimaryUserId)
+        if (userId != PrimaryUserId || type is not (0 or 1 or 2) || index != 0)
         {
-            return ctx.SetReturn(PrimaryPadHandle);
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
-        return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
+        return ctx.SetReturn(PrimaryPadHandle);
     }
 
     // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
@@ -251,7 +254,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var informationAddress = ctx[CpuRegister.Rsi];
-        if (handle != PrimaryPadHandle)
+        if (!IsPrimaryPadHandle(handle))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -261,14 +264,13 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // ScePadDeviceClassExtendedInformation:
-        //   ScePadDeviceClass deviceClass (4 bytes)
-        //   uint8_t reserved[4] (4 bytes)
-        //   union classData (12 bytes)
-        // Report a standard DualSense with no extended class data.
-        Span<byte> information = stackalloc byte[20];
+        // ScePadDeviceClassExtendedInformation: deviceClass 0 = standard pad
+        // (DualSense). We emulate no special peripheral (guitar/drums/wheel), so
+        // the class-data union stays zeroed — the guest treats it as a plain
+        // controller with no extended capabilities.
+        Span<byte> information = stackalloc byte[0x20];
         information.Clear();
-        BinaryPrimitives.WriteInt32LittleEndian(information[0x00..], 0); // deviceClass = STANDARD
+        BinaryPrimitives.WriteInt32LittleEndian(information[0x00..], 0);
 
         return ctx.Memory.TryWrite(informationAddress, information)
             ? ctx.SetReturn(0)

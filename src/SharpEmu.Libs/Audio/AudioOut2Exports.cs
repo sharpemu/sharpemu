@@ -367,23 +367,6 @@ public static class AudioOut2Exports
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    [SysAbiExport(
-        Nid = "GrQ9s4IrNaQ",
-        ExportName = "sceAudioOutGetPortState",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceAudioOut")]
-    public static int AudioOutGetPortState(CpuContext ctx)
-    {
-        var stateAddress = ctx[CpuRegister.Rsi];
-        if (stateAddress != 0)
-        {
-            Span<byte> zero = stackalloc byte[16];
-            zero.Clear();
-            _ = ctx.Memory.TryWrite(stateAddress, zero);
-        }
-        return ctx.SetReturn(0);
-    }
-
     private static bool TryWriteUInt64(CpuContext ctx, ulong address, ulong value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
