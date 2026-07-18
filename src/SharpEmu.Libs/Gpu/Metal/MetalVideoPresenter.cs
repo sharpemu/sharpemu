@@ -359,6 +359,11 @@ internal static partial class MetalVideoPresenter
         MetalNative.class_addMethod(cls, MetalNative.Selector("keyDown:"), keyDown, "v@:@");
         var keyUp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnKeyUp;
         MetalNative.class_addMethod(cls, MetalNative.Selector("keyUp:"), keyUp, "v@:@");
+        // Command-modified keys never reach keyDown: — AppKit routes them through
+        // performKeyEquivalent:, so Cmd+F1 (Metal Performance HUD) hooks in here.
+        var keyEquivalent = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, byte>)&OnPerformKeyEquivalent;
+        MetalNative.class_addMethod(
+            cls, MetalNative.Selector("performKeyEquivalent:"), keyEquivalent, "c@:@");
         // First responder status is what routes key events to this view.
         var accepts = (nint)(delegate* unmanaged[Cdecl]<nint, nint, byte>)&AcceptsFirstResponder;
         MetalNative.class_addMethod(
@@ -398,6 +403,94 @@ internal static partial class MetalVideoPresenter
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static byte AcceptsFirstResponder(nint self, nint cmd) => 1;
+
+    private const ushort KeyCodeF1 = 0x7A;
+    private const ulong NsEventModifierFlagCommand = 1UL << 20;
+    private static bool _metalHudVisible;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static byte OnPerformKeyEquivalent(nint self, nint cmd, nint nsEvent)
+    {
+        try
+        {
+            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
+            var modifiers = (ulong)MetalNative.Send(nsEvent, MetalNative.Selector("modifierFlags"));
+            if (keyCode == KeyCodeF1 && (modifiers & NsEventModifierFlagCommand) != 0)
+            {
+                if (!MetalNative.SendBool(nsEvent, MetalNative.Selector("isARepeat")))
+                {
+                    ToggleMetalPerformanceHud();
+                }
+
+                return 1; // handled: no system beep, no further routing
+            }
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Metal key-equivalent handler failed: {exception.Message}");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Cmd+F1: Apple's Metal Performance HUD on the CAMetalLayer (plain F1 keeps
+    /// the built-in CPU-rasterized perf overlay). Configured per Apple's
+    /// "Customizing Metal Performance HUD": developerHUDProperties takes
+    /// mode=default|disabled and logging=default, plus any MTL_HUD_* environment
+    /// keys directly in the dictionary — all three HUD flags (enabled, per-frame
+    /// logging, shader-compile logging) ride in one property set. Runs on the
+    /// AppKit main thread (the key-equivalent path), same thread as the render loop.
+    /// </summary>
+    private static void ToggleMetalPerformanceHud()
+    {
+        var layer = _metalLayer;
+        if (layer == 0)
+        {
+            return;
+        }
+
+        var setProperties = MetalNative.Selector("setDeveloperHUDProperties:");
+        if (!MetalNative.SendBool(layer, MetalNative.Selector("respondsToSelector:"), setProperties))
+        {
+            Console.Error.WriteLine("[LOADER][WARN] Metal Performance HUD unavailable on this macOS.");
+            return;
+        }
+
+        _metalHudVisible = !_metalHudVisible;
+        var pool = MetalNative.objc_autoreleasePoolPush();
+        try
+        {
+            var properties = MetalNative.Send(
+                MetalNative.Class("NSMutableDictionary"), MetalNative.Selector("dictionary"));
+            var setObjectForKey = MetalNative.Selector("setObject:forKey:");
+            if (_metalHudVisible)
+            {
+                var defaultValue = MetalNative.NsString("default");
+                MetalNative.SendVoid(properties, setObjectForKey, defaultValue, MetalNative.NsString("mode"));
+                MetalNative.SendVoid(properties, setObjectForKey, defaultValue, MetalNative.NsString("logging"));
+                MetalNative.SendVoid(
+                    properties,
+                    setObjectForKey,
+                    MetalNative.NsString("1"),
+                    MetalNative.NsString("MTL_HUD_LOG_SHADER_ENABLED"));
+            }
+            else
+            {
+                MetalNative.SendVoid(
+                    properties, setObjectForKey, MetalNative.NsString("disabled"), MetalNative.NsString("mode"));
+            }
+
+            MetalNative.SendVoid(layer, setProperties, properties);
+        }
+        finally
+        {
+            MetalNative.objc_autoreleasePoolPop(pool);
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] Metal Performance HUD {(_metalHudVisible ? "shown" : "hidden")} (Cmd+F1).");
+    }
 
     private static unsafe nint CreateRenderTimerTarget()
     {

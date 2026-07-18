@@ -190,6 +190,11 @@ internal static partial class MetalNative
     [return: MarshalAs(UnmanagedType.I1)]
     public static partial bool SendBool(nint receiver, nint selector);
 
+    /// <summary>One-argument BOOL sends, e.g. respondsToSelector:.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static partial bool SendBool(nint receiver, nint selector, nint argument);
+
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial double SendDouble(nint receiver, nint selector);
@@ -199,6 +204,10 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoid(nint receiver, nint selector, nint argument);
+
+    /// <summary>Two-object-argument void sends, e.g. setObject:forKey:.</summary>
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendVoid(nint receiver, nint selector, nint argument0, nint argument1);
 
     /// <summary>performSelectorOnMainThread:withObject:waitUntilDone: — the SEL
     /// to perform is itself an argument, followed by the object and the wait
