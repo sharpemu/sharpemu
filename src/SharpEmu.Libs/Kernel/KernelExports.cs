@@ -466,4 +466,30 @@ public static class KernelExports
         ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+
+    [SysAbiExport(
+        Nid = "VAzswvTOCzI",
+        ExportName = "unlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int UnlinkPosix(CpuContext ctx) =>
+        KernelMemoryCompatExports.KernelUnlink(ctx);
+
+    [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdx];
+        if (infoAddress != 0)
+        {
+            Span<byte> zero = stackalloc byte[0x130];
+            zero.Clear();
+            _ = ctx.Memory.TryWrite(infoAddress, zero);
+        }
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
+    }
 }

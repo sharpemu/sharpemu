@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Cpu;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
@@ -316,11 +317,15 @@ public sealed partial class DirectExecutionBackend
 		}
 		if (!isGuestWorker &&
 			!ActiveForcedGuestExit &&
-			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2) &&
-			TryForceGuestExitToHostStub(argPackPtr, num, num7, importStubEntry.Nid))
+			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2))
 		{
-			cpuContext[CpuRegister.Rax] = 1uL;
-			return 1uL;
+			// Break before the forced exit so the loop state is still live.
+			NotifyDebuggerStall(CpuStallKind.ImportLoop, in importStubEntry, num7, num, value, value2);
+			if (TryForceGuestExitToHostStub(argPackPtr, num, num7, importStubEntry.Nid))
+			{
+				cpuContext[CpuRegister.Rax] = 1uL;
+				return 1uL;
+			}
 		}
 		bool flag0 = importStubEntry.SuppressStrlenTrace;
 		bool flag = num7 >= 2156221920u && num7 <= 2156225024u;
@@ -583,25 +588,6 @@ public sealed partial class DirectExecutionBackend
 			cpuContext[CpuRegister.R15] = value8;
 			cpuContext[CpuRegister.Rdi] = value;
 			cpuContext[CpuRegister.Rsi] = value2;
-			
-			// Track main thread activity for diagnostics
-			if (Environment.CurrentManagedThreadId == HostMainThread.GetManagedThreadId() && !GuestThreadExecution.IsGuestThread)
-			{
-				HostMainThread.SetLastRip(num7); // return address
-				HostMainThread.SetLastImportNid(importStubEntry.Nid);
-				
-				// Log synchronization operations from main thread
-				if (importStubEntry.Nid == "Zxa0VhQVTsk" || // sceKernelWaitSema
-				    importStubEntry.Nid == "4czppHBiriw" || // sceKernelSignalSema
-				    importStubEntry.Nid == "188x57JYp0g")   // sceKernelCreateSema
-				{
-					Console.Error.WriteLine(
-						$"[MAIN_THREAD] Import#{num} {importStubEntry.Nid} " +
-						$"ret=0x{num7:X16} rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} " +
-						$"result={orbisGen2Result}");
-				}
-			}
-			
 			if (GuestThreadExecution.TryConsumeCurrentContextTransfer(out var transferTarget))
 			{
 				if (!TryPrepareGuestContextTransfer(
@@ -650,31 +636,20 @@ public sealed partial class DirectExecutionBackend
 					out var hasBlockContinuation,
 					out var blockWakeKey,
 					out var blockWaiter,
-					out var blockDeadlineTimestamp))
+					out var blockDeadlineTimestamp) &&
+				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
 			{
-				// Race-condition guard: a signal may have arrived between
-				// RequestCurrentThreadBlock (in the import handler) and this
-				// point.  Re-evaluate the wake predicate; if the waiter is
-				// already satisfied, skip the yield so the thread keeps
-				// running with the value already set by the import handler.
-				if (blockWaiter is not null && blockWaiter.TryWake())
+				if (hasBlockContinuation)
 				{
-					cpuContext[CpuRegister.Rax] = unchecked((ulong)blockWaiter.Resume());
+					RegisterBlockedGuestThreadContinuation(
+						GuestThreadExecution.CurrentGuestThreadHandle,
+						blockContinuation,
+						blockWakeKey,
+						blockWaiter,
+						blockDeadlineTimestamp);
 				}
-				else if (TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
-				{
-					if (hasBlockContinuation)
-					{
-						RegisterBlockedGuestThreadContinuation(
-							GuestThreadExecution.CurrentGuestThreadHandle,
-							blockContinuation,
-							blockWakeKey,
-							blockWaiter,
-							blockDeadlineTimestamp);
-					}
 
-					cpuContext[CpuRegister.Rax] = 0uL;
-				}
+				cpuContext[CpuRegister.Rax] = 0uL;
 			}
 			if (flag || flag2 || flag3)
 			{
@@ -1375,33 +1350,22 @@ public sealed partial class DirectExecutionBackend
 				out var blockContinuation,
 				out var hasBlockContinuation,
 				out var blockWakeKey,
-				out var blockResumeHandler,
-				out var blockWakeHandler,
+				out var blockWaiter,
 				out var blockDeadlineTimestamp);
-		if (consumedThreadBlock)
+		if (consumedThreadBlock &&
+			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
 		{
-			// Race-condition guard: a signal may have arrived between
-			// RequestCurrentThreadBlock and this point.  Re-evaluate the
-			// wake handler; if already satisfied, skip the yield.
-			if (blockWakeHandler is not null && blockWakeHandler())
+			if (hasBlockContinuation)
 			{
-				cpuContext[CpuRegister.Rax] = unchecked((ulong)(blockResumeHandler is not null ? blockResumeHandler() : 0));
+				RegisterBlockedGuestThreadContinuation(
+					GuestThreadExecution.CurrentGuestThreadHandle,
+					blockContinuation,
+					blockWakeKey,
+					blockWaiter,
+					blockDeadlineTimestamp);
 			}
-			else if (TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
-			{
-				if (hasBlockContinuation)
-				{
-					RegisterBlockedGuestThreadContinuation(
-						GuestThreadExecution.CurrentGuestThreadHandle,
-						blockContinuation,
-						blockWakeKey,
-						blockResumeHandler,
-						blockWakeHandler,
-						blockDeadlineTimestamp);
-				}
 
-				cpuContext[CpuRegister.Rax] = 0uL;
-			}
+			cpuContext[CpuRegister.Rax] = 0uL;
 		}
 		if (probeLeafReturn)
 		{
@@ -1593,18 +1557,11 @@ public sealed partial class DirectExecutionBackend
 			"qvMUCyyaCSI" or
 			"Vo5V8KAwCmk" or // sceSystemServiceHideSplashScreen
 			"TywrFKCoLGY" or // sceSaveDataInitialize3
-			"ZkZhskCPXFw" or // sceSaveDataInitialize
-			"l1NmDeDpNGU" or // sceSaveDataInitialize2
 			"dyIhnXq-0SM" or // sceSaveDataDirNameSearch
 			"ZP4e7rlzOUk" or // sceSaveDataMount3
-			"32HQAQdwM2o" or // sceSaveDataMount
-			"0z45PIH+SNI" or // sceSaveDataMount2
 			"ERKzksauAJA" or // sceSaveDataDialogGetStatus
 			"KK3Bdg1RWK0" or // sceSaveDataDialogUpdateStatus
 			"en7gNVnh878" or // sceSaveDataDialogIsReadyToDisplay
-			"G5kSn8PRHGA" or // sceSaveDataDialogParamInitialize
-			"45JWahOrYpE" or // sceSaveDataDialogParamInit
-			"Nv8c-Kb+DUM" or // sceVideoOutIsOutputSupported
 			"jO8DM8oyego" or // sceNpEntitlementAccessInitialize
 			"TFyU+KFBv54" or // sceNpEntitlementAccessGetAddcontEntitlementInfoList
 			"27bAgiJmOh0" or // pthread_cond_timedwait
