@@ -1995,11 +1995,7 @@ public static partial class KernelMemoryCompatExports
             }
             else
             {
-            // Unknown fd (PFS handles, etc.): treat as no-op close.
-            // TODO: track PFS fds explicitly and scope this fallback.
-
-            ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
         }
 
@@ -2037,8 +2033,7 @@ public static partial class KernelMemoryCompatExports
 
         if (stream is null)
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         long positionBefore;
@@ -6460,9 +6455,7 @@ public static partial class KernelMemoryCompatExports
             return TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
         }
 
-        // Unknown fd (PFS handles, etc.): return a default regular-file stat
-        var fallbackNow = DateTime.UtcNow;
-        return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0, fallbackNow, fallbackNow, fallbackNow, $"fallback:{fd}");
+        return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
     }
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
@@ -6607,9 +6600,7 @@ public static partial class KernelMemoryCompatExports
 
         if (directory is null)
         {
-            // Unknown fd (PFS handles, etc.): return 0 entries
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         var currentIndex = directory.NextIndex;
