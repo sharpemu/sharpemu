@@ -49,8 +49,9 @@ public sealed class SaveDataMemoryExportsTests : IDisposable
         SaveDataExports.ConfigureApplicationInfo(TitleId);
     }
 
+    // Saves are keyed by title id only (single-user layout): <root>/<titleId>/...
     private string MemoryPath =>
-        Path.Combine(_root, UserId.ToString(), TitleId, "sce_sdmemory", "memory.dat");
+        Path.Combine(_root, TitleId, "sce_sdmemory", "memory.dat");
 
     public void Dispose()
     {

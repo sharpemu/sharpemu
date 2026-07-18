@@ -214,6 +214,21 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    /// <summary>Removes a guest mount registered by <see cref="RegisterGuestPathMount"/>.</summary>
+    public static bool UnregisterGuestPathMount(string guestMountPoint)
+    {
+        var normalizedMountPoint = NormalizeGuestStatCachePath(guestMountPoint);
+        if (normalizedMountPoint is null)
+        {
+            return false;
+        }
+
+        lock (_guestMountGate)
+        {
+            return _guestMounts.Remove(normalizedMountPoint);
+        }
+    }
+
     internal static bool TryAllocateHleData(
         CpuContext ctx,
         ulong length,
