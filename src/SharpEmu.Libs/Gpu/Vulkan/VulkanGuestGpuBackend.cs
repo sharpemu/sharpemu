@@ -31,7 +31,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
-        if (!Gen5SpirvTranslator.TryCompileVertexShader(
+        var compiledSuccessfully = state.GraphicsStageMode == Gen5GraphicsStageMode.NggPassthrough
+            ? Gen5SpirvTranslator.TryCompileNggPassthroughVertexShader(
                 state,
                 evaluation,
                 out var compiled,
@@ -41,12 +42,24 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
                 imageBindingBase,
                 scalarRegisterBufferIndex,
                 requiredVertexOutputCount,
-                storageBufferOffsetAlignment))
+                storageBufferOffsetAlignment)
+            : Gen5SpirvTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out compiled,
+                out error,
+                globalBufferBase,
+                totalGlobalBufferCount,
+                imageBindingBase,
+                scalarRegisterBufferIndex,
+                requiredVertexOutputCount,
+                storageBufferOffsetAlignment);
+        if (!compiledSuccessfully)
         {
             return false;
         }
 
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        shader = new VulkanCompiledGuestShader(compiled.Spirv, compiled.SubgroupRequirements);
         return true;
     }
 
@@ -82,7 +95,7 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             return false;
         }
 
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        shader = new VulkanCompiledGuestShader(compiled.Spirv, compiled.SubgroupRequirements);
         return true;
     }
 
@@ -116,7 +129,7 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             return false;
         }
 
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        shader = new VulkanCompiledGuestShader(compiled.Spirv, compiled.SubgroupRequirements);
         return true;
     }
 
@@ -162,7 +175,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             primitiveType,
             indexBuffer,
             vertexBuffers,
-            renderState);
+            renderState,
+            vertexShader is null ? default : SubgroupRequirements(vertexShader),
+            SubgroupRequirements(pixelShader));
 
     public void SubmitDepthOnlyTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -191,7 +206,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             indexBuffer,
             vertexBuffers,
             renderState,
-            shaderAddress);
+            shaderAddress,
+            vertexShader is null ? default : SubgroupRequirements(vertexShader),
+            SubgroupRequirements(pixelShader));
 
     public void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -222,7 +239,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             vertexBuffers,
             renderState,
             depthTarget,
-            shaderAddress);
+            shaderAddress,
+            vertexShader is null ? default : SubgroupRequirements(vertexShader),
+            SubgroupRequirements(pixelShader));
 
     public void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -239,7 +258,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             attributeCount,
             width,
             height,
-            shaderAddress);
+            shaderAddress,
+            SubgroupRequirements(pixelShader));
 
     public long SubmitComputeDispatch(
         ulong shaderAddress,
@@ -278,14 +298,21 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             writesGlobalMemory,
             threadCountX,
             threadCountY,
-            threadCountZ);
+            threadCountZ,
+            SubgroupRequirements(computeShader));
 
     public bool TrySubmitGuestImage(
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) =>
-        VulkanVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
+        uint pitchInPixel,
+        uint guestFormat = 0) =>
+        VulkanVideoPresenter.TrySubmitGuestImage(
+            address,
+            width,
+            height,
+            pitchInPixel,
+            guestFormat);
 
     public bool TrySubmitOrderedGuestImageFlip(
         int videoOutHandle,
@@ -293,14 +320,16 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) =>
+        uint pitchInPixel,
+        uint guestFormat = 0) =>
         VulkanVideoPresenter.TrySubmitOrderedGuestImageFlip(
             videoOutHandle,
             displayBufferIndex,
             address,
             width,
             height,
-            pitchInPixel);
+            pitchInPixel,
+            guestFormat);
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
@@ -346,6 +375,13 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     private static byte[] Spirv(IGuestCompiledShader shader) =>
         shader is VulkanCompiledGuestShader vulkanShader
             ? vulkanShader.Spirv
+            : throw new InvalidOperationException(
+                $"shader handle of type {shader.GetType().Name} was not compiled by the Vulkan backend");
+
+    private static Gen5ShaderSubgroupRequirements SubgroupRequirements(
+        IGuestCompiledShader shader) =>
+        shader is VulkanCompiledGuestShader vulkanShader
+            ? vulkanShader.SubgroupRequirements
             : throw new InvalidOperationException(
                 $"shader handle of type {shader.GetType().Name} was not compiled by the Vulkan backend");
 }

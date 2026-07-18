@@ -234,7 +234,8 @@ public static class VideoOutExports
         uint TilingMode,
         uint Width,
         uint Height,
-        uint PitchInPixel);
+        uint PitchInPixel,
+        uint GuestFormat);
 
     [SysAbiExport(
         Nid = "Up36PTk687E",
@@ -859,7 +860,8 @@ public static class VideoOutExports
                 attribute.TilingMode,
                 attribute.Width,
                 attribute.Height,
-                attribute.PitchInPixel);
+                attribute.PitchInPixel,
+                MapPixelFormatToGuestTextureFormat(attribute.PixelFormat));
             return true;
         }
     }
@@ -1171,7 +1173,8 @@ public static class VideoOutExports
                 displayBuffer.Address,
                 displayBuffer.Width,
                 displayBuffer.Height,
-                displayBuffer.PitchInPixel);
+                displayBuffer.PitchInPixel,
+                displayBuffer.GuestFormat);
         }
 
         if (_dumpVideoOut)

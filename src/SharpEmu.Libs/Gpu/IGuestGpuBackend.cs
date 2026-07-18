@@ -154,7 +154,8 @@ internal interface IGuestGpuBackend
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel);
+        uint pitchInPixel,
+        uint guestFormat = 0);
 
     bool TrySubmitOrderedGuestImageFlip(
         int videoOutHandle,
@@ -162,7 +163,8 @@ internal interface IGuestGpuBackend
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel);
+        uint pitchInPixel,
+        uint guestFormat = 0);
 
     /// <summary>Registers a display buffer with its guest texture format tag.</summary>
     void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);

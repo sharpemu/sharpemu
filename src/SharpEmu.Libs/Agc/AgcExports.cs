@@ -3458,7 +3458,8 @@ public static partial class AgcExports
                         cachedDisplayBuffer.Address,
                         cachedDisplayBuffer.Width,
                         cachedDisplayBuffer.Height,
-                        cachedDisplayBuffer.PitchInPixel))
+                        cachedDisplayBuffer.PitchInPixel,
+                        cachedDisplayBuffer.GuestFormat))
                 {
                     TraceDisplayBuffer(
                         handle,
@@ -7880,7 +7881,16 @@ public static partial class AgcExports
             VulkanVideoPresenter.IsGpuGuestImageAvailable(
                 descriptor.Address,
                 descriptor.Format,
-                descriptor.NumberType))
+                descriptor.NumberType,
+                descriptor.Width,
+                descriptor.Height,
+                descriptor.BaseLevel,
+                descriptor.MipLevels,
+                descriptor.ResourceArrayLayers,
+                baseArrayLayer,
+                viewArrayLayers,
+                descriptor.Depth,
+                imageKind))
         {
             texture = new GuestDrawTexture(
                 descriptor.Address,
