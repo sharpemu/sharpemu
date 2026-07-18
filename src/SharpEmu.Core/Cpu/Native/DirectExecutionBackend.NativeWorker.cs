@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.HLE;
+using HlePosixHostStubs = SharpEmu.HLE.Host.Posix.PosixHostStubs;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -92,10 +93,8 @@ public sealed partial class DirectExecutionBackend
 
 	private NativeGuestExecutor? RentNativeGuestExecutor()
 	{
-		// NativeGuestExecutor emits a Win32 wait loop and creates it with
-		// kernel32!CreateThread. POSIX hosts use the established inline entry
-		// path until the worker loop has a pthread/eventfd implementation.
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
+		if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
+			NativeGuestWorkersDisabled)
 		{
 			return null;
 		}
@@ -186,6 +185,8 @@ public sealed partial class DirectExecutionBackend
 		private static nint _waitForSingleObjectAddress;
 		private static nint _setEventAddress;
 		private static nint _exitThreadAddress;
+		private static nint _posixWaitWorkerEventThunk;
+		private static nint _posixSignalWorkerEventThunk;
 
 		private readonly DirectExecutionBackend _backend;
 		// Windows uses AutoResetEvent (its SafeWaitHandle is a real kernel
@@ -249,35 +250,82 @@ public sealed partial class DirectExecutionBackend
 
 		public static NativeGuestExecutor? TryCreate(DirectExecutionBackend backend)
 		{
-			if (!EnsureKernel32Exports())
+			if (!EnsureWorkerLoopExports())
 			{
 				return null;
 			}
+
 			var executor = new NativeGuestExecutor(backend);
 			if (!executor.Initialize())
 			{
 				executor.Dispose();
 				return null;
 			}
+
 			return executor;
 		}
 
-		private static bool EnsureKernel32Exports()
+		private static bool EnsureWorkerLoopExports()
 		{
-			if (_exitThreadAddress != 0)
+			if (OperatingSystem.IsWindows())
 			{
-				return _waitForSingleObjectAddress != 0 && _setEventAddress != 0;
+				if (_exitThreadAddress != 0)
+				{
+					return _waitForSingleObjectAddress != 0 && _setEventAddress != 0;
+				}
+
+				var kernel32 = GetModuleHandle("kernel32.dll");
+				if (kernel32 == 0)
+				{
+					return false;
+				}
+
+				_waitForSingleObjectAddress = GetProcAddress(kernel32, "WaitForSingleObject");
+				_setEventAddress = GetProcAddress(kernel32, "SetEvent");
+				_exitThreadAddress = GetProcAddress(kernel32, "ExitThread");
+				return _waitForSingleObjectAddress != 0 &&
+					_setEventAddress != 0 &&
+					_exitThreadAddress != 0;
 			}
-			nint kernel32 = GetModuleHandle("kernel32.dll");
-			if (kernel32 == 0)
+
+			if (!OperatingSystem.IsLinux())
 			{
 				return false;
 			}
-			_waitForSingleObjectAddress = GetProcAddress(kernel32, "WaitForSingleObject");
-			_setEventAddress = GetProcAddress(kernel32, "SetEvent");
-			_exitThreadAddress = GetProcAddress(kernel32, "ExitThread");
-			return _waitForSingleObjectAddress != 0 && _setEventAddress != 0 && _exitThreadAddress != 0;
+
+			lock (PosixThunkGate)
+			{
+				if (_posixWaitWorkerEventThunk == 0)
+				{
+					_posixWaitWorkerEventThunk = PosixHostStubs.CreateWin64ToSysVThunk(
+						(nint)(delegate* unmanaged<nint, uint, int>)&WaitWorkerEvent);
+					_posixSignalWorkerEventThunk = PosixHostStubs.CreateWin64ToSysVThunk(
+						(nint)(delegate* unmanaged<nint, int>)&SignalWorkerEvent);
+				}
+			}
+
+			_waitForSingleObjectAddress = _posixWaitWorkerEventThunk;
+			_setEventAddress = _posixSignalWorkerEventThunk;
+			return _waitForSingleObjectAddress != 0 && _setEventAddress != 0;
 		}
+
+		[UnmanagedCallersOnly]
+		private static int WaitWorkerEvent(nint handle, uint timeout)
+		{
+			return PosixHostStubs.WaitWorkerEvent(
+				handle,
+				timeout == uint.MaxValue ? -1 : unchecked((int)timeout))
+				? 0
+				: 258;
+		}
+
+		[UnmanagedCallersOnly]
+		private static int SignalWorkerEvent(nint handle)
+		{
+			return PosixHostStubs.SignalWorkerEvent(handle) ? 1 : 0;
+		}
+
+
 
 		private bool Initialize()
 		{
@@ -387,10 +435,19 @@ public sealed partial class DirectExecutionBackend
 			// Signal done so a Run() racing teardown cannot park forever; a stopped
 			// worker is never re-rented, so the stale signal is unobservable.
 			EmitSetDoneEvent();
-			Emit(0x31); Emit(0xC9);                         // xor ecx, ecx
-			EmitMovRaxImm64((ulong)_exitThreadAddress);
-			EmitCallRax();
-			Emit(0xCC);                                     // int3 (ExitThread never returns)
+			if (OperatingSystem.IsWindows())
+			{
+				Emit(0x31); Emit(0xC9); // xor ecx, ecx
+				EmitMovRaxImm64((ulong)_exitThreadAddress);
+				EmitCallRax();
+				Emit(0xCC); // int3 (ExitThread never returns)
+			}
+			else
+			{
+				Emit(0x48); Emit(0x83); Emit(0xC4); Emit(0x28); // add rsp, 0x28
+				Emit(0x31); Emit(0xC0); // xor eax, eax
+				Emit(0xC3); // ret (pthread start routine exit)
+			}
 			*(int*)(code + stopJump) = stopOffset - (stopJump + sizeof(int));
 			*(int*)(code + skipJump) = skipEntryOffset - (skipJump + sizeof(int));
 
@@ -400,13 +457,25 @@ public sealed partial class DirectExecutionBackend
 				return false;
 			}
 			FlushInstructionCache(GetCurrentProcess(), _loopStub, LoopStubSize);
-			_threadHandle = CreateThread(
-				0,
-				WorkerStackReservation,
-				(nint)_loopStub,
-				0,
-				StackSizeParamIsAReservation,
-				out _nativeThreadId);
+			if (OperatingSystem.IsWindows())
+			{
+				_threadHandle = CreateThread(
+					0,
+					WorkerStackReservation,
+					(nint)_loopStub,
+					0,
+					StackSizeParamIsAReservation,
+					out _nativeThreadId);
+			}
+			else
+			{
+				_threadHandle = HlePosixHostStubs.CreateWorkerThread(
+					(nint)_loopStub,
+					0,
+					WorkerStackReservation,
+					out _nativeThreadId);
+			}
+
 			if (_threadHandle == 0)
 			{
 				return false;
@@ -465,7 +534,10 @@ public sealed partial class DirectExecutionBackend
 				return;
 			}
 
-			_ = PosixHostStubs.SignalWorkerEvent(_workSemaphore);
+			if (_workSemaphore != 0)
+			{
+				_ = PosixHostStubs.SignalWorkerEvent(_workSemaphore);
+			}
 		}
 
 		private void WaitWorkCompleted()
@@ -616,8 +688,29 @@ public sealed partial class DirectExecutionBackend
 			var exited = _threadHandle == 0;
 			if (_threadHandle != 0)
 			{
-				exited = WaitForSingleObject(_threadHandle, 1000u) == 0u;
-				CloseHandle(_threadHandle);
+				if (OperatingSystem.IsWindows())
+				{
+					exited = WaitForSingleObject(_threadHandle, 1000u) == 0u;
+					CloseHandle(_threadHandle);
+				}
+				else
+				{
+					// pthread_kill(thread, 0) reports a returned-but-unjoined
+					// thread as live, so confirm the worker reached its stop
+					// path through the done-event it signals there, then reap it
+					// with a blocking join. If it never signals it is wedged in
+					// guest code: leave it detached and leak the run loop rather
+					// than free memory it may still execute.
+					exited = PosixHostStubs.WaitWorkerEvent(_doneSemaphore, 1000);
+					if (exited)
+					{
+						HlePosixHostStubs.JoinWorkerThread(_threadHandle);
+					}
+					else
+					{
+						HlePosixHostStubs.CloseWorkerThreadHandle(_threadHandle);
+					}
+				}
 				_threadHandle = 0;
 			}
 			if (!exited)
