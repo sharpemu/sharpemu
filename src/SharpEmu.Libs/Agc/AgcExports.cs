@@ -5039,6 +5039,14 @@ public static partial class AgcExports
                     _ => false,
                 });
 
+                // Latch waiters against the written value so a same-frame label
+                // reset cannot lose the wakeup (see ApplySubmittedReleaseMem).
+                if (wroteData && dataSelection is 1 or 2)
+                {
+                    GpuWaitRegistry.LatchSatisfiedByValue(
+                        ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                }
+
                 if (tracePacket)
                 {
                     TraceAgc(
@@ -5103,6 +5111,16 @@ public static partial class AgcExports
                         unchecked((ulong)System.Diagnostics.Stopwatch.GetTimestamp())),
                     _ => false,
                 };
+
+                // Latch waiters against the value we just wrote: the guest reuses
+                // these labels and can reset them to 0 before the wake pass reads
+                // memory, which otherwise loses the wakeup and stalls at a black
+                // screen (Astro Bot: graphics queue waiting on a compute EOP label).
+                if (wroteData && dataSelection is 1 or 2)
+                {
+                    GpuWaitRegistry.LatchSatisfiedByValue(
+                        ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                }
 
                 if (tracePacket)
                 {

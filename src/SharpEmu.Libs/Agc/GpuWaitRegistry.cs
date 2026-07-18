@@ -37,6 +37,12 @@ internal static class GpuWaitRegistry
         public long RegisteredTicks;
         public bool StaleReported;
         public object? State;
+        // Latched by LatchSatisfiedByValue when a producer wrote a value that
+        // satisfies this waiter. The label is frequently reused (reset to 0 for
+        // the next frame) immediately after the producing write, so re-reading
+        // guest memory at wake time can miss the transient satisfied window.
+        // Latching records satisfaction at the moment of the write instead.
+        public bool Latched;
     }
 
     private static readonly object _gate = new();
@@ -114,8 +120,14 @@ internal static class GpuWaitRegistry
                         continue;
                     }
 
-                    var value = readValue(address, list[i].Is64Bit);
-                    if (value is null || !Compare(list[i], value.Value))
+                    var satisfied = list[i].Latched;
+                    if (!satisfied)
+                    {
+                        var value = readValue(address, list[i].Is64Bit);
+                        satisfied = value is not null && Compare(list[i], value.Value);
+                    }
+
+                    if (!satisfied)
                     {
                         continue;
                     }
@@ -234,6 +246,43 @@ internal static class GpuWaitRegistry
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// Records satisfaction for every waiter at <paramref name="address"/> whose
+    /// condition is met by <paramref name="value"/> — the value a producer just
+    /// wrote to that label. Called from the ordered producer side effect so a
+    /// same-frame label reset cannot lose the wakeup. The waiters stay registered
+    /// (latched) and are drained by the next CollectSatisfied. Returns true when
+    /// at least one waiter latched, so the caller can trigger a wake pass.
+    /// </summary>
+    public static bool LatchSatisfiedByValue(object memory, ulong address, ulong value)
+    {
+        var latchedAny = false;
+        lock (_gate)
+        {
+            if (!_waiters.TryGetValue(address, out var list))
+            {
+                return false;
+            }
+
+            for (var i = 0; i < list.Count; i++)
+            {
+                var waiter = list[i];
+                if (waiter.Latched ||
+                    !ReferenceEquals(waiter.Memory, memory) ||
+                    !Compare(waiter, value))
+                {
+                    continue;
+                }
+
+                waiter.Latched = true;
+                list[i] = waiter;
+                latchedAny = true;
+            }
+        }
+
+        return latchedAny;
     }
 
     public static bool Compare(in WaitingDcb waiter, ulong value)
