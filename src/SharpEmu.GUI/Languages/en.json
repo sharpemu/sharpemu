@@ -169,5 +169,6 @@
   "Updater.Status.Installing": "Installing update…",
   "Updater.Status.Timeout": "Update check timed out after 10 seconds.",
   "Updater.Status.Failed": "Could not check for updates.",
+  "Updater.Status.ChecksumFailed": "Downloaded update failed SHA-256 verification.",
   "Updater.Status.Unsupported": "Automatic updating requires a Windows, Linux or macOS x64 build."
 }

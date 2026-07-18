@@ -140,5 +140,6 @@
   "Updater.Status.Installing": "Güncelleme kuruluyor…",
   "Updater.Status.Timeout": "Güncelleme denetimi 10 saniye sonra zaman aşımına uğradı.",
   "Updater.Status.Failed": "Güncellemeler denetlenemedi.",
+  "Updater.Status.ChecksumFailed": "İndirilen güncelleme SHA-256 doğrulamasını geçemedi.",
   "Updater.Status.Unsupported": "Otomatik güncelleme Windows, Linux veya macOS x64 build'i gerektirir."
 }
