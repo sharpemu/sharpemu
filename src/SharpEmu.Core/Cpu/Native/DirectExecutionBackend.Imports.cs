@@ -532,7 +532,8 @@ public sealed partial class DirectExecutionBackend
 			}
 			DeliverPendingGuestExceptionAtSafePoint(
 				cpuContext,
-				CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
+				argPackPtr,
+				num7);
 			StoreImportVectorReturn(cpuContext, argPackPtr);
 			if (dispatchResolved &&
 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
@@ -1328,7 +1329,8 @@ public sealed partial class DirectExecutionBackend
 		}
 		DeliverPendingGuestExceptionAtSafePoint(
 			cpuContext,
-			CaptureImportBoundaryContinuation(cpuContext, argPackPtr, returnRip));
+			argPackPtr,
+			returnRip);
 		StoreImportVectorReturn(cpuContext, argPackPtr);
 
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)

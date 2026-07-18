@@ -711,6 +711,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static ulong _currentExternalGuestThreadHandle;
 
 	private readonly Dictionary<ulong, PendingGuestException> _pendingGuestExceptions = new Dictionary<ulong, PendingGuestException>();
+	private int _pendingGuestExceptionCount;
 
 	private readonly HashSet<ulong> _activeGuestExceptionDeliveries = new HashSet<ulong>();
 
@@ -3948,10 +3949,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					// unwinding. Unity can begin its next stop-the-world cycle in
 					// that window; treating the new raise as part of the old delivery
 					// strands the collector waiting for an acknowledgement.
-					_pendingGuestExceptions[threadHandle] = new PendingGuestException(
+					SetPendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						external.ExceptionStackBase);
+						external.ExceptionStackBase));
 					return true;
 				}
 
@@ -3960,10 +3961,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				// managed thread corrupts the worker's control state. Queue the
 				// request and let that exact executor consume it at its next HLE
 				// boundary, where the original guest thread is safely paused.
-				_pendingGuestExceptions[threadHandle] = new PendingGuestException(
+				SetPendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					external.ExceptionStackBase);
+					external.ExceptionStackBase));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -4008,17 +4009,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				}
 				if (target.ExceptionDeliveryActive)
 				{
-					_pendingGuestExceptions[threadHandle] = new PendingGuestException(
+					SetPendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						exceptionStackBase);
+						exceptionStackBase));
 					return true;
 				}
 
-				_pendingGuestExceptions[threadHandle] = new PendingGuestException(
+				SetPendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					exceptionStackBase);
+					exceptionStackBase));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -4179,7 +4180,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					RestoreInterruptedGuestThread();
 					if (target.State == GuestThreadRunState.Blocked &&
 						!target.ExecutorActive &&
-						_pendingGuestExceptions.Remove(threadHandle, out var queued))
+						TryTakePendingGuestExceptionLocked(threadHandle, out var queued))
 					{
 						followUp = queued;
 					}
@@ -4263,8 +4264,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private void DeliverPendingGuestExceptionAtSafePoint(
 		CpuContext currentContext,
-		GuestCpuContinuation interruptedContinuation)
+		nint argPackPtr,
+		ulong returnRip)
 	{
+		// Exceptions are delivered at import boundaries. If one is queued just
+		// after this read, the following boundary will observe it.
+		if (Volatile.Read(ref _pendingGuestExceptionCount) == 0)
+		{
+			return;
+		}
+
 		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
 		if (threadHandle == 0)
 		{
@@ -4278,7 +4287,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return;
 			}
 
-			if (!_pendingGuestExceptions.Remove(threadHandle, out pending))
+			if (!TryTakePendingGuestExceptionLocked(threadHandle, out pending))
 			{
 				return;
 			}
@@ -4290,6 +4299,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		const ulong callbackStackOffset = 0x1000;
 		const ulong callbackStackSize = 0xF000;
 		var exceptionContextAddress = pending.ExceptionStackBase + 0x100;
+		var interruptedContinuation = CaptureImportBoundaryContinuation(
+			currentContext,
+			argPackPtr,
+			returnRip);
 		try
 		{
 			if (!TryWriteGuestExceptionContext(
@@ -4338,6 +4351,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_activeGuestExceptionDeliveries.Remove(threadHandle);
 			}
 		}
+	}
+
+	private void SetPendingGuestExceptionLocked(
+		ulong threadHandle,
+		PendingGuestException pending)
+	{
+		_pendingGuestExceptions[threadHandle] = pending;
+		Volatile.Write(ref _pendingGuestExceptionCount, _pendingGuestExceptions.Count);
+	}
+
+	private bool TryTakePendingGuestExceptionLocked(
+		ulong threadHandle,
+		out PendingGuestException pending)
+	{
+		if (!_pendingGuestExceptions.Remove(threadHandle, out pending))
+		{
+			return false;
+		}
+
+		Volatile.Write(ref _pendingGuestExceptionCount, _pendingGuestExceptions.Count);
+		return true;
 	}
 
 	private static bool TryWriteGuestExceptionContext(
@@ -4434,6 +4468,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_guestThreads.Clear();
 			_externalGuestThreads.Clear();
 			_pendingGuestExceptions.Clear();
+			Volatile.Write(ref _pendingGuestExceptionCount, 0);
 			_activeGuestExceptionDeliveries.Clear();
 		}
 
