@@ -42,6 +42,23 @@ const ulong ProgramAddress = 0x100000;
         0xD56C0005, 0x00020501, // v_mul_hi_i32 v5, v1, v2
         0xBF810000,             // s_endpgm
     ]),
+    // Packed f16 (VOP3P) arithmetic, including the fused multiply-add. The
+    // constants pin the double-rounding regression from the VOP3P first slice:
+    // fma(0x4100, 0x7522, 0x04EA) must round once to 0x7A6B (an f32
+    // multiply-add then pack yields 0x7A6A). The last fma exercises the src2
+    // neg_lo/neg_hi modifier path.
+    ("pk-f16", true, [
+        0x7E0002FF, 0x41004100, // v_mov_b32 v0, 0x41004100 (2.5 packed)
+        0x7E0202FF, 0x75227522, // v_mov_b32 v1, 0x75227522 (21024 packed)
+        0x7E0402FF, 0x04EA04EA, // v_mov_b32 v2, 0x04EA04EA (~7.496e-5 packed)
+        0xCC0E4003, 0x1C0A0300, // v_pk_fma_f16 v3, v0, v1, v2
+        0xCC0F4004, 0x18020500, // v_pk_add_f16 v4, v0, v2
+        0xCC104005, 0x18020300, // v_pk_mul_f16 v5, v0, v1
+        0xCC114006, 0x18020300, // v_pk_min_f16 v6, v0, v1
+        0xCC124007, 0x18020300, // v_pk_max_f16 v7, v0, v1
+        0xCC0E4408, 0x9C0A0300, // v_pk_fma_f16 v8, v0, v1, neg_lo:[0,0,1] neg_hi:[0,0,1] v2
+        0xBF810000,             // s_endpgm
+    ]),
     ("mrt", true, [
         0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
         0x7E0202FF, 0x00000000, // v_mov_b32 v1, 0.0f
@@ -115,7 +132,10 @@ const ulong ProgramAddress = 0x100000;
     // Executable end-to-end test: compute with real ALU instructions, then
     // buffer_store_dword results to guestBuffers[0] at offsets 0/4/8, prove
     // that a store with EXEC=0 does not land (offset 12 stays sentinel), and
-    // that stores work again after EXEC is restored (offset 16).
+    // that stores work again after EXEC is restored (offset 16). Offsets 20/24
+    // hold the packed fused f16 FMA and its negated-addend twin, whose exact
+    // results (0x7A6B7A6B / 0x7A6A7A6A) straddle an f16 midpoint and therefore
+    // catch any double-rounding regression on real hardware.
     ("exec", true, [
         0xBFA10001,             // s_clause 0x1 (hint no-op in an executed program, needs #108)
         0x7E0002FF, 0x3FC00000, // v_mov_b32 v0, 1.5f
@@ -133,6 +153,13 @@ const ulong ProgramAddress = 0x100000;
         0xE070000C, 0x80020200, // buffer_store_dword v2, off, s[8:11], 0 offset:12 (masked, must not land)
         0xBEFE03C1,             // s_mov_b32 exec_lo, -1      -> lane active again
         0xE0700010, 0x80020000, // buffer_store_dword v0, off, s[8:11], 0 offset:16
+        0x7E0E02FF, 0x41004100, // v_mov_b32 v7, 0x41004100 (2.5 packed)
+        0x7E1002FF, 0x75227522, // v_mov_b32 v8, 0x75227522 (21024 packed)
+        0x7E1202FF, 0x04EA04EA, // v_mov_b32 v9, 0x04EA04EA (~7.496e-5 packed)
+        0xCC0E400A, 0x1C261107, // v_pk_fma_f16 v10, v7, v8, v9
+        0xCC0E440B, 0x9C261107, // v_pk_fma_f16 v11, v7, v8, neg_lo:[0,0,1] neg_hi:[0,0,1] v9
+        0xE0700014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0 offset:20
+        0xE0700018, 0x80020B00, // buffer_store_dword v11, off, s[8:11], 0 offset:24
         0xBF810000,             // s_endpgm
     ]),
 ];

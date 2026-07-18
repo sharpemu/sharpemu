@@ -953,22 +953,13 @@ public static partial class Gen5SpirvTranslator
                 case "VPkMulF16":
                 case "VPkMinF16":
                 case "VPkMaxF16":
+                case "VPkFmaF16":
                     if (!TryEmitPackedF16(instruction, out result, out error))
                     {
                         return false;
                     }
 
                     break;
-                case "VPkFmaF16":
-                    // Deliberately loud: a fused f16 FMA rounds the product+add once,
-                    // whereas doing the multiply-add in f32 and rounding to f16 at the
-                    // end double-rounds. Concrete miss: fma(0x4100, 0x7522, 0x04EA) is
-                    // 0x7A6B fused but 0x7A6A via f32. Exact emulation (round-to-odd
-                    // f32 product then RNE pack) is a planned follow-up slice.
-                    error =
-                        $"unsupported vop3p opcode {instruction.Opcode} " +
-                        "(fused f16 FMA requires single-rounding; deferred to a later slice)";
-                    return false;
                 default:
                     error = $"unsupported vector opcode {instruction.Opcode}";
                     return false;
@@ -1008,8 +999,9 @@ public static partial class Gen5SpirvTranslator
         // even. For add and mul this is bit-exact to a true f16 op (the f32 result
         // rounds losslessly to f16 by the double-rounding theorem; a f16 product even
         // fits in f32 exactly). min/max carry no rounding, so they are exact once the
-        // conversions are. v_pk_fma_f16 is intentionally not routed here because a
-        // fused f16 FMA cannot be reproduced by an f32 multiply-add plus a pack.
+        // conversions are. v_pk_fma_f16 cannot be reproduced by a plain f32
+        // multiply-add plus a pack (that double-rounds), so it goes through the
+        // round-to-odd sequence in EmitPackedF16FusedMultiplyAdd instead.
         private bool TryEmitPackedF16(
             Gen5ShaderInstruction instruction,
             out uint result,
@@ -1029,7 +1021,8 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            for (var index = 0; index < 2; index++)
+            var sourceCount = instruction.Opcode == "VPkFmaF16" ? 3 : 2;
+            for (var index = 0; index < sourceCount; index++)
             {
                 var source = instruction.Sources[index];
                 if (source.Kind is not (Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister))
@@ -1054,6 +1047,12 @@ public static partial class Gen5SpirvTranslator
         {
             var left = EmitPackedF16Operand(instruction, control, 0, highLane);
             var right = EmitPackedF16Operand(instruction, control, 1, highLane);
+            if (instruction.Opcode == "VPkFmaF16")
+            {
+                var addend = EmitPackedF16Operand(instruction, control, 2, highLane);
+                return EmitFloatToHalf(EmitPackedF16FusedMultiplyAdd(left, right, addend));
+            }
+
             var value = instruction.Opcode switch
             {
                 "VPkAddF16" => _module.AddInstruction(SpirvOp.FAdd, _floatType, left, right),
@@ -1063,6 +1062,75 @@ public static partial class Gen5SpirvTranslator
                 _ => left,
             };
             return EmitFloatToHalf(Bitcast(_uintType, value));
+        }
+
+        // Fused f16 multiply-add with a single rounding, emulated in f32 without the
+        // Float16 capability. The f32 product of two widened f16 values is exact
+        // (11-bit significands, and the exponent stays inside the f32 normal range:
+        // any non-zero product magnitude is in [2^-48, 2^33]), so only the addition
+        // rounds. An f32 add then an f16 pack would round twice; instead the add is
+        // corrected to round-to-odd, which a following round-to-nearest-even pack
+        // turns into the exactly-once-rounded fused result (innocuous double rounding
+        // holds because f32 carries 24 significand bits >= 11 + 2).
+        //
+        // sum = RN(product + addend); Knuth's 2Sum recovers the exact residual
+        // (product + addend) - sum from four more RN ops. 2Sum is exact for any two
+        // finite f32 inputs; no intermediate here can overflow (|product| < 2^33,
+        // |addend| < 2^16) and none can enter the f32 subnormal range (every finite
+        // value in play is a multiple of 2^-48 by construction), so implementation
+        // f32 denorm-flush modes never see a denormal. If the residual says the sum
+        // was inexact and the sum's significand is even, step one ulp towards the
+        // true value: consecutive floats have consecutive sign-magnitude encodings,
+        // so that neighbour is the enclosing float with the odd significand.
+        //
+        // Inf/NaN inputs make the residual NaN (e.g. sum - addend = Inf - Inf); the
+        // ordered compare below is then false and the IEEE sum passes through
+        // unchanged. A residual of zero also covers the exact-sum case, where the
+        // parity fix must not fire. Returns the round-to-odd f32 bit pattern.
+        private uint EmitPackedF16FusedMultiplyAdd(uint left, uint right, uint addend)
+        {
+            var product = EmitPreciseFloat(SpirvOp.FMul, left, right);
+            var sum = EmitPreciseFloat(SpirvOp.FAdd, product, addend);
+
+            var productPart = EmitPreciseFloat(SpirvOp.FSub, sum, addend);
+            var addendPart = EmitPreciseFloat(SpirvOp.FSub, sum, productPart);
+            var productError = EmitPreciseFloat(SpirvOp.FSub, product, productPart);
+            var addendError = EmitPreciseFloat(SpirvOp.FSub, addend, addendPart);
+            var residual = EmitPreciseFloat(SpirvOp.FAdd, productError, addendError);
+
+            var sumBits = Bitcast(_uintType, sum);
+            var residualBits = Bitcast(_uintType, residual);
+            var inexact = _module.AddInstruction(
+                SpirvOp.FOrdNotEqual, _boolType, residual, Float(0));
+            var evenSignificand = Equal(BitwiseAnd(sumBits, UInt(1)), 0);
+            var adjust = _module.AddInstruction(
+                SpirvOp.LogicalAnd, _boolType, inexact, evenSignificand);
+
+            // Residual sign relative to the sum picks the step direction: same sign
+            // means the true value lies away from zero (encoding + 1), opposite sign
+            // means towards zero (encoding - 1). The sum cannot be zero here (any
+            // inexact sum has magnitude >= 2^-48) and cannot be the largest finite
+            // value (its significand is odd), so the step never crosses zero or Inf.
+            var towardZero = IsNotZero(
+                BitwiseAnd(BitwiseXor(sumBits, residualBits), UInt(0x8000_0000)));
+            var stepped = SelectU(
+                towardZero,
+                ISubU(sumBits, UInt(1)),
+                IAdd(sumBits, UInt(1)));
+            return SelectU(adjust, stepped, sumBits);
+        }
+
+        // A float op the driver must evaluate exactly as written. The 2Sum
+        // residual above is error-free only op by op; without NoContraction
+        // driver compilers fold the sequence (e.g. contract product+sum into an
+        // f32 fma and simplify the rebuilt terms), collapsing the residual to
+        // zero. Observed on AMD RDNA3 Windows: the pinned midpoint case decays
+        // to the double-rounded result unless every op in the chain is marked.
+        private uint EmitPreciseFloat(SpirvOp operation, uint left, uint right)
+        {
+            var value = _module.AddInstruction(operation, _floatType, left, right);
+            _module.AddDecoration(value, SpirvDecoration.NoContraction);
+            return value;
         }
 
         // Reads source `index`, selects the half feeding this lane (op_sel / op_sel_hi),
