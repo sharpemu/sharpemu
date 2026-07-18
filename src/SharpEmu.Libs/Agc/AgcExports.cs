@@ -7878,9 +7878,13 @@ public static partial class AgcExports
             return true;
         }
 
+        // Upload-known (not plain availability): the presenter's answer goes
+        // generation-stale when the guest CPU rewrites a CPU-backed image
+        // (video planes, streamed font atlases), which routes this draw back
+        // through the texel copy below so the refresh path re-uploads.
         if (!isStorage &&
             descriptor.Address != 0 &&
-            GuestGpu.Current.IsGpuGuestImageAvailable(
+            GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
                 descriptor.NumberType))
@@ -7987,6 +7991,19 @@ public static partial class AgcExports
         // (skipping would leave the draw with no pixels and a fallback
         // texture for the frame — visible flicker on animated textures).
         var sampler = ToGuestSampler(samplerDescriptor);
+        // Track the guest allocation before reading its texels so a CPU
+        // rewrite landing after the copy still bumps the write generation.
+        // The generation rides on the texture and is recorded by the
+        // presenter after upload, where the upload-known skip compares it
+        // against the tracker to force fresh texels for rewritten memory.
+        SharpEmu.HLE.GuestImageWriteTracker.Track(
+            descriptor.Address,
+            physicalSourceByteCount,
+            source: "agc.decoded-texture");
+        var hasWriteGeneration =
+            SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                descriptor.Address,
+                out var writeGeneration);
         if (!_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
@@ -8078,7 +8095,8 @@ public static partial class AgcExports
             Pitch: sourceWidth,
             TileMode: descriptor.TileMode,
             DstSelect: descriptor.DstSelect,
-            Sampler: ToGuestSampler(samplerDescriptor));
+            Sampler: ToGuestSampler(samplerDescriptor),
+            WriteGeneration: hasWriteGeneration ? writeGeneration : -1);
         return true;
     }
 

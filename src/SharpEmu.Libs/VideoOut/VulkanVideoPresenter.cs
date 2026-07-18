@@ -472,6 +472,11 @@ internal static unsafe class VulkanVideoPresenter
     private static readonly Queue<Presentation> _pendingGuestImagePresentations = new();
     private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
     private static readonly Dictionary<ulong, uint> _availableGuestImages = new();
+    // Write-tracker generation last uploaded for a CPU-backed guest image.
+    // A newer generation in the tracker means the guest CPU rewrote the
+    // memory (video frames, streamed atlases) and the upload-known skip in
+    // draw translation must ship fresh texels instead of reusing the image.
+    private static readonly Dictionary<ulong, long> _cpuBackedUploadGenerations = new();
     private static readonly Dictionary<(int Handle, int BufferIndex), long>
         _lastOrderedGuestFlipVersions = new();
     private static long _orderedGuestFlipVersionSequence;
@@ -811,6 +816,7 @@ internal static unsafe class VulkanVideoPresenter
         _pendingGuestImagePresentations.Clear();
         _guestImageWorkSequences.Clear();
         _availableGuestImages.Clear();
+        _cpuBackedUploadGenerations.Clear();
         _lastOrderedGuestFlipVersions.Clear();
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
@@ -1790,9 +1796,30 @@ internal static unsafe class VulkanVideoPresenter
 
         lock (_gate)
         {
-            return _availableGuestImages.TryGetValue(address, out var availableFormat) &&
+            var known =
+                _availableGuestImages.TryGetValue(address, out var availableFormat) &&
                     availableFormat == guestFormat ||
                 _pendingGuestImageUploads.ContainsKey((address, guestFormat));
+            if (!known)
+            {
+                return false;
+            }
+
+            // CPU-backed images (video frames, streamed atlases) go stale when
+            // the guest CPU rewrites the memory after the recorded upload; a
+            // changed write-tracker generation forces a fresh texel copy so
+            // the refresh path can re-upload. GPU-rendered images have no
+            // generation entry and keep the plain availability answer.
+            if (_cpuBackedUploadGenerations.TryGetValue(address, out var uploadedGeneration) &&
+                SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                    address,
+                    out var currentGeneration) &&
+                currentGeneration != uploadedGeneration)
+            {
+                return false;
+            }
+
+            return true;
         }
     }
 
@@ -2990,6 +3017,10 @@ internal static unsafe class VulkanVideoPresenter
             public Sampler Sampler;
             public GuestImageResource? GuestImage;
             public GuestDepthResource? GuestDepth;
+            // Write-tracker generation of the guest memory the staged pixels
+            // were read from; -1 when unknown. Recorded on the guest image
+            // after upload so stale-content skips can be detected.
+            public long WriteGeneration = -1;
             // A sampled render-target alias cannot remain bound to the same
             // image while that image is a color attachment. The per-draw
             // snapshot uses this source to copy the target's pre-draw contents
@@ -7004,6 +7035,18 @@ internal static unsafe class VulkanVideoPresenter
             if ((guestImage.Initialized || guestImage.InitialUploadPending) &&
                 guestImage.CpuContentFingerprint == fingerprint)
             {
+                // Content unchanged despite a newer write generation: advance
+                // the recorded generation so later draws can skip the copy
+                // again instead of restaging identical texels every draw.
+                if (texture.WriteGeneration >= 0)
+                {
+                    lock (_gate)
+                    {
+                        _cpuBackedUploadGenerations[texture.Address] =
+                            texture.WriteGeneration;
+                    }
+                }
+
                 return false;
             }
 
@@ -7033,6 +7076,7 @@ internal static unsafe class VulkanVideoPresenter
                 GuestImage = guestImage,
                 CpuContentFingerprint = fingerprint,
                 UpdatesCpuContent = true,
+                WriteGeneration = texture.WriteGeneration,
             };
             return true;
         }
@@ -7718,6 +7762,7 @@ internal static unsafe class VulkanVideoPresenter
                 SamplerState = texture.Sampler,
                 CpuContentFingerprint = contentFingerprint,
                 UpdatesCpuContent = texture.Address != 0,
+                WriteGeneration = texture.WriteGeneration,
             };
 
             if (texture.Address != 0 &&
@@ -7748,6 +7793,12 @@ internal static unsafe class VulkanVideoPresenter
                     if (guestFormat != 0)
                     {
                         _availableGuestImages[texture.Address] = guestFormat;
+                    }
+
+                    if (texture.WriteGeneration >= 0)
+                    {
+                        _cpuBackedUploadGenerations[texture.Address] =
+                            texture.WriteGeneration;
                     }
 
                     _guestImageExtents[texture.Address] =
@@ -11222,6 +11273,7 @@ internal static unsafe class VulkanVideoPresenter
                 lock (_gate)
                 {
                     _availableGuestImages.Remove(target.Address);
+                    _cpuBackedUploadGenerations.Remove(target.Address);
                     _guestImageExtents.Remove(target.Address);
                 }
 
@@ -11246,6 +11298,7 @@ internal static unsafe class VulkanVideoPresenter
                 _guestImages.Add(target.Address, retained);
                 lock (_gate)
                 {
+                    _cpuBackedUploadGenerations.Remove(target.Address);
                     _guestImageExtents[target.Address] = (
                         target.Width,
                         target.Height,
@@ -13873,6 +13926,11 @@ internal static unsafe class VulkanVideoPresenter
                     if (texture.UpdatesCpuContent)
                     {
                         guestImage.CpuContentFingerprint = texture.CpuContentFingerprint;
+                        if (texture.WriteGeneration >= 0)
+                        {
+                            _cpuBackedUploadGenerations[guestImage.Address] =
+                                texture.WriteGeneration;
+                        }
                     }
                 }
             }
@@ -15190,6 +15248,7 @@ internal static unsafe class VulkanVideoPresenter
             lock (_gate)
             {
                 _availableGuestImages.Clear();
+                _cpuBackedUploadGenerations.Clear();
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
