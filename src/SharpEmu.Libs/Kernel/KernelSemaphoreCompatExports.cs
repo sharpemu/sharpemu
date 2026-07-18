@@ -13,6 +13,10 @@ public static class KernelSemaphoreCompatExports
     private const int MaxSemaphoreNameLength = 128;
     private static readonly ConcurrentDictionary<uint, KernelSemaphoreState> _semaphores = new();
     private static int _nextSemaphoreHandle = 1;
+    private static readonly bool _logBlocking = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"),
+        "1",
+        StringComparison.Ordinal);
 
     private sealed class KernelSemaphoreState
     {
@@ -219,13 +223,16 @@ public static class KernelSemaphoreCompatExports
         if (!GuestThreadExecution.IsGuestThread)
         {
             var currentThreadId = Environment.CurrentManagedThreadId;
-            if (currentThreadId == HostMainThread.GetManagedThreadId())
-            {
-                HostMainThread.SetBlocked(true, $"sceKernelWaitSema:0x{handle:X8}:{semaphore.Name}");
-                Console.Error.WriteLine(
-                    $"[MAIN_THREAD] Blocking on semaphore handle=0x{handle:X8} name='{semaphore.Name}' " +
-                    $"need={needCount} count={semaphore.Count}");
-            }
+                if (currentThreadId == HostMainThread.GetManagedThreadId())
+                {
+                    HostMainThread.SetBlocked(true, $"sceKernelWaitSema:0x{handle:X8}:{semaphore.Name}");
+                    if (_logBlocking)
+                    {
+                        Console.Error.WriteLine(
+                            $"[MAIN_THREAD] Blocking on semaphore handle=0x{handle:X8} name='{semaphore.Name}' " +
+                            $"need={needCount} count={semaphore.Count}");
+                    }
+                }
         }
         
         return WaitSemaphoreOnHostThread(ctx, semaphore, handle, needCount, timeoutAddress, timeoutUsec);
@@ -301,8 +308,11 @@ public static class KernelSemaphoreCompatExports
                 if (isMainThread)
                 {
                     HostMainThread.SetBlocked(false, null);
-                    Console.Error.WriteLine(
-                        $"[MAIN_THREAD] Unblocked from semaphore handle=0x{handle:X8} name='{semaphore.Name}'");
+                    if (_logBlocking)
+                    {
+                        Console.Error.WriteLine(
+                            $"[MAIN_THREAD] Unblocked from semaphore handle=0x{handle:X8} name='{semaphore.Name}'");
+                    }
                 }
 
                 if (timeoutAddress != 0)

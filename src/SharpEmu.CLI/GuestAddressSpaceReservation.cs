@@ -79,6 +79,10 @@ internal static partial class GuestAddressSpaceReservation
     /// <summary>
     /// Releases the early reservation so PhysicalVirtualMemory can allocate normally.
     /// Called just before the loader needs the address space.
+    ///
+    /// NOTE: there is a TOCTOU window between this free and the loader's reserve where
+    /// the GC could reclaim the range. On Win10+ this could be made atomic via
+    /// VirtualAlloc2/MEM_REPLACE_PLACEHOLDER; for now the reservation is best-effort.
     /// </summary>
     internal static void ReleaseReservation()
     {
