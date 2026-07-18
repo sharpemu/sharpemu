@@ -162,7 +162,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var alignedSize = (size + 0xFFF) & ~0xFFFUL;
         var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         var hostProtection = executable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
-        var result = _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
+
+        var reserveOnly = !executable &&
+            alignedSize >= LargeDataReserveThreshold &&
+            alignedSize > FullCommitRegionLimit;
+
+        var result = reserveOnly
+            ? _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.ReadWrite)
+            : _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
         if (result == 0)
         {
             return false;
@@ -184,7 +191,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 VirtualAddress = actualAddress,
                 Size = alignedSize,
                 IsExecutable = executable,
-                IsReservedOnly = false,
+                IsReservedOnly = reserveOnly,
                 Protection = protection
             });
         }
@@ -193,7 +200,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitWriteLock();
         }
 
-        var allocationKind = executable ? "executable memory" : "data memory";
+        var allocationKind = reserveOnly
+            ? "reserved data memory (lazy commit)"
+            : (executable ? "executable memory" : "data memory");
         TraceVmem($"Allocated exact {allocationKind}: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes)");
         return true;
     }
