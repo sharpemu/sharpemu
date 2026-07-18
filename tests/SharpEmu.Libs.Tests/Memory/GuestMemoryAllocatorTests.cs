@@ -98,7 +98,7 @@ public sealed class GuestMemoryAllocatorTests
     [Fact]
     public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideWindows()
     {
-        if (OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsMacOS())
         {
             return;
         }

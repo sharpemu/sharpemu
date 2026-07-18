@@ -367,11 +367,16 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
 
-        // POSIX (macOS/Linux) treats mmap hints as best-effort; Rosetta may
-        // relocate whole guest windows on both macOS and Linux/Docker.
-        // Over-allocate once so the returned host range always contains an
-        // aligned guest-visible start. Windows uses exact-address search.
-        if (!OperatingSystem.IsWindows())
+        // macOS (and Rosetta on Linux/Docker) treat mmap hints as best-effort;
+        // Rosetta may relocate whole guest windows. Over-allocate once so the
+        // returned host range always contains an aligned guest-visible start.
+        // Windows uses exact-address search. Set SHARPEMU_POSIX_FIXED_ALLOC=1
+        // to enable over-allocation on non-macOS platforms when needed.
+        if (OperatingSystem.IsMacOS() ||
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_POSIX_FIXED_ALLOC"),
+                "1",
+                StringComparison.Ordinal))
         {
             var reserveSize = effectiveAlignment > PageSize
                 ? alignedSize + effectiveAlignment
