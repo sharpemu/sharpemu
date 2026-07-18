@@ -59,6 +59,22 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
             ToNativeProtection(protection));
     }
 
+    public IHostSharedMemory? CreateSharedMemory(ulong size) => Posix.CreateSharedMemory(size);
+
+    public ulong MapSharedMemory(
+        IHostSharedMemory sharedMemory,
+        ulong desiredAddress,
+        ulong size,
+        ulong offset,
+        HostPageProtection protection) =>
+        Posix.MapSharedMemory(sharedMemory, desiredAddress, size, offset, ToNativeProtection(protection));
+
+    public bool UnmapSharedMemory(ulong address, ulong size) =>
+        Posix.UnmapSharedMemory(address, size);
+
+    public bool UnmapReservedMemory(ulong address, ulong size) =>
+        Posix.UnmapReservedMemory(address, size);
+
     public bool Commit(ulong address, ulong size, HostPageProtection protection)
     {
         return Posix.Alloc(
@@ -163,6 +179,8 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
         private const int PROT_EXEC = 0x4;
 
         private const int MAP_PRIVATE = 0x02;
+        private const int MAP_SHARED = 0x01;
+        private const int MAP_FIXED = 0x10;
         private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
         private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
 
@@ -179,12 +197,32 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static readonly object Gate = new();
         private static readonly SortedList<ulong, Region> Regions = new();
+        private static readonly Dictionary<ulong, SharedView> SharedViews = new();
+
+        private sealed class PosixSharedMemory(int fileDescriptor, ulong size) : IHostSharedMemory
+        {
+            private int _fileDescriptor = fileDescriptor;
+
+            internal int FileDescriptor => _fileDescriptor;
+
+            public ulong Size { get; } = size;
+
+            public void Dispose()
+            {
+                var current = Interlocked.Exchange(ref _fileDescriptor, -1);
+                if (current >= 0)
+                {
+                    close(current);
+                }
+            }
+        }
 
         private sealed class Region
         {
             public ulong Base;
             public ulong Size;
             public uint DefaultProtect;
+            public bool IsReservation;
             public Dictionary<ulong, uint>? PageProtects;
             public bool UsesMachAllocation;
 
@@ -326,10 +364,257 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     Base = (ulong)result,
                     Size = alignedSize,
                     DefaultProtect = protect,
+                    IsReservation = (allocationType & MEM_COMMIT) == 0,
                     UsesMachAllocation = usesMachAllocation,
                 };
 
                 return (void*)result;
+            }
+        }
+
+        private readonly record struct SharedView(
+            PosixSharedMemory Backing,
+            ulong Size,
+            ulong Offset,
+            uint Protection,
+            bool ReplacedReservation);
+
+        public static IHostSharedMemory? CreateSharedMemory(ulong size)
+        {
+            if (size == 0 || size > long.MaxValue)
+            {
+                return null;
+            }
+
+            int fileDescriptor;
+            if (OperatingSystem.IsLinux())
+            {
+                fileDescriptor = memfd_create("sharpemu-direct-memory", 1);
+            }
+            else
+            {
+                var name = $"/sharpemu-{Environment.ProcessId}-{Guid.NewGuid():N}";
+                fileDescriptor = shm_open(name, 0x0202, 0x180);
+                if (fileDescriptor >= 0)
+                {
+                    shm_unlink(name);
+                }
+            }
+
+            if (fileDescriptor < 0)
+            {
+                Trace($"shared backing open failed: size=0x{size:X} errno={Marshal.GetLastPInvokeError()}");
+                return null;
+            }
+
+            if (ftruncate(fileDescriptor, (long)size) != 0)
+            {
+                var error = Marshal.GetLastPInvokeError();
+                close(fileDescriptor);
+                Trace($"shared backing truncate failed: size=0x{size:X} errno={error}");
+                return null;
+            }
+
+            return new PosixSharedMemory(fileDescriptor, size);
+        }
+
+        public static ulong MapSharedMemory(
+            IHostSharedMemory sharedMemory,
+            ulong desiredAddress,
+            ulong size,
+            ulong offset,
+            uint protect)
+        {
+            if (sharedMemory is not PosixSharedMemory posixSharedMemory ||
+                posixSharedMemory.FileDescriptor < 0 ||
+                size == 0 ||
+                offset > posixSharedMemory.Size ||
+                size > posixSharedMemory.Size - offset ||
+                (offset & (PageSize - 1)) != 0 ||
+                offset > long.MaxValue)
+            {
+                Trace(
+                    $"shared mmap rejected arguments: desired=0x{desiredAddress:X16} " +
+                    $"size=0x{size:X} offset=0x{offset:X} backing_size=0x{sharedMemory.Size:X}");
+                return 0;
+            }
+
+            var alignedSize = AlignUp(size, PageSize);
+            lock (Gate)
+            {
+                var replacesReservation = desiredAddress != 0 &&
+                    TryFindRegionLocked(desiredAddress, out var containingRegion) &&
+                    containingRegion.IsReservation &&
+                    desiredAddress <= containingRegion.End &&
+                    alignedSize <= containingRegion.End - desiredAddress;
+                if (desiredAddress != 0 &&
+                    (OverlapsSharedViewLocked(desiredAddress, alignedSize) ||
+                     OverlapsTrackedRegionLocked(desiredAddress, alignedSize) &&
+                     !replacesReservation))
+                {
+                    Trace(
+                        $"shared mmap overlap: desired=0x{desiredAddress:X16} " +
+                        $"size=0x{alignedSize:X} replaces_reservation={replacesReservation}");
+                    return 0;
+                }
+
+                var flags = MAP_SHARED;
+                if (replacesReservation)
+                {
+                    flags |= MAP_FIXED;
+                }
+                else if (desiredAddress != 0 && !OperatingSystem.IsMacOS())
+                {
+                    flags |= MAP_FIXED_NOREPLACE;
+                }
+
+                var result = mmap(
+                    (nint)desiredAddress,
+                    (nuint)alignedSize,
+                    ToPosixProtect(protect),
+                    flags,
+                    posixSharedMemory.FileDescriptor,
+                    (long)offset);
+                if (result == MAP_FAILED || (desiredAddress != 0 && (ulong)result != desiredAddress))
+                {
+                    var error = result == MAP_FAILED ? Marshal.GetLastPInvokeError() : 0;
+                    Trace(
+                        $"shared mmap failed: desired=0x{desiredAddress:X16} " +
+                        $"got=0x{(ulong)result:X16} size=0x{alignedSize:X} " +
+                        $"offset=0x{offset:X} flags=0x{flags:X} errno={error}");
+                    if (result != MAP_FAILED)
+                    {
+                        munmap(result, (nuint)alignedSize);
+                    }
+
+                    return 0;
+                }
+
+                if (!replacesReservation)
+                {
+                    Regions[(ulong)result] = new Region
+                    {
+                        Base = (ulong)result,
+                        Size = alignedSize,
+                        DefaultProtect = protect,
+                        IsReservation = false
+                    };
+                }
+
+                SharedViews[(ulong)result] = new SharedView(
+                    posixSharedMemory,
+                    alignedSize,
+                    offset,
+                    protect,
+                    replacesReservation);
+                return (ulong)result;
+            }
+        }
+
+        public static bool UnmapSharedMemory(ulong address, ulong size)
+        {
+            if (size == 0)
+            {
+                return false;
+            }
+
+            var alignedSize = AlignUp(size, PageSize);
+            lock (Gate)
+            {
+                if (!SharedViews.TryGetValue(address, out var view) ||
+                    view.Size != alignedSize)
+                {
+                    return false;
+                }
+
+                if (!view.ReplacedReservation)
+                {
+                    if (!Regions.TryGetValue(address, out var region) ||
+                        region.Size != alignedSize ||
+                        munmap((nint)address, (nuint)alignedSize) != 0)
+                    {
+                        return false;
+                    }
+
+                    Regions.Remove(region.Base);
+                    SharedViews.Remove(address);
+                    return true;
+                }
+
+                if (!TryFindRegionLocked(address, out var reservation) ||
+                    !reservation.IsReservation ||
+                    alignedSize > reservation.End - address)
+                {
+                    return false;
+                }
+
+                if (munmap((nint)address, (nuint)alignedSize) != 0)
+                {
+                    return false;
+                }
+
+                var replacement = mmap(
+                    (nint)address,
+                    (nuint)alignedSize,
+                    ToPosixProtect(reservation.DefaultProtect),
+                    MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE,
+                    -1,
+                    0);
+                if (replacement != MAP_FAILED && (ulong)replacement == address)
+                {
+                    SharedViews.Remove(address);
+                    return true;
+                }
+
+                var restored = mmap(
+                    (nint)address,
+                    (nuint)alignedSize,
+                    ToPosixProtect(view.Protection),
+                    MAP_SHARED | MAP_FIXED,
+                    view.Backing.FileDescriptor,
+                    checked((long)view.Offset));
+                if (restored != MAP_FAILED && (ulong)restored == address)
+                {
+                    return false;
+                }
+
+                throw new InvalidOperationException(
+                    $"Failed to restore shared view at 0x{address:X16} after reservation remap failed");
+            }
+        }
+
+        public static bool UnmapReservedMemory(ulong address, ulong size)
+        {
+            if (size == 0 || ulong.MaxValue - address < size)
+            {
+                return false;
+            }
+
+            var alignedSize = AlignUp(size, PageSize);
+            lock (Gate)
+            {
+                if (!TryFindRegionLocked(address, out var region) ||
+                    !region.IsReservation ||
+                    alignedSize > region.End - address ||
+                    OverlapsSharedViewLocked(address, alignedSize) ||
+                    munmap((nint)address, (nuint)alignedSize) != 0)
+                {
+                    return false;
+                }
+
+                Regions.Remove(region.Base);
+                if (region.Base < address)
+                {
+                    Regions[region.Base] = CloneRegionRange(region, region.Base, address - region.Base);
+                }
+
+                var end = address + alignedSize;
+                if (end < region.End)
+                {
+                    Regions[end] = CloneRegionRange(region, end, region.End - end);
+                }
+
+                return true;
             }
         }
 
@@ -450,6 +735,45 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
             }
 
             return false;
+        }
+
+        private static bool OverlapsSharedViewLocked(ulong start, ulong size)
+        {
+            var end = start + size;
+            foreach (var entry in SharedViews)
+            {
+                if (entry.Key < end && start < entry.Key + entry.Value.Size)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static Region CloneRegionRange(Region source, ulong address, ulong size)
+        {
+            Dictionary<ulong, uint>? pageProtects = null;
+            if (source.PageProtects is not null)
+            {
+                var end = address + size;
+                foreach (var entry in source.PageProtects)
+                {
+                    if (entry.Key >= address && entry.Key < end)
+                    {
+                        (pageProtects ??= [])[entry.Key] = entry.Value;
+                    }
+                }
+            }
+
+            return new Region
+            {
+                Base = address,
+                Size = size,
+                DefaultProtect = source.DefaultProtect,
+                IsReservation = source.IsReservation,
+                PageProtects = pageProtects,
+            };
         }
 
         private static bool TryFindRegionLocked(ulong address, out Region region)
@@ -584,5 +908,20 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         [DllImport("libSystem.B.dylib")]
         private static extern int mach_vm_deallocate(uint target, ulong address, ulong size);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int memfd_create(string name, uint flags);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int shm_open(string name, int oflag, uint mode);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int shm_unlink(string name);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int ftruncate(int fileDescriptor, long length);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int close(int fileDescriptor);
     }
 }

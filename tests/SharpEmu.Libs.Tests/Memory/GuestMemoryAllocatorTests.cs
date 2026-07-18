@@ -3,6 +3,7 @@
 
 using SharpEmu.Core.Memory;
 using SharpEmu.Core.Loader;
+using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using Xunit;
 

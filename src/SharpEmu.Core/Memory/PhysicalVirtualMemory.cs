@@ -15,8 +15,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private readonly ReaderWriterLockSlim _gate = new(LockRecursionPolicy.SupportsRecursion);
     private readonly object _guestAllocationGate = new();
+    private readonly object _directMemoryBackingGate = new();
     private readonly object _allocationSearchHintGate = new();
     private readonly List<MemoryRegion> _regions = new();
+    private readonly Dictionary<ulong, DirectMapping> _directMappings = new();
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
@@ -41,6 +43,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const uint PAGE_READONLY = 0x02;
 
     private readonly IHostMemory _hostMemory;
+    private IHostSharedMemory? _directMemoryBacking;
+    private ulong _directMemoryBackingSize;
     private ulong _guestAllocationArenaBase;
     private readonly SortedDictionary<ulong, ulong> _guestAllocationFreeRanges = new();
     private readonly Dictionary<ulong, (ulong Offset, ulong Size)> _guestAllocations = new();
@@ -48,7 +52,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null)
     {
-        _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
+        _hostMemory = hostMemory ?? HostPlatform.Current.Memory;
     }
 
     private sealed class CrossPlatformHostMemory : IHostMemory
@@ -286,7 +290,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var actualAddress = result;
 
         var lazyPrimeState = "n/a";
-        if (reservedOnly)
+        if (reservedOnly && !_hostMemory.UsesPlaceholderReservations)
         {
             var primeBytes = Math.Min(alignedSize, LazyReservePrimeBytes);
             if (primeBytes != 0)
@@ -347,6 +351,54 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         TraceVmem($"Allocated {allocationKind}: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes) lazy_prime={lazyPrimeState}");
 
         return actualAddress;
+    }
+
+    public ulong ReserveAt(ulong desiredAddress, ulong size, bool executable = true, bool allowAlternative = true)
+    {
+        if (size == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(size), "Size must be greater than zero");
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        var result = _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.NoAccess);
+        if (result == 0 && allowAlternative)
+        {
+            result = _hostMemory.Reserve(0, alignedSize, HostPageProtection.NoAccess);
+        }
+
+        if (result == 0 || (desiredAddress != 0 && !allowAlternative && result != desiredAddress))
+        {
+            if (result != 0)
+            {
+                _hostMemory.Free(result);
+            }
+
+            throw new InvalidOperationException(
+                $"Failed to reserve guest range at 0x{desiredAddress:X16} ({alignedSize} bytes)");
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            InsertRegionSorted(new MemoryRegion
+            {
+                VirtualAddress = result,
+                Size = alignedSize,
+                IsExecutable = executable,
+                IsReservedOnly = true,
+                IsGuestReservation = true,
+                Protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE
+            });
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+
+        TraceVmem(
+            $"Reserved guest range: 0x{result:X16} - 0x{result + alignedSize:X16} ({alignedSize} bytes)");
+        return result;
     }
 
     public bool TryAllocateAtOrAbove(
@@ -419,6 +471,716 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         return false;
+    }
+
+    public bool TryReserveAtOrAbove(
+        ulong desiredAddress,
+        ulong size,
+        bool executable,
+        ulong alignment,
+        out ulong actualAddress)
+    {
+        actualAddress = 0;
+        if (size == 0)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        var effectiveAlignment = Math.Max(PageSize, alignment == 0 ? PageSize : alignment);
+        var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
+        var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
+
+        for (var attempt = 0; attempt < 0x10000; attempt++)
+        {
+            if (cursor == 0 || ulong.MaxValue - cursor < alignedSize)
+            {
+                return false;
+            }
+
+            if (TryGetOverlappingRegionEnd(cursor, alignedSize, out var overlapEnd))
+            {
+                cursor = AlignUp(overlapEnd, effectiveAlignment);
+                continue;
+            }
+
+            try
+            {
+                actualAddress = ReserveAt(
+                    cursor,
+                    alignedSize,
+                    executable,
+                    allowAlternative: OperatingSystem.IsMacOS());
+                if (actualAddress != 0 &&
+                    (actualAddress & (effectiveAlignment - 1)) == 0)
+                {
+                    UpdateAllocationSearchCursor(
+                        desiredAddress,
+                        effectiveAlignment,
+                        executable,
+                        actualAddress + alignedSize);
+                    return true;
+                }
+
+                if (actualAddress != 0)
+                {
+                    ReleaseUntrackedAllocation(actualAddress);
+                }
+
+                actualAddress = 0;
+            }
+            catch
+            {
+            }
+
+            cursor = AlignUp(cursor + effectiveAlignment, effectiveAlignment);
+        }
+
+        return false;
+    }
+
+    public bool TryMapDirectMemory(
+        ulong desiredAddress,
+        ulong size,
+        ulong directMemoryOffset,
+        ulong directMemorySize,
+        GuestPageProtection protection,
+        ulong alignment,
+        bool allowSearch,
+        out ulong actualAddress)
+    {
+        actualAddress = 0;
+        if (size == 0 ||
+            directMemorySize == 0 ||
+            size > ulong.MaxValue - (PageSize - 1) ||
+            directMemoryOffset > directMemorySize ||
+            size > directMemorySize - directMemoryOffset)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        if (alignedSize > directMemorySize - directMemoryOffset)
+        {
+            return false;
+        }
+
+        var effectiveAlignment = Math.Max(PageSize, alignment == 0 ? PageSize : alignment);
+        if (effectiveAlignment % PageSize != 0)
+        {
+            return false;
+        }
+
+        IHostSharedMemory backing;
+        lock (_directMemoryBackingGate)
+        {
+            if (_directMemoryBacking is null)
+            {
+                _directMemoryBacking = _hostMemory.CreateSharedMemory(directMemorySize);
+                _directMemoryBackingSize = _directMemoryBacking?.Size ?? 0;
+            }
+
+            if (_directMemoryBacking is null || _directMemoryBackingSize != directMemorySize)
+            {
+                TraceVmem(
+                    $"Failed to create direct-memory backing: requested=0x{directMemorySize:X} actual=0x{_directMemoryBackingSize:X}");
+                return false;
+            }
+
+            backing = _directMemoryBacking;
+        }
+
+        var hostProtection = ResolveProtection(protection);
+        var isExecutable = (protection & GuestPageProtection.Execute) != 0;
+        var rawProtection = isExecutable
+            ? (protection & GuestPageProtection.Write) != 0 ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ
+            : (protection & GuestPageProtection.Write) != 0 ? PAGE_READWRITE : PAGE_READONLY;
+        ulong cursor;
+        try
+        {
+            cursor = desiredAddress == 0
+                ? 0
+                : allowSearch
+                    ? AlignUpToMultiple(desiredAddress, effectiveAlignment)
+                    : desiredAddress;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        if (!allowSearch &&
+            (cursor == 0 || (cursor & (PageSize - 1)) != 0))
+        {
+            return false;
+        }
+
+        var maximumAttempts = allowSearch ? 0x10000 : 1;
+
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            MemoryRegion? containingReservation = null;
+            if (cursor != 0)
+            {
+                _gate.EnterReadLock();
+                try
+                {
+                    var containingRegion = FindRegion(cursor, alignedSize);
+                    if (containingRegion?.IsReservedOnly == true)
+                    {
+                        containingReservation = containingRegion;
+                    }
+                }
+                finally
+                {
+                    _gate.ExitReadLock();
+                }
+            }
+
+            if (cursor != 0 && containingReservation is null &&
+                (ulong.MaxValue - cursor < alignedSize || TryGetOverlappingRegionEnd(cursor, alignedSize, out _)))
+            {
+                TraceVmem(
+                    $"Direct-memory candidate overlaps committed mapping: va=0x{cursor:X16} size=0x{alignedSize:X}");
+                if (!allowSearch || ulong.MaxValue - cursor < effectiveAlignment)
+                {
+                    return false;
+                }
+
+                cursor = AlignUpToMultiple(
+                    cursor + effectiveAlignment,
+                    effectiveAlignment);
+                continue;
+            }
+
+            var mappedAddress = _hostMemory.MapSharedMemory(
+                backing,
+                cursor,
+                alignedSize,
+                directMemoryOffset,
+                hostProtection);
+            if (mappedAddress != 0 &&
+                (allowSearch
+                    ? mappedAddress % effectiveAlignment == 0
+                    : mappedAddress == cursor))
+            {
+                _gate.EnterWriteLock();
+                try
+                {
+                    if (containingReservation is null)
+                    {
+                        InsertRegionSorted(new MemoryRegion
+                        {
+                            VirtualAddress = mappedAddress,
+                            Size = alignedSize,
+                            IsExecutable = isExecutable,
+                            IsReservedOnly = false,
+                            Protection = rawProtection
+                        });
+                    }
+
+                    _directMappings.Add(
+                        mappedAddress,
+                        new DirectMapping(
+                            mappedAddress,
+                            alignedSize,
+                            directMemoryOffset,
+                            hostProtection));
+                }
+                finally
+                {
+                    _gate.ExitWriteLock();
+                }
+
+                actualAddress = mappedAddress;
+                TraceVmem(
+                    $"Mapped direct memory: phys=0x{directMemoryOffset:X16} va=0x{mappedAddress:X16} size=0x{alignedSize:X}");
+                return true;
+            }
+
+            if (mappedAddress != 0)
+            {
+                _hostMemory.Free(mappedAddress);
+            }
+
+            TraceVmem(
+                $"Host rejected direct-memory view: phys=0x{directMemoryOffset:X16} va=0x{cursor:X16} size=0x{alignedSize:X}");
+
+            if (!allowSearch || cursor == 0 || ulong.MaxValue - cursor < effectiveAlignment)
+            {
+                return false;
+            }
+
+            cursor = AlignUpToMultiple(
+                cursor + effectiveAlignment,
+                effectiveAlignment);
+        }
+
+        return false;
+    }
+
+    public bool TryReplaceDirectMemory(
+        ulong address,
+        ulong size,
+        ulong directMemoryOffset,
+        ulong directMemorySize,
+        GuestPageProtection protection,
+        out ulong actualAddress)
+    {
+        actualAddress = 0;
+        if (address == 0 ||
+            size == 0 ||
+            directMemorySize == 0 ||
+            size > ulong.MaxValue - (PageSize - 1))
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        if ((address & (PageSize - 1)) != 0 ||
+            ulong.MaxValue - address < alignedSize ||
+            directMemoryOffset > directMemorySize ||
+            alignedSize > directMemorySize - directMemoryOffset)
+        {
+            return false;
+        }
+
+        IHostSharedMemory backing;
+        lock (_directMemoryBackingGate)
+        {
+            if (_directMemoryBacking is null)
+            {
+                _directMemoryBacking = _hostMemory.CreateSharedMemory(directMemorySize);
+                _directMemoryBackingSize = _directMemoryBacking?.Size ?? 0;
+            }
+
+            if (_directMemoryBacking is null || _directMemoryBackingSize != directMemorySize)
+            {
+                TraceVmem(
+                    $"Failed to create direct-memory backing: requested=0x{directMemorySize:X} actual=0x{_directMemoryBackingSize:X}");
+                return false;
+            }
+
+            backing = _directMemoryBacking;
+        }
+
+        var end = address + alignedSize;
+        var hostProtection = ResolveProtection(protection);
+        var isExecutable = (protection & GuestPageProtection.Execute) != 0;
+        var rawProtection = isExecutable
+            ? (protection & GuestPageProtection.Write) != 0 ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ
+            : (protection & GuestPageProtection.Write) != 0 ? PAGE_READWRITE : PAGE_READONLY;
+
+        _gate.EnterWriteLock();
+        try
+        {
+            var overlaps = _directMappings.Values
+                .Where(mapping =>
+                    mapping.VirtualAddress < end &&
+                    address < mapping.VirtualAddress + mapping.Size)
+                .OrderBy(static mapping => mapping.VirtualAddress)
+                .ToArray();
+            if (overlaps.Length == 0)
+            {
+                return false;
+            }
+
+            var standaloneRegions = new Dictionary<ulong, MemoryRegion>();
+            var survivors = new List<DirectMapping>(overlaps.Length * 2);
+            var survivorRegions = new List<MemoryRegion>(overlaps.Length * 2);
+            foreach (var mapping in overlaps)
+            {
+                var standaloneRegion = _regions.FirstOrDefault(region =>
+                    region.VirtualAddress == mapping.VirtualAddress &&
+                    region.Size == mapping.Size &&
+                    !region.IsReservedOnly);
+                if (standaloneRegion is not null)
+                {
+                    standaloneRegions.Add(mapping.VirtualAddress, standaloneRegion);
+                }
+
+                var mappingEnd = mapping.VirtualAddress + mapping.Size;
+                var overlapStart = Math.Max(address, mapping.VirtualAddress);
+                var overlapEnd = Math.Min(end, mappingEnd);
+                if (mapping.VirtualAddress < overlapStart)
+                {
+                    var prefix = mapping with { Size = overlapStart - mapping.VirtualAddress };
+                    survivors.Add(prefix);
+                    if (standaloneRegion is not null)
+                    {
+                        survivorRegions.Add(CloneRegionRange(
+                            standaloneRegion,
+                            prefix.VirtualAddress,
+                            prefix.Size));
+                    }
+                }
+
+                if (overlapEnd < mappingEnd)
+                {
+                    var suffix = new DirectMapping(
+                        overlapEnd,
+                        mappingEnd - overlapEnd,
+                        mapping.PhysicalOffset + (overlapEnd - mapping.VirtualAddress),
+                        mapping.Protection);
+                    survivors.Add(suffix);
+                    if (standaloneRegion is not null)
+                    {
+                        survivorRegions.Add(CloneRegionRange(
+                            standaloneRegion,
+                            suffix.VirtualAddress,
+                            suffix.Size));
+                    }
+                }
+            }
+
+            var replacement = new DirectMapping(
+                address,
+                alignedSize,
+                directMemoryOffset,
+                hostProtection);
+            var containingReservation = FindRegion(address, alignedSize);
+            var replacementRegion = containingReservation?.IsReservedOnly == true
+                ? null
+                : new MemoryRegion
+                {
+                    VirtualAddress = address,
+                    Size = alignedSize,
+                    IsExecutable = isExecutable,
+                    IsReservedOnly = false,
+                    Protection = rawProtection
+                };
+
+            var removedOriginals = new List<DirectMapping>(overlaps.Length);
+            foreach (var mapping in overlaps)
+            {
+                if (!_hostMemory.UnmapSharedMemory(mapping.VirtualAddress, mapping.Size))
+                {
+                    RollbackDirectReplacementLocked(backing, [], removedOriginals);
+                    return false;
+                }
+
+                removedOriginals.Add(mapping);
+            }
+
+            var installedMappings = new List<DirectMapping>(survivors.Count + 1);
+            foreach (var survivor in survivors)
+            {
+                if (!TryMapDirectViewLocked(backing, survivor))
+                {
+                    RollbackDirectReplacementLocked(backing, installedMappings, removedOriginals);
+                    return false;
+                }
+
+                installedMappings.Add(survivor);
+            }
+
+            if (!TryMapDirectViewLocked(backing, replacement))
+            {
+                RollbackDirectReplacementLocked(backing, installedMappings, removedOriginals);
+                return false;
+            }
+
+            installedMappings.Add(replacement);
+
+            foreach (var mapping in overlaps)
+            {
+                _directMappings.Remove(mapping.VirtualAddress);
+                if (standaloneRegions.TryGetValue(mapping.VirtualAddress, out var standaloneRegion))
+                {
+                    _regions.Remove(standaloneRegion);
+                }
+            }
+
+            foreach (var survivor in survivors)
+            {
+                _directMappings.Add(survivor.VirtualAddress, survivor);
+            }
+
+            foreach (var survivorRegion in survivorRegions)
+            {
+                InsertRegionSorted(survivorRegion);
+            }
+
+            _directMappings.Add(replacement.VirtualAddress, replacement);
+            if (replacementRegion is not null)
+            {
+                InsertRegionSorted(replacementRegion);
+            }
+
+            actualAddress = address;
+            TraceVmem(
+                $"Replaced direct memory: phys=0x{directMemoryOffset:X16} va=0x{address:X16} size=0x{alignedSize:X}");
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    private bool TryMapDirectViewLocked(IHostSharedMemory backing, DirectMapping mapping)
+    {
+        var mappedAddress = _hostMemory.MapSharedMemory(
+            backing,
+            mapping.VirtualAddress,
+            mapping.Size,
+            mapping.PhysicalOffset,
+            mapping.Protection);
+        if (mappedAddress == mapping.VirtualAddress)
+        {
+            return true;
+        }
+
+        if (mappedAddress != 0 &&
+            !_hostMemory.UnmapSharedMemory(mappedAddress, mapping.Size))
+        {
+            throw new InvalidOperationException(
+                $"Failed to remove misplaced direct-memory view at 0x{mappedAddress:X16}");
+        }
+
+        return false;
+    }
+
+    private void RollbackDirectReplacementLocked(
+        IHostSharedMemory backing,
+        IReadOnlyList<DirectMapping> installedMappings,
+        IReadOnlyList<DirectMapping> removedOriginals)
+    {
+        var restored = true;
+        for (var index = installedMappings.Count - 1; index >= 0; index--)
+        {
+            var mapping = installedMappings[index];
+            restored &= _hostMemory.UnmapSharedMemory(mapping.VirtualAddress, mapping.Size);
+        }
+
+        foreach (var mapping in removedOriginals)
+        {
+            restored &= TryMapDirectViewLocked(backing, mapping);
+        }
+
+        if (!restored)
+        {
+            throw new InvalidOperationException(
+                "Failed to restore direct-memory mappings after an atomic replacement failure");
+        }
+    }
+
+    public bool TryUnmapDirectMemory(ulong address, ulong size)
+    {
+        if (size == 0)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        _gate.EnterWriteLock();
+        try
+        {
+            if (!_directMappings.TryGetValue(address, out var mapping) ||
+                mapping.Size != alignedSize ||
+                !_hostMemory.UnmapSharedMemory(address, alignedSize))
+            {
+                return false;
+            }
+
+            _directMappings.Remove(address);
+            for (var index = 0; index < _regions.Count; index++)
+            {
+                var region = _regions[index];
+                if (region.VirtualAddress == address &&
+                    region.Size == alignedSize &&
+                    !region.IsReservedOnly)
+                {
+                    _regions.RemoveAt(index);
+                    break;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    public bool TryUnmapDirectMemoryRange(ulong address, ulong size)
+    {
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        if (ulong.MaxValue - address < alignedSize)
+        {
+            return false;
+        }
+
+        var end = address + alignedSize;
+        _gate.EnterWriteLock();
+        try
+        {
+            var overlaps = _directMappings.Values
+                .Where(mapping =>
+                    mapping.VirtualAddress < end &&
+                    address < mapping.VirtualAddress + mapping.Size)
+                .OrderBy(static mapping => mapping.VirtualAddress)
+                .ToArray();
+            if (overlaps.Length == 0)
+            {
+                return true;
+            }
+
+            IHostSharedMemory? backing;
+            lock (_directMemoryBackingGate)
+            {
+                backing = _directMemoryBacking;
+            }
+
+            if (backing is null)
+            {
+                return false;
+            }
+
+            var standaloneRegions = new Dictionary<ulong, MemoryRegion>();
+            foreach (var mapping in overlaps)
+            {
+                var standaloneRegion = _regions.FirstOrDefault(region =>
+                    region.VirtualAddress == mapping.VirtualAddress &&
+                    region.Size == mapping.Size &&
+                    !region.IsReservedOnly);
+                if (standaloneRegion is not null)
+                {
+                    standaloneRegions.Add(mapping.VirtualAddress, standaloneRegion);
+                }
+
+                if (!_hostMemory.UnmapSharedMemory(mapping.VirtualAddress, mapping.Size))
+                {
+                    return false;
+                }
+
+                _directMappings.Remove(mapping.VirtualAddress);
+                if (standaloneRegion is not null)
+                {
+                    _regions.Remove(standaloneRegion);
+                }
+            }
+
+            foreach (var mapping in overlaps)
+            {
+                var mappingEnd = mapping.VirtualAddress + mapping.Size;
+                var overlapStart = Math.Max(address, mapping.VirtualAddress);
+                var overlapEnd = Math.Min(end, mappingEnd);
+                if (mapping.VirtualAddress < overlapStart &&
+                    !TryRemapDirectFragmentLocked(
+                        backing,
+                        mapping,
+                        mapping.VirtualAddress,
+                        overlapStart - mapping.VirtualAddress,
+                        standaloneRegions.GetValueOrDefault(mapping.VirtualAddress)))
+                {
+                    return false;
+                }
+
+                if (overlapEnd < mappingEnd &&
+                    !TryRemapDirectFragmentLocked(
+                        backing,
+                        mapping,
+                        overlapEnd,
+                        mappingEnd - overlapEnd,
+                        standaloneRegions.GetValueOrDefault(mapping.VirtualAddress)))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    private bool TryRemapDirectFragmentLocked(
+        IHostSharedMemory backing,
+        DirectMapping source,
+        ulong address,
+        ulong size,
+        MemoryRegion? standaloneRegion)
+    {
+        var physicalOffset = source.PhysicalOffset + (address - source.VirtualAddress);
+        var mappedAddress = _hostMemory.MapSharedMemory(
+            backing,
+            address,
+            size,
+            physicalOffset,
+            source.Protection);
+        if (mappedAddress != address)
+        {
+            if (mappedAddress != 0)
+            {
+                _hostMemory.UnmapSharedMemory(mappedAddress, size);
+            }
+
+            return false;
+        }
+
+        _directMappings.Add(
+            address,
+            new DirectMapping(address, size, physicalOffset, source.Protection));
+        if (standaloneRegion is not null)
+        {
+            InsertRegionSorted(CloneRegionRange(standaloneRegion, address, size));
+        }
+
+        return true;
+    }
+
+    public bool TryUnmapReservedMemory(ulong address, ulong size)
+    {
+        if (size == 0)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, PageSize);
+        _gate.EnterWriteLock();
+        try
+        {
+            var region = FindRegion(address, alignedSize);
+            if (region?.IsGuestReservation != true ||
+                _directMappings.Values.Any(mapping =>
+                    mapping.VirtualAddress < address + alignedSize &&
+                    address < mapping.VirtualAddress + mapping.Size) ||
+                !_hostMemory.UnmapReservedMemory(address, alignedSize))
+            {
+                return false;
+            }
+
+            _regions.Remove(region);
+            if (region.VirtualAddress < address)
+            {
+                InsertRegionSorted(CloneRegionRange(
+                    region,
+                    region.VirtualAddress,
+                    address - region.VirtualAddress));
+            }
+
+            var end = address + alignedSize;
+            var regionEnd = region.VirtualAddress + region.Size;
+            if (end < regionEnd)
+            {
+                InsertRegionSorted(CloneRegionRange(region, end, regionEnd - end));
+            }
+
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
     }
 
     private void ReleaseUntrackedAllocation(ulong address)
@@ -601,11 +1363,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.EnterWriteLock();
             try
             {
+                foreach (var mapping in _directMappings.Values)
+                {
+                    _hostMemory.UnmapSharedMemory(mapping.VirtualAddress, mapping.Size);
+                }
+
                 foreach (var region in _regions)
                 {
                     _hostMemory.Free(region.VirtualAddress);
                 }
                 _regions.Clear();
+                _directMappings.Clear();
                 _pageProtections.Clear();
                 lock (_allocationSearchHintGate)
                 {
@@ -620,6 +1388,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _guestAllocationArenaBase = 0;
             _guestAllocationFreeRanges.Clear();
             _guestAllocations.Clear();
+        }
+
+        lock (_directMemoryBackingGate)
+        {
+            _directMemoryBacking?.Dispose();
+            _directMemoryBacking = null;
+            _directMemoryBackingSize = 0;
         }
     }
 
@@ -747,18 +1522,43 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            var snapshot = new VirtualMemoryRegion[_regions.Count];
-            for (var i = 0; i < _regions.Count; i++)
+            var snapshot = new List<VirtualMemoryRegion>(_regions.Count + _directMappings.Count);
+            foreach (var region in _regions)
             {
-                var r = _regions[i];
-                snapshot[i] = new VirtualMemoryRegion(
-                    r.VirtualAddress,
-                    r.Size,
+                if (region.IsGuestReservation)
+                {
+                    continue;
+                }
+
+                snapshot.Add(new VirtualMemoryRegion(
+                    region.VirtualAddress,
+                    region.Size,
                     0,
-                    r.Size,
-                    r.IsExecutable ? ProgramHeaderFlags.Execute | ProgramHeaderFlags.Read : ProgramHeaderFlags.Read);
+                    region.Size,
+                    region.IsExecutable
+                        ? ProgramHeaderFlags.Execute | ProgramHeaderFlags.Read
+                        : ProgramHeaderFlags.Read));
             }
-            return snapshot;
+
+            foreach (var mapping in _directMappings.Values)
+            {
+                var containingRegion = FindRegion(mapping.VirtualAddress, mapping.Size);
+                if (containingRegion?.IsGuestReservation != true)
+                {
+                    continue;
+                }
+
+                snapshot.Add(new VirtualMemoryRegion(
+                    mapping.VirtualAddress,
+                    mapping.Size,
+                    0,
+                    mapping.Size,
+                    ProgramHeaderFlags.Read));
+            }
+
+            return snapshot
+                .OrderBy(static region => region.VirtualAddress)
+                .ToArray();
         }
         finally
         {
@@ -772,29 +1572,25 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            var region = FindRegion(virtualAddress, (ulong)destination.Length);
-            if (region is not null &&
-                TryResolveRegionOffset(
-                    virtualAddress,
-                    (ulong)destination.Length,
-                    region,
-                    out var offset))
+            var length = (ulong)destination.Length;
+            if (TryResolveRegionRun(virtualAddress, length, out var firstIndex, out var regionCount))
             {
-                var srcPtr = (void*)(region.VirtualAddress + offset);
                 if (destination.IsEmpty)
                 {
                     return true;
                 }
 
-                if (region.IsReservedOnly)
+                if (!TryCommitRegionRun(virtualAddress, length, firstIndex, regionCount))
                 {
-                    if (!EnsureRangeCommitted((ulong)srcPtr, (ulong)destination.Length, region))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
 
-                if (!CanReadWithoutProtectionChange((ulong)srcPtr, (ulong)destination.Length, region))
+                if (!CanAccessRegionRunWithoutProtectionChange(
+                        virtualAddress,
+                        length,
+                        firstIndex,
+                        regionCount,
+                        write: false))
                 {
                     requiresExclusiveAccess = true;
                 }
@@ -802,7 +1598,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     fixed (byte* destPtr = destination)
                     {
-                        Buffer.MemoryCopy(srcPtr, destPtr, (nuint)destination.Length, (nuint)destination.Length);
+                        Buffer.MemoryCopy((void*)virtualAddress, destPtr, (nuint)destination.Length, (nuint)destination.Length);
                     }
 
                     return true;
@@ -835,13 +1631,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            var region = FindRegion(virtualAddress, (ulong)expected.Length);
-            if (region is null ||
-                !TryResolveRegionOffset(
-                    virtualAddress,
-                    (ulong)expected.Length,
-                    region,
-                    out var offset))
+            var length = (ulong)expected.Length;
+            if (!TryResolveRegionRun(virtualAddress, length, out var firstIndex, out var regionCount))
             {
                 return false;
             }
@@ -851,19 +1642,22 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return true;
             }
 
-            var srcPtr = (void*)(region.VirtualAddress + offset);
-            if (region.IsReservedOnly &&
-                !EnsureRangeCommitted((ulong)srcPtr, (ulong)expected.Length, region))
+            if (!TryCommitRegionRun(virtualAddress, length, firstIndex, regionCount))
             {
                 return false;
             }
 
-            if (!CanReadWithoutProtectionChange((ulong)srcPtr, (ulong)expected.Length, region))
+            if (!CanAccessRegionRunWithoutProtectionChange(
+                    virtualAddress,
+                    length,
+                    firstIndex,
+                    regionCount,
+                    write: false))
             {
                 return false;
             }
 
-            return new ReadOnlySpan<byte>(srcPtr, expected.Length).SequenceEqual(expected);
+            return new ReadOnlySpan<byte>((void*)virtualAddress, expected.Length).SequenceEqual(expected);
         }
         finally
         {
@@ -877,29 +1671,25 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            var region = FindRegion(virtualAddress, (ulong)source.Length);
-            if (region is not null &&
-                TryResolveRegionOffset(
-                    virtualAddress,
-                    (ulong)source.Length,
-                    region,
-                    out var offset))
+            var length = (ulong)source.Length;
+            if (TryResolveRegionRun(virtualAddress, length, out var firstIndex, out var regionCount))
             {
-                var destPtr = (void*)(region.VirtualAddress + offset);
                 if (source.IsEmpty)
                 {
                     return true;
                 }
 
-                if (region.IsReservedOnly)
+                if (!TryCommitRegionRun(virtualAddress, length, firstIndex, regionCount))
                 {
-                    if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
 
-                if (!CanWriteWithoutProtectionChange((ulong)destPtr, (ulong)source.Length, region))
+                if (!CanAccessRegionRunWithoutProtectionChange(
+                        virtualAddress,
+                        length,
+                        firstIndex,
+                        regionCount,
+                        write: true))
                 {
                     requiresExclusiveAccess = true;
                 }
@@ -907,7 +1697,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     fixed (byte* srcPtr = source)
                     {
-                        Buffer.MemoryCopy(srcPtr, destPtr, (nuint)source.Length, (nuint)source.Length);
+                        Buffer.MemoryCopy(srcPtr, (void*)virtualAddress, (nuint)source.Length, (nuint)source.Length);
                     }
 
                     return true;
@@ -937,104 +1727,105 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private bool TryReadExclusive(ulong virtualAddress, Span<byte> destination)
     {
-        var region = FindRegion(virtualAddress, (ulong)destination.Length);
-        if (region is not null &&
-            TryResolveRegionOffset(
-                virtualAddress,
-                (ulong)destination.Length,
-                region,
-                out var offset))
+        var length = (ulong)destination.Length;
+        if (!TryResolveRegionRun(virtualAddress, length, out var firstIndex, out var regionCount))
         {
-            var srcPtr = (void*)(region.VirtualAddress + offset);
-            if (!EnsureRangeCommitted((ulong)srcPtr, (ulong)destination.Length, region))
-            {
-                return false;
-            }
+            return false;
+        }
 
-            if (CanReadWithoutProtectionChange((ulong)srcPtr, (ulong)destination.Length, region))
+        var cursor = virtualAddress;
+        var end = virtualAddress + length;
+        var touchedPages = new List<(ulong Address, uint Protection)>();
+        try
+        {
+            for (var index = firstIndex; index < firstIndex + regionCount; index++)
             {
-                fixed (byte* destPtr = destination)
+                var region = _regions[index];
+                var chunkSize = RegionChunkSize(region, cursor, end);
+                if (!EnsureRangeCommitted(cursor, chunkSize, region))
                 {
-                    Buffer.MemoryCopy(srcPtr, destPtr, (nuint)destination.Length, (nuint)destination.Length);
+                    return false;
                 }
 
-                return true;
-            }
-
-            if (!TryTemporarilyProtectForRead((ulong)srcPtr, (ulong)destination.Length, region, out var touchedPages))
-            {
-                return false;
-            }
-
-            try
-            {
-                fixed (byte* destPtr = destination)
+                if (!CanReadWithoutProtectionChange(cursor, chunkSize, region))
                 {
-                    Buffer.MemoryCopy(srcPtr, destPtr, (nuint)destination.Length, (nuint)destination.Length);
+                    if (!TryTemporarilyProtectForRead(cursor, chunkSize, region, out var chunkPages))
+                    {
+                        return false;
+                    }
+
+                    touchedPages.AddRange(chunkPages);
                 }
+
+                cursor += chunkSize;
             }
-            finally
+
+            fixed (byte* destPtr = destination)
             {
-                RestorePageProtections(touchedPages);
+                Buffer.MemoryCopy((void*)virtualAddress, destPtr, (nuint)destination.Length, (nuint)destination.Length);
             }
 
             return true;
         }
-
-        return false;
+        finally
+        {
+            RestorePageProtections(touchedPages);
+        }
     }
 
     private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
-        var region = FindRegion(virtualAddress, (ulong)source.Length);
-        if (region is not null &&
-            TryResolveRegionOffset(
-                virtualAddress,
-                (ulong)source.Length,
-                region,
-                out var offset))
+        var length = (ulong)source.Length;
+        if (!TryResolveRegionRun(virtualAddress, length, out var firstIndex, out var regionCount))
         {
-            var destPtr = (void*)(region.VirtualAddress + offset);
-            if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
-            {
-                return false;
-            }
+            return false;
+        }
 
-            if (CanWriteWithoutProtectionChange((ulong)destPtr, (ulong)source.Length, region))
+        var cursor = virtualAddress;
+        var end = virtualAddress + length;
+        var protectedChunks = new List<(ulong Address, ulong Size, uint Protection)>();
+        try
+        {
+            for (var index = firstIndex; index < firstIndex + regionCount; index++)
             {
-                fixed (byte* srcPtr = source)
+                var region = _regions[index];
+                var chunkSize = RegionChunkSize(region, cursor, end);
+                if (!EnsureRangeCommitted(cursor, chunkSize, region))
                 {
-                    Buffer.MemoryCopy(srcPtr, destPtr, (nuint)source.Length, (nuint)source.Length);
+                    return false;
                 }
 
-                return true;
+                if (!CanWriteWithoutProtectionChange(cursor, chunkSize, region))
+                {
+                    if (!_hostMemory.Protect(cursor, chunkSize, HostPageProtection.ReadWriteExecute, out var oldProtect))
+                    {
+                        return false;
+                    }
+
+                    protectedChunks.Add((cursor, chunkSize, oldProtect));
+                }
+
+                cursor += chunkSize;
             }
 
-            if (!_hostMemory.Protect((ulong)destPtr, (ulong)source.Length, HostPageProtection.ReadWriteExecute, out var oldProtect))
+            fixed (byte* srcPtr = source)
             {
-                return false;
-            }
-
-            try
-            {
-                fixed (byte* srcPtr = source)
-                {
-                    Buffer.MemoryCopy(srcPtr, destPtr, (nuint)source.Length, (nuint)source.Length);
-                }
-            }
-            finally
-            {
-                _hostMemory.ProtectRaw((ulong)destPtr, (ulong)source.Length, oldProtect, out _);
-                if (IsExecutableProtection(oldProtect))
-                {
-                    _hostMemory.FlushInstructionCache((ulong)destPtr, (ulong)source.Length);
-                }
+                Buffer.MemoryCopy(srcPtr, (void*)virtualAddress, (nuint)source.Length, (nuint)source.Length);
             }
 
             return true;
         }
-
-        return false;
+        finally
+        {
+            foreach (var (chunkAddress, chunkSize, protection) in protectedChunks)
+            {
+                _hostMemory.ProtectRaw(chunkAddress, chunkSize, protection, out _);
+                if (IsExecutableProtection(protection))
+                {
+                    _hostMemory.FlushInstructionCache(chunkAddress, chunkSize);
+                }
+            }
+        }
     }
 
     public bool TryWriteUInt64(ulong virtualAddress, ulong value)
@@ -1069,7 +1860,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            return FindRegion(virtualAddress, size) is not null;
+            return TryResolveRegionRun(virtualAddress, size, out _, out _);
         }
         finally
         {
@@ -1101,6 +1892,122 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             TryResolveRegionOffset(address, size, candidate, out _)
                 ? candidate
                 : null;
+    }
+
+    /// <summary>
+    /// Resolves the run of adjacent regions that covers
+    /// <c>[address, address + size)</c> without gaps. Guest-contiguous memory
+    /// is frequently assembled from many separate mappings, so accessors must
+    /// not require a single containing region.
+    /// </summary>
+    private bool TryResolveRegionRun(ulong address, ulong size, out int firstIndex, out int regionCount)
+    {
+        firstIndex = 0;
+        regionCount = 0;
+        if (ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var low = 0;
+        var high = _regions.Count - 1;
+        var candidate = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (_regions[middle].VirtualAddress <= address)
+            {
+                candidate = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (candidate < 0)
+        {
+            return false;
+        }
+
+        var cursor = address;
+        var end = address + size;
+        for (var index = candidate; index < _regions.Count; index++)
+        {
+            var region = _regions[index];
+            if (region.VirtualAddress > cursor)
+            {
+                return false;
+            }
+
+            var offset = cursor - region.VirtualAddress;
+            if (offset > region.Size)
+            {
+                return false;
+            }
+
+            if (region.Size - offset >= end - cursor)
+            {
+                firstIndex = candidate;
+                regionCount = index - candidate + 1;
+                return true;
+            }
+
+            cursor += region.Size - offset;
+        }
+
+        return false;
+    }
+
+    private static ulong RegionChunkSize(MemoryRegion region, ulong cursor, ulong end)
+    {
+        var available = region.Size - (cursor - region.VirtualAddress);
+        var remaining = end - cursor;
+        return available < remaining ? available : remaining;
+    }
+
+    private bool TryCommitRegionRun(ulong address, ulong size, int firstIndex, int regionCount)
+    {
+        var cursor = address;
+        var end = address + size;
+        for (var index = firstIndex; index < firstIndex + regionCount; index++)
+        {
+            var region = _regions[index];
+            var chunkSize = RegionChunkSize(region, cursor, end);
+            if (region.IsReservedOnly && !EnsureRangeCommitted(cursor, chunkSize, region))
+            {
+                return false;
+            }
+
+            cursor += chunkSize;
+        }
+
+        return true;
+    }
+
+    private bool CanAccessRegionRunWithoutProtectionChange(
+        ulong address,
+        ulong size,
+        int firstIndex,
+        int regionCount,
+        bool write)
+    {
+        var cursor = address;
+        var end = address + size;
+        for (var index = firstIndex; index < firstIndex + regionCount; index++)
+        {
+            var region = _regions[index];
+            var chunkSize = RegionChunkSize(region, cursor, end);
+            if (!CanAccessWithoutProtectionChange(cursor, chunkSize, region, write))
+            {
+                return false;
+            }
+
+            cursor += chunkSize;
+        }
+
+        return true;
     }
 
     private void InsertRegionSorted(MemoryRegion region)
@@ -1265,7 +2172,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private bool EnsureRangeCommitted(ulong address, ulong size, MemoryRegion region)
     {
-        if (size == 0 || !region.IsReservedOnly)
+        if (size == 0)
+        {
+            return true;
+        }
+
+        if (region.IsGuestReservation)
+        {
+            return IsDirectMappedRange(address, size);
+        }
+
+        if (!region.IsReservedOnly)
         {
             return true;
         }
@@ -1314,6 +2231,57 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return true;
     }
 
+    private bool IsDirectMappedRange(ulong address, ulong size)
+    {
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        // Reservations are populated by individually mapped views, so the
+        // range may be covered by several adjacent mappings rather than one.
+        var end = address + size;
+        var cursor = address;
+        while (cursor < end)
+        {
+            var next = cursor;
+            foreach (var mapping in _directMappings.Values)
+            {
+                if (mapping.VirtualAddress > cursor ||
+                    cursor - mapping.VirtualAddress >= mapping.Size)
+                {
+                    continue;
+                }
+
+                var reach = mapping.VirtualAddress + mapping.Size;
+                if (reach > next)
+                {
+                    next = reach < end ? reach : end;
+                }
+            }
+
+            if (next == cursor)
+            {
+                return false;
+            }
+
+            cursor = next;
+        }
+
+        return true;
+    }
+
+    private static MemoryRegion CloneRegionRange(MemoryRegion source, ulong address, ulong size) =>
+        new()
+        {
+            VirtualAddress = address,
+            Size = size,
+            IsExecutable = source.IsExecutable,
+            IsReservedOnly = source.IsReservedOnly,
+            IsGuestReservation = source.IsGuestReservation,
+            Protection = source.Protection,
+        };
+
     private bool TryTemporarilyProtectForRead(
         ulong address,
         ulong size,
@@ -1361,6 +2329,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return checked((value + mask) & ~mask);
     }
 
+    private static ulong AlignUpToMultiple(ulong value, ulong alignment)
+    {
+        var remainder = value % alignment;
+        return remainder == 0
+            ? value
+            : checked(value + alignment - remainder);
+    }
+
     private static ulong ResolveLazyReservePrimeBytes()
     {
         var configured = Environment.GetEnvironmentVariable("SHARPEMU_LAZY_RESERVE_PRIME_MB");
@@ -1399,7 +2375,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         public ulong Size { get; set; }
         public bool IsExecutable { get; set; }
         public bool IsReservedOnly { get; set; }
+        public bool IsGuestReservation { get; set; }
         public uint Protection { get; set; }
     }
+
+    private readonly record struct DirectMapping(
+        ulong VirtualAddress,
+        ulong Size,
+        ulong PhysicalOffset,
+        HostPageProtection Protection);
 
 }
