@@ -56,6 +56,20 @@ public static class Ngs2Exports
         return SetReturn(ctx, 0);
     }
 
+    // Non-allocator create: identical to the WithAllocator form for our purposes.
+    // The only signature difference is the caller-supplied buffer info in rsi
+    // (vs an allocator callback); the system option (rdi) and out-handle (rdx)
+    // sit at the same argument positions, so we reuse the same implementation.
+    // Dead Cells uses these variants — leaving sceNgs2SystemCreate unresolved
+    // gave the game a garbage system handle, so every later rack/voice call
+    // failed and it polled sceNgs2VoiceGetState forever, freezing at FLIP 0.
+    [SysAbiExport(
+        Nid = "koBbCMvOKWw",
+        ExportName = "sceNgs2SystemCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2SystemCreate(CpuContext ctx) => Ngs2SystemCreateWithAllocator(ctx);
+
     [SysAbiExport(
         Nid = "u-WrYDaJA3k",
         ExportName = "sceNgs2SystemDestroy",
@@ -120,6 +134,15 @@ public static class Ngs2Exports
 
         return SetReturn(ctx, 0);
     }
+
+    // Non-allocator rack create: system handle (rdi), rack id (rsi) and the
+    // out-handle (r8) share the WithAllocator argument layout, so reuse it.
+    [SysAbiExport(
+        Nid = "cLV4aiT9JpA",
+        ExportName = "sceNgs2RackCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2RackCreate(CpuContext ctx) => Ngs2RackCreateWithAllocator(ctx);
 
     [SysAbiExport(
         Nid = "lCqD7oycmIM",
