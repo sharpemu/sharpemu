@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Reflection;
 
 namespace SharpEmu.GUI;
 
@@ -20,7 +21,7 @@ public static class Updater
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
     private static readonly HttpClient Http = CreateHttpClient();
 
-    public sealed record UpdateInfo(string Sha, string Name, string DownloadUrl, long Size, string Sha256);
+    public sealed record UpdateInfo(string Sha, string Name, string DownloadUrl, long Size, string Sha256, string TagName);
 
     public static async Task<UpdateInfo?> CheckAsync(string? currentSha, CancellationToken cancellationToken = default)
     {
@@ -35,8 +36,18 @@ public static class Updater
             null,
             platform.Rid,
             platform.Extension);
+        var currentVersion = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         if (update is null || currentSha is null ||
             string.Equals(update.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (currentVersion is not null &&
+            TryParseVersion(currentVersion, out var installed) &&
+            TryParseVersion(update.TagName, out var available) &&
+            available.CompareTo(installed) <= 0)
         {
             return null;
         }
@@ -59,51 +70,63 @@ public static class Updater
             Directory.Delete(root, recursive: true);
         }
 
-        Directory.CreateDirectory(root);
-        var archive = Path.Combine(root, update.Name);
-        using (var response = await Http.GetAsync(update.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+        var launched = false;
+        try
         {
-            response.EnsureSuccessStatusCode();
-            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-            await using var output = File.Create(archive);
-            var buffer = new byte[81920];
-            long written = 0;
-            int read;
-            while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+            Directory.CreateDirectory(root);
+            var archive = Path.Combine(root, update.Name);
+            using (var response = await Http.GetAsync(update.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
             {
-                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                written += read;
-                progress?.Report(update.Size == 0 ? 0 : (int)(written * 100 / update.Size));
+                response.EnsureSuccessStatusCode();
+                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var output = File.Create(archive);
+                var buffer = new byte[81920];
+                long written = 0;
+                int read;
+                while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    written += read;
+                    progress?.Report(update.Size == 0 ? 0 : (int)(written * 100 / update.Size));
+                }
+
+                if (written != update.Size)
+                {
+                    throw new InvalidDataException($"Downloaded {written} bytes; expected {update.Size}.");
+                }
             }
 
-            if (written != update.Size)
+            await using (var archiveStream = File.OpenRead(archive))
             {
-                throw new InvalidDataException($"Downloaded {written} bytes; expected {update.Size}.");
+                var actualSha256 = Convert.ToHexString(await SHA256.HashDataAsync(archiveStream, cancellationToken));
+                if (!string.Equals(actualSha256, update.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException($"SHA-256 mismatch; expected {update.Sha256}, got {actualSha256}.");
+                }
+            }
+
+            var platform = CurrentPlatform();
+            var stagedExe = ExtractArchive(archive, payload, platform.Extension, platform.ExecutableName);
+
+            var start = new ProcessStartInfo(stagedExe)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = payload,
+            };
+            start.ArgumentList.Add(ApplyArgument);
+            start.ArgumentList.Add(Environment.ProcessId.ToString());
+            start.ArgumentList.Add(AppContext.BaseDirectory);
+            using var helper = Process.Start(start)
+                ?? throw new InvalidOperationException("The update installer could not be started.");
+            launched = true;
+        }
+        finally
+        {
+            if (!launched)
+            {
+                TryDeleteDirectory(root);
             }
         }
-
-        await using (var archiveStream = File.OpenRead(archive))
-        {
-            var actualSha256 = Convert.ToHexString(await SHA256.HashDataAsync(archiveStream, cancellationToken));
-            if (!string.Equals(actualSha256, update.Sha256, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException($"SHA-256 mismatch; expected {update.Sha256}, got {actualSha256}.");
-            }
-        }
-
-        var platform = CurrentPlatform();
-        var stagedExe = ExtractArchive(archive, payload, platform.Extension, platform.ExecutableName);
-
-        var start = new ProcessStartInfo(stagedExe)
-        {
-            UseShellExecute = false,
-            WorkingDirectory = payload,
-        };
-        start.ArgumentList.Add(ApplyArgument);
-        start.ArgumentList.Add(Environment.ProcessId.ToString());
-        start.ArgumentList.Add(AppContext.BaseDirectory);
-        using var helper = Process.Start(start)
-            ?? throw new InvalidOperationException("The update installer could not be started.");
     }
 
     /// <summary>Runs from the downloaded executable after the old GUI exits.</summary>
@@ -115,6 +138,8 @@ public static class Updater
             return false;
         }
 
+        var backup = Path.Combine(Path.GetTempPath(), $"SharpEmu.UpdateBackup-{Environment.ProcessId}");
+        var changed = new List<(string Destination, string? Backup)>();
         try
         {
             if (int.TryParse(args[1], out var oldPid))
@@ -134,6 +159,7 @@ public static class Updater
 
             var source = AppContext.BaseDirectory;
             var target = Path.GetFullPath(args[2]);
+            Directory.CreateDirectory(backup);
             foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
             {
                 var relative = Path.GetRelativePath(source, file);
@@ -147,6 +173,14 @@ public static class Updater
 
                 var destination = Path.Combine(target, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                string? backupFile = null;
+                if (File.Exists(destination))
+                {
+                    backupFile = Path.Combine(backup, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(backupFile)!);
+                    File.Copy(destination, backupFile, overwrite: true);
+                }
+                changed.Add((destination, backupFile));
                 File.Copy(file, destination, overwrite: true);
                 if (!OperatingSystem.IsWindows())
                 {
@@ -160,10 +194,31 @@ public static class Updater
                 UseShellExecute = false,
                 WorkingDirectory = target,
             }) ?? throw new InvalidOperationException("The updated SharpEmu could not be started.");
+            TryDeleteDirectory(backup);
         }
         catch (Exception ex)
         {
             exitCode = 1;
+            foreach (var (destination, backupFile) in changed.AsEnumerable().Reverse())
+            {
+                try
+                {
+                    if (backupFile is null)
+                    {
+                        File.Delete(destination);
+                    }
+                    else if (File.Exists(backupFile))
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                        File.Copy(backupFile, destination, overwrite: true);
+                    }
+                }
+                catch
+                {
+                    // Best-effort rollback; the original error is more useful to the user.
+                }
+            }
+            TryDeleteDirectory(backup);
             try
             {
                 File.WriteAllText(Path.Combine(args[2], "update-error.log"), ex.ToString());
@@ -223,7 +278,8 @@ public static class Updater
                     name,
                     asset.GetProperty("browser_download_url").GetString()!,
                     asset.GetProperty("size").GetInt64(),
-                    digest["sha256:".Length..])));
+                    digest["sha256:".Length..],
+                    document.RootElement.GetProperty("tag_name").GetString() ?? "")));
         }
 
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
@@ -273,6 +329,30 @@ public static class Updater
 
         var sha = match.Groups[1].Value;
         return sha.Length > 7 ? sha[..7] : sha;
+    }
+
+    private static bool TryParseVersion(string value, out ReleaseVersion version)
+    {
+        var match = Regex.Match(value.TrimStart('v'), @"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?");
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, out var major) ||
+            !int.TryParse(match.Groups[2].Value, out var minor) ||
+            !int.TryParse(match.Groups[3].Value, out var patch))
+        {
+            version = default;
+            return false;
+        }
+
+        version = new ReleaseVersion(major, minor, patch, match.Groups[4].Value);
+        return true;
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+        catch { }
     }
 
     private static string ExtractArchive(
@@ -330,4 +410,13 @@ public static class Updater
 
     private sealed record PlatformInfo(string Rid, string Extension, string ExecutableName);
     private sealed record CommitComparison(string Status, DateTimeOffset CurrentDate, DateTimeOffset ReleaseDate);
+    private readonly record struct ReleaseVersion(int Major, int Minor, int Patch, string PreRelease) : IComparable<ReleaseVersion>
+    {
+        public int CompareTo(ReleaseVersion other) =>
+            (Major, Minor, Patch) != (other.Major, other.Minor, other.Patch)
+                ? (Major, Minor, Patch).CompareTo((other.Major, other.Minor, other.Patch))
+                : string.IsNullOrEmpty(PreRelease) == string.IsNullOrEmpty(other.PreRelease)
+                    ? string.CompareOrdinal(PreRelease, other.PreRelease)
+                    : string.IsNullOrEmpty(PreRelease) ? 1 : -1;
+    }
 }
