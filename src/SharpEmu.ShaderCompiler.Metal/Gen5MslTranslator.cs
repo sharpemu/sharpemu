@@ -257,6 +257,11 @@ public static partial class Gen5MslTranslator
         private readonly Dictionary<uint, int> _imageBindingByPc = [];
         private readonly Dictionary<uint, int> _bufferBindingByPc = [];
         private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
+        // Per storage-image binding: whether the body reads it, writes it, or
+        // both. Metal caps access::read_write textures at 8 per function, so each
+        // binding is declared with the minimal access it actually uses.
+        private bool[] _imageBindingReads = [];
+        private bool[] _imageBindingWrites = [];
         private readonly SortedSet<uint> _pixelAttributes = [];
         private readonly SortedSet<uint> _vertexOutputs = [];
         private readonly Dictionary<uint, Gen5VertexInputBinding> _vertexInputsByPc = [];
@@ -667,13 +672,15 @@ public static partial class Gen5MslTranslator
             if (_stage == Gen5MslStage.Compute && IsWave64)
             {
                 source.AppendLine("    uint sharpemu_lane = sharpemu_tg_index & 63u;");
-                if (_usesWaveScratch)
+                if (_usesWaveScratch && !_usesLds)
                 {
                     // Two dwords bridge each half's ballot; the third carries a
                     // broadcast value for read-first-lane. Indexed only by half,
                     // so correct for a one-wave (64-thread) workgroup — larger
                     // workgroups would need per-wave scratch (matches the SPIR-V
-                    // translator's bridge scope).
+                    // translator's bridge scope). When the shader also uses LDS the
+                    // bridge instead aliases the top of that allocation (below) so
+                    // total threadgroup memory stays within Metal's 32 KB limit.
                     source.AppendLine("    threadgroup uint sharpemu_wave_scratch[3];");
                 }
             }
@@ -701,6 +708,18 @@ public static partial class Gen5MslTranslator
                     // because only write-then-read correctness is needed.
                     source.AppendLine($"    thread uint sharpemu_lds[{PrivateLdsDwordCount}] = {{}};");
                 }
+            }
+
+            if (_usesWaveScratch && _usesLds && _stage == Gen5MslStage.Compute)
+            {
+                // Reuse the final three dwords of the LDS allocation for the
+                // wave64 bridge. A separate threadgroup array would push total
+                // threadgroup memory past Metal's 32 KB limit for shaders that
+                // request the full LDS (mirrors the SPIR-V translator). Guest LDS
+                // accesses are bounds-masked into the same allocation, so this
+                // trades a rare top-of-LDS collision for a compilable pipeline.
+                source.AppendLine(
+                    $"    threadgroup uint* sharpemu_wave_scratch = &sharpemu_lds[{LdsDwordCount - 3}u];");
             }
 
             EmitRegisterFile(source);

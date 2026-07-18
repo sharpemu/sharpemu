@@ -31,6 +31,17 @@ public static partial class Gen5MslTranslator
                 _imageKinds.Add((isStorage, DecodeImageComponentKind(binding.ResourceDescriptor)));
             }
 
+            // Seed each binding's access from the opcode that defined it; the body
+            // emission (TryEmitImage) then ORs in the access of every instruction
+            // that resolves to the same binding, so a load and a store sharing one
+            // binding correctly become read_write.
+            _imageBindingReads = new bool[_imageKinds.Count];
+            _imageBindingWrites = new bool[_imageKinds.Count];
+            for (var index = 0; index < _evaluation.ImageBindings.Count; index++)
+            {
+                MarkImageBindingAccess(index, _evaluation.ImageBindings[index].Opcode);
+            }
+
             // Assign one sampler per sampled image (storage images take none).
             // Computed before body emission because the sample calls reference
             // the slots. Samplers live in an argument buffer (see
@@ -41,6 +52,33 @@ public static partial class Gen5MslTranslator
             for (var index = 0; index < _imageKinds.Count; index++)
             {
                 _samplerSlots[index] = _imageKinds[index].IsStorage ? -1 : _samplerCount++;
+            }
+        }
+
+        /// <summary>Records that <paramref name="opcode"/> reads and/or writes the
+        /// storage image at <paramref name="bindingIndex"/>, so EmitImageArguments
+        /// can pick the minimal Metal access qualifier.</summary>
+        private void MarkImageBindingAccess(int bindingIndex, string opcode)
+        {
+            if ((uint)bindingIndex >= (uint)_imageBindingReads.Length)
+            {
+                return;
+            }
+
+            if (opcode.StartsWith("ImageStore", StringComparison.Ordinal))
+            {
+                _imageBindingWrites[bindingIndex] = true;
+            }
+            else if (opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
+            {
+                _imageBindingReads[bindingIndex] = true;
+                _imageBindingWrites[bindingIndex] = true;
+            }
+            else
+            {
+                // ImageLoad/ImageLoadMip and ImageGetResinfo read the texture;
+                // sampled ops are non-storage and ignore these flags.
+                _imageBindingReads[bindingIndex] = true;
             }
         }
 
@@ -90,9 +128,22 @@ public static partial class Gen5MslTranslator
             {
                 var (isStorage, kind) = _imageKinds[index];
                 var textureSlot = _imageBindingBase + index;
-                source.AppendLine(isStorage
-                    ? $"    texture2d<{kind}, access::read_write> tex{index} [[texture({textureSlot})]],"
-                    : $"    texture2d<{kind}> tex{index} [[texture({textureSlot})]],");
+                if (isStorage)
+                {
+                    // Minimal access keeps read_write textures under Metal's cap
+                    // of 8 per function: only images that are both read and
+                    // written (or resolve a load and a store to one binding) need
+                    // read_write; the rest are read-only or write-only.
+                    var access = _imageBindingWrites[index]
+                        ? (_imageBindingReads[index] ? "read_write" : "write")
+                        : "read";
+                    source.AppendLine(
+                        $"    texture2d<{kind}, access::{access}> tex{index} [[texture({textureSlot})]],");
+                }
+                else
+                {
+                    source.AppendLine($"    texture2d<{kind}> tex{index} [[texture({textureSlot})]],");
+                }
             }
 
             if (_samplerCount > 0)
@@ -210,6 +261,9 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            // The resolving instruction may differ from the one that defined the
+            // binding (a store can dominate a load's binding); fold its access in.
+            MarkImageBindingAccess(bindingIndex, instruction.Opcode);
             var (isStorage, kind) = _imageKinds[bindingIndex];
             var texture = $"tex{bindingIndex}";
 
