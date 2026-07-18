@@ -482,7 +482,13 @@ public static class KernelExports
         LibraryName = "libSceSysmodule")]
     public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var infoAddress = ctx[CpuRegister.Rdx];
+        if (infoAddress != 0)
+        {
+            Span<byte> zero = stackalloc byte[0x130];
+            zero.Clear();
+            _ = ctx.Memory.TryWrite(infoAddress, zero);
+        }
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

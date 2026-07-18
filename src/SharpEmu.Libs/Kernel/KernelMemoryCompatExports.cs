@@ -1995,8 +1995,10 @@ public static partial class KernelMemoryCompatExports
             }
             else
             {
-                // Unknown fd (PFS handles, etc.): treat as no-op close
-                ctx[CpuRegister.Rax] = 0;
+            // Unknown fd (PFS handles, etc.): treat as no-op close.
+            // TODO: track PFS fds explicitly and scope this fallback.
+
+            ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
         }
