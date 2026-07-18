@@ -45,11 +45,6 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        // Avoid blocking full collections while guest and render threads are
-        // running, and establish the GC mode before the runtime reserves the
-        // fixed guest address-space window.
-        System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
-
         try
         {
             return Run(args);
