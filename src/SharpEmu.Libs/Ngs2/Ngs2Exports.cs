@@ -218,11 +218,60 @@ public static class Ngs2Exports
         LibraryName = "libSceNgs2")]
     public static int Ngs2VoiceControl(CpuContext ctx)
     {
+        var voiceHandle = ctx[CpuRegister.Rdi];
+        var paramList = ctx[CpuRegister.Rsi];
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
-                Voices.ContainsKey(ctx[CpuRegister.Rdi]) ? 0 : OrbisNgs2ErrorInvalidVoiceHandle);
+            if (!Voices.ContainsKey(voiceHandle))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
+            }
+        }
+
+        if (ShouldTrace())
+        {
+            TraceVoiceParamList(ctx, voiceHandle, paramList);
+        }
+
+        return SetReturn(ctx, 0);
+    }
+
+    // Empirically dump the SceNgs2VoiceParamHead-chained command list so we can
+    // confirm the real struct layout (size/next/id) against public NGS2 sources
+    // before building the software mixer. Assumed header: u16 size, s16 next
+    // (byte offset to the next block, 0 = end), u32 id.
+    private static void TraceVoiceParamList(CpuContext ctx, ulong voiceHandle, ulong paramList)
+    {
+        if (paramList == 0)
+        {
+            return;
+        }
+
+        Span<byte> peek = stackalloc byte[32];
+        var offset = paramList;
+        for (int guard = 0; guard < 32; guard++)
+        {
+            if (!ctx.TryReadUInt16(offset, out var size) ||
+                !ctx.TryReadUInt16(offset + 2, out var next) ||
+                !ctx.TryReadUInt32(offset + 4, out var id))
+            {
+                Console.Error.WriteLine($"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} @0x{offset:X}: unreadable header");
+                return;
+            }
+
+            peek.Clear();
+            var readable = Math.Min((int)Math.Max((ushort)8, size), peek.Length);
+            ctx.Memory.TryRead(offset, peek[..readable]);
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} id=0x{id:X} size={size} next={unchecked((short)next)} bytes={Convert.ToHexString(peek[..readable])}");
+
+            var advance = unchecked((short)next);
+            if (advance <= 0)
+            {
+                return;
+            }
+
+            offset += (ulong)advance;
         }
     }
 
