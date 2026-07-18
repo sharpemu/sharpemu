@@ -379,6 +379,22 @@ internal static partial class MetalVideoPresenter
         {
             var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
             var isRepeat = MetalNative.SendBool(nsEvent, MetalNative.Selector("isARepeat"));
+
+            // Function keys can arrive here even with Command held (AppKit only
+            // reroutes some chords through the key-equivalent path), so catch
+            // Cmd+F1 in both places — and keep it away from MetalHostInput so it
+            // never toggles the plain-F1 perf overlay.
+            var modifiers = (ulong)MetalNative.Send(nsEvent, MetalNative.Selector("modifierFlags"));
+            if (keyCode == KeyCodeF1 && (modifiers & NsEventModifierFlagCommand) != 0)
+            {
+                if (!isRepeat)
+                {
+                    ToggleMetalPerformanceHud();
+                }
+
+                return;
+            }
+
             MetalHostInput.KeyDown(keyCode, isRepeat);
         }
         catch (Exception exception)
