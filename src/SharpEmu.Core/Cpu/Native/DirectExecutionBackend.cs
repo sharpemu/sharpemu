@@ -9,6 +9,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
@@ -234,6 +235,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private ulong _entryPoint;
 
 	private CpuContext? _cpuContext;
+
+	// Debugger seam; both null when no debugger is attached.
+	private ICpuDebugHook? _debugHook;
+
+	private ICpuDebugFrame? _activeDebugFrame;
 
 	[ThreadStatic]
 	private static DirectExecutionBackend? _activeExecutionBackend;
@@ -890,6 +896,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool HasActiveExecutionThread => ReferenceEquals(_activeExecutionBackend, this);
 
+	/// <summary>
+	/// Binds the debug frame view the dispatcher created for the frame about to
+	/// run, so stall notifications reference the same frame the debugger saw at
+	/// entry. Set to null when no debugger is attached.
+	/// </summary>
+	internal void SetActiveDebugFrame(ICpuDebugFrame? frame) => _activeDebugFrame = frame;
+
+	/// <summary>
+	/// Notifies an attached debugger of a detected execution stall. No-op when no
+	/// debugger is attached or no frame is bound. The debugger may block here to
+	/// present a break before the backend forces the guest out of the loop.
+	/// </summary>
+	private void NotifyDebuggerStall(
+		CpuStallKind kind,
+		in ImportStubEntry import,
+		ulong instructionPointer,
+		long dispatchIndex,
+		ulong argument0,
+		ulong argument1)
+	{
+		var hook = _debugHook;
+		var frame = _activeDebugFrame;
+		if (hook is null || frame is null)
+		{
+			return;
+		}
+
+		var export = import.Export;
+		var exportDescription = export is null ? "unresolved" : $"{export.LibraryName}:{export.Name}";
+		var detail = $"kind={kind}, nid={import.Nid}, export={exportDescription}, dispatch#{dispatchIndex}, " +
+			$"rip=0x{instructionPointer:X16}, arg0=0x{argument0:X16}, arg1=0x{argument1:X16}";
+		hook.OnStall(frame, new CpuStallInfo(
+			kind,
+			import.Nid,
+			instructionPointer,
+			dispatchIndex,
+			argument0,
+			argument1,
+			detail,
+			export?.LibraryName,
+			export?.Name));
+	}
+
 	private CpuContext? ActiveCpuContext => HasActiveExecutionThread ? _activeCpuContext : _cpuContext;
 
 	private ulong ActiveEntryReturnSentinelRip
@@ -1051,6 +1100,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export2) ? ("[LOADER][INFO] ExportCheck map_direct: " + export2.LibraryName + ":" + export2.Name) : "[LOADER][INFO] ExportCheck map_direct: MISSING");
 		_entryPoint = entryPoint;
 		_cpuContext = context;
+		_debugHook = executionOptions.DebugHook;
 		_returnFallbackTarget = context[CpuRegister.Rsi];
 		Volatile.Write(ref _globalFallbackTarget, _returnFallbackTarget);
 		Volatile.Write(ref _globalUnresolvedReturnStub, (ulong)_unresolvedReturnStub);

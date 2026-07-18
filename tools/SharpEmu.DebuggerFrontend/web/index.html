@@ -1,0 +1,302 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SharpEmu Debugger</title>
+  <link rel="icon" type="image/webp" href="/sharpemu-logo.webp">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><img src="/sharpemu-logo.webp" alt=""></div>
+      <div>
+        <div class="eyebrow">LIVE DEVELOPMENT TOOLS</div>
+        <h1>SharpEmu <span>Debugger</span></h1>
+      </div>
+    </div>
+
+    <form id="connection-form" class="connection-bar">
+      <label class="connection-field">
+        <span>Host</span>
+        <input id="debug-host" name="host" autocomplete="off" value="127.0.0.1" aria-label="Debugger host">
+      </label>
+      <div class="connection-divider" aria-hidden="true">:</div>
+      <label class="connection-field port-field">
+        <span>Port</span>
+        <input id="debug-port" name="port" type="number" min="1" max="65535" value="5714" aria-label="Debugger port">
+      </label>
+      <button id="connection-button" class="button button-primary" type="submit">
+        <span class="button-icon" aria-hidden="true">↗</span>
+        <span id="connection-button-label">Connect</span>
+      </button>
+    </form>
+
+    <div id="connection-status" class="connection-status disconnected" aria-live="polite">
+      <span class="status-dot"></span>
+      <div>
+        <strong id="connection-state">Offline</strong>
+        <small id="connection-endpoint">Not connected</small>
+      </div>
+    </div>
+  </header>
+
+  <nav class="execution-toolbar" aria-label="Execution controls">
+    <div class="toolbar-group">
+      <button id="continue-button" class="tool-button accent" type="button" title="Continue (F5)">
+        <span class="tool-icon">▶</span><span>Continue</span><kbd>F5</kbd>
+      </button>
+      <button id="pause-button" class="tool-button" type="button" title="Pause (F6)">
+        <span class="tool-icon">Ⅱ</span><span>Pause</span><kbd>F6</kbd>
+      </button>
+      <button id="step-button" class="tool-button" type="button" title="Step frame (F10)">
+        <span class="tool-icon">↦</span><span>Step frame</span><kbd>F10</kbd>
+      </button>
+      <div class="toolbar-separator"></div>
+      <button id="refresh-button" class="tool-button compact" type="button" title="Refresh target state">
+        <span class="tool-icon">↻</span><span>Refresh</span>
+      </button>
+    </div>
+    <div class="target-pill">
+      <span>Target</span>
+      <strong id="toolbar-target-state">Disconnected</strong>
+    </div>
+  </nav>
+
+  <main class="workspace">
+    <section class="launch-panel" aria-labelledby="launch-title">
+      <div class="launch-heading">
+        <div class="launch-icon" aria-hidden="true">▷</div>
+        <div>
+          <div class="eyebrow">LOCAL SESSION</div>
+          <h2 id="launch-title">Launch and attach</h2>
+          <p>Choose a game executable and the frontend will start SharpEmu with its debugger enabled.</p>
+        </div>
+      </div>
+      <form id="launch-form" class="launch-form">
+        <label class="launch-path-field">
+          <span>Game executable</span>
+          <input id="eboot-path" placeholder="/path/to/game/eboot.bin" autocomplete="off" required>
+        </label>
+        <button id="browse-eboot-button" class="button button-secondary align-end" type="button">Browse…</button>
+        <button id="launch-button" class="button button-primary align-end" type="submit">
+          <span class="button-icon" aria-hidden="true">▶</span>Launch &amp; attach
+        </button>
+        <button id="stop-emulator-button" class="button button-danger align-end" type="button" disabled>Stop</button>
+      </form>
+      <div class="launch-status">
+        <span id="emulator-status-dot" class="status-dot"></span>
+        <div>
+          <strong id="emulator-status">No frontend-launched session</strong>
+          <small id="emulator-detail">You can still attach to an emulator that is already running.</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="panel target-panel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">SESSION</div>
+            <h2>Target overview</h2>
+          </div>
+          <span id="target-state-badge" class="state-badge disconnected">Disconnected</span>
+        </div>
+        <div class="target-address">
+          <span>Instruction pointer</span>
+          <strong id="target-address">—</strong>
+        </div>
+        <dl class="fact-grid">
+          <div><dt>Stop reason</dt><dd id="stop-reason">—</dd></div>
+          <div><dt>Frame</dt><dd id="frame-kind">—</dd></div>
+          <div class="wide"><dt>Image / module</dt><dd id="frame-label">—</dd></div>
+          <div><dt>Result</dt><dd id="stop-result">—</dd></div>
+          <div><dt>Opcode bytes</dt><dd id="opcode-bytes">—</dd></div>
+        </dl>
+        <div id="stop-detail-wrap" class="stop-detail hidden">
+          <span>Detail</span>
+          <p id="stop-detail"></p>
+        </div>
+        <div id="stall-analysis" class="stall-analysis hidden">
+          <div class="stall-analysis-header">
+            <div>
+              <div class="eyebrow">STALL DIAGNOSIS</div>
+              <h3 id="stall-analysis-title">Execution is not making progress</h3>
+            </div>
+            <span id="stall-confidence" class="confidence-badge">Medium confidence</span>
+          </div>
+          <p id="stall-summary" class="stall-summary"></p>
+          <div class="diagnosis-block cause-block">
+            <span class="diagnosis-label">Why this happens</span>
+            <p id="stall-cause"></p>
+          </div>
+          <div class="diagnosis-block fix-block">
+            <span class="diagnosis-label">Most likely fix</span>
+            <p id="stall-fix"></p>
+          </div>
+          <div class="diagnosis-columns">
+            <div>
+              <span class="diagnosis-label">Recommended checks</span>
+              <ol id="stall-actions"></ol>
+            </div>
+            <div>
+              <span class="diagnosis-label">Evidence</span>
+              <ul id="stall-evidence"></ul>
+            </div>
+          </div>
+          <p class="diagnosis-disclaimer">Heuristic diagnosis based on the detected loop and resolved HLE import. Confirm with tracing before changing synchronization behavior.</p>
+        </div>
+      </article>
+
+      <article class="panel registers-panel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">CPU STATE</div>
+            <h2>Registers</h2>
+          </div>
+          <span class="panel-hint">Select a value to edit</span>
+        </div>
+        <div id="register-grid" class="register-grid empty-state">
+          <p>Pause the target to inspect registers.</p>
+        </div>
+      </article>
+
+      <article class="panel breakpoints-panel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">EXECUTION</div>
+            <h2>Breakpoints</h2>
+          </div>
+          <span id="breakpoint-count" class="count-badge">0</span>
+        </div>
+        <form id="breakpoint-form" class="inline-form breakpoint-form">
+          <label class="grow">
+            <span>Address</span>
+            <input id="breakpoint-address" placeholder="0x00000008801234A0" autocomplete="off" required>
+          </label>
+          <label>
+            <span>Kind</span>
+            <select id="breakpoint-kind">
+              <option value="execute">Execute</option>
+              <option value="readwatch">Read watch</option>
+              <option value="writewatch">Write watch</option>
+              <option value="accesswatch">Access watch</option>
+            </select>
+          </label>
+          <label class="length-field">
+            <span>Length</span>
+            <input id="breakpoint-length" type="number" min="1" value="1">
+          </label>
+          <button class="button button-secondary align-end" type="submit">Add</button>
+        </form>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>On</th><th>ID</th><th>Kind</th><th>Address</th><th>Length</th><th></th></tr></thead>
+            <tbody id="breakpoint-table">
+              <tr class="empty-row"><td colspan="6">No breakpoints configured.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="panel-note">Execute breakpoints are active at frame boundaries. Data watchpoints are protocol-ready and await CPU backend hooks.</p>
+      </article>
+
+      <article class="panel memory-panel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">GUEST MEMORY</div>
+            <h2>Memory inspector</h2>
+          </div>
+          <span id="memory-meta" class="panel-hint">Up to 64 KiB</span>
+        </div>
+        <form id="memory-read-form" class="inline-form memory-controls">
+          <label class="grow">
+            <span>Address</span>
+            <input id="memory-address" placeholder="0x0000000880200000" autocomplete="off" required>
+          </label>
+          <label class="memory-length">
+            <span>Bytes</span>
+            <input id="memory-length" type="number" min="1" max="65536" value="256" required>
+          </label>
+          <button class="button button-secondary align-end" type="submit">Read memory</button>
+        </form>
+        <pre id="memory-view" class="memory-view" tabindex="0">No memory loaded.</pre>
+        <form id="memory-write-form" class="write-form">
+          <label>
+            <span>Write address</span>
+            <input id="memory-write-address" placeholder="0x0000000880200000" autocomplete="off" required>
+          </label>
+          <label class="grow">
+            <span>Hex bytes</span>
+            <input id="memory-write-bytes" placeholder="90 90 CC" autocomplete="off" required>
+          </label>
+          <button class="button button-danger align-end" type="submit">Write</button>
+        </form>
+      </article>
+
+      <article class="panel activity-panel">
+        <div class="panel-header activity-header">
+          <div>
+            <div class="eyebrow">PROTOCOL</div>
+            <h2>Activity</h2>
+          </div>
+          <div class="activity-actions">
+            <label class="search-box">
+              <span aria-hidden="true">⌕</span>
+              <input id="activity-search" placeholder="Filter activity" aria-label="Filter activity">
+            </label>
+            <button id="clear-activity" class="icon-button" type="button" title="Clear activity">Clear</button>
+          </div>
+        </div>
+        <div id="activity-stream" class="activity-stream" role="log" aria-live="polite">
+          <div class="activity-empty">Protocol events and commands will appear here.</div>
+        </div>
+        <details class="raw-command">
+          <summary>Advanced: send raw JSON request</summary>
+          <form id="raw-command-form">
+            <textarea id="raw-command-input" spellcheck="false">{"command":"status"}</textarea>
+            <button class="button button-secondary" type="submit">Send request</button>
+          </form>
+        </details>
+      </article>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>SharpEmu JSON-lines protocol <strong id="protocol-version">—</strong></span>
+    <span class="footer-shortcuts"><kbd>F5</kbd> Continue <kbd>F6</kbd> Pause <kbd>F10</kbd> Step</span>
+  </footer>
+
+  <dialog id="register-dialog" class="modal">
+    <form id="register-form" method="dialog">
+      <div class="modal-header">
+        <div><div class="eyebrow">CPU STATE</div><h2>Edit register</h2></div>
+        <button id="register-dialog-close" class="icon-button close-button" type="button" aria-label="Close">×</button>
+      </div>
+      <label>
+        <span>Register</span>
+        <input id="register-name" readonly>
+      </label>
+      <label>
+        <span>Value</span>
+        <input id="register-value" autocomplete="off" required>
+      </label>
+      <div class="modal-actions">
+        <button id="register-cancel" class="button button-ghost" type="button">Cancel</button>
+        <button class="button button-primary" type="submit">Apply value</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast-stack" class="toast-stack" aria-live="assertive"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

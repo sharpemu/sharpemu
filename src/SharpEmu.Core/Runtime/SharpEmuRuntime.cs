@@ -68,6 +68,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             CpuEngine = cpuExecutionOptions.CpuEngine,
             StrictDynlibResolution = cpuExecutionOptions.StrictDynlibResolution,
             ImportTraceLimit = Math.Max(0, cpuExecutionOptions.ImportTraceLimit),
+            DebugHook = cpuExecutionOptions.DebugHook,
         };
         _fileSystem = fileSystem ?? new PhysicalFileSystem();
     }
@@ -79,6 +80,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             CpuEngine = options.CpuEngine,
             StrictDynlibResolution = options.StrictDynlibResolution,
             ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
+            DebugHook = options.DebugHook,
         };
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
