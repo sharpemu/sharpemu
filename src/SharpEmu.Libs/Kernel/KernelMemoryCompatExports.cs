@@ -1111,6 +1111,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        ctx[CpuRegister.Rax] = destination;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

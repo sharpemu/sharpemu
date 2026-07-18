@@ -1466,8 +1466,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			"Q3VBxCXhUHs" =>
 			[
 				0x48, 0x89, 0xF8,
-				0x48, 0x89, 0xD1,
-				0xF3, 0xA4,
+				0x48, 0x85, 0xD2,
+				0x74, 0x11,
+				0x44, 0x8A, 0x06,
+				0x44, 0x88, 0x07,
+				0x48, 0xFF, 0xC6,
+				0x48, 0xFF, 0xC7,
+				0x48, 0xFF, 0xCA,
+				0x75, 0xEF,
 				0xC3,
 			],
 			"8zTFvBIAIN8" =>
@@ -1601,7 +1607,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static bool IsHlePreferredNid(string nid)
 	{
-		return string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal);
+		return string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal) ||
+			(OperatingSystem.IsWindows() &&
+			 string.Equals(nid, "Q3VBxCXhUHs", StringComparison.Ordinal));
 	}
 
 	private static bool IsLibcLibrary(string libraryName)
