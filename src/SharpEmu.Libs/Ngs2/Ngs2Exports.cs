@@ -214,6 +214,21 @@ public static class Ngs2Exports
         var outHandleAddress = ctx[CpuRegister.Rdx];
         lock (StateGate)
         {
+            // Dead Cells (#259) ignores the handle from sceNgs2RackCreate and passes
+            // rdi=0. If exactly one rack exists, fall back to it; otherwise keep the
+            // invalid-rack-handle error to stay deterministic with multiple racks.
+            if (rackHandle == 0)
+            {
+                if (Racks.Count == 1)
+                {
+                    rackHandle = Racks.Keys.Single();
+                }
+                else
+                {
+                    return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
+                }
+            }
+
             if (!Racks.ContainsKey(rackHandle))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
@@ -870,6 +885,32 @@ public static class Ngs2Exports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_NGS2"),
             "1",
             StringComparison.Ordinal);
+
+    internal static void ClearStateForTests()
+    {
+        lock (StateGate)
+        {
+            Systems.Clear();
+            Racks.Clear();
+            Voices.Clear();
+        }
+    }
+
+    internal static void AddRackForTests(ulong handle, ulong systemHandle, uint rackId)
+    {
+        lock (StateGate)
+        {
+            Racks[handle] = new RackState(systemHandle, rackId);
+        }
+    }
+
+    internal static void AddVoiceForTests(ulong handle, ulong rackHandle, uint voiceIndex)
+    {
+        lock (StateGate)
+        {
+            Voices[handle] = new VoiceState(rackHandle, voiceIndex);
+        }
+    }
 
     private static int SetReturn(CpuContext ctx, int result)
     {
