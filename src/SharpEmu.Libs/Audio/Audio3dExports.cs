@@ -10,9 +10,10 @@ namespace SharpEmu.Libs.Audio;
 // scene). It is a quality/positioning feature, not a correctness gate:
 // games (e.g. Astro Bot) call it heavily during audio init and will hit
 // the unresolved-import trap (and AV) on every entry point if it is
-// missing. NID strings are taken from the canonical libSceAudio3d export
-// table (shared PS4/PS5 NIDs). Success-returning stubs let init
-// proceed without us owning any audio state.
+// missing. NID strings are derived from the export names with the project's
+// PS5 NID algorithm (see SharpEmu.SourceGenerators/Ps5Nid.cs) so they
+// match what the guest binary actually calls. Success-returning stubs let
+// init proceed without us owning any audio state.
 public static class Audio3dExports
 {
     private const int Ok = 0;
@@ -59,7 +60,7 @@ public static class Audio3dExports
     [SysAbiExport(Nid = "jO2tec4dJ2M", ExportName = "sceAudio3dObjectReserve", Target = Generation.Gen5, LibraryName = "libSceAudio3d")]
     public static int ObjectReserve(CpuContext ctx) => ctx.SetReturn(Ok);
 
-    [SysAbiExport(Nid = "V1FBFpNIAzk", ExportName = "sceAudio3dObjectSetAttribute", Target = Generation.Gen5, LibraryName = "libSceAudio3d")]
+    [SysAbiExport(Nid = "m+eR7y8286E", ExportName = "sceAudio3dObjectSetAttribute", Target = Generation.Gen5, LibraryName = "libSceAudio3d")]
     public static int ObjectSetAttribute(CpuContext ctx) => ctx.SetReturn(Ok);
 
     [SysAbiExport(Nid = "4uyHN9q4ZeU", ExportName = "sceAudio3dObjectSetAttributes", Target = Generation.Gen5, LibraryName = "libSceAudio3d")]
