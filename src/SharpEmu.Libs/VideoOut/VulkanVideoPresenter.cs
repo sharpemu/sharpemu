@@ -512,6 +512,10 @@ internal static unsafe class VulkanVideoPresenter
     private static uint _windowHeight;
     private static bool _closed;
     private static bool _presenterCloseRequested;
+    // Set once the render thread finishes Vulkan init and begins consuming the
+    // guest-work queue. Guest GPU work enqueued before this point would sit
+    // unexecuted behind CreateSwapchain, so ordered submissions wait on it.
+    private static bool _presenterReady;
     private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
     private const uint NvidiaVendorId = 0x10DE;
     private const uint AmdVendorId = 0x1002;
@@ -737,6 +741,7 @@ internal static unsafe class VulkanVideoPresenter
             _hostSurface = surface;
             _closed = false;
             _presenterCloseRequested = false;
+            _presenterReady = false;
             return true;
         }
     }
@@ -1428,10 +1433,75 @@ internal static unsafe class VulkanVideoPresenter
         ArgumentNullException.ThrowIfNull(action);
         lock (_gate)
         {
-            return _closed || _thread is null
+            return _closed || _thread is null || !WaitForPresenterReadyLocked()
                 ? 0
                 : EnqueueGuestWorkLocked(new VulkanOrderedGuestAction(action, debugName));
         }
+    }
+
+    /// <summary>
+    /// Marks the guest-work consumer as live. Called by the render thread once
+    /// Vulkan init completes and before it starts draining the queue.
+    /// </summary>
+    private static void SignalPresenterReady()
+    {
+        lock (_gate)
+        {
+            _presenterReady = true;
+            System.Threading.Monitor.PulseAll(_gate);
+        }
+    }
+
+    // How long a guest submission may wait for the presenter to come up before
+    // giving up and letting the caller run its side effect inline. Vulkan init
+    // (device + swapchain against an embedded host window) can take seconds on
+    // a cold start; a guest that submits GPU work in that window would
+    // otherwise queue label writes nobody executes, and titles that poll those
+    // labels declare a GPU hang and abort. Waiting is correct: real hardware
+    // cannot accept submissions before the GPU exists either.
+    private static readonly int _presenterReadyTimeoutMs =
+        int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_PRESENTER_READY_TIMEOUT_MS"),
+            out var configuredTimeout) && configuredTimeout >= 0
+            ? configuredTimeout
+            : 10_000;
+
+    private static bool _presenterReadyTimeoutLogged;
+
+    /// <summary>
+    /// Blocks the calling guest thread until the presenter is consuming guest
+    /// work. Returns false if the presenter closed or failed to come up in
+    /// time, in which case callers fall back to running the action inline.
+    /// </summary>
+    private static bool WaitForPresenterReadyLocked()
+    {
+        if (_presenterReady)
+        {
+            return true;
+        }
+
+        var deadline = Environment.TickCount64 + _presenterReadyTimeoutMs;
+        while (!_presenterReady && !_closed && _thread is not null)
+        {
+            var remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0)
+            {
+                if (!_presenterReadyTimeoutLogged)
+                {
+                    _presenterReadyTimeoutLogged = true;
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Vulkan VideoOut presenter not ready after " +
+                        $"{_presenterReadyTimeoutMs} ms; running guest GPU side effects inline. " +
+                        "Cross-queue ordering is not guaranteed for these submissions.");
+                }
+
+                return false;
+            }
+
+            System.Threading.Monitor.Wait(_gate, (int)Math.Min(remaining, 100));
+        }
+
+        return _presenterReady && !_closed;
     }
 
     /// <summary>
@@ -1621,7 +1691,7 @@ internal static unsafe class VulkanVideoPresenter
                 out var lastVersion)
                     ? lastVersion
                     : 0;
-            return _closed || _thread is null
+            return _closed || _thread is null || !WaitForPresenterReadyLocked()
                 ? 0
                 : EnqueueGuestWorkLocked(
                     new VulkanOrderedGuestFlipWait(
@@ -2157,6 +2227,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _closed = true;
                 _thread = null;
+                _presenterReady = false;
                 if (_hostSurfacePendingDetach is not null &&
                     ReferenceEquals(_hostSurface, _hostSurfacePendingDetach))
                 {
@@ -3209,6 +3280,7 @@ internal static unsafe class VulkanVideoPresenter
             CreateCommandResources();
             CreateGuestDrawResources();
             _vulkanReady = true;
+            SignalPresenterReady();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
         }
