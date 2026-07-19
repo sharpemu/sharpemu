@@ -290,6 +290,381 @@ public static class FontExports
         return SetSuccess(ctx);
     }
 
+    // sceFontGetVerticalLayout: mirror GetHorizontalLayout. The engine reads
+    // baseline / line-advance / decoration extent floats out of rsi; write the
+    // same invented geometry so layout math doesn't divide by zero. Without
+    // this export the import traps and AVs during font init (e.g. Astro Bot).
+    [SysAbiExport(
+        Nid = "3BrWWFU+4ts",
+        ExportName = "sceFontGetVerticalLayout",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetVerticalLayout(CpuContext ctx)
+    {
+        var layoutAddress = ctx[CpuRegister.Rsi];
+        if (layoutAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var values = new[] { 12.0f, 16.0f, 0.0f };
+        for (var index = 0; index < values.Length; index++)
+        {
+            if (!TryWriteUInt32(
+                    ctx,
+                    layoutAddress + (ulong)(index * sizeof(float)),
+                    BitConverter.SingleToUInt32Bits(values[index])))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetSuccess(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "m8IWpATfdlU",
+        ExportName = "sceFontOpen",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int Open(CpuContext ctx) => CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F01);
+
+    [SysAbiExport(
+        Nid = "0MSWKGP6vTY",
+        ExportName = "sceFontOpenWithEdition",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int OpenWithEdition(CpuContext ctx) => CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F01);
+
+    [SysAbiExport(
+        Nid = "BNMZ8FLUb0M",
+        ExportName = "sceFontClose",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int Close(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "W20K7jlecQs",
+        ExportName = "sceFontGetFontList",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetFontList(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "8IYoZvD+ftY",
+        ExportName = "sceFontGetFontInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetFontInfo(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "6uyC8vkrjQg",
+        ExportName = "sceFontGetFontInfoByIndexNumber",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetFontInfoByIndexNumber(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "xA+ZY8vB23Q",
+        ExportName = "sceFontFindFont",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int FindFont(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "LicXq6sYii4",
+        ExportName = "sceFontFindFontByIndexNumber",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int FindFontByIndexNumber(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "btKlMfbvHvg",
+        ExportName = "sceFontGetCharInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharInfo(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "DQ88qpIfHxE",
+        ExportName = "sceFontGetCharImageRect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharImageRect(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "JyXkZN0zNp0",
+        ExportName = "sceFontGetCharGlyphImage",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharGlyphImage(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "A+CR5wsReME",
+        ExportName = "sceFontRenderChar",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderChar(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "iJ0ITQd7j2g",
+        ExportName = "sceFontRenderText",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderText(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "+61DJFF+O3M",
+        ExportName = "sceFontRenderTextEx",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderTextEx(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "IFq-MmVoXEc",
+        ExportName = "sceFontRenderTextEx2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderTextEx2(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "ragjw+t57U4",
+        ExportName = "sceFontSetResolution",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetResolution(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "2XuwSn9FMaU",
+        ExportName = "sceFontGetResolution",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetResolution(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "goZvzzIyEk0",
+        ExportName = "sceFontSetEdgeColor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetEdgeColor(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "nJl94f-bXxg",
+        ExportName = "sceFontGetEdgeColor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetEdgeColor(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "YrhnAYrwEJw",
+        ExportName = "sceFontSetMemoryOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetMemoryOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "CI4i7qJkk9E",
+        ExportName = "sceFontGetMemoryOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetMemoryOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "TP9NxdE4cDA",
+        ExportName = "sceFontSetAlias",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetAlias(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "vm5H3KMkpPc",
+        ExportName = "sceFontGetAlias",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetAlias(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "8yEjBGvO1-I",
+        ExportName = "sceFontGetShadowColor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetShadowColor(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "h2GFElmd83w",
+        ExportName = "sceFontSetShadowColor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetShadowColor(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "t03kSLl5HWs",
+        ExportName = "sceFontGetShadowOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetShadowOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "vyBe+agXceY",
+        ExportName = "sceFontSetShadowOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetShadowOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "jXWM95SzSJs",
+        ExportName = "sceFontGetLibraryVersion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetLibraryVersion(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "diRlpc19ApE",
+        ExportName = "sceFontGetRendererVersion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetRendererVersion(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "jxmva5iwliA",
+        ExportName = "sceFontSetDefaultFontH",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetDefaultFontH(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "dhlBfjZHVnU",
+        ExportName = "sceFontGetDefaultFontH",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetDefaultFontH(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "48MzfN8Nm3Q",
+        ExportName = "sceFontSetDefaultFontV",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetDefaultFontV(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "LYh5a3WJ09U",
+        ExportName = "sceFontGetDefaultFontV",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetDefaultFontV(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "Oa0d5-qaRtY",
+        ExportName = "sceFontGetCharImageRect2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharImageRect2(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "yQClzy6yt-0",
+        ExportName = "sceFontGetCharGlyphImage2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharGlyphImage2(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "6qiwCw0LcnU",
+        ExportName = "sceFontRenderChar2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderChar2(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "wdJQ-W0c6VI",
+        ExportName = "sceFontRenderText2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderText2(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "vNPSSjHCdKU",
+        ExportName = "sceFontGetKerningInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetKerningInfo(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "yFhLVX1SpW0",
+        ExportName = "sceFontSetKerningOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetKerningOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "6Rq45C8Cl9U",
+        ExportName = "sceFontGetKerningOn",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetKerningOn(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "XwbRCHnGWeQ",
+        ExportName = "sceFontOpenUserFile",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int OpenUserFile(CpuContext ctx) => CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F01);
+
+    [SysAbiExport(
+        Nid = "vk-0K-cNaTw",
+        ExportName = "sceFontOpenUserMemory",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int OpenUserMemory(CpuContext ctx) => CreateOpaqueHandle(ctx, ctx[CpuRegister.R8], 0x100, magic: 0x0F01);
+
+    [SysAbiExport(
+        Nid = "ajs6g0lMxYQ",
+        ExportName = "sceFontCloseUserFile",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int CloseUserFile(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "P84DDPAiJrw",
+        ExportName = "sceFontGetFontH",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetFontH(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "Nne5dPtWRBY",
+        ExportName = "sceFontGetFontV",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetFontV(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "rwdGxz8wXtQ",
+        ExportName = "sceFontGetScale",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetScale(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "2qGvC5UtqhU",
+        ExportName = "sceFontSetScale",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int SetScale(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "mxt2u-yBTPY",
+        ExportName = "sceFontGetCharImageBuffer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharImageBuffer(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "Nx+Jqkgli2Q",
+        ExportName = "sceFontGetCharImageBuffer2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GetCharImageBuffer2(CpuContext ctx) => SetSuccess(ctx);
+
     private static int ReturnSelection(CpuContext ctx, ref ulong selectionAddress, uint objectSize)
     {
         if (ctx[CpuRegister.Rdi] != 0)
