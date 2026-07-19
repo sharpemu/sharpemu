@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -698,14 +698,22 @@ public static class PlayGoExports
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
         {
-            // No PlayGo sidecar: report a fully-installed single chunk. Available must
-            // stay true or scePlayGoOpen fails with NotSupportPlayGo (fatal PS5-component
-            // init failure for UE titles); chunk 0 reports LocalFast and every other id
-            // returns BAD_CHUNK_ID, terminating title-side chunk enumeration.
-            TracePlayGo("metadata_missing; fully-installed single chunk");
+            // No PlayGo sidecar: derive the installed chunk set from the pak files
+            // actually present on disk. A locally dumped title has all of its data
+            // installed, and a package that splits content across chunks names them
+            // pakchunk<N>-<platform>.pak, so those N are exactly the chunks that
+            // exist. Reporting only chunk 0 told such a title its remaining content
+            // was missing: The Invincible (PPSA06426) ships pakchunk0..8 and spun
+            // forever re-querying scePlayGoGetLocus for a chunk that never became
+            // available. Available must stay true or scePlayGoOpen fails with
+            // NotSupportPlayGo (fatal PS5-component init failure for UE titles).
+            // Ids outside the discovered set still return BAD_CHUNK_ID, so
+            // title-side chunk enumeration still terminates.
+            var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
+            TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
             return new PlayGoMetadata(
                 true,
-                [(ushort)0],
+                installedChunkIds,
                 PlayGoChunkIdKnowledge.Authoritative);
         }
 
@@ -716,6 +724,41 @@ public static class PlayGoExports
             chunkIds.Length == 0
                 ? PlayGoChunkIdKnowledge.Unknown
                 : PlayGoChunkIdKnowledge.Authoritative);
+    }
+
+    // Chunk ids for a title that ships no PlayGo sidecar, taken from the
+    // pakchunk<N>-<platform>.pak files on disk. Chunk 0 is always included: it
+    // is the base chunk and must resolve even for a title with no pak files at
+    // all (which keeps the single-chunk behaviour for such titles).
+    private static ushort[] DiscoverInstalledChunkIds(string app0Root)
+    {
+        var ids = new SortedSet<ushort> { 0 };
+        try
+        {
+            foreach (var pakFile in Directory.EnumerateFiles(app0Root, "pakchunk*.pak", SearchOption.AllDirectories))
+            {
+                var name = Path.GetFileNameWithoutExtension(pakFile);
+                var digits = name.AsSpan("pakchunk".Length);
+                var length = 0;
+                while (length < digits.Length && char.IsAsciiDigit(digits[length]))
+                {
+                    length++;
+                }
+
+                if (length > 0 && ushort.TryParse(digits[..length], out var chunkId))
+                {
+                    ids.Add(chunkId);
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        return ids.ToArray();
     }
 
     private static ushort[] LoadChunkIds(string chunkDefsXml)
