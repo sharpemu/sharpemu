@@ -304,8 +304,11 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             height,
             pitchInPixel);
 
-    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
-        VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
+    public void RegisterKnownDisplayBuffer(ulong address, GuestDisplayBufferFormat format) =>
+        VulkanVideoPresenter.RegisterKnownDisplayBuffer(
+            address,
+            format.TextureFormat,
+            format.ComponentOrder);
 
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         VulkanVideoPresenter.IsGpuGuestImageAvailable(address, format, numberType);

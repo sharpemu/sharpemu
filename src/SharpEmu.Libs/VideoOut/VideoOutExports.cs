@@ -1459,9 +1459,12 @@ public static class VideoOutExports
             var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
             if (guestFormat != 0)
             {
+                var displayFormat = new GuestDisplayBufferFormat(
+                    guestFormat,
+                    MapPixelFormatToComponentOrder(attribute.PixelFormat));
                 foreach (var address in addresses)
                 {
-                    GuestGpu.Current.RegisterKnownDisplayBuffer(address, guestFormat);
+                    GuestGpu.Current.RegisterKnownDisplayBuffer(address, displayFormat);
                 }
             }
 
@@ -1749,6 +1752,14 @@ public static class VideoOutExports
 
         return result;
     }
+
+    private static GuestImageComponentOrder MapPixelFormatToComponentOrder(ulong pixelFormat) =>
+        NormalizePixelFormat(pixelFormat) switch
+        {
+            SceVideoOutPixelFormatA8R8G8B8Srgb or
+            SceVideoOutPixelFormat2B8G8R8A8Srgb => GuestImageComponentOrder.Bgra,
+            _ => GuestImageComponentOrder.Rgba,
+        };
 
     internal static bool TryPackRgba8Pixel(
         ulong pixelFormat,

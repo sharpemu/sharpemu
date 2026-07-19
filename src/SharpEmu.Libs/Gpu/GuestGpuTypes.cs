@@ -9,6 +9,17 @@ namespace SharpEmu.Libs.Gpu;
 // graphics-API values must never appear here: each backend owns the guest -> native
 // translation for its API.
 
+/// <summary>The byte component order of a guest display buffer.</summary>
+internal enum GuestImageComponentOrder
+{
+    Rgba,
+    Bgra,
+}
+
+internal readonly record struct GuestDisplayBufferFormat(
+    uint TextureFormat,
+    GuestImageComponentOrder ComponentOrder);
+
 /// <summary>A guest texture referenced by a draw or dispatch. Format/NumberType/
 /// TileMode/DstSelect are raw guest descriptor codes.</summary>
 internal sealed record GuestDrawTexture(

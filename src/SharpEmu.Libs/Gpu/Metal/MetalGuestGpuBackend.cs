@@ -177,8 +177,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
             height,
             pitchInPixel);
 
-    public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
-        MetalVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
+    public void RegisterKnownDisplayBuffer(ulong address, GuestDisplayBufferFormat format) =>
+        MetalVideoPresenter.RegisterKnownDisplayBuffer(address, format.TextureFormat);
 
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         MetalVideoPresenter.IsGuestImageAvailable(address, format, numberType);

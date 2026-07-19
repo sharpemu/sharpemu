@@ -472,6 +472,8 @@ internal static unsafe class VulkanVideoPresenter
     private static readonly Queue<Presentation> _pendingGuestImagePresentations = new();
     private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
     private static readonly Dictionary<ulong, uint> _availableGuestImages = new();
+    private static readonly Dictionary<ulong, GuestImageComponentOrder>
+        _displayBufferComponentOrders = new();
     private static readonly Dictionary<(int Handle, int BufferIndex), long>
         _lastOrderedGuestFlipVersions = new();
     private static long _orderedGuestFlipVersionSequence;
@@ -811,6 +813,7 @@ internal static unsafe class VulkanVideoPresenter
         _pendingGuestImagePresentations.Clear();
         _guestImageWorkSequences.Clear();
         _availableGuestImages.Clear();
+        _displayBufferComponentOrders.Clear();
         _lastOrderedGuestFlipVersions.Clear();
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
@@ -1751,7 +1754,10 @@ internal static unsafe class VulkanVideoPresenter
 
     // Display buffers registered through sceVideoOutRegisterBuffers remain
     // valid flip targets even before AGC has rendered into them.
-    internal static void RegisterKnownDisplayBuffer(ulong address, uint guestFormat)
+    internal static void RegisterKnownDisplayBuffer(
+        ulong address,
+        uint guestFormat,
+        GuestImageComponentOrder componentOrder)
     {
         if (address == 0 || guestFormat == 0)
         {
@@ -1761,6 +1767,29 @@ internal static unsafe class VulkanVideoPresenter
         lock (_gate)
         {
             _availableGuestImages[address] = guestFormat;
+            _displayBufferComponentOrders[address] = componentOrder;
+        }
+    }
+
+    internal static Format GetDisplayBufferViewFormat(
+        Format format,
+        GuestImageComponentOrder componentOrder) =>
+        componentOrder == GuestImageComponentOrder.Bgra
+            ? format switch
+            {
+                Format.R8G8B8A8Unorm => Format.B8G8R8A8Unorm,
+                Format.R8G8B8A8Srgb => Format.B8G8R8A8Srgb,
+                _ => format,
+            }
+            : format;
+
+    private static Format ResolveDisplayBufferViewFormat(ulong address, Format format)
+    {
+        lock (_gate)
+        {
+            return _displayBufferComponentOrders.TryGetValue(address, out var componentOrder)
+                ? GetDisplayBufferViewFormat(format, componentOrder)
+                : format;
         }
     }
 
@@ -5158,7 +5187,13 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             EnsureGuestSubmissionCapacity();
-            var snapshot = CreateGuestFlipSnapshot(source, work.Version);
+            // The copy is raw and RGBA8/BGRA8 are size-compatible. Selecting the
+            // registered display format here gives the snapshot the same byte
+            // reinterpretation a native VideoOut frame view would apply.
+            var snapshot = CreateGuestFlipSnapshot(
+                source,
+                work.Version,
+                ResolveDisplayBufferViewFormat(work.Address, source.Format));
             var commandBuffer = AllocateGuestCommandBuffer();
             var submitted = false;
             try
@@ -5344,13 +5379,14 @@ internal static unsafe class VulkanVideoPresenter
 
         private GuestImageResource CreateGuestFlipSnapshot(
             GuestImageResource source,
-            long version)
+            long version,
+            Format format)
         {
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
                 ImageType = ImageType.Type2D,
-                Format = source.Format,
+                Format = format,
                 Extent = new Extent3D(source.Width, source.Height, 1),
                 MipLevels = 1,
                 ArrayLayers = 1,
@@ -5406,7 +5442,7 @@ internal static unsafe class VulkanVideoPresenter
                 Height = source.Height,
                 MipLevels = 1,
                 GuestFormat = source.GuestFormat,
-                Format = source.Format,
+                Format = format,
                 Image = image,
                 Memory = memory,
             };
@@ -15190,6 +15226,7 @@ internal static unsafe class VulkanVideoPresenter
             lock (_gate)
             {
                 _availableGuestImages.Clear();
+                _displayBufferComponentOrders.Clear();
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
