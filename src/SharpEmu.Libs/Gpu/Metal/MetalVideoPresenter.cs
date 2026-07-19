@@ -228,6 +228,17 @@ internal static partial class MetalVideoPresenter
 
     private static void RunWindowLoop()
     {
+        // The Metal Performance HUD attaches to a process at Metal init;
+        // toggling developerHUDProperties on a live layer is inert when the
+        // HUD was never armed. SHARPEMU_METAL_HUD=1 arms it the documented way
+        // (setenv lands in the native environ before the device initializes),
+        // showing the HUD from launch; Cmd+F1 then toggles it per-layer.
+        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_METAL_HUD"), "1", StringComparison.Ordinal))
+        {
+            Environment.SetEnvironmentVariable("MTL_HUD_ENABLED", "1");
+            _metalHudVisible = true;
+        }
+
         MetalNative.EnsureFrameworksLoaded();
 
         _device = MetalNative.MTLCreateSystemDefaultDevice();
@@ -506,6 +517,14 @@ internal static partial class MetalVideoPresenter
 
         Console.Error.WriteLine(
             $"[LOADER][INFO] Metal Performance HUD {(_metalHudVisible ? "shown" : "hidden")} (Cmd+F1).");
+        if (_metalHudVisible &&
+            !string.Equals(Environment.GetEnvironmentVariable("MTL_HUD_ENABLED"), "1", StringComparison.Ordinal))
+        {
+            // The per-layer property only takes effect when the HUD attached at
+            // Metal init; without that the toggle is a no-op on some macOS builds.
+            Console.Error.WriteLine(
+                "[LOADER][INFO] If the HUD does not appear, relaunch with SHARPEMU_METAL_HUD=1 (arms Apple's HUD at startup).");
+        }
     }
 
     private static unsafe nint CreateRenderTimerTarget()

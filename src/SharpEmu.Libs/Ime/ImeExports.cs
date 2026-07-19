@@ -43,4 +43,25 @@ public static class ImeExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // No hardware keyboard is ever connected; zero the caller's info struct so
+    // it reads as "not connected" rather than uninitialized stack.
+    [SysAbiExport(
+        Nid = "VkqLPArfFdc",
+        ExportName = "sceImeKeyboardGetInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceIme")]
+    public static int ImeKeyboardGetInfo(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rsi] != 0 ? ctx[CpuRegister.Rsi] : ctx[CpuRegister.Rdi];
+        if (infoAddress != 0)
+        {
+            Span<byte> info = stackalloc byte[0x40];
+            info.Clear();
+            _ = ctx.Memory.TryWrite(infoAddress, info);
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }

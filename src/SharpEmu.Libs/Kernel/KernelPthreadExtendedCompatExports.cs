@@ -91,10 +91,6 @@ public static class KernelPthreadExtendedCompatExports
         public PthreadAttrState Attributes { get; set; } = PthreadAttrState.Default;
     }
 
-    // On the outer class deliberately: a static on the nested state class gives it a type
-    // initializer that first runs on a guest thread and fail-fasts the CLR.
-    private static long _nextRwlockWakeId;
-
     private sealed class PthreadRwlockState
     {
         public object SyncRoot { get; } = new();
@@ -105,8 +101,6 @@ public static class KernelPthreadExtendedCompatExports
         public ulong WriterThreadId { get; set; }
         public int WaitingWriters { get; set; }
 
-        // See PthreadMutexState.WakeKey.
-        public string WakeKey { get; } = "pthread_rwlock#" + Interlocked.Increment(ref _nextRwlockWakeId).ToString("X");
 
         public int GetReaderCount(ulong threadId)
         {
@@ -166,17 +160,6 @@ public static class KernelPthreadExtendedCompatExports
             ReaderTotalCount = Math.Max(0, ReaderTotalCount - 1);
             return true;
         }
-    }
-
-    private sealed class RwlockWaiter : IGuestThreadBlockWaiter
-    {
-        public required PthreadRwlockState Rwlock { get; init; }
-        public required ulong ThreadId { get; init; }
-        public required bool Write { get; init; }
-
-        public int Resume() => (int)OrbisGen2Result.ORBIS_GEN2_OK;
-
-        public bool TryWake() => TryAcquireBlockedRwlock(Rwlock, ThreadId, Write);
     }
 
     private readonly record struct TlsKeyState(ulong Destructor);
@@ -1184,7 +1167,6 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(rwlock.WakeKey);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1479,35 +1461,30 @@ public static class KernelPthreadExtendedCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
 
+                // In-place block: Monitor.Wait releases SyncRoot and parks
+                // atomically, so an unlock's PulseAll cannot be lost. Sliced
+                // only so teardown can unwind parked threads.
                 rwlock.WaitingWriters++;
-                var transferredToScheduler = false;
+                GuestThreadBlocking.NoteBlocked(currentThreadId, "pthread_rwlock_wrlock");
                 try
                 {
-                    if (GuestThreadExecution.IsGuestThread &&
-                        GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
-                        GuestThreadExecution.RequestCurrentThreadBlock(
-                            ctx,
-                            "pthread_rwlock_wrlock",
-                            rwlock.WakeKey,
-                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = true }))
-                    {
-                        transferredToScheduler = true;
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-                    }
-
                     while (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0 || rwlock.CompatWriterTotalCount != 0)
                     {
-                        Monitor.Wait(rwlock.SyncRoot);
+                        if (GuestThreadBlocking.ShutdownRequested)
+                        {
+                            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                        }
+
+                        GuestThreadBlocking.Checkpoint(currentThreadId, rwlock.SyncRoot);
+                        _ = Monitor.Wait(rwlock.SyncRoot, GuestThreadBlocking.WaitSliceMilliseconds);
                     }
 
                     rwlock.WriterThreadId = currentThreadId;
                 }
                 finally
                 {
-                    if (!transferredToScheduler)
-                    {
-                        rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
-                    }
+                    rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
+                    GuestThreadBlocking.NoteUnblocked(currentThreadId);
                 }
             }
             else
@@ -1517,20 +1494,26 @@ public static class KernelPthreadExtendedCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
                 }
 
-                while (ReaderMustWaitForRwlock(rwlock, currentThreadId))
+                if (ReaderMustWaitForRwlock(rwlock, currentThreadId))
                 {
-                    if (GuestThreadExecution.IsGuestThread &&
-                        GuestThreadExecution.TryGetCurrentImportCallFrame(out _) &&
-                        GuestThreadExecution.RequestCurrentThreadBlock(
-                            ctx,
-                            "pthread_rwlock_rdlock",
-                            rwlock.WakeKey,
-                            new RwlockWaiter { Rwlock = rwlock, ThreadId = currentThreadId, Write = false }))
+                    GuestThreadBlocking.NoteBlocked(currentThreadId, "pthread_rwlock_rdlock");
+                    try
                     {
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-                    }
+                        while (ReaderMustWaitForRwlock(rwlock, currentThreadId))
+                        {
+                            if (GuestThreadBlocking.ShutdownRequested)
+                            {
+                                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                            }
 
-                    Monitor.Wait(rwlock.SyncRoot);
+                            GuestThreadBlocking.Checkpoint(currentThreadId, rwlock.SyncRoot);
+                            _ = Monitor.Wait(rwlock.SyncRoot, GuestThreadBlocking.WaitSliceMilliseconds);
+                        }
+                    }
+                    finally
+                    {
+                        GuestThreadBlocking.NoteUnblocked(currentThreadId);
+                    }
                 }
 
                 if (rwlock.WriterThreadId != 0 ||
@@ -1545,33 +1528,6 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static bool TryAcquireBlockedRwlock(PthreadRwlockState rwlock, ulong currentThreadId, bool write)
-    {
-        lock (rwlock.SyncRoot)
-        {
-            if (write)
-            {
-                if (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0 || rwlock.CompatWriterTotalCount != 0)
-                {
-                    return false;
-                }
-
-                DetectRwlockWriterConflict(0, rwlock, currentThreadId, "wrlock-resume");
-                rwlock.WriterThreadId = currentThreadId;
-                rwlock.WaitingWriters = Math.Max(0, rwlock.WaitingWriters - 1);
-                return true;
-            }
-
-            if (ReaderMustWaitForRwlock(rwlock, currentThreadId))
-            {
-                return false;
-            }
-
-            rwlock.AddReader(currentThreadId);
-            return true;
-        }
     }
 
     // Call while holding lock(rwlock.SyncRoot): an existing reader/writer here means a
@@ -1603,8 +1559,6 @@ public static class KernelPthreadExtendedCompatExports
         return rwlock.WaitingWriters > 0 &&
                rwlock.GetReaderCount(currentThreadId) == 0;
     }
-
-    private static string GetRwlockWakeKey(ulong rwlockAddress) => $"pthread_rwlock:0x{rwlockAddress:X16}";
 
     public static string? DumpRwlockStateForStall(ulong rwlockAddress)
     {

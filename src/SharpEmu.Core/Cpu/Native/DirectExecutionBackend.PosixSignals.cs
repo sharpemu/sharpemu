@@ -50,6 +50,15 @@ public sealed unsafe partial class DirectExecutionBackend
 	private const int LinuxUcontextGregsOffset = 40;
 	private const int LinuxGregsErrOffset = 19 * 8;
 
+	// XMM0 starts after the exception/thread states and the floating-point header on Darwin.
+	// Linux mcontext_t instead stores a pointer to an FXSAVE-compatible _libc_fpstate after
+	// gregs[23], where XMM0 begins at byte 160.
+	private const int DarwinMcontextFloatStateOffset = 16 + 21 * 8;
+	private const int DarwinFloatStateXmmOffset = 168;
+	private const int LinuxFpregsPointerOffset = 23 * 8;
+	private const int LinuxFxsaveXmmOffset = 160;
+	private const int XmmRegisterBlockSize = 16 * 16;
+
 	// Byte offsets of the general registers relative to GetPosixRegisterBase,
 	// ordered to match the contiguous Win64 CONTEXT block CTX_RAX..CTX_RIP
 	// (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15, rip). Verified
@@ -70,6 +79,8 @@ public sealed unsafe partial class DirectExecutionBackend
 
 	[ThreadStatic]
 	private static int _posixSignalHandlerDepth;
+	[ThreadStatic]
+	private static bool _posixVectorContextAvailable;
 
 	private void SetupPosixExceptionHandler()
 	{
@@ -121,8 +132,10 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		byte* fakeUcontext = stackalloc byte[512];
 		new Span<byte>(fakeUcontext, 512).Clear();
-		byte* fakeMcontext = stackalloc byte[512];
-		new Span<byte>(fakeMcontext, 512).Clear();
+		// Large enough for the Darwin mcontext64 XMM block the handler now
+		// round-trips (exception+thread state + float state = 708 bytes).
+		byte* fakeMcontext = stackalloc byte[768];
+		new Span<byte>(fakeMcontext, 768).Clear();
 		if (OperatingSystem.IsMacOS())
 		{
 			*(byte**)(fakeUcontext + DarwinUcontextMcontextOffset) = fakeMcontext;
@@ -154,6 +167,33 @@ public sealed unsafe partial class DirectExecutionBackend
 			record.ExceptionInformation[1] = 0x70000;
 			_ = TryHandleLazyCommittedPage(&record, 0, 0);
 			ChainPreviousPosixAction(0, 0, 0);
+
+			// Rosetta can deliver the first unsupported SHA instruction before the
+			// runtime is in a safe state to JIT the recovery path. Decode and execute
+			// each supported form once now, while signal handlers are not installed.
+			byte[][] shaWarmupOpcodes =
+			{
+				new byte[] { 0x0F, 0x38, 0xC9, 0xC1 },       // sha1msg1 xmm0, xmm1
+				new byte[] { 0x0F, 0x38, 0xCA, 0xC1 },       // sha1msg2 xmm0, xmm1
+				new byte[] { 0x0F, 0x38, 0xC8, 0xC1 },       // sha1nexte xmm0, xmm1
+				new byte[] { 0x0F, 0x3A, 0xCC, 0xC1, 0x00 }, // sha1rnds4 xmm0, xmm1, 0
+			};
+			_posixVectorContextAvailable = true;
+			try
+			{
+				foreach (byte[] opcode in shaWarmupOpcodes)
+				{
+					fixed (byte* instructionBytes = opcode)
+					{
+						WriteCtxU64(contextRecord, CTX_RIP, (ulong)instructionBytes);
+						_ = TryRecoverIllegalInstruction(contextRecord, (ulong)instructionBytes);
+					}
+				}
+			}
+			finally
+			{
+				_posixVectorContextAvailable = false;
+			}
 		}
 		finally
 		{
@@ -251,6 +291,15 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			WriteCtxU64(contextRecord, CTX_RAX + i * 8, *(ulong*)(registers + offsets[i]));
 		}
+		// Only bridge the XMM block for SIGILL, the sole signal whose recovery
+		// may emulate an XMM instruction (Intel SHA). Copying 256 bytes in and
+		// out of the mcontext on every SIGSEGV (the hot demand-paging path) is
+		// pure overhead and needless surface for corruption.
+		byte* xmmRegisters = signal == PosixSigIll ? GetPosixXmmBase(registers) : null;
+		if (xmmRegisters != null)
+		{
+			CopyXmmRegisterBlock(contextRecord + CTX_XMM0, xmmRegisters);
+		}
 
 		EXCEPTION_RECORD record = default;
 		record.ExceptionAddress = (void*)ReadCtxU64(contextRecord, CTX_RIP);
@@ -294,13 +343,21 @@ public sealed unsafe partial class DirectExecutionBackend
 		// every fault anyway, and recovering here avoids dumping the full
 		// VectoredHandler diagnostics for each recoverable trap.
 		int disposition = 0;
-		if (_posixRawRecoveryEnabled)
+		_posixVectorContextAvailable = xmmRegisters != null;
+		try
 		{
-			disposition = TryRecoverUnresolvedSentinel(&pointers);
+			if (_posixRawRecoveryEnabled)
+			{
+				disposition = TryRecoverUnresolvedSentinel(&pointers);
+			}
+			if (disposition != -1 && !_posixSignalWarmup && _posixSignalBackend is { } backend)
+			{
+				disposition = backend.VectoredHandler(&pointers);
+			}
 		}
-		if (disposition != -1 && !_posixSignalWarmup && _posixSignalBackend is { } backend)
+		finally
 		{
-			disposition = backend.VectoredHandler(&pointers);
+			_posixVectorContextAvailable = false;
 		}
 		if (traceSignal)
 		{
@@ -316,6 +373,10 @@ public sealed unsafe partial class DirectExecutionBackend
 		for (int i = 0; i < offsets.Length; i++)
 		{
 			*(ulong*)(registers + offsets[i]) = ReadCtxU64(contextRecord, CTX_RAX + i * 8);
+		}
+		if (xmmRegisters != null)
+		{
+			CopyXmmRegisterBlock(xmmRegisters, contextRecord + CTX_XMM0);
 		}
 		return true;
 	}
@@ -333,6 +394,25 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		return (byte*)ucontext + LinuxUcontextGregsOffset;
+	}
+
+	private static byte* GetPosixXmmBase(byte* registers)
+	{
+		if (OperatingSystem.IsMacOS())
+		{
+			return registers + DarwinMcontextFloatStateOffset + DarwinFloatStateXmmOffset;
+		}
+
+		byte* fpregs = *(byte**)(registers + LinuxFpregsPointerOffset);
+		return fpregs == null ? null : fpregs + LinuxFxsaveXmmOffset;
+	}
+
+	private static void CopyXmmRegisterBlock(byte* destination, byte* source)
+	{
+		for (var offset = 0; offset < XmmRegisterBlockSize; offset += sizeof(ulong))
+		{
+			*(ulong*)(destination + offset) = *(ulong*)(source + offset);
+		}
 	}
 
 	private static ulong GetPosixFaultAddress(nint siginfo, byte* registers)

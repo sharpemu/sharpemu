@@ -97,8 +97,6 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
-
         if (micros < 1000)
         {
             // Guest worker pools use usleep(1) as a polling backoff. Do not turn
@@ -1304,6 +1302,30 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Same (pc, flags, out-info) contract as sceKernelGetModuleInfoForUnwind,
+    // surfaced through libSceSysmodule on Gen5; the unwinder threads whichever
+    // one the module's libc was linked against.
+    [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx) => KernelGetModuleInfoForUnwind(ctx);
+
+    // libc unwinder predicate: is this PC the kernel signal-return trampoline?
+    // Guest signal returns do not run through a guest-visible trampoline here,
+    // so no PC is ever one — report false and let the frame unwind normally.
+    [SysAbiExport(
+        Nid = "crb5j7mkk1c",
+        ExportName = "_is_signal_return",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int IsSignalReturn(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "nu4a0-arQis",
         ExportName = "sceKernelAioInitializeParam",
@@ -2097,7 +2119,6 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, posix ? "nanosleep" : "sceKernelNanosleep");
         var totalTicks = tvSec * TimeSpan.TicksPerSecond + Math.Max(tvNsec / 100L, 1L);
         try
         {

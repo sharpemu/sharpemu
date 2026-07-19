@@ -5,14 +5,12 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using SharpEmu.HLE;
-using SharpEmu.Libs.Fiber;
 
 namespace SharpEmu.Libs.Kernel;
 
 public static class KernelEventFlagCompatExports
 {
     private const int MaxEventFlagNameLength = 31;
-    private const int HostWaitPumpMilliseconds = 1;
     private const uint AttrThreadFifo = 0x01;
     private const uint AttrThreadPriority = 0x02;
     private const uint AttrSingle = 0x10;
@@ -25,8 +23,7 @@ public static class KernelEventFlagCompatExports
     private static readonly ConcurrentDictionary<ulong, EventFlagState> _eventFlags = new();
     private static long _nextEventFlagHandle = 1;
 
-    // Cached once: gating every call site avoids building the interpolated
-    // trace string (and FormatFrameChain/FormatGuestWaitObject) when disabled.
+    // Cached once: gating every call site avoids building the interpolated trace string when disabled.
     private static readonly bool _traceEventFlag = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_EVENT_FLAG"), "1", StringComparison.Ordinal);
 
@@ -128,11 +125,11 @@ public static class KernelEventFlagCompatExports
         lock (state.Gate)
         {
             state.Bits |= pattern;
+            // Wake threads parked in-place on the gate; each re-checks its pattern.
             Monitor.PulseAll(state.Gate);
             if (_traceEventFlag) TraceEventFlag($"set handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
         }
 
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetEventFlagWakeKey(handle));
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -229,134 +226,67 @@ public static class KernelEventFlagCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        Monitor.Enter(state.Gate);
-        try
+        // A zero-microsecond timeout degrades to an instant poll because the
+        // deadline is already in the past.
+        var hostDeadlineMs = timeoutAddress != 0
+            ? Environment.TickCount64 + (timeoutUsec == 0
+                ? 0L
+                : Math.Max(1L, (timeoutUsec + 999L) / 1000L))
+            : long.MaxValue;
+
+        lock (state.Gate)
         {
             if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var immediateWaitResult))
             {
+                if (_traceEventFlag) TraceEventFlag($"poll handle=0x{handle:X16} pattern=0x{pattern:X16} mode=0x{waitMode:X2} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
                 return SetReturn(ctx, immediateWaitResult);
             }
 
-            // Timed waits block on a deadline instead of returning TIMED_OUT
-            // immediately; a zero-microsecond timeout still degrades to an
-            // instant poll because the deadline is already in the past.
-            var deadline = timeoutAddress != 0
-                ? GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromMicroseconds(timeoutUsec))
-                : 0;
-            var hostDeadlineMs = timeoutAddress != 0
-                ? Environment.TickCount64 + (timeoutUsec == 0
-                    ? 0L
-                    : Math.Max(1L, (timeoutUsec + 999L) / 1000L))
-                : long.MaxValue;
-
-            var currentGuestThread = GuestThreadExecution.CurrentGuestThreadHandle;
-            var currentFiber = FiberExports.GetCurrentFiberAddressForDiagnostics(ctx);
-            var managedThread = Environment.CurrentManagedThreadId;
-            var blockedWaitResult = OrbisGen2Result.ORBIS_GEN2_OK;
-            var satisfied = false;
-            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "sceKernelWaitEventFlag",
-                GetEventFlagWakeKey(handle),
-                () =>
+            // In-place block on the flag gate. Monitor.Wait releases the gate
+            // and parks atomically, so a concurrent SetEventFlag's PulseAll
+            // cannot be lost between the satisfy check and the park. On wake
+            // the predicate is re-evaluated (Set semantics on FreeBSD-style
+            // event flags: OR/AND over the bit pattern, optional clear).
+            state.WaitingThreads++;
+            var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+            if (_traceEventFlag) TraceEventFlag($"wait-block handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{guestThreadHandle:X16} ret=0x{returnRip:X16}");
+            GuestThreadBlocking.NoteBlocked(guestThreadHandle, "sceKernelWaitEventFlag");
+            try
+            {
+                while (true)
                 {
-                    if (satisfied)
+                    if (GuestThreadBlocking.ShutdownRequested)
                     {
-                        return (int)blockedWaitResult;
+                        if (timeoutAddress != 0) _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
                     }
 
-                    // Deadline expiry: report timeout with the current bits.
-                    if (timeoutAddress != 0)
+                    if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var wokeResult))
+                    {
+                        if (timeoutAddress != 0) _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        if (_traceEventFlag) TraceEventFlag($"wait-wake handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
+                        return SetReturn(ctx, wokeResult);
+                    }
+
+                    var remaining = hostDeadlineMs - Environment.TickCount64;
+                    if (timeoutAddress != 0 && remaining <= 0)
                     {
                         _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                        if (_traceEventFlag) TraceEventFlag($"wait-timeout handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
                     }
 
-                    _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-                },
-                () =>
-                {
-                    if (!TryPrepareBlockedWait(
-                            ctx,
-                            state,
-                            pattern,
-                            waitMode,
-                            resultAddress,
-                            out var preparedResult))
-                    {
-                        return false;
-                    }
-
-                    blockedWaitResult = preparedResult;
-                    satisfied = true;
-                    return true;
-                },
-                deadline);
-            if (_traceEventFlag) TraceEventFlag($"wait-unsatisfied handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} block={requestedBlock} ret=0x{returnRip:X16} frames={FormatFrameChain(ctx)}");
-            if (_traceEventFlag) TraceEventFlag($"wait-object handle=0x{handle:X16} name='{state.Name}' {FormatGuestWaitObject(ctx)}");
-            if (!requestedBlock)
-            {
-                var scheduler = GuestThreadExecution.Scheduler;
-                if (scheduler is null)
-                {
-                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
-                }
-
-                state.WaitingThreads++;
-                if (_traceEventFlag) TraceEventFlag($"wait-pump handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} ret=0x{returnRip:X16}");
-                var releaseWaiter = true;
-                try
-                {
-                    while (true)
-                    {
-                        Monitor.Exit(state.Gate);
-                        try
-                        {
-                            scheduler.Pump(ctx, "sceKernelWaitEventFlag");
-                        }
-                        finally
-                        {
-                            Monitor.Enter(state.Gate);
-                        }
-
-                        if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var pumpedWaitResult))
-                        {
-                            state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
-                            releaseWaiter = false;
-                            if (_traceEventFlag) TraceEventFlag($"wait-wake handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} waiters={state.WaitingThreads} ret=0x{returnRip:X16}");
-                            return SetReturn(ctx, pumpedWaitResult);
-                        }
-
-                        var remaining = hostDeadlineMs - Environment.TickCount64;
-                        if (timeoutAddress != 0 && remaining <= 0)
-                        {
-                            state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
-                            releaseWaiter = false;
-                            _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-                            _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
-                            if (_traceEventFlag) TraceEventFlag($"wait-timeout handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
-                            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
-                        }
-
-                        Monitor.Wait(state.Gate, (int)Math.Min(remaining, HostWaitPumpMilliseconds));
-                    }
-                }
-                finally
-                {
-                    if (releaseWaiter)
-                    {
-                        state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
-                    }
+                    GuestThreadBlocking.Checkpoint(guestThreadHandle, state.Gate);
+                    _ = Monitor.Wait(state.Gate, (int)Math.Min(remaining, GuestThreadBlocking.WaitSliceMilliseconds));
                 }
             }
-
-            state.WaitingThreads++;
-            if (_traceEventFlag) TraceEventFlag($"wait-block handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} ret=0x{returnRip:X16}");
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-        }
-        finally
-        {
-            Monitor.Exit(state.Gate);
+            finally
+            {
+                state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
+                GuestThreadBlocking.NoteUnblocked(guestThreadHandle);
+            }
         }
     }
 
@@ -455,41 +385,6 @@ public static class KernelEventFlagCompatExports
         return true;
     }
 
-    private static bool TryPrepareBlockedWait(
-        CpuContext ctx,
-        EventFlagState state,
-        ulong pattern,
-        uint waitMode,
-        ulong resultAddress,
-        out OrbisGen2Result result)
-    {
-        lock (state.Gate)
-        {
-            result = OrbisGen2Result.ORBIS_GEN2_OK;
-            if (!IsSatisfied(state.Bits, pattern, waitMode))
-            {
-                return false;
-            }
-
-            if (!TryWriteResultPattern(ctx, resultAddress, state.Bits))
-            {
-                result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-            else
-            {
-                ApplyClearMode(state, pattern, waitMode);
-            }
-
-            state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
-            if (_traceEventFlag) TraceEventFlag(
-                $"wait-wake pattern=0x{pattern:X16} mode=0x{waitMode:X2} bits=0x{state.Bits:X16} waiters={state.WaitingThreads}");
-            return true;
-        }
-    }
-
-    private static string GetEventFlagWakeKey(ulong handle) =>
-        $"event_flag:0x{handle:X16}";
-
     private static bool TryWriteResultPattern(CpuContext ctx, ulong address, ulong bits) =>
         address == 0 || ctx.TryWriteUInt64(address, bits);
 
@@ -516,19 +411,6 @@ public static class KernelEventFlagCompatExports
         }
 
         value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
-        return true;
-    }
-
-    private static bool TryReadByte(CpuContext ctx, ulong address, out byte value)
-    {
-        Span<byte> buffer = stackalloc byte[1];
-        if (!ctx.Memory.TryRead(address, buffer))
-        {
-            value = 0;
-            return false;
-        }
-
-        value = buffer[0];
         return true;
     }
 
@@ -584,95 +466,4 @@ public static class KernelEventFlagCompatExports
             ? frame.ReturnRip
             : 0UL;
 
-    private static string FormatFrameChain(CpuContext ctx)
-    {
-        Span<ulong> returns = stackalloc ulong[4];
-        var count = 0;
-        var frame = ctx[CpuRegister.Rbp];
-        for (var index = 0; index < returns.Length && frame != 0; index++)
-        {
-            if (!ctx.TryReadUInt64(frame, out var nextFrame) ||
-                !ctx.TryReadUInt64(frame + sizeof(ulong), out var returnAddress))
-            {
-                break;
-            }
-
-            returns[count++] = returnAddress;
-            if (nextFrame <= frame)
-            {
-                break;
-            }
-
-            frame = nextFrame;
-        }
-
-        return count switch
-        {
-            0 => "none",
-            1 => $"0x{returns[0]:X16}",
-            2 => $"0x{returns[0]:X16},0x{returns[1]:X16}",
-            3 => $"0x{returns[0]:X16},0x{returns[1]:X16},0x{returns[2]:X16}",
-            _ => $"0x{returns[0]:X16},0x{returns[1]:X16},0x{returns[2]:X16},0x{returns[3]:X16}",
-        };
-    }
-
-    private static string FormatGuestWaitObject(CpuContext ctx)
-    {
-        var r12 = ctx[CpuRegister.R12];
-        var r13 = ctx[CpuRegister.R13];
-        var objectAddress = r12 != 0
-            ? r12
-            : r13 >= 0xA8
-                ? r13 - 0xA8
-                : 0;
-
-        var builder = new StringBuilder(256);
-        builder.Append($"r12=0x{r12:X16} r13=0x{r13:X16}");
-        if (objectAddress == 0)
-        {
-            return builder.ToString();
-        }
-
-        builder.Append($" obj=0x{objectAddress:X16}");
-        AppendUInt32(builder, ctx, objectAddress + 0x58, "o58");
-        AppendUInt32(builder, ctx, objectAddress + 0x5C, "o5C");
-        AppendUInt64(builder, ctx, objectAddress + 0x60, "o60");
-        AppendByte(builder, ctx, objectAddress + 0x6C, "state6C");
-        AppendByte(builder, ctx, objectAddress + 0x6D, "o6D");
-        AppendByte(builder, ctx, objectAddress + 0xA0, "waitA0");
-        AppendByte(builder, ctx, objectAddress + 0xA1, "stateA1");
-        AppendByte(builder, ctx, objectAddress + 0xA2, "oA2");
-        AppendUInt64(builder, ctx, objectAddress + 0xA8, "eventA8");
-        if (r13 != 0)
-        {
-            AppendUInt64(builder, ctx, r13, "r13_0");
-            AppendUInt64(builder, ctx, r13 + 8, "r13_8");
-        }
-
-        return builder.ToString();
-    }
-
-    private static void AppendByte(StringBuilder builder, CpuContext ctx, ulong address, string name)
-    {
-        if (TryReadByte(ctx, address, out var value))
-        {
-            builder.Append($" {name}=0x{value:X2}");
-        }
-    }
-
-    private static void AppendUInt32(StringBuilder builder, CpuContext ctx, ulong address, string name)
-    {
-        if (TryReadUInt32(ctx, address, out var value))
-        {
-            builder.Append($" {name}=0x{value:X8}");
-        }
-    }
-
-    private static void AppendUInt64(StringBuilder builder, CpuContext ctx, ulong address, string name)
-    {
-        if (TryReadUInt64(ctx, address, out var value))
-        {
-            builder.Append($" {name}=0x{value:X16}");
-        }
-    }
 }

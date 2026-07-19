@@ -93,19 +93,6 @@ public static class KernelEventQueueCompatExports
         }
     }
 
-    private sealed class EqueueWaiter : IGuestThreadBlockWaiter
-    {
-        public required CpuContext Ctx { get; init; }
-        public required ulong Handle { get; init; }
-        public required ulong EventsAddress { get; init; }
-        public required int EventCapacity { get; init; }
-        public required ulong OutCountAddress { get; init; }
-
-        public int Resume() => ResumeWaitEqueue(Ctx, Handle, EventsAddress, EventCapacity, OutCountAddress);
-
-        public bool TryWake() => HasPendingEvents(Handle);
-    }
-
     [SysAbiExport(
         Nid = "D0OdFMjp46I",
         ExportName = "sceKernelCreateEqueue",
@@ -149,9 +136,9 @@ public static class KernelEventQueueCompatExports
             _eventQueues.Remove(handle);
             _pendingEvents.Remove(handle);
             _registeredEvents.Remove(handle);
+            // Wake any thread parked on this queue so it observes the deletion.
+            Monitor.PulseAll(_eventQueueGate);
         }
-
-        _wakeKeys.TryRemove(handle, out _);
 
         TraceEventQueue(ctx, "delete", handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -412,59 +399,81 @@ public static class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (timeoutAddress == 0 &&
-            GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "sceKernelWaitEqueue",
-                GetEventQueueWakeKey(handle),
-                new EqueueWaiter
-                {
-                    Ctx = ctx,
-                    Handle = handle,
-                    EventsAddress = eventsAddress,
-                    EventCapacity = eventCapacity,
-                    OutCountAddress = outCountAddress,
-                }))
+        // No events ready: block this host thread in place on the queue gate.
+        // Monitor.Wait releases the gate and parks atomically, so an
+        // EnqueueEvent/TriggerDisplayEvent PulseAll issued the instant after
+        // the emptiness check cannot be lost. kqueue/kevent semantics: sleep
+        // until an event matching a registration is delivered or the timeout
+        // (usec, infinite when the arg pointer is null) lapses; a zero timeout
+        // degrades to an instant poll.
+        long deadline;
+        if (timeoutAddress == 0)
         {
-            TraceEventQueue(ctx, "wait-block", handle);
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            deadline = long.MaxValue;
+        }
+        else if (timeoutUsec == 0)
+        {
+            deadline = 0;
+        }
+        else
+        {
+            deadline = Environment.TickCount64 + Math.Max(1L, timeoutUsec / 1000L);
         }
 
-        if (timeoutAddress != 0 && ctx.TryReadUInt64(timeoutAddress, out var timeoutRaw))
+        TraceEventQueue(ctx, "wait-block", handle);
+        var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+        GuestThreadBlocking.NoteBlocked(guestThreadHandle, "sceKernelWaitEqueue");
+        try
         {
-            var timeoutMicros = timeoutRaw & 0xFFFF_FFFFUL;
-            var deadline = Environment.TickCount64 +
-                Math.Max(1L, (long)Math.Min(timeoutMicros / 1000, int.MaxValue));
             lock (_eventQueueGate)
             {
-                while (!HasPendingEvents(handle))
+                while (true)
                 {
-                    var remaining = deadline - Environment.TickCount64;
-                    if (remaining <= 0)
+                    if ((_pendingEvents.TryGetValue(handle, out var queue) && queue.Count != 0) ||
+                        !_eventQueues.Contains(handle) ||
+                        GuestThreadBlocking.ShutdownRequested)
                     {
                         break;
                     }
 
-                    Monitor.Wait(_eventQueueGate, (int)Math.Min(remaining, 100));
+                    var remaining = deadline - Environment.TickCount64;
+                    if (timeoutAddress != 0 && remaining <= 0)
+                    {
+                        break;
+                    }
+
+                    var slice = timeoutAddress == 0
+                        ? GuestThreadBlocking.WaitSliceMilliseconds
+                        : (int)Math.Min(remaining, GuestThreadBlocking.WaitSliceMilliseconds);
+                    GuestThreadBlocking.Checkpoint(guestThreadHandle, _eventQueueGate);
+                    _ = Monitor.Wait(_eventQueueGate, slice);
                 }
             }
+        }
+        finally
+        {
+            GuestThreadBlocking.NoteUnblocked(guestThreadHandle);
+        }
 
-            deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-            if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
-            {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
+        deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
+        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
 
-            if (deliveredCount > 0)
-            {
-                TraceEventQueue(ctx, "wait-timed-deliver", handle);
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-            }
+        if (deliveredCount > 0)
+        {
+            TraceEventQueue(ctx, "wait-deliver", handle);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
 
+        if (timeoutAddress != 0)
+        {
             TraceEventQueue(ctx, "wait-timeout", handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
         }
 
+        // Reached only on queue deletion or teardown; the guest sees zero events.
         TraceEventQueue(ctx, "wait", handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -798,32 +807,6 @@ public static class KernelEventQueueCompatExports
         return triggered;
     }
 
-    private static int ResumeWaitEqueue(
-        CpuContext ctx,
-        ulong handle,
-        ulong eventsAddress,
-        int eventCapacity,
-        ulong outCountAddress)
-    {
-        var deliveredCount = DequeueEvents(ctx, handle, eventsAddress, eventCapacity);
-        if (outCountAddress != 0 && !TryWriteUInt32(ctx, outCountAddress, (uint)deliveredCount))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        return deliveredCount > 0
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-    }
-
-    private static bool HasPendingEvents(ulong handle)
-    {
-        lock (_eventQueueGate)
-        {
-            return _pendingEvents.TryGetValue(handle, out var events) && events.Count != 0;
-        }
-    }
-
     private static void QueueOrUpdateEvent(
         KernelEventDeque queue,
         KernelQueuedEvent queuedEvent)
@@ -841,16 +824,16 @@ public static class KernelEventQueueCompatExports
         };
     }
 
-    // Wake keys are formatted once per handle: WakeEventQueue runs on every event
-    // enqueue (vblank/flip edges included), so formatting there is steady string churn.
-    private static readonly ConcurrentDictionary<ulong, string> _wakeKeys = new();
-
-    private static string GetEventQueueWakeKey(ulong handle) =>
-        _wakeKeys.GetOrAdd(handle, static h => $"sceKernelWaitEqueue:{h:X16}");
-
+    // Wake threads parked in-place on the queue gate; each re-checks for a
+    // matching pending event. The handle is unused (all queues share one gate)
+    // but kept in the signature so call sites read intent-fully.
     private static void WakeEventQueue(ulong handle)
     {
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetEventQueueWakeKey(handle));
+        _ = handle;
+        lock (_eventQueueGate)
+        {
+            Monitor.PulseAll(_eventQueueGate);
+        }
     }
 
     private static int DequeueEvents(CpuContext ctx, ulong handle, ulong eventsAddress, int eventCapacity)

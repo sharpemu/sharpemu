@@ -630,27 +630,6 @@ public sealed partial class DirectExecutionBackend
 					cpuContext[CpuRegister.Rax] = 18446744071562199298uL;
 				}
 			}
-			if (GuestThreadExecution.TryConsumeCurrentThreadBlock(
-					out var blockReason,
-					out var blockContinuation,
-					out var hasBlockContinuation,
-					out var blockWakeKey,
-					out var blockWaiter,
-					out var blockDeadlineTimestamp) &&
-				TryYieldGuestThreadToHostStub(argPackPtr, num, num7, importStubEntry.Nid, blockReason))
-			{
-				if (hasBlockContinuation)
-				{
-					RegisterBlockedGuestThreadContinuation(
-						GuestThreadExecution.CurrentGuestThreadHandle,
-						blockContinuation,
-						blockWakeKey,
-						blockWaiter,
-						blockDeadlineTimestamp);
-				}
-
-				cpuContext[CpuRegister.Rax] = 0uL;
-			}
 			if (flag || flag2 || flag3)
 			{
 				Console.Error.WriteLine($"[LOADER][TRACE] ImportRet#{num}: nid={importStubEntry.Nid} result={orbisGen2Result} rax=0x{cpuContext[CpuRegister.Rax]:X16}");
@@ -1345,35 +1324,13 @@ public sealed partial class DirectExecutionBackend
 			}
 		}
 
-		var consumedThreadBlock = GuestThreadExecution.TryConsumeCurrentThreadBlock(
-				out var blockReason,
-				out var blockContinuation,
-				out var hasBlockContinuation,
-				out var blockWakeKey,
-				out var blockWaiter,
-				out var blockDeadlineTimestamp);
-		if (consumedThreadBlock &&
-			TryYieldGuestThreadToHostStub(argPackPtr, dispatchIndex, returnRip, importStubEntry.Nid, blockReason))
-		{
-			if (hasBlockContinuation)
-			{
-				RegisterBlockedGuestThreadContinuation(
-					GuestThreadExecution.CurrentGuestThreadHandle,
-					blockContinuation,
-					blockWakeKey,
-					blockWaiter,
-					blockDeadlineTimestamp);
-			}
-
-			cpuContext[CpuRegister.Rax] = 0uL;
-		}
 		if (probeLeafReturn)
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] leaf-return-probe-exit nid={importStubEntry.Nid} " +
 				$"original=0x{returnRip:X16} final=0x{*(ulong*)(argPackPtr + 96):X16} " +
 				$"rsp=0x{leafStackPointer:X16} active_slot=0x{ActiveGuestReturnSlotAddress:X16} " +
-				$"block={consumedThreadBlock} yield={ActiveGuestThreadYieldRequested}");
+				$"yield={ActiveGuestThreadYieldRequested}");
 		}
 
 		result = cpuContext[CpuRegister.Rax];
