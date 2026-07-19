@@ -77,6 +77,55 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void PosixClose_BadDescriptorReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0x80020002; // never-opened / sentinel fd
+
+        var result = KernelMemoryCompatExports.PosixClose(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void PosixRead_BadDescriptorReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong bufferAddress = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0x80020002; // never-opened / sentinel fd
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 0x40;
+
+        var result = KernelMemoryCompatExports.PosixRead(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void PosixWrite_BadDescriptorReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong bufferAddress = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(bufferAddress, "payload");
+        context[CpuRegister.Rdi] = 0x80020002; // never-opened / sentinel fd
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 0x7;
+
+        var result = KernelMemoryCompatExports.PosixWrite(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+    }
+
+    [Fact]
     public void Sprintf_ReadsVariadicDoubleFromXmmRegister()
     {
         const ulong memoryBase = 0x1_0000_0000;

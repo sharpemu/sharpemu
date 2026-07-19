@@ -1548,7 +1548,13 @@ public static partial class KernelMemoryCompatExports
         ExportName = "close",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixClose(CpuContext ctx) => KernelCloseCore(ctx, unchecked((int)ctx[CpuRegister.Rdi]));
+    public static int PosixClose(CpuContext ctx)
+    {
+        var result = KernelCloseCore(ctx, unchecked((int)ctx[CpuRegister.Rdi]));
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, result, notFoundErrno: Ebadf);
+    }
 
     [SysAbiExport(
         Nid = "UK2Tl2DWUns",
@@ -2128,7 +2134,15 @@ public static partial class KernelMemoryCompatExports
         ExportName = "read",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixRead(CpuContext ctx) => KernelReadUnderscore(ctx);
+    public static int PosixRead(CpuContext ctx)
+    {
+        // On success KernelReadUnderscore writes the byte count into RAX, which
+        // the import bridge prefers over this return value.
+        var result = KernelReadUnderscore(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, result, notFoundErrno: Ebadf);
+    }
 
     [SysAbiExport(
         Nid = "Cg4srZ6TKbU",
@@ -2327,7 +2341,15 @@ public static partial class KernelMemoryCompatExports
         ExportName = "write",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixWrite(CpuContext ctx) => KernelWriteUnderscore(ctx);
+    public static int PosixWrite(CpuContext ctx)
+    {
+        // On success KernelWriteUnderscore writes the byte count into RAX, which
+        // the import bridge prefers over this return value.
+        var result = KernelWriteUnderscore(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, result, notFoundErrno: Ebadf);
+    }
 
     [SysAbiExport(
         Nid = "4wSze92BhLI",

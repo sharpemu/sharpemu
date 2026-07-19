@@ -37,10 +37,11 @@ public sealed class KernelSocketCompatExportsTests
                 KernelMemoryCompatExports.PosixClose(context));
             Assert.Equal(0UL, context[CpuRegister.Rax]);
 
+            // A second close of an already-closed fd fails per the POSIX ABI:
+            // -1 with errno set, not the raw Orbis NOT_FOUND sentinel.
             context[CpuRegister.Rdi] = unchecked((ulong)guestFd);
-            Assert.Equal(
-                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
-                KernelMemoryCompatExports.PosixClose(context));
+            Assert.Equal(-1, KernelMemoryCompatExports.PosixClose(context));
+            Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
         }
         finally
         {
