@@ -640,6 +640,21 @@ public static partial class AgcExports
     public static int GetRegisterDefaults2Internal(CpuContext ctx) =>
         ReturnRegisterDefaults(ctx, internalDefaults: true);
 
+    /// <summary>
+    /// Reports that the GPU is not running in Trinity mode, matching the base
+    /// console this backend emulates.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "BfBDZGbti7A",
+        ExportName = "sceAgcGetIsTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int GetIsTrinityMode(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "f3dg2CSgRKY",
         ExportName = "sceAgcCreateShader",

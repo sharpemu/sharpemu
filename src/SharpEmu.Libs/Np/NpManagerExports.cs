@@ -69,6 +69,23 @@ public static class NpManagerExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    /// <summary>
+    /// Accepts the reachability callback and never invokes it. Reachability
+    /// transitions only ever fire on a real PSN connection, which an offline
+    /// session does not have, so registering successfully and staying silent is
+    /// the accurate emulation of a signed-out console rather than a stub.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "hw5KNqAAels",
+        ExportName = "sceNpRegisterNpReachabilityStateCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpRegisterNpReachabilityStateCallback(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "qQJfO8HAiaY",
         ExportName = "sceNpRegisterStateCallbackA",
