@@ -771,7 +771,16 @@ public static class KernelPthreadCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            if (state.Type is MutexTypeNormal or MutexTypeAdaptiveNp)
+            if (state.Type == MutexTypeAdaptiveNp)
+            {
+                var adaptiveResult = tryOnly
+                    ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
+                    : (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock-idempotent", mutexAddress, resolvedAddress, state, currentThreadId, adaptiveResult);
+                return adaptiveResult;
+            }
+
+            if (state.Type == MutexTypeNormal)
             {
                 if (tryOnly)
                 {
@@ -807,7 +816,23 @@ public static class KernelPthreadCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
 
-                if (state.Type is MutexTypeNormal or MutexTypeAdaptiveNp)
+                if (state.Type == MutexTypeAdaptiveNp)
+                {
+                    if (tryOnly)
+                    {
+                        TracePthreadMutex(ctx, "trylock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+                    }
+
+                    // Gen5 runtime wrappers can layer an adaptive lock call over
+                    // scePthreadMutexLock for one logical acquisition, followed by
+                    // only one unlock. Keep the duplicate acquisition idempotent so
+                    // the matching unlock fully releases the HLE mutex.
+                    TracePthreadMutex(ctx, "lock-idempotent", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+
+                if (state.Type == MutexTypeNormal)
                 {
                     if (tryOnly)
                     {
@@ -816,7 +841,7 @@ public static class KernelPthreadCompatExports
                     }
 
                     // Several Gen5 runtimes layer their own owner/count bookkeeping
-                    // over a NORMAL or ADAPTIVE kernel mutex. Returning EDEADLK here
+                    // over a NORMAL kernel mutex. Returning EDEADLK here
                     // leaves that guest bookkeeping out of sync with the HLE owner and
                     // turns the wrapper into a permanent lock/unlock retry loop. Keep
                     // the compatibility recursion used by the original implementation;
