@@ -52,10 +52,10 @@ public enum Gen5PixelOutputKind
 /// <summary>Raw CB_COLOR_INFO.COMP_SWAP mode for a guest color target.</summary>
 public enum Gen5PixelOutputComponentSwap
 {
-    Standard,
-    Alternate,
-    StandardReverse,
-    AlternateReverse,
+    Standard = 0,
+    Alternate = 1,
+    StandardReverse = 2,
+    AlternateReverse = 3,
 }
 
 public readonly record struct Gen5PixelOutputBinding(

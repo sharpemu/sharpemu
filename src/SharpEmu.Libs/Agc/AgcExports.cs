@@ -6824,6 +6824,7 @@ public static partial class AgcExports
                 (attrib2 & 0x3FFFu) + 1,
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
+                // CB_COLOR_INFO.COMP_SWAP occupies bits 11..12.
                 (info >> 11) & 0x3u,
                 (attrib3 >> 14) & 0x1Fu));
         }
