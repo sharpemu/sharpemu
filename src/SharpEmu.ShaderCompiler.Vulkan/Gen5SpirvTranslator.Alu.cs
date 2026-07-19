@@ -1015,12 +1015,6 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            if (control.Clamp)
-            {
-                error = $"unsupported vop3p modifiers (clamp) for {instruction.Opcode}";
-                return false;
-            }
-
             var sourceCount = instruction.Opcode == "VPkFmaF16" ? 3 : 2;
             for (var index = 0; index < sourceCount; index++)
             {
@@ -1040,6 +1034,14 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Computes one result lane (low or high) as a packed 16-bit f16 value.
+        // The op runs in f32 and its result is narrowed back to f16 exactly (see
+        // EmitFloatToHalf). When the clamp modifier is set the pre-narrowing f32
+        // value is saturated to [0, 1] first; because 0.0 and 1.0 are exact in both
+        // f32 and f16 and the clamp is monotonic, clamping before the narrowing
+        // gives the same f16 the hardware produces by clamping the f16 result. For
+        // the fused multiply-add the pre-narrowing value is the round-to-odd f32
+        // from EmitPackedF16FusedMultiplyAdd, and round-to-odd preserves that
+        // equivalence through the final round-to-nearest-even.
         private uint EmitPackedF16Lane(
             Gen5ShaderInstruction instruction,
             Gen5Vop3pControl control,
@@ -1047,21 +1049,44 @@ public static partial class Gen5SpirvTranslator
         {
             var left = EmitPackedF16Operand(instruction, control, 0, highLane);
             var right = EmitPackedF16Operand(instruction, control, 1, highLane);
+            uint value;
             if (instruction.Opcode == "VPkFmaF16")
             {
                 var addend = EmitPackedF16Operand(instruction, control, 2, highLane);
-                return EmitFloatToHalf(EmitPackedF16FusedMultiplyAdd(left, right, addend));
+                value = EmitPackedF16FusedMultiplyAdd(left, right, addend);
+            }
+            else
+            {
+                value = Bitcast(_uintType, instruction.Opcode switch
+                {
+                    "VPkAddF16" => _module.AddInstruction(SpirvOp.FAdd, _floatType, left, right),
+                    "VPkMulF16" => _module.AddInstruction(SpirvOp.FMul, _floatType, left, right),
+                    "VPkMinF16" => EmitPackedF16MinMax(left, right, isMax: false),
+                    "VPkMaxF16" => EmitPackedF16MinMax(left, right, isMax: true),
+                    _ => left,
+                });
             }
 
-            var value = instruction.Opcode switch
+            if (control.Clamp)
             {
-                "VPkAddF16" => _module.AddInstruction(SpirvOp.FAdd, _floatType, left, right),
-                "VPkMulF16" => _module.AddInstruction(SpirvOp.FMul, _floatType, left, right),
-                "VPkMinF16" => EmitPackedF16MinMax(left, right, isMax: false),
-                "VPkMaxF16" => EmitPackedF16MinMax(left, right, isMax: true),
-                _ => left,
-            };
-            return EmitFloatToHalf(Bitcast(_uintType, value));
+                value = EmitClampToUnitInterval(value);
+            }
+
+            return EmitFloatToHalf(value);
+        }
+
+        // Saturates an f32 bit pattern to [0, 1] the way the VOP3P clamp modifier
+        // does: below 0 (and NaN, since the ordered compare is false for it) becomes
+        // 0, above 1 becomes 1. Ordered compares match the hardware's NaN-to-zero
+        // behaviour without a separate IsNan test.
+        private uint EmitClampToUnitInterval(uint valueBits)
+        {
+            var value = Bitcast(_floatType, valueBits);
+            var aboveZero = _module.AddInstruction(SpirvOp.FOrdGreaterThan, _boolType, value, Float(0));
+            var lowerBounded = _module.AddInstruction(SpirvOp.Select, _floatType, aboveZero, value, Float(0));
+            var belowOne = _module.AddInstruction(SpirvOp.FOrdLessThan, _boolType, lowerBounded, Float(1));
+            var clamped = _module.AddInstruction(SpirvOp.Select, _floatType, belowOne, lowerBounded, Float(1));
+            return Bitcast(_uintType, clamped);
         }
 
         // Fused f16 multiply-add with a single rounding, emulated in f32 without the

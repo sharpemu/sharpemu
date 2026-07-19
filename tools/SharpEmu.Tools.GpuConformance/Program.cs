@@ -17,6 +17,8 @@
 //       multiply-add would give 0x7A6A instead
 //   [6] the same fma with the addend negated -> 0x7A6A packed (just below the
 //       same midpoint), pinning the opposite rounding direction
+//   [7] the pinned fma with the clamp modifier -> 0x3C00 packed (both lanes
+//       exceed 1.0, so each saturates to 1.0)
 // Every other word of the buffer must still hold the sentinel afterwards.
 //
 // Creating the compute pipeline doubles as a driver-acceptance check for the
@@ -45,6 +47,9 @@ var expectedRestored = BitConverter.SingleToUInt32Bits(1.5f);
 // addend decides the rounding direction under a single fused rounding.
 const uint ExpectedPkFma = 0x7A6B_7A6B;
 const uint ExpectedPkFmaNeg = 0x7A6A_7A6A;
+// Both lanes of the pinned fma are ~52560, far above 1.0, so the clamp modifier
+// saturates each to 1.0 (0x3C00 in f16).
+const uint ExpectedPkFmaClamp = 0x3C00_3C00;
 
 unsafe
 {
@@ -365,6 +370,7 @@ unsafe
         ("store after exec restore (offset 16)", words[4], expectedRestored),
         ("v_pk_fma_f16 fused rounds up at midpoint", words[5], ExpectedPkFma),
         ("v_pk_fma_f16 neg addend rounds down", words[6], ExpectedPkFmaNeg),
+        ("v_pk_fma_f16 clamp saturates to 1.0", words[7], ExpectedPkFmaClamp),
     };
     var failures = 0;
     foreach (var (name, actual, expected) in results)

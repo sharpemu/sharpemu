@@ -57,6 +57,8 @@ const ulong ProgramAddress = 0x100000;
         0xCC114006, 0x18020300, // v_pk_min_f16 v6, v0, v1
         0xCC124007, 0x18020300, // v_pk_max_f16 v7, v0, v1
         0xCC0E4408, 0x9C0A0300, // v_pk_fma_f16 v8, v0, v1, neg_lo:[0,0,1] neg_hi:[0,0,1] v2
+        0xCC0FC009, 0x18020000, // v_pk_add_f16 v9, v0, v0 clamp  (2.5+2.5=5 -> saturates to 1.0)
+        0xCC0EC40A, 0x1C0A0300, // v_pk_fma_f16 v10, v0, v1, v2 clamp
         0xBF810000,             // s_endpgm
     ]),
     ("mrt", true, [
@@ -158,8 +160,10 @@ const ulong ProgramAddress = 0x100000;
         0x7E1202FF, 0x04EA04EA, // v_mov_b32 v9, 0x04EA04EA (~7.496e-5 packed)
         0xCC0E400A, 0x1C261107, // v_pk_fma_f16 v10, v7, v8, v9
         0xCC0E440B, 0x9C261107, // v_pk_fma_f16 v11, v7, v8, neg_lo:[0,0,1] neg_hi:[0,0,1] v9
+        0xCC0EC00C, 0x1C261107, // v_pk_fma_f16 v12, v7, v8, v9 clamp (>=1 -> saturates to 1.0)
         0xE0700014, 0x80020A00, // buffer_store_dword v10, off, s[8:11], 0 offset:20
         0xE0700018, 0x80020B00, // buffer_store_dword v11, off, s[8:11], 0 offset:24
+        0xE070001C, 0x80020C00, // buffer_store_dword v12, off, s[8:11], 0 offset:28
         0xBF810000,             // s_endpgm
     ]),
 ];
