@@ -2328,6 +2328,37 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "smIj7eqzZE8",
+        ExportName = "clock_getres",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int ClockGetres(CpuContext ctx)
+    {
+        var timespecAddress = ctx[CpuRegister.Rsi];
+
+        // POSIX allows a null resolution pointer: the call then only validates
+        // the clock id, which every id a title passes here does.
+        if (timespecAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        // clock_gettime above is backed by DateTimeOffset.UtcNow, whose tick is
+        // 100 ns, so that is the honest resolution to report rather than the 1 ns
+        // a caller might otherwise assume it can rely on.
+        const ulong ResolutionNanoseconds = 100;
+        if (!ctx.TryWriteUInt64(timespecAddress, 0) ||
+            !ctx.TryWriteUInt64(timespecAddress + sizeof(long), ResolutionNanoseconds))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "vNe1w4diLCs",
         ExportName = "__tls_get_addr",
         Target = Generation.Gen4 | Generation.Gen5,
