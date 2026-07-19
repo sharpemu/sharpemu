@@ -2059,6 +2059,13 @@ public static class KernelRuntimeCompatExports
     public static int KernelNanosleep(CpuContext ctx) => NanosleepCore(ctx, posix: false);
 
     [SysAbiExport(
+        Nid = "NhpspxdjEKU",
+        ExportName = "_nanosleep",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixNanosleepUnderscore(CpuContext ctx) => NanosleepCore(ctx, posix: true);
+
+    [SysAbiExport(
         Nid = "yS8U2TGCe1A",
         ExportName = "nanosleep",
         Target = Generation.Gen4 | Generation.Gen5,
