@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -4728,7 +4728,7 @@ public static partial class KernelMemoryCompatExports
                 !guestPath.StartsWith("/", StringComparison.Ordinal) &&
                 !guestPath.StartsWith("\\", StringComparison.Ordinal))
             {
-                var relative = guestPath.Replace('/', Path.DirectorySeparatorChar);
+                var relative = NormalizeMountRelativePath(guestPath);
                 return Path.Combine(app0Root, relative);
             }
         }
@@ -4803,12 +4803,40 @@ public static partial class KernelMemoryCompatExports
         return _cachedApp0Root;
     }
 
+    // Resolves "." and ".." inside a mount-relative guest path and clamps the
+    // result at the mount root, so a guest path can never escape into the host
+    // filesystem. Unreal Engine titles depend on this: their base directory is
+    // <app>/binaries/<platform>, so they address content with "../../../"
+    // prefixes that land back inside /app0 on real hardware. Combining those
+    // raw against the app0 root walked out of the game folder entirely, so the
+    // title enumerated an unrelated host directory and never found its .pak files.
     private static string NormalizeMountRelativePath(string relativePath)
     {
-        return relativePath
-            .TrimStart('/', '\\')
-            .Replace('/', Path.DirectorySeparatorChar)
-            .Replace('\\', Path.DirectorySeparatorChar);
+        var segments = relativePath.Split(
+            new[] { '/', '\\' },
+            StringSplitOptions.RemoveEmptyEntries);
+        var resolved = new List<string>(segments.Length);
+        foreach (var segment in segments)
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (resolved.Count > 0)
+                {
+                    resolved.RemoveAt(resolved.Count - 1);
+                }
+
+                continue;
+            }
+
+            resolved.Add(segment);
+        }
+
+        return string.Join(Path.DirectorySeparatorChar, resolved);
     }
 
     private static string ResolveDevlogAppRoot()
