@@ -161,6 +161,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
         var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
+        RefreshTlsInitImagesAfterRelocation(image, loadedModuleImages);
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,
@@ -642,6 +643,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.
             (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false),
+            // Flat/repacked dumps place companion .prx files directly alongside eboot.bin
+            // instead of nesting them under Media/Plugins. Scan it the same deferred-init
+            // way so on-demand-loaded native plugins (Unity's IL2CPP runtime, audio
+            // middleware, etc.) are still discoverable.
+            (Path: ebootDirectory, StartAtBoot: false),
         }
         .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
         .Select(group => group.First())
@@ -786,6 +792,14 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
     }
 
+    // A recognizable sentinel written into unresolved cross-module data-import
+    // targets when SHARPEMU_POISON_UNRESOLVED_DATA_IMPORTS=1, so a later guest
+    // crash dereferencing one of these slots is immediately identifiable as
+    // "unresolved data import" rather than indistinguishable from a legitimate
+    // null pointer. Mirrors the StackCheckGuardValue sentinel technique used
+    // for unresolved import-stub returns (DirectExecutionBackend.Imports.cs).
+    private const ulong UnresolvedDataImportPoisonValue = 0xBAADDA7ABAADDA7AUL;
+
     private int RebindImportedDataSymbols(
         SelfImage image,
         IReadOnlyDictionary<string, ulong> runtimeSymbols,
@@ -801,6 +815,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_DATA_REBIND"),
             "1",
             StringComparison.Ordinal);
+        var poisonUnresolved = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_POISON_UNRESOLVED_DATA_IMPORTS"),
+            "1",
+            StringComparison.Ordinal);
         for (var i = 0; i < image.ImportedRelocations.Count; i++)
         {
             var relocation = image.ImportedRelocations[i];
@@ -812,10 +830,12 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             if (!runtimeSymbols.TryGetValue(relocation.Nid, out var symbolAddress) ||
                 !IsUsableRuntimeSymbolAddress(symbolAddress))
             {
+                var poisoned = poisonUnresolved &&
+                    TryWriteUInt64(_virtualMemory, relocation.TargetAddress, UnresolvedDataImportPoisonValue);
                 if (logRebind)
                 {
                     Console.Error.WriteLine(
-                        $"[RUNTIME] Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16}");
+                        $"[RUNTIME] Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16} poisoned={poisoned}");
                 }
 
                 unresolved++;
@@ -845,6 +865,46 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         return rebound;
+    }
+
+    // The loader registers each module's PT_TLS identity (and captures an initial
+    // InitImage snapshot) before applying that module's own relocations, and cross-module
+    // imported-data relocations (RebindImportedDataSymbols, above) are resolved later
+    // still, once every module has loaded. If a module's .tdata contains a relocatable
+    // pointer, the loader's early snapshot bakes in the pre-relocation (zero) bytes
+    // permanently. Re-read every TLS-bearing image's segment now - after both relocation
+    // passes have completed for every module, and before RunAllInitializers lets any guest
+    // code (and therefore any __tls_get_addr call) run - so GuestTlsTemplate's InitImage
+    // reflects the final, fully-relocated bytes before any guest thread ever derives a TLS
+    // block from it.
+    private void RefreshTlsInitImagesAfterRelocation(
+        SelfImage image,
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages)
+    {
+        RefreshTlsInitImage(image);
+        for (var i = 0; i < loadedModuleImages.Count; i++)
+        {
+            RefreshTlsInitImage(loadedModuleImages[i].Image);
+        }
+    }
+
+    private void RefreshTlsInitImage(SelfImage image)
+    {
+        if (image.TlsModuleId == 0 || image.TlsFileSize == 0)
+        {
+            return;
+        }
+
+        var initImage = new byte[image.TlsFileSize];
+        if (!_virtualMemory.TryRead(image.TlsSegmentAddress, initImage))
+        {
+            Console.Error.WriteLine(
+                $"[RUNTIME][TLS] Failed to re-read TLS init image for module {image.TlsModuleId} " +
+                $"at 0x{image.TlsSegmentAddress:X16}; keeping the pre-relocation snapshot.");
+            return;
+        }
+
+        GuestTlsTemplate.UpdateInitImage(image.TlsModuleId, initImage);
     }
 
     private static void MergeKnownHleDataSymbols(IDictionary<string, ulong> runtimeSymbols)

@@ -4,10 +4,12 @@
 using System.Buffers.Binary;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
+using SharpEmu.Libs.Tests.Tls;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Loader;
 
+[Collection(GuestTlsTemplateStateCollection.Name)]
 public sealed class SelfLoaderTests
 {
     private const uint Ps4SelfMagic = 0x4F153D1D;

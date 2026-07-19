@@ -1098,8 +1098,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine($"[LOADER][INFO] RuntimeSymbols: {runtimeSymbols.Count}");
 		Console.Error.WriteLine(_moduleManager.TryGetExport("QrZZdJ8XsX0", out ExportedFunction export) ? ("[LOADER][INFO] ExportCheck fputs: " + export.LibraryName + ":" + export.Name) : "[LOADER][INFO] ExportCheck fputs: MISSING");
 		Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export2) ? ("[LOADER][INFO] ExportCheck map_direct: " + export2.LibraryName + ":" + export2.Name) : "[LOADER][INFO] ExportCheck map_direct: MISSING");
+		foreach (var watchAddress in ParseDiagnosticAddresses(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITE_ADDRS")))
+		{
+			SharpEmu.HLE.GuestImageWriteTracker.Track(watchAddress, 8, source: "debug-watch");
+		}
 		_entryPoint = entryPoint;
 		_cpuContext = context;
+		foreach (var (forcedAddress, forcedValue) in ParseForcedByteWrites(Environment.GetEnvironmentVariable("SHARPEMU_FORCE_BYTE_WRITE")))
+		{
+			var forcedOk = context.Memory.TryWrite(forcedAddress, new[] { forcedValue });
+			Console.Error.WriteLine(
+				$"[LOADER][EXPERIMENT] Forced byte write addr=0x{forcedAddress:X16} value=0x{forcedValue:X2} ok={forcedOk}");
+		}
 		_debugHook = executionOptions.DebugHook;
 		_returnFallbackTarget = context[CpuRegister.Rsi];
 		Volatile.Write(ref _globalFallbackTarget, _returnFallbackTarget);
@@ -1643,6 +1653,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return false;
 		}
+		if (IsThreadIdentityLibcExport(exportName))
+		{
+			// A host pthread_self() can't distinguish between SharpEmu's cooperatively-scheduled
+			// guest threads, which all run inline on the same host thread. Passing this through
+			// via LLE breaks guest code that keys per-thread state (e.g. IL2CPP-style allocator
+			// caches) off the returned identity, so it must always go through the per-guest-thread
+			// -aware HLE path instead.
+			return false;
+		}
 		var value = Environment.GetEnvironmentVariable("SHARPEMU_LLE_LIBC_SAFE_ONLY");
 		if (string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) ||
 			string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
@@ -1671,30 +1690,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool CanUseLleLibcAllocatorFamily()
 	{
-		return HasUsableLleLibcExport("gQX+4GDQjpM", "malloc") &&
-			   HasUsableLleLibcExport("tIhsqj0qsFE", "free") &&
-			   HasUsableLleLibcExport("2X5agFjKxMc", "calloc") &&
-			   HasUsableLleLibcExport("Y7aJ1uydPMo", "realloc") &&
-			   HasUsableLleLibcExport("Ujf3KzMvRmI", "memalign") &&
-			   HasUsableLleLibcExport("2Btkg8k24Zg", "aligned_alloc") &&
-			   HasUsableLleLibcExport("cVSk9y8URbc", "posix_memalign");
-	}
-
-	private bool HasUsableLleLibcExport(string nid, string exportName)
-	{
-		if (TryResolveRuntimeSymbolAddress(nid, out var address) && IsDirectImportTargetUsable(address))
-		{
-			return true;
-		}
-
-		foreach (var candidate in EnumerateRuntimeSymbolCandidates(exportName))
-		{
-			if (TryResolveRuntimeSymbolAddress(candidate, out address) && IsDirectImportTargetUsable(address))
-			{
-				return true;
-			}
-		}
-
+		// Deliberately always false: HLE's aligned-allocation exports (memalign/aligned_alloc/
+		// posix_memalign) carve memory from SharpEmu's own guest heap, which is backed by
+		// freshly-committed, demand-paged host memory that reads as zero on first touch. Guest
+		// code that lazily initializes a field only "if it reads as zero" (a real pattern found
+		// in metal_slug's IL2CPP-style per-thread allocator bucket bookkeeping) works by accident
+		// under that HLE heap, but a real host memalign() can return recycled, non-zeroed heap
+		// memory instead - dereferencing the unpopulated field then crashes. Since glibc's malloc/
+		// free/calloc/realloc/memalign/aligned_alloc/posix_memalign all share one underlying heap,
+		// mixing LLE for some of these with HLE for others would let guest code free an
+		// HLE-allocated (non-native) pointer through a real host free(), corrupting the host heap.
+		// So this family must stay all-HLE together rather than partially LLE'd.
 		return false;
 	}
 
@@ -1722,6 +1728,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			"memmove" or
 			"memset" or
 			"memcmp" => true,
+			_ => false,
+		};
+	}
+
+	private static bool IsThreadIdentityLibcExport(string exportName)
+	{
+		return exportName switch
+		{
+			"pthread_self" or
+			"scePthreadSelf" => true,
 			_ => false,
 		};
 	}

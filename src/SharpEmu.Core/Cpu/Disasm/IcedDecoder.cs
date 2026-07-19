@@ -100,6 +100,19 @@ public static class IcedDecoder
         ArgumentNullException.ThrowIfNull(memory);
         var clampedLength = Math.Clamp(maxLen, 1, MaxInstructionBytes);
         var buffer = new byte[clampedLength];
+
+        // Fast path: the whole window is mapped (the overwhelming majority of
+        // positions during a linear scan) — one bulk read instead of up to 15
+        // single-byte calls.
+        if (memory.TryRead(rip, buffer))
+        {
+            bytes = buffer;
+            return true;
+        }
+
+        // Fall back to byte-at-a-time only for a partially-mapped tail (e.g.
+        // near the end of a region), so a whole-window read failure doesn't
+        // discard a shorter run of bytes that IS actually readable.
         Span<byte> oneByte = stackalloc byte[1];
         var readCount = 0;
         for (var i = 0; i < clampedLength; i++)
@@ -128,6 +141,47 @@ public static class IcedDecoder
         bytes = new byte[readCount];
         Array.Copy(buffer, bytes, readCount);
         return true;
+    }
+
+    /// <summary>
+    /// Decodes just enough to learn an instruction's length and referenced
+    /// memory address, skipping the text-formatting and byte-copying work
+    /// <see cref="TryDecode"/> always does. Intended for hot scan loops (e.g.
+    /// linear reference scans over megabytes of guest code) that only need to
+    /// test <paramref name="memoryAddress"/> against candidate targets and
+    /// call the full <see cref="TryDecode"/> once, only for an actual hit.
+    /// </summary>
+    public static bool TryDecodeQuick(ulong rip, ReadOnlySpan<byte> codeBytes, out int length, out ulong? memoryAddress)
+    {
+        length = 0;
+        memoryAddress = null;
+        if (codeBytes.IsEmpty)
+        {
+            return false;
+        }
+
+        var decodeLength = Math.Min(MaxInstructionBytes, codeBytes.Length);
+        var decodeBytes = GC.AllocateUninitializedArray<byte>(decodeLength);
+        codeBytes[..decodeLength].CopyTo(decodeBytes);
+
+        try
+        {
+            var decoder = Decoder.Create(64, new ByteArrayCodeReader(decodeBytes));
+            decoder.IP = rip;
+            decoder.Decode(out var instruction);
+            if (instruction.Code == Code.INVALID || instruction.Length <= 0)
+            {
+                return false;
+            }
+
+            length = instruction.Length;
+            memoryAddress = GetMemoryAddress(in instruction);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static string FormatBytes(ReadOnlySpan<byte> bytes)

@@ -308,7 +308,9 @@ public sealed class SelfLoader : ISelfLoader
             applicationInfo.Version,
             tlsModuleId,
             tlsInfo.MemorySize,
-            tlsInfo.StaticOffset);
+            tlsInfo.StaticOffset,
+            tlsInfo.SegmentAddress,
+            tlsInfo.FileSize);
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
@@ -538,7 +540,11 @@ public sealed class SelfLoader : ISelfLoader
             $"[LOADER][TLS] Module {tlsModuleId} TLS template: memsz=0x{tlsHeader.MemorySize:X} " +
             $"filesz=0x{tlsHeader.FileSize:X} align=0x{tlsHeader.Alignment:X} " +
             $"static_offset=0x{staticOffset:X} total_static=0x{GuestTlsTemplate.StaticTlsSize:X}");
-        return new ModuleTlsInfo(tlsHeader.MemorySize, staticOffset);
+        return new ModuleTlsInfo(
+            tlsHeader.MemorySize,
+            staticOffset,
+            imageBase + tlsHeader.VirtualAddress,
+            (ulong)fileSize);
     }
 
     private static IReadOnlyDictionary<ulong, string> ResolveAndPatchImportStubs(
@@ -1241,6 +1247,10 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         var dynamicInfo = ParseDynamicInfo(dynamicTable);
+        Console.Error.WriteLine(
+            $"[LOADER][TEST] dynamicInfo: InitOffset=0x{dynamicInfo.InitOffset:X} " +
+            $"InitArrayOffset=0x{dynamicInfo.InitArrayOffset:X} InitArraySize=0x{dynamicInfo.InitArraySize:X} " +
+            $"PreInitArrayOffset=0x{dynamicInfo.PreInitArrayOffset:X} PreInitArraySize=0x{dynamicInfo.PreInitArraySize:X}");
         var preInitializers = new List<ulong>(4);
         var initializers = new List<ulong>(8);
         initFunctionEntryPoint = ResolveMappedAddressOrFallback(virtualMemory, dynamicInfo.InitOffset, imageBase);
@@ -2731,7 +2741,7 @@ public sealed class SelfLoader : ISelfLoader
         public uint Type => (uint)(Info & uint.MaxValue);
     }
 
-    private readonly record struct ModuleTlsInfo(ulong MemorySize, ulong StaticOffset);
+    private readonly record struct ModuleTlsInfo(ulong MemorySize, ulong StaticOffset, ulong SegmentAddress, ulong FileSize);
 
     private enum RelocationValueKind : byte
     {

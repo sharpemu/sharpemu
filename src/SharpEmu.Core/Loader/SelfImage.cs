@@ -27,7 +27,9 @@ public sealed class SelfImage
         string? version = null,
         uint tlsModuleId = 0,
         ulong tlsMemorySize = 0,
-        ulong tlsStaticOffset = 0)
+        ulong tlsStaticOffset = 0,
+        ulong tlsSegmentAddress = 0,
+        ulong tlsFileSize = 0)
     {
         ArgumentNullException.ThrowIfNull(programHeaders);
         ArgumentNullException.ThrowIfNull(mappedRegions);
@@ -50,6 +52,8 @@ public sealed class SelfImage
         TlsModuleId = tlsModuleId;
         TlsMemorySize = tlsMemorySize;
         TlsStaticOffset = tlsStaticOffset;
+        TlsSegmentAddress = tlsSegmentAddress;
+        TlsFileSize = tlsFileSize;
     }
 
     public bool IsSelf { get; }
@@ -88,4 +92,10 @@ public sealed class SelfImage
 
     /// <summary>Variant II distance from the thread pointer to this module's static TLS base.</summary>
     public ulong TlsStaticOffset { get; }
+
+    /// <summary>Mapped virtual address of this module's PT_TLS segment, or 0 if it has none.</summary>
+    public ulong TlsSegmentAddress { get; }
+
+    /// <summary>File-backed (".tdata") byte count within the PT_TLS segment, clamped to TlsMemorySize.</summary>
+    public ulong TlsFileSize { get; }
 }

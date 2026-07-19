@@ -33,6 +33,10 @@ public sealed partial class DirectExecutionBackend
 	private const int ImportVectorRegisterCount = 8;
 	private const ulong StackCheckGuardValue = 0xC0DEC0DECAFEBA00UL;
 	private static long _canaryReturnRecoveries;
+	private static readonly List<ulong> _debugWriteWatchAddresses =
+		ParseDiagnosticAddresses(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITE_ADDRS"));
+	private static readonly ulong[] _debugWriteWatchLastValues =
+		Enumerable.Repeat(ulong.MaxValue, _debugWriteWatchAddresses.Count).ToArray();
 
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
@@ -145,6 +149,17 @@ public sealed partial class DirectExecutionBackend
 	private unsafe ulong DispatchImport(int importIndex, nint argPackPtr)
 	{
 		long num = NextImportDispatchIndex();
+		for (var watchIndex = 0; watchIndex < _debugWriteWatchAddresses.Count; watchIndex++)
+		{
+			var watchAddress = _debugWriteWatchAddresses[watchIndex];
+			var currentValue = *(ulong*)watchAddress;
+			if (currentValue != _debugWriteWatchLastValues[watchIndex])
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][WATCH] addr=0x{watchAddress:X16} changed 0x{_debugWriteWatchLastValues[watchIndex]:X16} -> 0x{currentValue:X16} before import#{num}");
+				_debugWriteWatchLastValues[watchIndex] = currentValue;
+			}
+		}
 		if ((num & 0x3F) == 0)
 		{
 			MarkExecutionProgress();

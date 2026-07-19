@@ -98,7 +98,16 @@ public sealed partial class DirectExecutionBackend
 		{
 			return;
 		}
-		Log.Info($"   Recent import calls for managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
+
+		// Deliberately raw Console.Error.WriteLine, not Log.Info: this runs from inside
+		// the native crash handler, where another thread can be stuck holding a
+		// SharpEmuLog sink's lock (ConsoleLogSink/FileLogSink's own `_sync`, including
+		// FileLogSink's periodic background flush timer) with no guarantee it will ever
+		// run again to release it — routing through Log.Info here has been observed to
+		// hang the process indefinitely. Every sibling Dump*Diagnostics function in this
+		// crash path already uses raw Console.Error.WriteLine for the same reason; this
+		// was the one inconsistent holdout.
+		Console.Error.WriteLine($"[LOADER][INFO]   Recent import calls for managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ({_recentImportTraceCount}):");
 		int num = (_recentImportTraceWriteIndex - _recentImportTraceCount + trace.Length) % trace.Length;
 		for (int i = 0; i < _recentImportTraceCount; i++)
 		{
@@ -106,8 +115,8 @@ public sealed partial class DirectExecutionBackend
 			var entry = trace[num2];
 			if (!string.IsNullOrEmpty(entry.Nid))
 			{
-				Log.Info(
-					$"     #{entry.DispatchIndex} managed={entry.ManagedThreadId} guest=0x{entry.GuestThreadHandle:X16} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
+				Console.Error.WriteLine(
+					$"[LOADER][INFO]     #{entry.DispatchIndex} managed={entry.ManagedThreadId} guest=0x{entry.GuestThreadHandle:X16} nid={entry.Nid} ret=0x{entry.ReturnRip:X16} " +
 					$"rdi=0x{entry.Arg0:X16} rsi=0x{entry.Arg1:X16} rdx=0x{entry.Arg2:X16}");
 			}
 		}

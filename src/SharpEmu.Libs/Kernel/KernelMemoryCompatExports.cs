@@ -1218,6 +1218,94 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // C++'s operator new/delete family are, by default, thin wrappers over this same libc
+    // heap (this is also how real libstdc++/libc++ implement them), so they're kept HLE and
+    // routed through the exact same TryAllocateLibcHeap/FreeLibcHeap helpers as malloc/free
+    // for the same heap-consistency reason documented on the malloc-family LLE/HLE decision
+    // in DirectExecutionBackend.CanUseLleLibcAllocatorFamily: letting these run as real guest
+    // code means executing the platform SDK's own allocator-hook-selection bootstrap, whose
+    // magic-statics lazy initialization was root-caused (see testing_instructions.md) to
+    // resolve to a compiled debug-trap slot rather than a working hook. Simplified relative
+    // to the full C++ spec: on failure this returns null like malloc/calloc/realloc already
+    // do, rather than looping a std::new_handler or throwing std::bad_alloc.
+    [SysAbiExport(
+        Nid = "fJnpuVVBbKk",
+        ExportName = "_Znwm",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorNew(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] =
+            TryAllocateLibcHeap(ctx[CpuRegister.Rdi], DefaultLibcHeapAlignment, zeroFill: false, out var address)
+                ? address
+                : 0;
+        TraceLibcAllocation(
+            ctx,
+            "operator new",
+            size: ctx[CpuRegister.Rdi],
+            alignment: DefaultLibcHeapAlignment,
+            resultAddress: ctx[CpuRegister.Rax]);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // The Itanium ABI's default operator new[] is just operator new with the same size -
+    // any array-cookie bookkeeping for non-trivial element destructors is inserted by the
+    // caller and already folded into the size passed in.
+    [SysAbiExport(
+        Nid = "hdm0YfMa7TQ",
+        ExportName = "_Znam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorNewArray(CpuContext ctx)
+    {
+        return OperatorNew(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "z+P+xCnWLBk",
+        ExportName = "_ZdlPv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorDelete(CpuContext ctx)
+    {
+        FreeLibcHeap(ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "MLWl90SFWNE",
+        ExportName = "_ZdaPv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorDeleteArray(CpuContext ctx)
+    {
+        return OperatorDelete(ctx);
+    }
+
+    // Sized delete (C++14, emitted by default by modern compilers). SharpEmu's heap already
+    // tracks each allocation's own size internally - same as plain free() - so the size
+    // argument (rsi) is accepted for ABI compatibility and otherwise ignored.
+    [SysAbiExport(
+        Nid = "lYDzBVE5mZs",
+        ExportName = "_ZdlPvm",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorDeleteSized(CpuContext ctx)
+    {
+        return OperatorDelete(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "FOt55ZNaVJk",
+        ExportName = "_ZdaPvm",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int OperatorDeleteArraySized(CpuContext ctx)
+    {
+        return OperatorDelete(ctx);
+    }
+
     [SysAbiExport(
         Nid = "Ujf3KzMvRmI",
         ExportName = "memalign",
@@ -6359,6 +6447,33 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    private static bool IsWithinTrackedLibcHeap(ulong address, ulong length)
+    {
+        if (length == 0)
+        {
+            return false;
+        }
+
+        lock (_libcAllocGate)
+        {
+            foreach (var (allocationAddress, allocation) in _libcAllocations)
+            {
+                var allocationSize = (ulong)allocation.Size;
+                var offset = address >= allocationAddress
+                    ? address - allocationAddress
+                    : ulong.MaxValue;
+                if (offset > allocationSize || length > allocationSize - offset)
+                {
+                    continue;
+                }
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsHostRangeAccessible(ulong address, ulong length, bool writeAccess)
     {
         if (address == 0 || length == 0)
@@ -6375,6 +6490,15 @@ public static partial class KernelMemoryCompatExports
         if (ulong.MaxValue - address < length - 1)
         {
             return false;
+        }
+
+        if (IsWithinTrackedLibcHeap(address, length))
+        {
+            // Marshal.AllocHGlobal-backed libc-heap allocations are always
+            // committed + read/write and are invisible to HostMemory's OS-page
+            // tracker (they were never mmap'd/reserved through it), so bypass
+            // VirtualQuery once containment in a live allocation is confirmed.
+            return true;
         }
 
         if (!TryQueryHostPage(address, out var startInfo) || !HasRequiredProtection(startInfo.Protect, writeAccess))

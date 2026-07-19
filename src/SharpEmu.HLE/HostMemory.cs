@@ -260,6 +260,7 @@ public static unsafe class HostMemory
                     DefaultProtect = protect
                 };
 
+                Trace($"alloc: addr=0x{(ulong)result:X16} size=0x{alignedSize:X}");
                 return (void*)result;
             }
         }
@@ -277,6 +278,7 @@ public static unsafe class HostMemory
                 }
 
                 Regions.Remove((ulong)address);
+                Trace($"free: addr=0x{(ulong)address:X16} size=0x{region.Size:X}");
                 return munmap((nint)address, (nuint)region.Size) == 0;
             }
         }

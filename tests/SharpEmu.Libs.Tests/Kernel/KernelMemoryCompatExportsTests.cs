@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using Xunit;
 
@@ -308,5 +309,100 @@ public sealed class KernelMemoryCompatExportsTests
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void OperatorNew_ReturnsWritableAddressOfRequestedSize()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 64;
+
+        var result = KernelMemoryCompatExports.OperatorNew(context);
+        var address = context[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.NotEqual(0UL, address);
+
+        // The allocation comes from KernelMemoryCompatExports' own Marshal.AllocHGlobal
+        // -backed heap, a real host pointer distinct from FakeCpuMemory's simulated guest
+        // range, so verify it directly via Marshal rather than memory.TryRead/TryWrite.
+        var pointer = unchecked((nint)address);
+        Marshal.WriteByte(pointer, 63, 0xAB);
+        Assert.Equal(0xAB, Marshal.ReadByte(pointer, 63));
+
+        KernelMemoryCompatExports.Free(context);
+    }
+
+    [Fact]
+    public void OperatorNewArray_BehavesLikeOperatorNewForTheSameSize()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 128;
+
+        var result = KernelMemoryCompatExports.OperatorNewArray(context);
+        var address = context[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.NotEqual(0UL, address);
+
+        var pointer = unchecked((nint)address);
+        Marshal.WriteByte(pointer, 127, 0xCD);
+        Assert.Equal(0xCD, Marshal.ReadByte(pointer, 127));
+
+        context[CpuRegister.Rdi] = address;
+        KernelMemoryCompatExports.OperatorDeleteArray(context);
+    }
+
+    [Fact]
+    public void OperatorDelete_NullPointerIsNoOp()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 0;
+
+        var result = KernelMemoryCompatExports.OperatorDelete(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+    }
+
+    [Fact]
+    public void OperatorDeleteSized_IgnoresSizeArgumentAndFreesTheAllocation()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 32;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.OperatorNew(context));
+        var address = context[CpuRegister.Rax];
+
+        context[CpuRegister.Rdi] = address;
+        context[CpuRegister.Rsi] = 999; // deliberately mismatched size, must still free correctly
+        var deleteResult = KernelMemoryCompatExports.OperatorDeleteSized(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, deleteResult);
+
+        // Allocating again should succeed cleanly, confirming the heap's internal
+        // bookkeeping for the freed slot wasn't corrupted by the mismatched size.
+        context[CpuRegister.Rdi] = 32;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.OperatorNew(context));
+        Assert.NotEqual(0UL, context[CpuRegister.Rax]);
+        KernelMemoryCompatExports.Free(context);
+    }
+
+    [Fact]
+    public void OperatorDeleteArraySized_FreesAnOperatorNewArrayAllocation()
+    {
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = 48;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.OperatorNewArray(context));
+        var address = context[CpuRegister.Rax];
+
+        context[CpuRegister.Rdi] = address;
+        context[CpuRegister.Rsi] = 48;
+        var deleteResult = KernelMemoryCompatExports.OperatorDeleteArraySized(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, deleteResult);
     }
 }

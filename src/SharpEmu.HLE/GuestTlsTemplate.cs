@@ -193,6 +193,37 @@ public static class GuestTlsTemplate
         }
     }
 
+    /// <summary>
+    /// Replaces a registered module's PT_TLS init image in place, without
+    /// touching its already-assigned static offset/alignment. The loader must
+    /// register every module's identity before applying ELF relocations (so
+    /// DTPMOD/DTPOFF/TPOFF relocations can see the module's real static
+    /// offset), but a module's initialized TLS bytes (.tdata) can themselves
+    /// contain relocatable pointers - so the loader re-reads the segment
+    /// after relocations run and calls this to capture the corrected bytes,
+    /// before any guest thread's TLS block is ever derived from them.
+    /// </summary>
+    public static void UpdateInitImage(ulong moduleId, ReadOnlySpan<byte> initImage)
+    {
+        lock (_gate)
+        {
+            if (!_modules.TryGetValue(moduleId, out var existing))
+            {
+                return;
+            }
+
+            _modules[moduleId] = new ModuleTemplate
+            {
+                ModuleId = existing.ModuleId,
+                InitImage = initImage.ToArray(),
+                MemorySize = existing.MemorySize,
+                Alignment = existing.Alignment,
+                AlignmentBias = existing.AlignmentBias,
+                StaticOffset = existing.StaticOffset,
+            };
+        }
+    }
+
     /// <summary>Returns the static TP-relative block offset for a module.</summary>
     public static bool TryGetStaticOffset(ulong moduleId, out ulong staticOffset)
     {
