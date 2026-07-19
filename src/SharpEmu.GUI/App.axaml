@@ -236,6 +236,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Foreground" Value="#11141B" />
     </Style>
 
+    <!-- One stroke style for every toolbar icon; the checked state inverts
+         the stroke to stay visible on the light fill. -->
+    <Style Selector="Button.iconCircle Path">
+      <Setter Property="Stroke" Value="{StaticResource TextBrush}" />
+      <Setter Property="StrokeThickness" Value="1.7" />
+      <Setter Property="StrokeLineCap" Value="Round" />
+      <Setter Property="StrokeJoin" Value="Round" />
+      <Setter Property="Width" Value="20" />
+      <Setter Property="Height" Value="20" />
+      <Setter Property="Stretch" Value="None" />
+    </Style>
+    <Style Selector="ToggleButton.iconCircle Path">
+      <Setter Property="Stroke" Value="{StaticResource TextBrush}" />
+      <Setter Property="StrokeThickness" Value="1.7" />
+      <Setter Property="StrokeLineCap" Value="Round" />
+      <Setter Property="StrokeJoin" Value="Round" />
+      <Setter Property="Width" Value="20" />
+      <Setter Property="Height" Value="20" />
+      <Setter Property="Stretch" Value="None" />
+    </Style>
+    <Style Selector="ToggleButton.iconCircle:checked Path">
+      <Setter Property="Stroke" Value="#11141B" />
+    </Style>
+
     <!-- Options category sidebar entries, console-settings style. -->
     <Style Selector="Button.sideItem">
       <Setter Property="Background" Value="Transparent" />

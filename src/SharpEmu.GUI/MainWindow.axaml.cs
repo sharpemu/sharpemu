@@ -113,8 +113,12 @@ public partial class MainWindow : Window
     // Title-bar clock, console style.
     private readonly DispatcherTimer _clockTimer;
 
-    // Hero fade/slide-in on selection change.
+    // Fade/slide-in animation state (hero block, page switch, options
+    // section switch); each target keeps its own cancellation source so
+    // restarting one animation never cancels another.
     private CancellationTokenSource? _heroAnimationCts;
+    private CancellationTokenSource? _pageAnimationCts;
+    private CancellationTokenSource? _sectionAnimationCts;
     private string? _lastHeroPath;
 
     // Which backdrop layer is currently showing (see ShowBackdrop).
@@ -399,6 +403,7 @@ public partial class MainWindow : Window
         LibraryPage.IsVisible = index == 0;
         LibraryToolbar.IsVisible = index == 0;
         OptionsPage.IsVisible = index == 1;
+        AnimateSlideFadeIn(index == 0 ? LibraryPage : OptionsPage, ref _pageAnimationCts, 18);
     }
 
     /// <summary>
@@ -407,11 +412,17 @@ public partial class MainWindow : Window
     /// </summary>
     private void SetOptionsSection(int index)
     {
+        if (index == _optionsSectionIndex)
+        {
+            return;
+        }
+
         _optionsSectionIndex = index;
         SetActiveClass(GeneralSectionButton, index == 0);
         SetActiveClass(EnvSectionButton, index == 1);
         GeneralScroll.IsVisible = index == 0;
         EnvScroll.IsVisible = index == 1;
+        AnimateSlideFadeIn(index == 0 ? GeneralScroll : EnvScroll, ref _sectionAnimationCts, 12);
     }
 
     private static void SetActiveClass(Button button, bool active)
@@ -1790,20 +1801,25 @@ public partial class MainWindow : Window
     /// scrubbing quickly through the strip keeps the hero gently pulsing
     /// rather than stacking animations.
     /// </summary>
-    private void AnimateHeroIn()
-    {
-        _heroAnimationCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _heroAnimationCts = cts;
+    private void AnimateHeroIn() => AnimateSlideFadeIn(HeroPanel, ref _heroAnimationCts, 14);
 
-        // Code-run keyframes can only animate properties with registered
-        // animators, which rules out RenderTransform itself — so the fade
-        // targets the panel and the slide targets a TranslateTransform's Y
-        // (both plain doubles).
-        if (HeroPanel.RenderTransform is not TranslateTransform translate)
+    /// <summary>
+    /// Fades a panel in while sliding it up from <paramref name="fromY"/>
+    /// pixels below. Restarting cancels the previous run on the same target.
+    /// Code-run keyframes can only animate properties with registered
+    /// animators, which rules out RenderTransform itself — so the fade
+    /// targets the panel and the slide targets a TranslateTransform's Y
+    /// (both plain doubles).
+    /// </summary>
+    private static void AnimateSlideFadeIn(Control target, ref CancellationTokenSource? animationCts, double fromY)
+    {
+        animationCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        animationCts = cts;
+
+        if (target.RenderTransform is not TranslateTransform)
         {
-            translate = new TranslateTransform();
-            HeroPanel.RenderTransform = translate;
+            target.RenderTransform = new TranslateTransform();
         }
 
         var animation = new Animation
@@ -1819,7 +1835,7 @@ public partial class MainWindow : Window
                     Setters =
                     {
                         new Setter(OpacityProperty, 0.0),
-                        new Setter(TranslateTransform.YProperty, 14.0),
+                        new Setter(TranslateTransform.YProperty, fromY),
                     },
                 },
                 new KeyFrame
@@ -1834,7 +1850,7 @@ public partial class MainWindow : Window
             },
         };
 
-        _ = animation.RunAsync(HeroPanel, cts.Token);
+        _ = animation.RunAsync(target, cts.Token);
     }
 
     /// <summary>
