@@ -11246,7 +11246,19 @@ public static partial class AgcExports
                             $"addr=0x{commandAddress:X16} dwords={dwordCount}");
                     }
 
-                    ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
+                    // Submit through the pending queue rather than parsing inline.
+                    // ParseSubmittedDcb reports "this buffer suspended on a wait"
+                    // through its return value, and only the queue path records
+                    // that and assigns a submission id.
+                    gpuState.Graphics.QueueName = "dcb.graphics";
+                    EnqueueSubmittedDcb(
+                        ctx,
+                        gpuState,
+                        gpuState.Graphics,
+                        commandAddress,
+                        dwordCount,
+                        ++gpuState.SubmissionSequence,
+                        tracePackets);
                 }
 
                 DrainResumableDcbs(ctx, gpuState, tracePackets);
