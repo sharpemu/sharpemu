@@ -199,9 +199,24 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
-                    var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
-                    throw new InvalidOperationException(
-                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}.");
+                    if (isNextGen)
+                    {
+                        allocatedBase = physicalVm.AllocateAt(imageBase, totalImageSize, executable: true, allowAlternative: true);
+                        if (allocatedBase == 0)
+                        {
+                            var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
+                            throw new InvalidOperationException(
+                                $"Could not allocate main image at required base 0x{imageBase:X16} or any alternative address (size=0x{totalImageSize:X}): {reason}.");
+                        }
+                        Console.WriteLine(
+                            $"[LOADER] Could not allocate main image at exact base 0x{imageBase:X16}; loaded at 0x{allocatedBase:X16} instead.");
+                    }
+                    else
+                    {
+                        var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
+                        throw new InvalidOperationException(
+                            $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}.");
+                    }
                 }
 
                 imageBase = allocatedBase;
