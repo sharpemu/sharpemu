@@ -591,6 +591,17 @@ public static class KernelPthreadCompatExports
         LibraryName = "libKernel")]
     public static int PthreadOncePOSIX(CpuContext ctx) => PthreadOnce(ctx);
 
+    /// <summary>
+    /// The POSIX-named alias of <see cref="PthreadRename"/>, following the same
+    /// two-NID pattern as <see cref="PthreadOncePOSIX"/>.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "9vyP6Z7bqzc",
+        ExportName = "pthread_rename_np",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRenameNpPOSIX(CpuContext ctx) => PthreadRename(ctx);
+
     private static int PthreadMutexInitCore(CpuContext ctx, ulong mutexAddress, ulong attrAddress)
     {
         if (mutexAddress == 0)
