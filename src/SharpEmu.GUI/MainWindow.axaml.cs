@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -10,6 +12,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
@@ -103,6 +106,19 @@ public partial class MainWindow : Window
     private long _navLeftNextAt;
     private long _navRightNextAt;
 
+    // Eases the tile strip toward keeping the selected tile centered.
+    private readonly DispatcherTimer _stripScrollTimer;
+
+    // Title-bar clock, console style.
+    private readonly DispatcherTimer _clockTimer;
+
+    // Hero fade/slide-in on selection change.
+    private CancellationTokenSource? _heroAnimationCts;
+    private string? _lastHeroPath;
+
+    // Which backdrop layer is currently showing (see ShowBackdrop).
+    private bool _backdropFrontIsA = true;
+
     //Github http client for latest commit
     private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
     private string? _latestCommitSha;
@@ -122,8 +138,7 @@ public partial class MainWindow : Window
         {
             _defaultBackdrop = new Bitmap(
                 AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/pic0.png")));
-            BackdropImage.Source = _defaultBackdrop;
-            BackdropImage.Opacity = 1.0;
+            ShowBackdrop(_defaultBackdrop);
         }
         catch (Exception)
         {
@@ -167,7 +182,11 @@ public partial class MainWindow : Window
         };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
-        GameList.SelectionChanged += (_, _) => UpdateSelectedGame();
+        GameList.SelectionChanged += (_, _) =>
+        {
+            UpdateSelectedGame();
+            StartStripCentering();
+        };
         GameList.DoubleTapped += (_, _) => LaunchSelected();
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
@@ -280,6 +299,20 @@ public partial class MainWindow : Window
         };
         _gamepadTimer.Tick += (_, _) => PollGamepad();
         _gamepadTimer.Start();
+
+        _stripScrollTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(16),
+        };
+        _stripScrollTimer.Tick += (_, _) => AdvanceStripCentering();
+
+        ClockText.Text = DateTime.Now.ToString("HH:mm");
+        _clockTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        _clockTimer.Tick += (_, _) => ClockText.Text = DateTime.Now.ToString("HH:mm");
+        _clockTimer.Start();
 
 
         GithubButton.Click += (_, _) =>
@@ -447,9 +480,12 @@ public partial class MainWindow : Window
         // DualSense wins when both are connected; XInput covers Xbox pads.
         if (!WindowsDualSenseReader.TryGetState(out var pad) && !WindowsXInputReader.TryGetState(out pad))
         {
+            PadIndicator.IsVisible = false;
             _previousPadButtons = HostGamepadButtons.None;
             return;
         }
+
+        PadIndicator.IsVisible = true;
 
         if (!IsActive)
         {
@@ -481,6 +517,20 @@ public partial class MainWindow : Window
 
         if (_activePageIndex != 0)
         {
+            // The options page has no focus navigation yet, but the d-pad or
+            // left stick can at least scroll it; ~11px per 16ms tick gives a
+            // smooth continuous glide while held.
+            var scrollUp = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
+            var scrollDown = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
+            if ((scrollUp || scrollDown) &&
+                (OptionsTabs.SelectedItem as TabItem)?.Content is ScrollViewer optionsScroll)
+            {
+                var maxOffset = Math.Max(0, optionsScroll.Extent.Height - optionsScroll.Viewport.Height);
+                optionsScroll.Offset = new Vector(
+                    optionsScroll.Offset.X,
+                    Math.Clamp(optionsScroll.Offset.Y + (scrollDown ? 11 : -11), 0, maxOffset));
+            }
+
             _previousPadButtons = pad.Buttons;
             return;
         }
@@ -548,7 +598,50 @@ public partial class MainWindow : Window
             ? 0
             : Math.Clamp(GameList.SelectedIndex + delta, 0, _visibleGames.Count - 1);
         GameList.SelectedIndex = index;
-        GameList.ScrollIntoView(index);
+        // The SelectionChanged handler starts the smooth centering scroll.
+    }
+
+    /// <summary>
+    /// Starts easing the strip so the selected tile ends up centered in the
+    /// viewport, console style, instead of the jarring ScrollIntoView jump.
+    /// </summary>
+    private void StartStripCentering()
+    {
+        if (GameList.SelectedIndex >= 0)
+        {
+            _stripScrollTimer.Start();
+        }
+    }
+
+    /// <summary>
+    /// One easing step toward the centered offset. The target is recomputed
+    /// every tick because the selected tile's animated margin is still
+    /// resizing the row while the scroll is in flight.
+    /// </summary>
+    private void AdvanceStripCentering()
+    {
+        if (GameList.Scroll is not ScrollViewer scroll ||
+            GameList.SelectedIndex < 0 ||
+            GameList.ContainerFromIndex(GameList.SelectedIndex) is not Control container ||
+            scroll.Viewport.Width <= 0)
+        {
+            _stripScrollTimer.Stop();
+            return;
+        }
+
+        var target = Math.Clamp(
+            container.Bounds.Center.X - (scroll.Viewport.Width / 2),
+            0,
+            Math.Max(0, scroll.Extent.Width - scroll.Viewport.Width));
+        var current = scroll.Offset.X;
+        var next = current + ((target - current) * 0.22);
+        if (Math.Abs(target - next) < 0.75)
+        {
+            next = target;
+            _stripScrollTimer.Stop();
+        }
+
+        scroll.Offset = new Vector(next, scroll.Offset.Y);
     }
 
     private async Task OnOpenedAsync()
@@ -854,6 +947,8 @@ public partial class MainWindow : Window
         _consoleFlushTimer.Stop();
         _libraryBlurTimer.Stop();
         _gamepadTimer.Stop();
+        _stripScrollTimer.Stop();
+        _clockTimer.Stop();
         _sndPreview.Stop();
         _discord?.Dispose();
         _consoleWindow?.Close();
@@ -1604,17 +1699,76 @@ public partial class MainWindow : Window
             SelectedBadgesRow.IsVisible = true;
             _ = UpdateBackdropAsync(game);
             PlaySelectedGamePreview(game);
+            if (!string.Equals(_lastHeroPath, game.Path, FilePathComparison))
+            {
+                _lastHeroPath = game.Path;
+                AnimateHeroIn();
+            }
         }
         else
         {
             UpdateSelectedGameTexts();
             SelectedBadgesRow.DataContext = null;
             SelectedBadgesRow.IsVisible = false;
+            _lastHeroPath = null;
             _ = UpdateBackdropAsync(null);
             _sndPreview.Stop();
         }
 
         UpdateRunButtons();
+    }
+
+    /// <summary>
+    /// Fades and slides the hero block in when the selection lands on a
+    /// different game. Restarting the animation cancels the previous run, so
+    /// scrubbing quickly through the strip keeps the hero gently pulsing
+    /// rather than stacking animations.
+    /// </summary>
+    private void AnimateHeroIn()
+    {
+        _heroAnimationCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _heroAnimationCts = cts;
+
+        // Code-run keyframes can only animate properties with registered
+        // animators, which rules out RenderTransform itself — so the fade
+        // targets the panel and the slide targets a TranslateTransform's Y
+        // (both plain doubles).
+        if (HeroPanel.RenderTransform is not TranslateTransform translate)
+        {
+            translate = new TranslateTransform();
+            HeroPanel.RenderTransform = translate;
+        }
+
+        var animation = new Animation
+        {
+            Duration = TimeSpan.FromMilliseconds(240),
+            Easing = new CubicEaseOut(),
+            FillMode = FillMode.Forward,
+            Children =
+            {
+                new KeyFrame
+                {
+                    Cue = new Cue(0),
+                    Setters =
+                    {
+                        new Setter(OpacityProperty, 0.0),
+                        new Setter(TranslateTransform.YProperty, 14.0),
+                    },
+                },
+                new KeyFrame
+                {
+                    Cue = new Cue(1),
+                    Setters =
+                    {
+                        new Setter(OpacityProperty, 1.0),
+                        new Setter(TranslateTransform.YProperty, 0.0),
+                    },
+                },
+            },
+        };
+
+        _ = animation.RunAsync(HeroPanel, cts.Token);
     }
 
     /// <summary>
@@ -1702,24 +1856,55 @@ public partial class MainWindow : Window
         }
     }
 
+    private Image BackdropFront => _backdropFrontIsA ? BackdropImageA : BackdropImageB;
+
+    private Image BackdropBack => _backdropFrontIsA ? BackdropImageB : BackdropImageA;
+
     /// <summary>
-    /// Fades the window backdrop to the selected game's key art. The image
-    /// decodes off the UI thread and is cached on the entry; a newer
-    /// selection cancels the fade-in of an older one.
+    /// Crossfades the two backdrop layers to the given bitmap: the hidden
+    /// layer receives the new art and fades in while the old one fades out
+    /// underneath it, so the window never dips to the bare color between
+    /// selections. Null fades both layers out.
+    /// </summary>
+    private void ShowBackdrop(Bitmap? bitmap)
+    {
+        if (bitmap is null)
+        {
+            BackdropImageA.Opacity = 0;
+            BackdropImageB.Opacity = 0;
+            return;
+        }
+
+        if (ReferenceEquals(BackdropFront.Source, bitmap))
+        {
+            BackdropFront.Opacity = 1;
+            BackdropBack.Opacity = 0;
+            return;
+        }
+
+        BackdropBack.Source = bitmap;
+        BackdropBack.Opacity = 1;
+        BackdropFront.Opacity = 0;
+        _backdropFrontIsA = !_backdropFrontIsA;
+    }
+
+    /// <summary>
+    /// Crossfades the window backdrop to the selected game's key art. The
+    /// image decodes off the UI thread and is cached on the entry; the old
+    /// art stays up until the new one is ready, and a newer selection
+    /// invalidates an older decode.
     /// </summary>
     private async Task UpdateBackdropAsync(GameEntry? game)
     {
         var generation = ++_backdropGeneration;
-        BackdropImage.Opacity = 0;
 
         // The bundled key art is the primary backdrop whenever the selection
         // has no art of its own; the window color stays as the last fallback.
         void ShowDefaultBackdrop()
         {
-            if (generation == _backdropGeneration && _defaultBackdrop is not null)
+            if (generation == _backdropGeneration)
             {
-                BackdropImage.Source = _defaultBackdrop;
-                BackdropImage.Opacity = 1.0;
+                ShowBackdrop(_defaultBackdrop);
             }
         }
 
@@ -1749,8 +1934,7 @@ public partial class MainWindow : Window
 
         if (generation == _backdropGeneration)
         {
-            BackdropImage.Source = game.Background;
-            BackdropImage.Opacity = 1.0;
+            ShowBackdrop(game.Background);
         }
     }
 
@@ -2185,7 +2369,7 @@ public partial class MainWindow : Window
         OptionsPage.IsVisible = _activePageIndex == 1;
         // Game art when the source still holds it, otherwise the bundled
         // default; a bare color only when neither is available.
-        BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
+        BackdropFront.Opacity = BackdropFront.Source is not null ? 1 : 0;
     }
 
     private void AnimateLibraryBlur(double targetRadius, bool clearWhenComplete = false)
@@ -2294,7 +2478,7 @@ public partial class MainWindow : Window
         LibraryPage.IsVisible = _activePageIndex == 0;
         LibraryToolbar.IsVisible = _activePageIndex == 0;
         OptionsPage.IsVisible = _activePageIndex == 1;
-        BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
+        BackdropFront.Opacity = BackdropFront.Source is not null ? 1 : 0;
         UpdateRunButtons();
         Console.Error.WriteLine("[GUI][INFO] Library restored while embedded session is closing.");
     }

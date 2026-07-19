@@ -26,11 +26,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
          home-screen style), dimmed by a scrim so text stays readable.
          Fades on selection. -->
     <Panel Grid.Row="0" Grid.RowSpan="3" ClipToBounds="True">
-      <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
+      <!-- Two stacked layers so selection changes crossfade between key
+           arts instead of fading to black and popping the new one in. -->
+      <Image x:Name="BackdropImageA" Stretch="UniformToFill" Opacity="0"
              HorizontalAlignment="Center" VerticalAlignment="Center">
         <Image.Transitions>
           <Transitions>
-            <DoubleTransition Property="Opacity" Duration="0:0:0.35" />
+            <DoubleTransition Property="Opacity" Duration="0:0:0.45" />
+          </Transitions>
+        </Image.Transitions>
+      </Image>
+      <Image x:Name="BackdropImageB" Stretch="UniformToFill" Opacity="0"
+             HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Image.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity" Duration="0:0:0.45" />
           </Transitions>
         </Image.Transitions>
       </Image>
@@ -56,6 +66,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <Border Classes="pill">
           <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
         </Border>
+      </StackPanel>
+
+      <!-- Console-style clock and controller indicator; the right margin
+           clears the system caption buttons drawn over the client area. -->
+      <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,0,150,0"
+                  HorizontalAlignment="Right" VerticalAlignment="Center">
+        <Border x:Name="PadIndicator" Classes="pill" IsVisible="False"
+                ToolTip.Tip="Controller connected">
+          <TextBlock Text="🎮" FontSize="12" />
+        </Border>
+        <TextBlock x:Name="ClockText" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
       </StackPanel>
     </Grid>
 
@@ -86,7 +107,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
                     VerticalAlignment="Center">
-          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="240" VerticalAlignment="Center" />
+          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="240" VerticalAlignment="Center"
+                   CornerRadius="999" Padding="14,6" />
           <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
           <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
@@ -182,8 +204,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
           <!-- Hero: big title, path, Play pill, status; badges bottom right. -->
           <Grid Grid.Row="2" x:Name="LaunchBar" ColumnDefinitions="*,Auto" Margin="12,0,12,30">
-            <StackPanel Grid.Column="0" Spacing="10" VerticalAlignment="Bottom" MaxWidth="760"
-                        HorizontalAlignment="Left">
+            <StackPanel Grid.Column="0" x:Name="HeroPanel" Spacing="10" VerticalAlignment="Bottom"
+                        MaxWidth="760" HorizontalAlignment="Left">
               <TextBlock x:Name="SelectedGameTitle" Text="No game selected" FontSize="44"
                          FontWeight="Light" TextTrimming="CharacterEllipsis" MaxLines="2"
                          TextWrapping="Wrap" LineHeight="50" />
@@ -251,7 +273,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
              in next to General. Card-grouped sections match the visual
              language used by the console panel and launch bar below. -->
         <Grid x:Name="OptionsPage" IsVisible="False">
-          <TabControl>
+          <TabControl x:Name="OptionsTabs">
             <TabItem x:Name="GeneralTabItem" Header="General" FontSize="15">
               <ScrollViewer>
                 <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">

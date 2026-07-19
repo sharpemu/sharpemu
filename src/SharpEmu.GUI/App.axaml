@@ -142,8 +142,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-      <Setter Property="Padding" Value="12,7" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="14,7" />
+      <Setter Property="CornerRadius" Value="999" />
     </Style>
     <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
@@ -155,8 +155,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
       <Setter Property="BorderThickness" Value="1" />
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-      <Setter Property="Padding" Value="12,7" />
-      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="14,7" />
+      <Setter Property="CornerRadius" Value="999" />
     </Style>
     <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
