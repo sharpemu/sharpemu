@@ -38,6 +38,29 @@ public sealed partial class DirectExecutionBackend
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
 
+	// Unresolved-import telemetry: per-NID hit counts so hot missing exports are
+	// logged with full context a few times, then sampled, plus a periodic
+	// aggregated summary line ("unresolved_imports_hit=") for run-over-run diffs.
+	private readonly object _unresolvedImportLogGate = new();
+	private readonly Dictionary<string, long> _unresolvedImportCounts = new(StringComparer.Ordinal);
+	private long _unresolvedImportTotalHits;
+
+	private void LogUnresolvedImportSummary(long totalUnresolvedHits)
+	{
+		KeyValuePair<string, long>[] countsByNid;
+		lock (_unresolvedImportLogGate)
+		{
+			countsByNid = _unresolvedImportCounts.ToArray();
+		}
+		var summaryParts = countsByNid
+			.OrderByDescending(pair => pair.Value)
+			.Select(pair => Aerolib.Instance.TryGetName(pair.Key, out var name)
+				? $"{pair.Key}={name}x{pair.Value}"
+				: $"{pair.Key}=?x{pair.Value}");
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] unresolved_imports_hit={totalUnresolvedHits} nids={string.Join(" ", summaryParts)}");
+	}
+
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
 	{
 		try
@@ -555,9 +578,28 @@ public sealed partial class DirectExecutionBackend
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				long nidHitCount;
+				long totalUnresolvedHits;
+				lock (_unresolvedImportLogGate)
+				{
+					_unresolvedImportCounts.TryGetValue(importStubEntry.Nid, out nidHitCount);
+					_unresolvedImportCounts[importStubEntry.Nid] = ++nidHitCount;
+					totalUnresolvedHits = ++_unresolvedImportTotalHits;
+				}
+				if (nidHitCount <= 4 || nidHitCount % 100 == 0)
+				{
+					var catalogText = Aerolib.Instance.TryGetName(importStubEntry.Nid, out var catalogName)
+						? catalogName
+						: "?";
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} name={catalogText} " +
+						$"hits={nidHitCount} thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				}
+				if (totalUnresolvedHits % 256 == 0)
+				{
+					LogUnresolvedImportSummary(totalUnresolvedHits);
+				}
 				if (importStubEntry.Nid == "L-Q3LEjIbgA")
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)

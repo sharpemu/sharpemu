@@ -155,6 +155,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const ulong GuestThreadStackSize = 0x0020_0000UL;
 
+	// PS libkernel carves each thread's pthread TCB out of the same allocation
+	// as its stack, directly above the stack top. Unity's stop-the-world
+	// suspend/GC machinery reads TCB fields of OTHER threads at
+	// stack-top-relative offsets (observed +0x2C0..0x3F0, run 121218): with the
+	// TCB region unmapped those reads access-violate intermittently during GC
+	// cycles. Keeping a zero-filled shadow block mapped above every guest
+	// thread stack absorbs them.
+	private const ulong GuestThreadStackShadowSize = 0x0001_0000UL;
+
 	private const ulong GuestThreadTlsSize = 0x0001_0000UL;
 
 	// Matches CpuDispatcher.TlsPrefixSize: static TLS blocks sit below the
@@ -4047,6 +4056,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			savedHasBlockedContinuation = target.HasBlockedContinuation;
 			savedBlockedContinuation = target.BlockedContinuation;
 			savedBlockWakeKey = target.BlockWakeKey;
+			// The waiter owns the interrupted wait's queue node. The signal
+			// handler runs guest code that can block on its own primitive and
+			// overwrite this field, so it must be saved and cleared here like
+			// every other Block* field, or the interrupted wait's node is
+			// orphaned in its queue and blocks every waiter behind it.
 			savedBlockWaiter = target.BlockWaiter;
 			savedBlockDeadlineTimestamp = target.BlockDeadlineTimestamp;
 
@@ -4487,7 +4501,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			error = "creator context memory is not backed by IVirtualMemory";
 			return false;
 		}
-		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, GuestThreadStackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
+		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, GuestThreadStackSize + GuestThreadStackShadowSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
 		{
 			return false;
 		}
@@ -5937,6 +5951,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					{
 						foreach (var thread in _guestThreads.Values)
 						{
+							var waiterDetail = thread.BlockWakeKey is { } snapshotWakeKey
+								? GuestThreadExecution.DescribeBlockWaiter(snapshotWakeKey)
+								: null;
 							Console.Error.WriteLine(
 								$"[LOADER][TRACE] guest_thread.snapshot " +
 								$"handle=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
@@ -5946,6 +5963,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 								$"ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
 								$"block={thread.BlockReason ?? "none"} " +
 								$"wake={thread.BlockWakeKey ?? "none"} " +
+								$"waiter={waiterDetail ?? "none"} " +
 								$"host_managed={thread.HostThread?.ManagedThreadId ?? 0} " +
 								$"host_tid={Volatile.Read(ref thread.HostThreadId)}");
 						}

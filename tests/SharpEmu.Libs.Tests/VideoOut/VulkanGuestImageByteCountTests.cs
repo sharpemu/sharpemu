@@ -20,7 +20,7 @@ public sealed class VulkanGuestImageByteCountTests
     {
         Assert.Equal(
             expected,
-            VulkanVideoPresenter.GetGuestImageByteCount(format, width, height));
+            VulkanVideoPresenter.GetGuestTextureByteCount(format, width, height));
     }
 
     [Theory]
@@ -34,6 +34,6 @@ public sealed class VulkanGuestImageByteCountTests
     {
         Assert.Equal(
             expected,
-            VulkanVideoPresenter.GetGuestImageByteCount(format, width, height));
+            VulkanVideoPresenter.GetGuestTextureByteCount(format, width, height));
     }
 }

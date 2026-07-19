@@ -254,44 +254,68 @@ public static class KernelEventFlagCompatExports
             var managedThread = Environment.CurrentManagedThreadId;
             var blockedWaitResult = OrbisGen2Result.ORBIS_GEN2_OK;
             var satisfied = false;
-            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "sceKernelWaitEventFlag",
-                GetEventFlagWakeKey(handle),
-                () =>
-                {
-                    if (satisfied)
+            // Release state.Gate across the scheduler registration. The resume
+            // and wake handlers below reacquire state.Gate themselves, so holding
+            // it here while RequestCurrentThreadBlock enters the scheduler gate
+            // inverts the lock order used by WakeBlockedThreads and the lost-wake
+            // sweep (both hold the scheduler gate, then call the wake predicate
+            // which takes state.Gate). That ABBA intermittently froze the entire
+            // scheduler — and disappeared under event-flag tracing, which shifts
+            // the timing. A SetEventFlag racing this window is still recovered by
+            // the park-time re-check in RunGuestThread and the periodic
+            // satisfied-wait sweep, exactly as the semaphore wait path relies on.
+            Monitor.Exit(state.Gate);
+            bool requestedBlock;
+            try
+            {
+                // Embedding the handle/name/pattern in the block reason lets a
+                // guest-thread scheduler snapshot (SHARPEMU_LOG_SUSPEND_THREADS)
+                // name the exact event flag and awaited bits directly, without a
+                // second SHARPEMU_LOG_EVENT_FLAG run to correlate by guest
+                // thread handle.
+                requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
+                    ctx,
+                    $"sceKernelWaitEventFlag:0x{handle:X16}('{state.Name}') pattern=0x{pattern:X16} mode=0x{waitMode:X2}",
+                    GetEventFlagWakeKey(handle),
+                    () =>
                     {
-                        return (int)blockedWaitResult;
-                    }
+                        if (satisfied)
+                        {
+                            return (int)blockedWaitResult;
+                        }
 
-                    // Deadline expiry: report timeout with the current bits.
-                    if (timeoutAddress != 0)
+                        // Deadline expiry: report timeout with the current bits.
+                        if (timeoutAddress != 0)
+                        {
+                            _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        }
+
+                        _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+                    },
+                    () =>
                     {
-                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-                    }
+                        if (!TryPrepareBlockedWait(
+                                ctx,
+                                state,
+                                pattern,
+                                waitMode,
+                                resultAddress,
+                                out var preparedResult))
+                        {
+                            return false;
+                        }
 
-                    _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-                },
-                () =>
-                {
-                    if (!TryPrepareBlockedWait(
-                            ctx,
-                            state,
-                            pattern,
-                            waitMode,
-                            resultAddress,
-                            out var preparedResult))
-                    {
-                        return false;
-                    }
-
-                    blockedWaitResult = preparedResult;
-                    satisfied = true;
-                    return true;
-                },
-                deadline);
+                        blockedWaitResult = preparedResult;
+                        satisfied = true;
+                        return true;
+                    },
+                    deadline);
+            }
+            finally
+            {
+                Monitor.Enter(state.Gate);
+            }
             if (_traceEventFlag) TraceEventFlag($"wait-unsatisfied handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} block={requestedBlock} ret=0x{returnRip:X16} frames={FormatFrameChain(ctx)}");
             if (_traceEventFlag) TraceEventFlag($"wait-object handle=0x{handle:X16} name='{state.Name}' {FormatGuestWaitObject(ctx)}");
             if (!requestedBlock)
@@ -489,6 +513,34 @@ public static class KernelEventFlagCompatExports
 
     private static string GetEventFlagWakeKey(ulong handle) =>
         $"event_flag:0x{handle:X16}";
+
+    static KernelEventFlagCompatExports()
+    {
+        GuestThreadExecution.AddBlockWaiterDescriber(DescribeEventFlagByKey);
+    }
+
+    // Reports the bit pattern behind a parked sceKernelWaitEventFlag, so a
+    // snapshot distinguishes "nobody set the bits" from a missed wake.
+    private static string? DescribeEventFlagByKey(string wakeKey)
+    {
+        const string prefix = "event_flag:0x";
+        if (!wakeKey.StartsWith(prefix, StringComparison.Ordinal) ||
+            !ulong.TryParse(
+                wakeKey.AsSpan(prefix.Length),
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var handle) ||
+            !_eventFlags.TryGetValue(handle, out var state))
+        {
+            return null;
+        }
+
+        lock (state.Gate)
+        {
+            return $"evf '{state.Name}' bits=0x{state.Bits:X} attr=0x{state.Attributes:X} " +
+                $"waiters={state.WaitingThreads}";
+        }
+    }
 
     private static bool TryWriteResultPattern(CpuContext ctx, ulong address, ulong bits) =>
         address == 0 || ctx.TryWriteUInt64(address, bits);

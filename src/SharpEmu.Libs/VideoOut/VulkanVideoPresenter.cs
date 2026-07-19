@@ -1591,6 +1591,14 @@ internal static unsafe class VulkanVideoPresenter
 
             var version = ++_orderedGuestFlipVersionSequence;
             _lastOrderedGuestFlipVersions[(videoOutHandle, displayBufferIndex)] = version;
+            // Progress markers: run-over-run comparable milestones ("did this fix
+            // get us further?") without per-flip spam once rendering is steady.
+            if (version is 1 or 10 or 100 or 1000 || version % 5000 == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[PROGRESS] guest_flip #{version} handle=0x{videoOutHandle:X} " +
+                    $"buffer={displayBufferIndex} {width}x{height}");
+            }
             return EnqueueGuestWorkLocked(
                 new VulkanOrderedGuestFlip(
                     version,
@@ -1658,21 +1666,10 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
-    internal static ulong GetGuestImageByteCount(uint format, uint width, uint height)
-    {
-        var blockBytes = format switch
-        {
-            169 or 170 or 175 or 176 => 8UL,
-            171 or 172 or 173 or 174 or
-            177 or 178 or 179 or 180 or 181 or 182 => 16UL,
-            _ => 0UL,
-        };
-        if (blockBytes != 0)
-        {
-            return checked(((ulong)width + 3) / 4 * (((ulong)height + 3) / 4) * blockBytes);
-        }
-
-        var bytesPerPixel = format switch
+    // Per-format byte cost. Formats 16/17/19 (B5G6R5/R5G5B5A1/R4G4B4A4-class 16-bit
+    // packed formats) are 2 bytes/pixel, not the 4-byte default — see PR #395.
+    internal static ulong GetGuestTextureBytesPerPixel(uint format) =>
+        format switch
         {
             1 => 1UL,
             2 or 3 or 16 or 17 or 19 => 2UL,
@@ -1681,7 +1678,21 @@ internal static unsafe class VulkanVideoPresenter
             14 => 16UL,
             _ => 4UL,
         };
-        return checked((ulong)width * height * bytesPerPixel);
+
+    internal static ulong GetGuestTextureByteCount(uint format, uint width, uint height)
+    {
+        // BC1 (169/170) and BC4 (175/176) are 8 bytes per 4x4 block;
+        // BC2/BC3/BC5/BC6H/BC7 are 16 bytes per block.
+        var blockBytes = format switch
+        {
+            169 or 170 or 175 or 176 => 8UL,
+            171 or 172 or 173 or 174 or
+            177 or 178 or 179 or 180 or 181 or 182 => 16UL,
+            _ => 0UL,
+        };
+        return blockBytes == 0
+            ? checked((ulong)width * height * GetGuestTextureBytesPerPixel(format))
+            : checked(((ulong)width + 3) / 4 * (((ulong)height + 3) / 4) * blockBytes);
     }
 
     private static byte[]? TakeGuestImageInitialData(ulong address)
@@ -3178,17 +3189,16 @@ internal static unsafe class VulkanVideoPresenter
             if (_window is not null)
             {
                 LogGlfwPlatformInUse();
-                if (!OperatingSystem.IsWindows())
+                // On Windows the pad itself is fed by GetAsyncKeyState (WindowsHostInput);
+                // the window events still matter there for the overlay KEY line and F1.
+                try
                 {
-                    try
-                    {
-                        Pad.HostWindowInput.Attach(_window.CreateInput());
-                        Console.Error.WriteLine("[LOADER][INFO] Window keyboard input attached for pad emulation.");
-                    }
-                    catch (Exception exception)
-                    {
-                        Console.Error.WriteLine($"[LOADER][WARN] Window keyboard input unavailable: {exception.Message}");
-                    }
+                    Pad.HostWindowInput.Attach(_window.CreateInput());
+                    Console.Error.WriteLine("[LOADER][INFO] Window keyboard input attached for pad emulation.");
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[LOADER][WARN] Window keyboard input unavailable: {exception.Message}");
                 }
 
                 if (PngSplashLoader.TryLoadIcon(out var iconPixels, out var iconWidth, out var iconHeight))
@@ -9165,29 +9175,10 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         private static ulong GetTextureBytesPerPixel(uint format) =>
-            format switch
-            {
-                1 => 1UL,
-                2 => 2UL,
-                3 => 2UL,
-                4 => 4UL,
-                5 => 4UL,
-                6 => 4UL,
-                7 => 4UL,
-                9 => 4UL,
-                10 => 4UL,
-                11 => 8UL,
-                12 => 8UL,
-                13 => 12UL,
-                14 => 16UL,
-                16 => 2UL,
-                17 => 2UL,
-                19 => 2UL,
-                _ => 4UL,
-            };
+            VulkanVideoPresenter.GetGuestTextureBytesPerPixel(format);
 
-        private static ulong GetTextureByteCount(uint format, uint width, uint height)
-            => GetGuestImageByteCount(format, width, height);
+        private static ulong GetTextureByteCount(uint format, uint width, uint height) =>
+            VulkanVideoPresenter.GetGuestTextureByteCount(format, width, height);
 
         private static ulong GetVulkanImageByteCount(Format format, uint width, uint height)
         {
@@ -10410,7 +10401,7 @@ internal static unsafe class VulkanVideoPresenter
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&
                     (ulong)initialData.Length ==
-                        GetTextureByteCount(
+                        VulkanVideoPresenter.GetGuestTextureByteCount(
                             targetDescriptor.Format,
                             targets[index].Width,
                             targets[index].Height))

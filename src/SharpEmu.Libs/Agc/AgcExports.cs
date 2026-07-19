@@ -8114,7 +8114,7 @@ public static partial class AgcExports
             return;
         }
 
-        var byteCount = VulkanVideoPresenter.GetGuestImageByteCount(
+        var byteCount = VulkanVideoPresenter.GetGuestTextureByteCount(
             target.Format,
             target.Width,
             target.Height);

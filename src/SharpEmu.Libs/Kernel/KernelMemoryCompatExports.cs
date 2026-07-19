@@ -4812,6 +4812,9 @@ public static partial class KernelMemoryCompatExports
         return guestPath;
     }
 
+    internal static bool TryResolveGuestMountPath(string guestPath, out string hostPath) =>
+        TryResolveRegisteredGuestMount(guestPath, out hostPath);
+
     private static bool TryResolveRegisteredGuestMount(string guestPath, out string hostPath)
     {
         hostPath = string.Empty;

@@ -12,6 +12,8 @@ public static class ShareExports
 
     private static int _initialized;
     private static string _contentParam = string.Empty;
+    private static ulong _contentEventCallback;
+    private static ulong _contentEventCallbackUserData;
 
     [SysAbiExport(
         Nid = "nBDD66kiFW8",
@@ -59,6 +61,42 @@ public static class ShareExports
         }
 
         TraceShare($"set_content_param len={contentParam.Length} preview='{FormatTraceString(contentParam)}'");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "0IL1keINExQ",
+        ExportName = "sceShareTerminate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceShareUtility")]
+    public static int ShareTerminate(CpuContext ctx)
+    {
+        var wasInitialized = Interlocked.Exchange(ref _initialized, 0) != 0;
+        _contentEventCallback = 0;
+        _contentEventCallbackUserData = 0;
+
+        TraceShare(wasInitialized ? "terminate" : "terminate while not initialized");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "Sygnk9dr5WQ",
+        ExportName = "sceShareRegisterContentEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceShareUtility")]
+    public static int ShareRegisterContentEventCallback(CpuContext ctx)
+    {
+        var callbackAddress = ctx[CpuRegister.Rdi];
+        var userDataAddress = ctx[CpuRegister.Rsi];
+        if (callbackAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        _contentEventCallback = callbackAddress;
+        _contentEventCallbackUserData = userDataAddress;
+
+        TraceShare($"register_content_event_callback callback=0x{callbackAddress:X} userData=0x{userDataAddress:X}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 

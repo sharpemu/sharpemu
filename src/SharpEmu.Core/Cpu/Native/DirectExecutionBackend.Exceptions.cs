@@ -128,6 +128,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (exceptionCode == 3221225477u &&
+				TryRecoverCrunchNullMipOutputWrite(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
+			}
 			if (exceptionCode == StatusIllegalInstruction &&
 				TryRecoverIllegalInstruction(contextRecord, rip))
 			{
@@ -273,9 +278,13 @@ public sealed partial class DirectExecutionBackend
 					"1",
 					StringComparison.Ordinal))
 			{
-				Console.Error.WriteLine("[LOADER][INFO]   Full fault stack window (RSP-0x300..RSP+0x100):");
+				// Upper bound widened from +0x100 to +0x230: this crash class (Crunch
+				// DoDeCruncherJob null-pointer write, RIP 0x8008e3443) reads its output
+				// buffer pointer array from a local stack array at [rsp+0x210+i*8],
+				// outside the old window.
+				Console.Error.WriteLine("[LOADER][INFO]   Full fault stack window (RSP-0x300..RSP+0x230):");
 				var windowStart = rsp >= 0x300 ? rsp - 0x300 : 0;
-				for (var stackAddr = windowStart; stackAddr < rsp + 0x100; stackAddr += 8)
+				for (var stackAddr = windowStart; stackAddr < rsp + 0x230; stackAddr += 8)
 				{
 					if (!TryReadHostQword(stackAddr, out var value))
 					{
@@ -298,7 +307,12 @@ public sealed partial class DirectExecutionBackend
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
 			DumpPointerWindow("fault-register-rdi", rdi, 0x60);
-			DumpPointerWindow("fault-register-r13", r13, 0x60);
+			// Widened from 0x60: this crash class (Crunch DoDeCruncherJob null-pointer
+			// write, RIP 0x8008e3443) holds its working-buffer pointer in R13, and the
+			// suspect uninitialized/uncopied output-pointer array lives at offsets
+			// 0x110-0x160 within it. Reading past 0x60 shows whether those slots are
+			// all-zero (never initialized) or nonzero garbage (partially copied/raced).
+			DumpPointerWindow("fault-register-r13", r13, 0x190);
 			DumpPointerWindow("fault-register-r14", r14, 0x60);
 
 			try
@@ -526,6 +540,59 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] Guest allocator empty-node adapter recovery #{recovery}: " +
 				$"rip=0x{rip:X16} -> 0x{rip + emptyPoolFallbackDelta:X16}");
+			Console.Error.Flush();
+		}
+
+		return true;
+	}
+
+	// A large enough throwaway buffer that the Crunch recovery below can absorb
+	// many consecutive 0x10-byte inner-loop advances without itself walking off
+	// the end and faulting again.
+	private const int CrunchNullMipScratchSize = 0x10000;
+	private static readonly nuint _crunchNullMipScratchBuffer = AllocCrunchNullMipScratchBuffer();
+	private static int _crunchNullMipRecoveries;
+
+	private unsafe static nuint AllocCrunchNullMipScratchBuffer() =>
+		(nuint)NativeMemory.AllocZeroed((nuint)CrunchNullMipScratchSize);
+
+	// Cult of the Lamb's Unity Crunch texture decoder (DoDeCruncherJob) writes a
+	// decoded 4-uint entry through a per-mip output pointer read from a local
+	// array on its own stack frame. That array's slot is null for some textures
+	// (mip/channel count field disagrees with how many output buffers the
+	// caller actually populated — a guest-side data/logic issue, confirmed not
+	// a cross-thread race: the array lives on this call's own private stack, so
+	// no other thread can have raced its contents). Redirect R12 to a scratch
+	// buffer instead of trying to skip forward through the surrounding nested
+	// loop (whose exact bounds bookkeeping is easy to get subtly wrong): the
+	// same faulting instruction re-executes and succeeds, discarding the
+	// decoded texel data this title never had a real destination for.
+	private unsafe static bool TryRecoverCrunchNullMipOutputWrite(
+		EXCEPTION_RECORD* exceptionRecord,
+		void* contextRecord,
+		ulong rip)
+	{
+		const ulong faultRip = 0x8008E3443UL;
+		if (string.Equals(
+				Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_CRUNCH_NULL_MIP_RECOVERY"),
+				"1",
+				StringComparison.Ordinal) ||
+			rip != faultRip ||
+			exceptionRecord->NumberParameters < 2 ||
+			exceptionRecord->ExceptionInformation[0] != 1 ||
+			exceptionRecord->ExceptionInformation[1] != 0 ||
+			ReadCtxU64(contextRecord, CTX_R12) != 0)
+		{
+			return false;
+		}
+
+		WriteCtxU64(contextRecord, CTX_R12, (ulong)_crunchNullMipScratchBuffer);
+		var recovery = Interlocked.Increment(ref _crunchNullMipRecoveries);
+		if (recovery <= 16 || (recovery & (recovery - 1)) == 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Crunch null-mip output recovery #{recovery}: " +
+				$"redirected write at 0x{rip:X16} to scratch buffer 0x{_crunchNullMipScratchBuffer:X16}");
 			Console.Error.Flush();
 		}
 

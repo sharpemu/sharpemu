@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.Linq;
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Diagnostics;
@@ -38,6 +39,53 @@ public static class KernelPthreadCompatExports
     private static readonly HashSet<ulong>? _tracePthreadMutexFilter = ParseTraceAddressFilter(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
     private static long _nextSynchronizationWaiterId;
+
+    // Lightweight lock-rate profiler. Off by default (zero per-call cost beyond a
+    // single volatile bool test). With SHARPEMU_PROFILE_MUTEX=1 it counts lock
+    // attempts per mutex address and dumps the hottest ones every 500k calls, so
+    // a guest busy-wait spin (one address hammered) is distinguishable from
+    // genuine spread-out lock traffic.
+    private static readonly bool _profileMutex =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_MUTEX"), "1", StringComparison.Ordinal);
+    private static readonly ConcurrentDictionary<ulong, long> _mutexLockCounts = new();
+    private static long _mutexLockTotal;
+    private const long MutexProfileDumpInterval = 100_000;
+    // Time-based dump so the hot-mutex/owner snapshot appears regularly even
+    // when the lock rate collapses (a stall drops lock traffic to a trickle, so
+    // a pure count trigger would go silent exactly when the dump matters most).
+    private static readonly long MutexProfileDumpTicks =
+        System.Diagnostics.Stopwatch.Frequency * 2; // ~2 s
+    private static long _lastMutexProfileDumpTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    private static void ProfileMutexLock(ulong resolvedAddress)
+    {
+        _mutexLockCounts.AddOrUpdate(resolvedAddress, 1, static (_, current) => current + 1);
+        var total = Interlocked.Increment(ref _mutexLockTotal);
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var last = Volatile.Read(ref _lastMutexProfileDumpTimestamp);
+        var dueByTime = now - last >= MutexProfileDumpTicks &&
+            Interlocked.CompareExchange(ref _lastMutexProfileDumpTimestamp, now, last) == last;
+        if (total % MutexProfileDumpInterval != 0 && !dueByTime)
+        {
+            return;
+        }
+
+        // Include each hot mutex's current owner + waiter count so a spin-lock
+        // hang is diagnosable straight from the dump: the top mutex plus who
+        // holds it (and never releases) identifies the stuck producer.
+        var top = _mutexLockCounts
+            .OrderByDescending(pair => pair.Value)
+            .Take(5)
+            .Select(pair =>
+            {
+                var owner = _mutexStates.TryGetValue(pair.Key, out var st)
+                    ? $" owner=0x{st.OwnerThreadId:X} rec={st.RecursionCount} waiters={st.Waiters.Count}"
+                    : string.Empty;
+                return $"0x{pair.Key:X16}:{pair.Value}{owner}";
+            });
+        Console.Error.WriteLine(
+            $"[PROFILE] mutex lock total={total} distinct={_mutexLockCounts.Count} top5=[{string.Join(", ", top)}]");
+    }
 
     private sealed class PthreadMutexState
     {
@@ -124,6 +172,10 @@ public static class KernelPthreadCompatExports
         public ManualResetEventSlim? HostSignal { get; set; }
         public LinkedListNode<PthreadMutexWaiter>? Node { get; set; }
         public int Granted;
+        // Back-reference for diagnostics only (DescribeWaiterByKey): lets a
+        // guest-thread snapshot report the mutex's current owner/recursion/queue
+        // depth for a waiter without a second lookup by address.
+        public PthreadMutexState? OwnerState { get; init; }
     }
 
     private sealed class PthreadCondState
@@ -150,9 +202,58 @@ public static class KernelPthreadCompatExports
 
     private readonly record struct PthreadMutexAttrState(int Type, int Protocol);
 
+    // Diagnostic registry: wake key -> live waiter, consumed by the scheduler's
+    // guest-thread snapshots. A snapshot line showing a parked thread whose
+    // waiter is already signaled/granted is the signature of a lost wake.
+    private static readonly ConcurrentDictionary<string, object> _diagnosticWaitersByKey = new();
+
+    private static void RegisterDiagnosticWaiter(string wakeKey, object waiter)
+    {
+        if (!string.IsNullOrEmpty(wakeKey))
+        {
+            _diagnosticWaitersByKey[wakeKey] = waiter;
+        }
+    }
+
+    private static void UnregisterDiagnosticWaiter(string wakeKey)
+    {
+        if (!string.IsNullOrEmpty(wakeKey))
+        {
+            _diagnosticWaitersByKey.TryRemove(wakeKey, out _);
+        }
+    }
+
+    private static string? DescribeWaiterByKey(string wakeKey)
+    {
+        if (string.IsNullOrEmpty(wakeKey) ||
+            !_diagnosticWaitersByKey.TryGetValue(wakeKey, out var waiter))
+        {
+            return null;
+        }
+
+        return waiter switch
+        {
+            PthreadCondWaiter cond =>
+                $"cond completion={cond.CompletionState} " +
+                $"mutex_granted={(cond.MutexWaiter is null ? "none" : Volatile.Read(ref cond.MutexWaiter.Granted).ToString())} " +
+                $"mutex_owner=0x{cond.MutexState.OwnerThreadId:X}",
+            PthreadMutexWaiter mutex =>
+                $"mutex granted={Volatile.Read(ref mutex.Granted)} queued={(mutex.Node is not null ? 1 : 0)} " +
+                $"first={(mutex.Node is not null && ReferenceEquals(mutex.OwnerState?.Waiters.First, mutex.Node) ? 1 : 0)} " +
+                $"owner=0x{mutex.OwnerState?.OwnerThreadId ?? 0:X} " +
+                $"depth={mutex.OwnerState?.Waiters.Count ?? 0} " +
+                $"head=0x{mutex.OwnerState?.Waiters.First?.Value.ThreadId ?? 0:X} " +
+                $"head_granted={(mutex.OwnerState?.Waiters.First is { } head ? Volatile.Read(ref head.Value.Granted) : -1)} " +
+                $"head_coop={(mutex.OwnerState?.Waiters.First?.Value.Cooperative == true ? 1 : 0)} " +
+                $"head_key='{mutex.OwnerState?.Waiters.First?.Value.WakeKey}'",
+            _ => null,
+        };
+    }
+
     static KernelPthreadCompatExports()
     {
         RunSynchronizationSelfChecks();
+        GuestThreadExecution.AddBlockWaiterDescriber(DescribeWaiterByKey);
     }
 
     [SysAbiExport(
@@ -753,6 +854,11 @@ public static class KernelPthreadCompatExports
         {
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (_profileMutex)
+        {
+            ProfileMutexLock(resolvedAddress);
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
@@ -1646,6 +1752,7 @@ public static class KernelPthreadCompatExports
                 ? wakeKey ?? $"pthread_mutex_waiter:{Interlocked.Increment(ref _nextSynchronizationWaiterId)}"
                 : string.Empty,
             HostSignal = cooperative ? null : new ManualResetEventSlim(initialState: false),
+            OwnerState = state,
         };
         waiter.Node = state.Waiters.AddLast(waiter);
         state.WaiterAddedLocked();
@@ -2080,11 +2187,23 @@ public static class KernelPthreadCompatExports
 
         _ = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var guestWord0);
         _ = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress + 8, out var guestWord1);
+        // Identify the guest code looping on this mutex: return RIP of the current
+        // import call plus the caller's frame return (rbp+8) one level up.
+        var returnRip = GuestThreadExecution.TryGetCurrentImportCallFrame(out var frame)
+            ? frame.ReturnRip
+            : 0UL;
+        var callerReturnText = "?";
+        var rbp = ctx[CpuRegister.Rbp];
+        if (rbp != 0 && ctx.TryReadUInt64(rbp + 8, out var callerReturn))
+        {
+            callerReturnText = $"0x{callerReturn:X16}";
+        }
         Console.Error.WriteLine(
             $"[LOADER][TRACE] pthread_{operation}: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
             $"guest[0]=0x{guestWord0:X16} guest[8]=0x{guestWord1:X16} " +
             $"current=0x{currentThreadId:X16} owner=0x{(state?.OwnerThreadId ?? 0):X16} " +
-            $"recursion={(state?.RecursionCount ?? 0)} type={(state?.Type ?? 0)} result=0x{unchecked((uint)result):X8}");
+            $"recursion={(state?.RecursionCount ?? 0)} type={(state?.Type ?? 0)} result=0x{unchecked((uint)result):X8} " +
+            $"ret=0x{returnRip:X16} caller={callerReturnText}");
     }
 
     private static void TracePthreadCond(string operation, ulong condAddress, ulong mutexAddress, PthreadCondState? state, bool timed, int result)

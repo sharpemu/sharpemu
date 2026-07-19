@@ -24,6 +24,117 @@ public static class KernelSemaphoreCompatExports
         public int Count { get; set; }
         public int WaitingThreads { get; set; }
         public object Gate { get; } = new();
+
+        // --- Stop-the-world suspend bridge (temporary) ---
+        // Unity's GC coordinator waits on 'SuspendSemaphore' for one ack per
+        // mutator thread. Threads parked in an unrelated HLE wait cannot reach
+        // their cooperative safepoint to post that ack, so the handshake stalls
+        // one or two acks short forever. PendingWaitNeed records the largest
+        // needCount currently parked here; the watchdog fills a stalled deficit.
+        public int PendingWaitNeed { get; set; }
+        public int BridgeLastCount { get; set; } = -1;
+        public long BridgeStableTicks { get; set; }
+    }
+
+    // Semaphore name Unity uses for its stop-the-world GC suspend handshake.
+    private const string SuspendSemaphoreName = "SuspendSemaphore";
+    private static readonly bool _suspendBridgeEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_BRIDGE"), "0", StringComparison.Ordinal);
+    private static readonly long SuspendBridgeStallTicks =
+        System.Diagnostics.Stopwatch.Frequency * 3 / 2; // ~1.5 s of no progress
+    private static Timer? _suspendBridgeTimer;
+
+    static KernelSemaphoreCompatExports()
+    {
+        GuestThreadExecution.AddBlockWaiterDescriber(DescribeSemaphoreByKey);
+        if (_suspendBridgeEnabled)
+        {
+            _suspendBridgeTimer = new Timer(
+                static _ => RunSuspendBridge(), null, 500, 500);
+        }
+    }
+
+    // Watchdog: a 'SuspendSemaphore' whose count sits below the parked waiter's
+    // needCount and stops advancing for ~1.5 s is a stop-the-world handshake
+    // waiting on HLE-blocked threads that will never reach a safepoint. Post the
+    // missing acks on their behalf; a blocked thread cannot touch the heap while
+    // parked, so counting it as already-suspended is safe. Bridge only — the
+    // faithful fix reproduces Baselib's per-thread GC-safe accounting.
+    private static void RunSuspendBridge()
+    {
+        foreach (var (handle, semaphore) in _semaphores)
+        {
+            if (!string.Equals(semaphore.Name, SuspendSemaphoreName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int deficit;
+            lock (semaphore.Gate)
+            {
+                if (semaphore.WaitingThreads <= 0 || semaphore.PendingWaitNeed <= semaphore.Count)
+                {
+                    semaphore.BridgeLastCount = semaphore.Count;
+                    semaphore.BridgeStableTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    continue;
+                }
+
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (semaphore.Count != semaphore.BridgeLastCount)
+                {
+                    semaphore.BridgeLastCount = semaphore.Count;
+                    semaphore.BridgeStableTicks = now;
+                    continue;
+                }
+
+                if (now - semaphore.BridgeStableTicks < SuspendBridgeStallTicks)
+                {
+                    continue;
+                }
+
+                deficit = Math.Min(
+                    semaphore.PendingWaitNeed - semaphore.Count,
+                    semaphore.MaxCount - semaphore.Count);
+                if (deficit <= 0)
+                {
+                    continue;
+                }
+
+                semaphore.Count += deficit;
+                semaphore.BridgeLastCount = semaphore.Count;
+                semaphore.BridgeStableTicks = now;
+                Monitor.PulseAll(semaphore.Gate);
+            }
+
+            Console.Error.WriteLine(
+                $"[BRIDGE] suspend handshake stalled on '{semaphore.Name}' (0x{handle:X}); " +
+                $"force-posted {deficit} ack(s) for HLE-blocked threads.");
+            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        }
+    }
+
+    // Reports the token state behind a parked sceKernelWaitSema. A thread still
+    // blocked while count is high enough to satisfy it is a lost wake; count
+    // pinned at zero means no producer ever signaled.
+    private static string? DescribeSemaphoreByKey(string wakeKey)
+    {
+        const string prefix = "sceKernelWaitSema:";
+        if (!wakeKey.StartsWith(prefix, StringComparison.Ordinal) ||
+            !uint.TryParse(
+                wakeKey.AsSpan(prefix.Length),
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var handle) ||
+            !_semaphores.TryGetValue(handle, out var semaphore))
+        {
+            return null;
+        }
+
+        lock (semaphore.Gate)
+        {
+            return $"sema '{semaphore.Name}' count={semaphore.Count} max={semaphore.MaxCount} " +
+                $"waiters={semaphore.WaitingThreads}";
+        }
     }
 
     [SysAbiExport(
@@ -129,6 +240,12 @@ public static class KernelSemaphoreCompatExports
             }
 
             semaphore.WaitingThreads++;
+            if (needCount > semaphore.PendingWaitNeed)
+            {
+                // Record the coordinator's ack target so the suspend bridge can
+                // recognise a handshake stalled below it.
+                semaphore.PendingWaitNeed = needCount;
+            }
         }
 
         // Block cooperatively: the wake predicate atomically acquires the
@@ -147,6 +264,11 @@ public static class KernelSemaphoreCompatExports
                 {
                     semaphore.Count -= needCount;
                     semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                    if (semaphore.WaitingThreads == 0)
+                    {
+                        semaphore.PendingWaitNeed = 0;
+                    }
+
                     acquired = true;
                     return true;
                 }
@@ -664,14 +786,20 @@ public static class KernelSemaphoreCompatExports
         return true;
     }
 
-    // Call sites must check this before building the interpolated message; the trace
-    // strings would otherwise be allocated on every semaphore op even with tracing off.
     private static readonly bool _traceSema =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SEMA"), "1", StringComparison.Ordinal);
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SEMA"), "1", StringComparison.Ordinal) ||
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SEMAPHORE"), "1", StringComparison.Ordinal);
+
+    // FMOD's audio pump signals/waits its semaphores hundreds of times per
+    // second; those lines drown every other semaphore in the log. They stay
+    // hidden unless explicitly requested.
+    private static readonly bool _traceFmodSema =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SEMA_FMOD"), "1", StringComparison.Ordinal);
 
     private static void TraceSemaphore(string message)
     {
-        if (!_traceSema)
+        if (!_traceSema ||
+            (!_traceFmodSema && message.Contains("name='FMOD", StringComparison.Ordinal)))
         {
             return;
         }

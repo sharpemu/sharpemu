@@ -145,6 +145,23 @@ public static class AvPlayerExports
         return unchecked((int)handle);
     }
 
+    // Streaming-bandwidth hint; local file playback has no use for it, but the
+    // guest treats a missing symbol as a fatal init error.
+    [SysAbiExport(
+        Nid = "N6Oy-EjduiY",
+        ExportName = "sceAvPlayerSetAvailableBandwidth",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerSetAvailableBandwidth(CpuContext ctx)
+    {
+        lock (StateGate)
+        {
+            return SetReturn(
+                ctx,
+                Players.ContainsKey(ctx[CpuRegister.Rdi]) ? 0 : InvalidParameters);
+        }
+    }
+
     [SysAbiExport(
         Nid = "HD1YKVU26-M",
         ExportName = "sceAvPlayerPostInit",
@@ -921,7 +938,36 @@ public static class AvPlayerExports
         player.LastGuestBuffer = bufferAddress;
         if (!ctx.Memory.TryWrite(bufferAddress, frameData))
         {
-            return false;
+            // The guest texture allocator can hand back memory the emulator
+            // cannot address (seen with Unity's MMVideoPlayer); swap to HLE
+            // buffers once instead of silently dropping every frame.
+            if (player.TextureAllocatorFailed)
+            {
+                Console.Error.WriteLine(
+                    $"[AVPLAYER][ERROR] video frame write failed data=0x{bufferAddress:X16} bytes={frameData.Length}");
+                return false;
+            }
+
+            Console.Error.WriteLine(
+                $"[AVPLAYER][WARN] guest-allocated video buffer 0x{bufferAddress:X16} is not writable; " +
+                "switching to HLE video buffers.");
+            player.TextureAllocatorFailed = true;
+            Array.Clear(player.GuestBuffers);
+            if (!AllocateGuestVideoBuffers(ctx, player, bufferStride))
+            {
+                return false;
+            }
+
+            player.GuestBufferStride = bufferStride;
+            bufferAddress = player.GuestBuffers[player.NextGuestBuffer];
+            player.NextGuestBuffer = (player.NextGuestBuffer + 1) % FrameBufferCount;
+            player.LastGuestBuffer = bufferAddress;
+            if (!ctx.Memory.TryWrite(bufferAddress, frameData))
+            {
+                Console.Error.WriteLine(
+                    $"[AVPLAYER][ERROR] video frame write failed on HLE buffer data=0x{bufferAddress:X16}");
+                return false;
+            }
         }
 
         Span<byte> info = extended
@@ -939,7 +985,14 @@ public static class AvPlayerExports
             info[64] = 8;
             info[65] = 8;
         }
-        return ctx.Memory.TryWrite(infoAddress, info);
+        if (!ctx.Memory.TryWrite(infoAddress, info))
+        {
+            Console.Error.WriteLine(
+                $"[AVPLAYER][ERROR] video frame info write failed info=0x{infoAddress:X16}");
+            return false;
+        }
+
+        return true;
     }
 
     private static bool AllocateGuestVideoBuffers(CpuContext ctx, PlayerState player, int bufferSize)
@@ -1009,7 +1062,9 @@ public static class AvPlayerExports
         {
             return false;
         }
-        var ffprobe = Path.Combine(Path.GetDirectoryName(ffmpeg) ?? string.Empty, "ffprobe");
+        var ffprobe = Path.Combine(
+            Path.GetDirectoryName(ffmpeg) ?? string.Empty,
+            OperatingSystem.IsWindows() ? "ffprobe.exe" : "ffprobe");
         if (!File.Exists(ffprobe))
         {
             return false;
@@ -1106,6 +1161,24 @@ public static class AvPlayerExports
                 return candidate;
             }
         }
+
+        // Windows: resolve ffmpeg(.exe) through PATH.
+        var executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
+        var pathDirectories = Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? [];
+        foreach (var directory in pathDirectories)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                continue;
+            }
+
+            var candidate = Path.Combine(directory.Trim(), executableName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
         return null;
     }
 

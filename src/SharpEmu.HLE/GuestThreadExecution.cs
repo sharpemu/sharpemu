@@ -221,6 +221,42 @@ public static class GuestThreadExecution
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
+    // Diagnostic hooks: map a block wake key to a human-readable description of
+    // the underlying synchronization object (completion/grant/token state). Each
+    // HLE primitive layer registers the keys it owns; the scheduler's thread
+    // snapshots consume them so a lost wake (a parked thread whose wait is
+    // already satisfiable) is visible in logs.
+    private static readonly List<Func<string, string?>> _blockWaiterDescribers = new();
+
+    public static void AddBlockWaiterDescriber(Func<string, string?> describer)
+    {
+        lock (_blockWaiterDescribers)
+        {
+            _blockWaiterDescribers.Add(describer);
+        }
+    }
+
+    public static string? DescribeBlockWaiter(string wakeKey)
+    {
+        if (string.IsNullOrEmpty(wakeKey))
+        {
+            return null;
+        }
+
+        lock (_blockWaiterDescribers)
+        {
+            foreach (var describer in _blockWaiterDescribers)
+            {
+                if (describer(wakeKey) is { } description)
+                {
+                    return description;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
