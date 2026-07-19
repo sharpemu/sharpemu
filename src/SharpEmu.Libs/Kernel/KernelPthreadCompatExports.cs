@@ -578,6 +578,19 @@ public static class KernelPthreadCompatExports
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    /// <summary>
+    /// The POSIX-named alias of <see cref="PthreadOnce"/>. libKernel exports the
+    /// same routine under two NIDs, and shipped middleware links the plain name:
+    /// DOOM's libcohtml, PlayFab and party modules all import this one rather
+    /// than scePthreadOnce.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "Z4QosVuAsA0",
+        ExportName = "pthread_once",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadOncePOSIX(CpuContext ctx) => PthreadOnce(ctx);
+
     private static int PthreadMutexInitCore(CpuContext ctx, ulong mutexAddress, ulong attrAddress)
     {
         if (mutexAddress == 0)
