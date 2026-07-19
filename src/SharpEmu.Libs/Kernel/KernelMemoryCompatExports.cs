@@ -5662,6 +5662,74 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
+    /// <summary>
+    /// Inserts <paramref name="replacement"/> into the tracked-region table,
+    /// carving it out of any regions it overlaps and preserving the parts of
+    /// those regions that fall outside it.
+    /// </summary>
+    /// <remarks>
+    /// The table is a SortedList keyed by start address, so assigning directly
+    /// destroys any existing entry that happens to share a start address. That
+    /// silently discarded enclosing reservations: a title reserves a large range
+    /// and then commits a small mapping at the same base, and the record of
+    /// everything past the small mapping disappears — leaving sceKernelVirtualQuery
+    /// unable to find memory the guest legitimately owns.
+    ///
+    /// Carving also keeps the table non-overlapping. Previously a new region
+    /// starting inside an existing one produced two overlapping entries, which
+    /// the ordered scan in TryFindVirtualQueryRegionLocked is not written to
+    /// expect.
+    /// </remarks>
+    private static void ReplaceMappedRegionRangeLocked(MappedRegion replacement)
+    {
+        if (replacement.Length == 0 ||
+            !TryAddU64(replacement.Address, replacement.Length, out var replacementEnd))
+        {
+            _mappedRegions[replacement.Address] = replacement;
+            return;
+        }
+
+        var start = replacement.Address;
+        List<MappedRegion>? overlapping = null;
+        foreach (var region in _mappedRegions.Values)
+        {
+            if (region.Length == 0 ||
+                !TryAddU64(region.Address, region.Length, out var regionEnd))
+            {
+                continue;
+            }
+
+            if (region.Address < replacementEnd && regionEnd > start)
+            {
+                (overlapping ??= []).Add(region);
+            }
+        }
+
+        if (overlapping is not null)
+        {
+            foreach (var region in overlapping)
+            {
+                _mappedRegions.Remove(region.Address);
+            }
+
+            foreach (var region in overlapping)
+            {
+                var regionEnd = region.Address + region.Length;
+                if (region.Address < start)
+                {
+                    AddMappedRegionSliceLocked(region, region.Address, start, region.Protection);
+                }
+
+                if (regionEnd > replacementEnd)
+                {
+                    AddMappedRegionSliceLocked(region, replacementEnd, regionEnd, region.Protection);
+                }
+            }
+        }
+
+        _mappedRegions[start] = replacement;
+    }
+
     private static void AddMappedRegionSliceLocked(
         MappedRegion source,
         ulong start,

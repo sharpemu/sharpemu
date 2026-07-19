@@ -184,6 +184,212 @@ public static class NetExports
         return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
     }
 
+    /// <summary>
+    /// POSIX alias of <see cref="NetSetsockopt"/>; identical
+    /// (fd, level, option, value, length) argument order.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "fFxGkxF2bVo",
+        ExportName = "setsockopt",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSetsockopt(CpuContext ctx) => NetSetsockopt(ctx);
+
+    /// <summary>
+    /// Reads back the socket options this backend actually tracks: SO_NBIO,
+    /// SO_REUSEADDR and SO_ERROR.
+    /// </summary>
+    /// <remarks>
+    /// Anything else returns EINVAL rather than a zero-filled buffer. A caller
+    /// that receives success for an option nobody stored would treat whatever
+    /// happens to be in its output buffer as the real setting, which is a harder
+    /// failure to trace than an explicit rejection.
+    /// </remarks>
+    [SysAbiExport(
+        Nid = "6O8EwYOgH9Y",
+        ExportName = "getsockopt",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetsockopt(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var level = unchecked((int)ctx[CpuRegister.Rsi]);
+        var option = unchecked((int)ctx[CpuRegister.Rdx]);
+        var valueAddress = ctx[CpuRegister.Rcx];
+        var lengthAddress = ctx[CpuRegister.R8];
+        if (!_sockets.TryGetValue(id, out var socket))
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+
+        if (valueAddress == 0 || lengthAddress == 0 || level != 0xFFFF)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        Span<byte> lengthBytes = stackalloc byte[sizeof(int)];
+        if (!ctx.Memory.TryRead(lengthAddress, lengthBytes))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if (BinaryPrimitives.ReadInt32LittleEndian(lengthBytes) < sizeof(int))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        int value;
+        switch (option)
+        {
+            // ORBIS_NET_SO_NBIO: mirrors what sceNetSetsockopt stored.
+            case 0x1200:
+                value = socket.Blocking ? 0 : 1;
+                break;
+            case 0x0004:
+                value = (int)socket.GetSocketOption(
+                    SocketOptionLevel.Socket,
+                    SocketOptionName.ReuseAddress)! != 0 ? 1 : 0;
+                break;
+            // ORBIS_NET_SO_ERROR: nothing here records per-socket async errors,
+            // so report "no pending error" rather than inventing one.
+            case 0x1007:
+                value = 0;
+                break;
+            default:
+                return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        Span<byte> valueBytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
+        BinaryPrimitives.WriteInt32LittleEndian(lengthBytes, sizeof(int));
+        if (!ctx.Memory.TryWrite(valueAddress, valueBytes) ||
+            !ctx.Memory.TryWrite(lengthAddress, lengthBytes))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        TraceNet("socket.getsockopt", id, unchecked((uint)option), unchecked((uint)value), 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "fZOeZIOEmLw",
+        ExportName = "send",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSend(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var length = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (!_sockets.TryGetValue(id, out var socket))
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+
+        if (length < 0 || (length != 0 && bufferAddress == 0))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if (length == 0)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        var payload = new byte[length];
+        if (!ctx.Memory.TryRead(bufferAddress, payload))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        try
+        {
+            var sent = socket.Send(payload, SocketFlags.None);
+            TraceNet("socket.send", id, unchecked((uint)length), unchecked((uint)sent), 0);
+            return ctx.SetReturn(sent);
+        }
+        catch (SocketException exception)
+            when (exception.SocketErrorCode == SocketError.WouldBlock)
+        {
+            return SetNetError(ctx, NetErrorWouldBlock, NetErrnoWouldBlock);
+        }
+        catch (SocketException)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+        catch (ObjectDisposedException)
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+    }
+
+    /// <summary>
+    /// Formats a binary address as text. Pure conversion with no socket state,
+    /// so it behaves identically to the console version for AF_INET/AF_INET6.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "5jRCs2axtr4",
+        ExportName = "inet_ntop",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixInetNtop(CpuContext ctx)
+    {
+        var family = unchecked((int)ctx[CpuRegister.Rdi]);
+        var sourceAddress = ctx[CpuRegister.Rsi];
+        var destinationAddress = ctx[CpuRegister.Rdx];
+        var destinationSize = unchecked((int)ctx[CpuRegister.Rcx]);
+        if (sourceAddress == 0 || destinationAddress == 0 || destinationSize <= 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // ORBIS_NET_AF_INET / ORBIS_NET_AF_INET6, matching TryMapAddressFamily.
+        var addressLength = family switch
+        {
+            2 => 4,
+            28 => 16,
+            _ => 0,
+        };
+
+        if (addressLength == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var rawAddress = new byte[addressLength];
+        if (!ctx.Memory.TryRead(sourceAddress, rawAddress))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var text = new IPAddress(rawAddress).ToString();
+        var encoded = Encoding.ASCII.GetBytes(text);
+
+        // POSIX requires the terminator to fit as well; a truncated address string
+        // is worse than a reported failure because the caller cannot detect it.
+        if (encoded.Length + 1 > destinationSize)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var buffer = new byte[encoded.Length + 1];
+        encoded.CopyTo(buffer, 0);
+        if (!ctx.Memory.TryWrite(destinationAddress, buffer))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // inet_ntop returns the destination pointer on success.
+        ctx[CpuRegister.Rax] = destinationAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "bErx49PgxyY",
         ExportName = "sceNetBind",

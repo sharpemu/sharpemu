@@ -1134,6 +1134,90 @@ public static class KernelPthreadExtendedCompatExports
     public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockWrlock(ctx);
 
     [SysAbiExport(
+        Nid = "SFxTMOfuCkE",
+        ExportName = "pthread_rwlock_tryrdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockTryrdlock(CpuContext ctx) =>
+        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: false);
+
+    [SysAbiExport(
+        Nid = "XhWHn6P5R7U",
+        ExportName = "pthread_rwlock_trywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockTrywrlock(CpuContext ctx) =>
+        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+
+    /// <summary>
+    /// Non-blocking counterpart of <see cref="PthreadRwlockLockCore"/>: acquires
+    /// only if the lock is free right now, otherwise reports BUSY.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not routed through TryAcquireBlockedRwlock. That helper exists
+    /// for the scheduler resume path and decrements WaitingWriters on success,
+    /// which is correct only for a thread that previously incremented it. A fresh
+    /// try never did, so reusing it would silently consume another thread's
+    /// waiter count and let a queued writer be skipped.
+    /// </remarks>
+    private static int PthreadRwlockTryLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
+    {
+        if (rwlockAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out var resolvedAddress, out var rwlock))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        lock (rwlock.SyncRoot)
+        {
+            if (write)
+            {
+                if (rwlock.WriterThreadId == currentThreadId || rwlock.GetReaderCount(currentThreadId) > 0)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+                }
+
+                // Mirrors the blocking path's re-entrant compat-writer grant so the
+                // two agree on what counts as already owning the lock.
+                if (rwlock.CompatWriterCounts.GetValueOrDefault(currentThreadId) > 0)
+                {
+                    rwlock.AddCompatWriter(currentThreadId);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+
+                if (rwlock.WriterThreadId != 0 ||
+                    rwlock.ReaderTotalCount != 0 ||
+                    rwlock.CompatWriterTotalCount != 0)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+                }
+
+                DetectRwlockWriterConflict(resolvedAddress, rwlock, currentThreadId, "trywrlock");
+                rwlock.WriterThreadId = currentThreadId;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            if (rwlock.WriterThreadId == currentThreadId)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+            }
+
+            if (ReaderMustWaitForRwlock(rwlock, currentThreadId))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+            }
+
+            rwlock.AddReader(currentThreadId);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+    }
+
+    [SysAbiExport(
         Nid = "+L98PIbGttk",
         ExportName = "scePthreadRwlockUnlock",
         Target = Generation.Gen4 | Generation.Gen5,
