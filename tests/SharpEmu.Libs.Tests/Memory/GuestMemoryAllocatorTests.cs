@@ -121,6 +121,113 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
     }
 
+    [Fact]
+    public void TryBackFixedRangeFillsOnlyTheFreePagesOfAPartiallyOccupiedRange()
+    {
+        const ulong rangeBase = 0x0000_0020_2F00_0000;
+        const ulong rangeSize = 0x40_0000;
+        const ulong occupiedSize = 0x4_0000;
+        using var host = new PartialOverlapHostMemory(rangeBase, occupiedSize, rangeSize);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.True(memory.TryBackFixedRange(rangeBase, rangeSize, executable: false));
+
+        // Only the free tail is allocated; the already-occupied head is untouched.
+        Assert.Equal(
+            [(rangeBase + occupiedSize, rangeSize - occupiedSize)],
+            host.AllocationCalls);
+    }
+
+    [Fact]
+    public void TryBackFixedRangeReturnsFalseWhenRangeIsFullyOccupied()
+    {
+        const ulong rangeBase = 0x0000_0020_2F00_0000;
+        const ulong rangeSize = 0x40_0000;
+        using var host = new PartialOverlapHostMemory(rangeBase, rangeSize, rangeSize);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.False(memory.TryBackFixedRange(rangeBase, rangeSize, executable: false));
+        Assert.Empty(host.AllocationCalls);
+    }
+
+    private sealed class PartialOverlapHostMemory : IHostMemory, IDisposable
+    {
+        private readonly ulong _rangeBase;
+        private readonly ulong _occupiedEnd;
+        private readonly ulong _rangeEnd;
+
+        public PartialOverlapHostMemory(ulong rangeBase, ulong occupiedSize, ulong rangeSize)
+        {
+            _rangeBase = rangeBase;
+            _occupiedEnd = rangeBase + occupiedSize;
+            _rangeEnd = rangeBase + rangeSize;
+        }
+
+        public List<(ulong Address, ulong Size)> AllocationCalls { get; } = [];
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            AllocationCalls.Add((desiredAddress, size));
+            return desiredAddress;
+        }
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            // Report contiguous runs of same-state pages, exactly as VirtualQuery
+            // does: the occupied head first, then the free tail.
+            if (address < _occupiedEnd)
+            {
+                info = new HostRegionInfo(
+                    address,
+                    _rangeBase,
+                    _occupiedEnd - address,
+                    HostRegionState.Committed,
+                    RawState: 0x1000,
+                    HostPageProtection.ReadWrite,
+                    RawProtection: 0x04,
+                    RawAllocationProtection: 0x04);
+                return true;
+            }
+
+            info = new HostRegionInfo(
+                address,
+                AllocationBase: 0,
+                _rangeEnd - address,
+                HostRegionState.Free,
+                RawState: 0x10000,
+                HostPageProtection.NoAccess,
+                RawProtection: 0x01,
+                RawAllocationProtection: 0);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
     private sealed class FakeHostMemory : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
