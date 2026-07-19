@@ -2827,12 +2827,51 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int KernelMapDirectMemory(CpuContext ctx)
     {
-        var inOutAddressPointer = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
-        var protection = unchecked((int)ctx[CpuRegister.Rdx]);
-        var flags = ctx[CpuRegister.Rcx];
-        var directMemoryStart = ctx[CpuRegister.R8];
-        var alignment = ctx[CpuRegister.R9];
+        return MapDirectMemoryCore(
+            ctx,
+            inOutAddressPointer: ctx[CpuRegister.Rdi],
+            length: ctx[CpuRegister.Rsi],
+            protection: unchecked((int)ctx[CpuRegister.Rdx]),
+            flags: ctx[CpuRegister.Rcx],
+            directMemoryStart: ctx[CpuRegister.R8],
+            alignment: ctx[CpuRegister.R9]);
+    }
+
+    [SysAbiExport(
+        Nid = "BQQniolj9tQ",
+        ExportName = "sceKernelMapDirectMemory2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelMapDirectMemory2(CpuContext ctx)
+    {
+        // The "2" variant inserts a memoryType argument (rdx) ahead of v1's
+        // protection, shifting protection/flags/directMemoryStart down one
+        // register each and pushing alignment onto the stack (the 7th argument,
+        // at [rsp + 8], above the return address). The memoryType only selects
+        // cache/GPU access attributes, which this HLE does not model per
+        // mapping, so it is accepted but does not affect placement.
+        ulong alignment = 0;
+        _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out alignment);
+
+        return MapDirectMemoryCore(
+            ctx,
+            inOutAddressPointer: ctx[CpuRegister.Rdi],
+            length: ctx[CpuRegister.Rsi],
+            protection: unchecked((int)ctx[CpuRegister.Rcx]),
+            flags: ctx[CpuRegister.R8],
+            directMemoryStart: ctx[CpuRegister.R9],
+            alignment: alignment);
+    }
+
+    private static int MapDirectMemoryCore(
+        CpuContext ctx,
+        ulong inOutAddressPointer,
+        ulong length,
+        int protection,
+        ulong flags,
+        ulong directMemoryStart,
+        ulong alignment)
+    {
         if (ShouldTraceDirectMemory())
         {
             Console.Error.WriteLine(
