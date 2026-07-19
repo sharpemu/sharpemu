@@ -13,6 +13,7 @@ using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -2544,58 +2545,67 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void PatchTlsPatterns()
 	{
-        // Large Gen5 executables can keep valid code well past the first 32 MiB.
-        // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
-        const ulong MaxScanBytes = 134217728uL;
-		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
 		int sse4aPatchCount = 0;
-		while (num < num2)
+		var handles = KernelModuleRegistry.GetModuleHandles(includeSystemModules: true);
+		foreach (var handle in handles)
 		{
-			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
+			if (!KernelModuleRegistry.TryGetModuleByHandle(handle, out var entry))
 			{
-				num += 4096uL;
 				continue;
 			}
-			ulong num5 = Math.Max(num, lpBuffer.BaseAddress);
-			ulong num6 = lpBuffer.BaseAddress + lpBuffer.RegionSize;
-			if (num6 > num2)
+			if (entry.BaseAddress == 0 || entry.EndAddress <= entry.BaseAddress)
 			{
-				num6 = num2;
+				continue;
 			}
-			uint num7 = lpBuffer.Protect & 0xFF;
-			bool flag = lpBuffer.State == 4096 && (lpBuffer.Protect & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
-			bool flag2 = num7 == PAGE_EXECUTE || num7 == 32 || num7 == 64 || num7 == PAGE_EXECUTE_WRITECOPY;
-			if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
+			ulong num = entry.BaseAddress;
+			ulong num2 = entry.EndAddress;
+			while (num < num2)
 			{
-				byte* ptr = (byte*)num5;
-				int scanBytes = (int)(num6 - num5);
-				for (int i = 0; i <= scanBytes - MinTlsPatchInstructionBytes; i++)
+				if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
 				{
-					nint address = (nint)(ptr + i);
-					int remainingBytes = scanBytes - i;
-					if (TryPatchTlsLoadInstruction(address, ptr + i, remainingBytes))
+					num += 4096uL;
+					continue;
+				}
+				ulong num5 = Math.Max(num, lpBuffer.BaseAddress);
+				ulong num6 = lpBuffer.BaseAddress + lpBuffer.RegionSize;
+				if (num6 > num2)
+				{
+					num6 = num2;
+				}
+				uint num7 = lpBuffer.Protect & 0xFF;
+				bool flag = lpBuffer.State == 4096 && (lpBuffer.Protect & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
+				bool flag2 = num7 == PAGE_EXECUTE || num7 == 32 || num7 == 64 || num7 == PAGE_EXECUTE_WRITECOPY;
+				if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
+				{
+					byte* ptr = (byte*)num5;
+					int scanBytes = (int)(num6 - num5);
+					for (int i = 0; i <= scanBytes - MinTlsPatchInstructionBytes; i++)
 					{
-						num3++;
-					}
-					else if (remainingBytes >= 12 && TryPatchTlsImmediateStoreInstruction(address, ptr + i))
-					{
-						num9++;
-					}
-					else if (remainingBytes >= 12 && TryPatchSse4aExtrqBlend(address, ptr + i))
-					{
-						sse4aPatchCount++;
-					}
-					else if (TryPatchStackCanaryInstruction(address, ptr + i))
-					{
-						num4++;
+						nint address = (nint)(ptr + i);
+						int remainingBytes = scanBytes - i;
+						if (TryPatchTlsLoadInstruction(address, ptr + i, remainingBytes))
+						{
+							num3++;
+						}
+						else if (remainingBytes >= 12 && TryPatchTlsImmediateStoreInstruction(address, ptr + i))
+						{
+							num9++;
+						}
+						else if (remainingBytes >= 12 && TryPatchSse4aExtrqBlend(address, ptr + i))
+						{
+							sse4aPatchCount++;
+						}
+						else if (TryPatchStackCanaryInstruction(address, ptr + i))
+						{
+							num4++;
+						}
 					}
 				}
+				num = num6 > num ? num6 : num + 4096uL;
 			}
-			num = num6 > num ? num6 : num + 4096uL;
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
 	}
