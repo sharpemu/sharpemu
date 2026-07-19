@@ -3428,6 +3428,47 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
+    /// <summary>
+    /// POSIX alias of <see cref="KernelMprotect"/>; identical (addr, len, prot)
+    /// argument order. Imported by libcohtml, whose embedded V8 changes page
+    /// permissions through this name when moving JIT pages between writable and
+    /// executable.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "YQOfxL4QfeU",
+        ExportName = "mprotect",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixMprotect(CpuContext ctx) => KernelMprotect(ctx);
+
+    /// <summary>
+    /// POSIX alias of <see cref="KernelMunmap"/>; identical (addr, len) argument
+    /// order.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "UqDGjXA5yUM",
+        ExportName = "munmap",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixMunmap(CpuContext ctx) => KernelMunmap(ctx);
+
+    /// <summary>
+    /// Reports the 16 KiB page granularity this backend maps and aligns against
+    /// (<see cref="OrbisPageSize"/>), not the host's 4 KiB. An allocator that
+    /// rounded to the host value would hand back sub-page offsets that every
+    /// mapping call here then rejects for misalignment.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "k+AXqu2-eBc",
+        ExportName = "getpagesize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetPageSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = OrbisPageSize;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "vSMAm3cxYTY",
         ExportName = "sceKernelMprotect",
