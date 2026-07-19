@@ -39,6 +39,60 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.Equal([(page, 0x1000UL, HostPageProtection.ReadWrite)], host.CommitCalls);
     }
 
+    [Fact]
+    public void RepeatedLazyReadUsesCommittedRangeCache()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        host.CommitCalls.Clear();
+
+        Span<byte> buffer = stackalloc byte[16];
+        Assert.True(memory.TryRead(address + 0x100, buffer));
+        var queryCallsAfterFirstRead = host.QueryCalls;
+        Assert.True(memory.TryRead(address + 0x108, buffer[..8]));
+
+        Assert.Equal(queryCallsAfterFirstRead, host.QueryCalls);
+        Assert.Single(host.CommitCalls);
+    }
+
+    [Fact]
+    public void TryCopyHandlesOverlappingIdentityMappedRanges()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4, 5, 6 }));
+
+        Assert.True(memory.TryCopy(address + 2, address, 4));
+
+        Span<byte> result = stackalloc byte[6];
+        Assert.True(memory.TryRead(address, result));
+        Assert.Equal(new byte[] { 1, 2, 1, 2, 3, 4 }, result.ToArray());
+    }
+
+    [Fact]
+    public void RepeatedTryCopyKeepsSourceAndDestinationCommitRangesCached()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        var source = address + 0x100;
+        var destination = address + 0x1100;
+        Assert.True(memory.TryWrite(source, new byte[] { 1, 2, 3, 4 }));
+        Assert.True(memory.TryWrite(destination, new byte[4]));
+
+        host.CommitCalls.Clear();
+        Assert.True(memory.TryCopy(destination, source, 4));
+        var queryCallsAfterFirstCopy = host.QueryCalls;
+        Assert.True(memory.TryCopy(destination, source, 4));
+
+        Assert.Equal(queryCallsAfterFirstCopy, host.QueryCalls);
+    }
+
     // 2. Reserve-only region: GetPointer commits the page before returning it,
     //    so callers receive a valid (non-null) pointer. An unmapped address yields null.
     [Fact]
@@ -125,11 +179,13 @@ public sealed class PhysicalVirtualMemoryTests
 
         public LazyZeroedHostMemory()
         {
-            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x2000);
+            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x3000);
             _address = ((ulong)_allocation + 0xFFF) & ~0xFFFUL;
         }
 
         public List<(ulong Address, ulong Size, HostPageProtection Protection)> CommitCalls { get; } = [];
+
+        public int QueryCalls { get; private set; }
 
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => _address;
 
@@ -162,6 +218,7 @@ public sealed class PhysicalVirtualMemoryTests
 
         public bool Query(ulong address, out HostRegionInfo info)
         {
+            QueryCalls++;
             var pageAddress = address & ~0xFFFUL;
             info = new HostRegionInfo(
                 pageAddress,

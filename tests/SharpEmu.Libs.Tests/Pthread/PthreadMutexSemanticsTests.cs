@@ -25,6 +25,128 @@ public sealed class PthreadMutexSemanticsTests
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
     }
 
+    [Fact]
+    public async Task ContendedMutex_HandsOffOneHostWaiterAtATime()
+    {
+        const ulong memoryBase = 0x2_0000_0000;
+        const ulong mutexAddress = memoryBase + 0x100;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var ownerContext = new CpuContext(memory, Generation.Gen5);
+        Assert.True(ownerContext.TryWriteUInt64(mutexAddress, 1));
+        ownerContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(ownerContext));
+
+        using var waitersStarted = new CountdownEvent(2);
+        using var firstAcquired = new ManualResetEventSlim(false);
+        using var secondAcquired = new ManualResetEventSlim(false);
+        using var releaseFirst = new ManualResetEventSlim(false);
+        var acquisitionCount = 0;
+
+        Task<(int LockResult, int UnlockResult)> StartWaiter() =>
+            Task.Factory.StartNew(
+                () =>
+                {
+                    var waiterContext = new CpuContext(memory, Generation.Gen5);
+                    waiterContext[CpuRegister.Rdi] = mutexAddress;
+                    waitersStarted.Signal();
+                    var lockResult = KernelPthreadCompatExports.PthreadMutexLock(waiterContext);
+                    if (lockResult != 0)
+                    {
+                        return (lockResult, int.MinValue);
+                    }
+
+                    if (Interlocked.Increment(ref acquisitionCount) == 1)
+                    {
+                        firstAcquired.Set();
+                        releaseFirst.Wait(TimeSpan.FromSeconds(5));
+                    }
+                    else
+                    {
+                        secondAcquired.Set();
+                    }
+
+                    var unlockResult = KernelPthreadCompatExports.PthreadMutexUnlock(waiterContext);
+                    return (lockResult, unlockResult);
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+
+        var firstWaiter = StartWaiter();
+        var secondWaiter = StartWaiter();
+        Assert.True(waitersStarted.Wait(TimeSpan.FromSeconds(5)));
+        Thread.Sleep(50);
+        Assert.Equal(0, Volatile.Read(ref acquisitionCount));
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+        Assert.True(firstAcquired.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, Volatile.Read(ref acquisitionCount));
+        releaseFirst.Set();
+        Assert.True(secondAcquired.Wait(TimeSpan.FromSeconds(5)));
+
+        var results = await Task.WhenAll(firstWaiter, secondWaiter).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.All(results, result => Assert.Equal((0, 0), result));
+        Assert.Equal(2, Volatile.Read(ref acquisitionCount));
+    }
+
+    [Fact]
+    public async Task ContendedMutex_PreservesMutualExclusionUnderLoad()
+    {
+        const ulong memoryBase = 0x3_0000_0000;
+        const ulong mutexAddress = memoryBase + 0x100;
+        const int workerCount = 4;
+        const int iterationsPerWorker = 250;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var initializationContext = new CpuContext(memory, Generation.Gen5);
+        Assert.True(initializationContext.TryWriteUInt64(mutexAddress, 1));
+        initializationContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(initializationContext));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(initializationContext));
+
+        using var start = new ManualResetEventSlim(false);
+        var insideCriticalSection = 0;
+        var mutualExclusionViolations = 0;
+        var protectedCounter = 0;
+        var workers = Enumerable.Range(0, workerCount)
+            .Select(_ => Task.Factory.StartNew(
+                () =>
+                {
+                    var context = new CpuContext(memory, Generation.Gen5);
+                    context[CpuRegister.Rdi] = mutexAddress;
+                    start.Wait();
+                    for (var iteration = 0; iteration < iterationsPerWorker; iteration++)
+                    {
+                        if (KernelPthreadCompatExports.PthreadMutexLock(context) != 0)
+                        {
+                            throw new InvalidOperationException("pthread mutex lock failed during contention stress.");
+                        }
+
+                        if (Interlocked.Increment(ref insideCriticalSection) != 1)
+                        {
+                            Interlocked.Increment(ref mutualExclusionViolations);
+                        }
+
+                        protectedCounter++;
+                        Thread.SpinWait(20);
+                        Interlocked.Decrement(ref insideCriticalSection);
+
+                        if (KernelPthreadCompatExports.PthreadMutexUnlock(context) != 0)
+                        {
+                            throw new InvalidOperationException("pthread mutex unlock failed during contention stress.");
+                        }
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
+            .ToArray();
+
+        start.Set();
+        await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, Volatile.Read(ref mutualExclusionViolations));
+        Assert.Equal(workerCount * iterationsPerWorker, protectedCounter);
+    }
+
     private sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
     {
         private readonly ulong _baseAddress;

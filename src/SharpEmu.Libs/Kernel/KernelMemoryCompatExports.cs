@@ -1105,10 +1105,13 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var payload = GC.AllocateUninitializedArray<byte>(count);
-        if (count > 0 && (!TryReadCompat(ctx, source, payload) || !TryWriteCompat(ctx, destination, payload)))
+        if (count > 0 && !ctx.Memory.TryCopy(destination, source, (ulong)count))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            var payload = GC.AllocateUninitializedArray<byte>(count);
+            if (!TryReadCompat(ctx, source, payload) || !TryWriteCompat(ctx, destination, payload))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
         }
 
         ctx[CpuRegister.Rax] = destination;

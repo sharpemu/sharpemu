@@ -20,6 +20,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
+
+    [ThreadStatic]
+    private static CommittedRangeCache? _committedRangeCache;
+
+    private long _mappingGeneration;
     private const ulong PageSize = 0x1000;
     private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
     private const ulong GuestAllocationArenaSize = 0x0100_0000;
@@ -28,6 +33,77 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const ulong FullCommitRegionLimit = 4UL << 30;
     private const ulong DefaultLazyReservePrimeBytes = 0x0400_0000UL; // 64 MiB
     private const ulong LazyReservePrimeChunkBytes = 0x0200_0000UL; // 32 MiB
+    private const int CommittedRangeCacheCapacity = 4;
+
+    private sealed class CommittedRangeCache
+    {
+        private readonly CommittedRange[] _ranges = new CommittedRange[CommittedRangeCacheCapacity];
+        private PhysicalVirtualMemory? _owner;
+        private long _generation;
+        private int _count;
+        private int _nextReplacement;
+
+        public bool Contains(
+            PhysicalVirtualMemory owner,
+            long generation,
+            ulong start,
+            ulong end)
+        {
+            if (!ReferenceEquals(_owner, owner) || _generation != generation)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < _count; index++)
+            {
+                var range = _ranges[index];
+                if (start >= range.Start && end <= range.End)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public void Add(
+            PhysicalVirtualMemory owner,
+            long generation,
+            ulong start,
+            ulong end)
+        {
+            if (!ReferenceEquals(_owner, owner) || _generation != generation)
+            {
+                _owner = owner;
+                _generation = generation;
+                _count = 0;
+                _nextReplacement = 0;
+            }
+
+            for (var index = 0; index < _count; index++)
+            {
+                var range = _ranges[index];
+                if (start <= range.End && end >= range.Start)
+                {
+                    _ranges[index] = new CommittedRange(
+                        Math.Min(start, range.Start),
+                        Math.Max(end, range.End));
+                    return;
+                }
+            }
+
+            if (_count < _ranges.Length)
+            {
+                _ranges[_count++] = new CommittedRange(start, end);
+                return;
+            }
+
+            _ranges[_nextReplacement] = new CommittedRange(start, end);
+            _nextReplacement = (_nextReplacement + 1) % _ranges.Length;
+        }
+    }
+
+    private readonly record struct CommittedRange(ulong Start, ulong End);
 
     // Raw Windows PAGE_* values retained for the internal region/protection
     // bookkeeping: regions and saved old-protection values always carry the raw
@@ -440,6 +516,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitWriteLock();
         }
 
+        Interlocked.Increment(ref _mappingGeneration);
         _hostMemory.Free(address);
     }
 
@@ -611,6 +688,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     _allocationSearchHints.Clear();
                 }
+                Interlocked.Increment(ref _mappingGeneration);
             }
             finally
             {
@@ -953,6 +1031,60 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length)
+    {
+        if (length == 0)
+        {
+            return true;
+        }
+        if (length > int.MaxValue)
+        {
+            return false;
+        }
+
+        // Match TryWrite's managed-write notification before touching an
+        // identity-mapped guest page protected by the image tracker.
+        GuestImageWriteTracker.NotifyManagedWrite(destinationAddress, length);
+
+        _gate.EnterReadLock();
+        try
+        {
+            var sourceRegion = FindRegion(sourceAddress, length);
+            var destinationRegion = FindRegion(destinationAddress, length);
+            if (sourceRegion is null || destinationRegion is null ||
+                !TryResolveRegionOffset(sourceAddress, length, sourceRegion, out var sourceOffset) ||
+                !TryResolveRegionOffset(destinationAddress, length, destinationRegion, out var destinationOffset))
+            {
+                return false;
+            }
+
+            var sourcePointer = sourceRegion.VirtualAddress + sourceOffset;
+            var destinationPointer = destinationRegion.VirtualAddress + destinationOffset;
+            if ((sourceRegion.IsReservedOnly &&
+                 !EnsureRangeCommitted(sourcePointer, length, sourceRegion)) ||
+                (destinationRegion.IsReservedOnly &&
+                 !EnsureRangeCommitted(destinationPointer, length, destinationRegion)) ||
+                !CanReadWithoutProtectionChange(sourcePointer, length, sourceRegion) ||
+                !CanWriteWithoutProtectionChange(destinationPointer, length, destinationRegion))
+            {
+                return false;
+            }
+
+            // Span.CopyTo has memmove overlap semantics, so this allocation-free
+            // path safely serves both libc memcpy and libc memmove.
+            new ReadOnlySpan<byte>((void*)sourcePointer, checked((int)length)).CopyTo(
+                new Span<byte>((void*)destinationPointer, checked((int)length)));
+            NotifyGuestWriteWatch(
+                destinationAddress,
+                new ReadOnlySpan<byte>((void*)destinationPointer, checked((int)length)));
+            return true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     private bool TryReadExclusive(ulong virtualAddress, Span<byte> destination)
     {
         var region = FindRegion(virtualAddress, (ulong)destination.Length);
@@ -1292,6 +1424,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         var startPage = AlignDown(address, PageSize);
         var endPage = AlignUp(address + size, PageSize);
+        var mappingGeneration = Volatile.Read(ref _mappingGeneration);
+        var committedRangeCache = _committedRangeCache ??= new CommittedRangeCache();
+        if (committedRangeCache.Contains(this, mappingGeneration, startPage, endPage))
+        {
+            return true;
+        }
         var commitProtection = GetCommitProtection(region);
 
         var pageAddress = startPage;
@@ -1313,6 +1451,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             if (info.State == HostRegionState.Committed)
             {
+                // The host query proved this whole range is committed. Retain
+                // that result instead of caching only the caller's small span.
+                CacheCommittedRange(info.BaseAddress, queriedEnd, mappingGeneration);
                 pageAddress = rangeEnd;
                 continue;
             }
@@ -1328,10 +1469,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            CacheCommittedRange(pageAddress, rangeEnd, mappingGeneration);
             pageAddress = rangeEnd;
         }
 
+        CacheCommittedRange(startPage, endPage, mappingGeneration);
         return true;
+    }
+
+    private void CacheCommittedRange(ulong startPage, ulong endPage, long mappingGeneration)
+    {
+        (_committedRangeCache ??= new CommittedRangeCache()).Add(
+            this,
+            mappingGeneration,
+            startPage,
+            endPage);
     }
 
     private bool TryTemporarilyProtectForRead(
