@@ -792,34 +792,31 @@ public static class SaveDataExports
 
         var id = (uint)Interlocked.Increment(ref _nextTransactionResource);
 
-        // The resource-out pointer's argument slot varies by SDK revision: some
-        // callers pass it in rdx, others in rcx (a 4-arg form where rdx holds a
-        // count/flag). Void Terrarium passes rdx=0x1 (not a pointer) and the
-        // real out-pointer in rcx. Probe the plausible candidates and write the
-        // handle to the first writable one instead of faulting on a bad rdx.
-        // This is a stub-level create (matches shadPS4's return-OK semantics);
-        // never return MEMORY_FAULT for it, or the guest treats savedata init as
-        // failed and never advances.
+        // A small RDX value is a flag, and RCX contains the output address.
+        // A larger RDX value is the output address for the older ABI.
         var resourceAddress = 0UL;
-        foreach (var candidate in new[]
-                 {
-                     ctx[CpuRegister.Rdx],
-                     ctx[CpuRegister.Rcx],
-                     ctx[CpuRegister.R8],
-                     ctx[CpuRegister.R9],
-                 })
+        var selectedAddress = SelectTransactionResourceAddress(
+            ctx[CpuRegister.Rdx],
+            ctx[CpuRegister.Rcx]);
+        if (selectedAddress != 0 && TryWriteUInt32(ctx, selectedAddress, id))
         {
-            if (candidate != 0 && TryWriteUInt32(ctx, candidate, id))
-            {
-                resourceAddress = candidate;
-                break;
-            }
+            resourceAddress = selectedAddress;
         }
 
         TraceSaveData(
             $"create_transaction_resource user={userId} reserved=0x{reserved:X} resource_addr=0x{resourceAddress:X} id={id}");
 
         return SetReturn(ctx, 0);
+    }
+
+    internal static ulong SelectTransactionResourceAddress(ulong rdx, ulong rcx)
+    {
+        if (rdx == 0)
+        {
+            return 0;
+        }
+
+        return rdx <= ushort.MaxValue ? rcx : rdx;
     }
 
     [SysAbiExport(

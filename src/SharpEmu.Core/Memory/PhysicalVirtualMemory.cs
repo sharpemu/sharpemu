@@ -919,6 +919,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                         Buffer.MemoryCopy(srcPtr, destPtr, (nuint)source.Length, (nuint)source.Length);
                     }
 
+                    NotifyGuestWriteWatch(virtualAddress, source);
                     return true;
                 }
             }
@@ -941,6 +942,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         finally
         {
             _gate.ExitWriteLock();
+        }
+    }
+
+    private static void NotifyGuestWriteWatch(ulong virtualAddress, ReadOnlySpan<byte> source)
+    {
+        if (GuestWriteWatch.Armed)
+        {
+            GuestWriteWatch.Check(virtualAddress, source);
         }
     }
 
@@ -1016,6 +1025,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     Buffer.MemoryCopy(srcPtr, destPtr, (nuint)source.Length, (nuint)source.Length);
                 }
 
+                NotifyGuestWriteWatch(virtualAddress, source);
                 return true;
             }
 
@@ -1040,6 +1050,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
             }
 
+            NotifyGuestWriteWatch(virtualAddress, source);
             return true;
         }
 

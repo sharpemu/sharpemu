@@ -31,6 +31,9 @@ public sealed class SaveDataExportsTests : IDisposable
     private const ulong SyncParam = Base + 0xC80;
     private const ulong SetupParam = Base + 0xD00;
     private const ulong SetupResult = Base + 0xD80;
+    private const ulong TransactionOut = Base + 0xE00;
+    private const ulong StaleR8 = Base + 0xE08;
+    private const ulong StaleR9 = Base + 0xE10;
 
     private const int NoEvent = unchecked((int)0x809F0008);
     private const int ParameterError = unchecked((int)0x809F0000);
@@ -224,5 +227,65 @@ public sealed class SaveDataExportsTests : IDisposable
         Assert.Equal(
             unchecked((int)0x809F0008),
             SaveDataExports.SaveDataDelete(Reg(rdi: DeleteParam)));
+    }
+
+    [Fact]
+    public void CreateTransactionResource_WithoutOutPointer_DoesNotProbeStaleRegisters()
+    {
+        const uint sentinel = 0xA5A5A5A5;
+        Assert.True(_ctx.TryWriteUInt32(TransactionOut, sentinel));
+        Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
+        Assert.True(_ctx.TryWriteUInt32(StaleR9, sentinel));
+
+        var ctx = Reg(rdi: UserId, rdx: 0, rcx: TransactionOut);
+        ctx[CpuRegister.R8] = StaleR8;
+        ctx[CpuRegister.R9] = StaleR9;
+
+        Assert.Equal(0, SaveDataExports.SaveDataCreateTransactionResource(ctx));
+        Assert.True(_ctx.TryReadUInt32(TransactionOut, out var rcxValue));
+        Assert.True(_ctx.TryReadUInt32(StaleR8, out var r8Value));
+        Assert.True(_ctx.TryReadUInt32(StaleR9, out var r9Value));
+        Assert.Equal(sentinel, rcxValue);
+        Assert.Equal(sentinel, r8Value);
+        Assert.Equal(sentinel, r9Value);
+    }
+
+    [Fact]
+    public void CreateTransactionResource_WithOutPointerFlag_WritesOnlyRcx()
+    {
+        const uint sentinel = 0xA5A5A5A5;
+        Assert.True(_ctx.TryWriteUInt32(TransactionOut, 0));
+        Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
+        Assert.True(_ctx.TryWriteUInt32(StaleR9, sentinel));
+
+        var ctx = Reg(rdi: UserId, rdx: 1, rcx: TransactionOut);
+        ctx[CpuRegister.R8] = StaleR8;
+        ctx[CpuRegister.R9] = StaleR9;
+
+        Assert.Equal(0, SaveDataExports.SaveDataCreateTransactionResource(ctx));
+        Assert.True(_ctx.TryReadUInt32(TransactionOut, out var resource));
+        Assert.True(_ctx.TryReadUInt32(StaleR8, out var r8Value));
+        Assert.True(_ctx.TryReadUInt32(StaleR9, out var r9Value));
+        Assert.NotEqual(0u, resource);
+        Assert.Equal(sentinel, r8Value);
+        Assert.Equal(sentinel, r9Value);
+    }
+
+    [Fact]
+    public void CreateTransactionResource_WithLegacyOutPointer_WritesOnlyRdx()
+    {
+        const uint sentinel = 0xA5A5A5A5;
+        Assert.True(_ctx.TryWriteUInt32(TransactionOut, 0));
+        Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
+
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataCreateTransactionResource(
+                Reg(rdi: UserId, rdx: TransactionOut, rcx: StaleR8)));
+
+        Assert.True(_ctx.TryReadUInt32(TransactionOut, out var resource));
+        Assert.True(_ctx.TryReadUInt32(StaleR8, out var rcxValue));
+        Assert.NotEqual(0u, resource);
+        Assert.Equal(sentinel, rcxValue);
     }
 }

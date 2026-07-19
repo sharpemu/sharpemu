@@ -2984,6 +2984,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        GuestWriteWatch.OnDirectMapping(mappedAddress, length, protection);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
