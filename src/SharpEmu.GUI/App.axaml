@@ -196,6 +196,67 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Padding" Value="8,3" />
     </Style>
 
+    <!-- Translucent variant of the card so the key art glows through the
+         options page. -->
+    <Style Selector="Border.glass">
+      <Setter Property="Background" Value="#CC141924" />
+    </Style>
+
+    <!-- Round toolbar icon buttons, PS5 top-bar style. -->
+    <Style Selector="Button.iconCircle">
+      <Setter Property="Background" Value="#26FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="40" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.iconCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#40FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+    <Style Selector="ToggleButton.iconCircle">
+      <Setter Property="Background" Value="#26FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="40" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="ToggleButton.iconCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#40FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+    <Style Selector="ToggleButton.iconCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#E8ECF4" />
+      <Setter Property="Foreground" Value="#11141B" />
+    </Style>
+
+    <!-- Options category sidebar entries, console-settings style. -->
+    <Style Selector="Button.sideItem">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Padding" Value="14,10" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Button.sideItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+    <Style Selector="Button.sideItem.active">
+      <Setter Property="Background" Value="#2EFFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    </Style>
+
     <Style Selector="ContextMenu">
       <Setter Property="Background" Value="{StaticResource CardBrush}" />
       <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />

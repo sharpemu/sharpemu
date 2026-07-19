@@ -105,14 +105,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </Border>
         </StackPanel>
 
-        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
+        <!-- PS5-style icon cluster: every library action is a round icon
+             button (labels live in tooltips); the search field slides out
+             of the magnifier toggle. -->
+        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="10"
                     VerticalAlignment="Center">
-          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="240" VerticalAlignment="Center"
-                   CornerRadius="999" Padding="14,6" />
-          <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
-          <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
-          <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
-          <ToggleButton x:Name="ConsoleToggle" Classes="ghost" Content="≡ Console" VerticalAlignment="Center" />
+          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="230" VerticalAlignment="Center"
+                   CornerRadius="999" Padding="14,6" IsVisible="False" />
+          <ToggleButton x:Name="SearchToggle" Classes="iconCircle" Content="🔍" FontSize="15" />
+          <Button x:Name="AddFolderButton" Classes="iconCircle" Content="＋" FontSize="18" />
+          <Button x:Name="OpenFileButton" Classes="iconCircle" Content="📂" FontSize="15" />
+          <Button x:Name="RescanButton" Classes="iconCircle" Content="⟳" FontSize="17" />
+          <ToggleButton x:Name="ConsoleToggle" Classes="iconCircle" Content="≡" FontSize="17" />
         </StackPanel>
       </Grid>
 
@@ -272,13 +276,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <!-- Options page: sub-tabs so future categories (Graphics, …) slot
              in next to General. Card-grouped sections match the visual
              language used by the console panel and launch bar below. -->
-        <Grid x:Name="OptionsPage" IsVisible="False">
-          <TabControl x:Name="OptionsTabs">
-            <TabItem x:Name="GeneralTabItem" Header="General" FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+        <!-- Options page, console-settings style: category sidebar on the
+             left, one scrollable pane per category on the right. The d-pad
+             switches categories (left/right) and scrolls (up/down). -->
+        <Grid x:Name="OptionsPage" IsVisible="False" ColumnDefinitions="240,*">
+          <StackPanel Grid.Column="0" Spacing="4" Margin="0,4,28,0">
+            <TextBlock x:Name="OptionsTitle" Text="Options" FontSize="24" FontWeight="Bold"
+                       Margin="14,0,0,16" />
+            <Button x:Name="GeneralSectionButton" Classes="sideItem active" Content="General" />
+            <Button x:Name="EnvSectionButton" Classes="sideItem" Content="Environment" />
+          </StackPanel>
 
-                  <Border Classes="card">
+          <Panel Grid.Column="1">
+            <ScrollViewer x:Name="GeneralScroll">
+              <StackPanel Margin="0,4,0,16" Spacing="16" MaxWidth="960" HorizontalAlignment="Left">
+
+                  <Border Classes="card glass">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle" Text="EMULATION" />
 
@@ -298,7 +311,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="card">
+                  <Border Classes="card glass">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle" Text="LOGGING" />
 
@@ -342,7 +355,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="card">
+                  <Border Classes="card glass">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle" Text="LAUNCHER" />
 
@@ -372,7 +385,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
-                  <Border Classes="card">
+                  <Border Classes="card glass">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="AboutSectionTitle"
                                 Classes="sectionTitle"
@@ -474,13 +487,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
                 </StackPanel>
-              </ScrollViewer>
-            </TabItem>
-            <TabItem x:Name="EnvTabItem" Header="Environment" FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+            </ScrollViewer>
 
-                  <Border Classes="card">
+            <ScrollViewer x:Name="EnvScroll" IsVisible="False">
+              <StackPanel Margin="0,4,0,16" Spacing="16" MaxWidth="960" HorizontalAlignment="Left">
+
+                  <Border Classes="card glass">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle" Text="ENVIRONMENT VARIABLES" />
                       <TextBlock x:Name="EnvDesc"
@@ -538,9 +550,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </Border>
 
                 </StackPanel>
-              </ScrollViewer>
-            </TabItem>
-          </TabControl>
+            </ScrollViewer>
+          </Panel>
         </Grid>
       </Panel>
 

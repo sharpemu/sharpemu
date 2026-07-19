@@ -78,6 +78,7 @@ public partial class MainWindow : Window
     private bool _awaitingFirstFrame;
     private int _autoScrollTicks;
     private int _activePageIndex;
+    private int _optionsSectionIndex;
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
     private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
@@ -203,7 +204,34 @@ public partial class MainWindow : Window
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
+        GeneralSectionButton.Click += (_, _) => SetOptionsSection(0);
+        EnvSectionButton.Click += (_, _) => SetOptionsSection(1);
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+
+        // The search field lives behind the magnifier toggle; closing it
+        // also clears the filter so the library never stays silently
+        // filtered by an invisible query.
+        SearchToggle.IsCheckedChanged += (_, _) =>
+        {
+            var open = SearchToggle.IsChecked == true;
+            SearchBox.IsVisible = open;
+            if (open)
+            {
+                SearchBox.Focus();
+            }
+            else if (!string.IsNullOrEmpty(SearchBox.Text))
+            {
+                SearchBox.Text = string.Empty;
+            }
+        };
+        SearchBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape)
+            {
+                SearchToggle.IsChecked = false;
+                e.Handled = true;
+            }
+        };
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -373,6 +401,19 @@ public partial class MainWindow : Window
         OptionsPage.IsVisible = index == 1;
     }
 
+    /// <summary>
+    /// Switches the visible options category. Also reachable with the d-pad
+    /// (left/right) while the Options page is active.
+    /// </summary>
+    private void SetOptionsSection(int index)
+    {
+        _optionsSectionIndex = index;
+        SetActiveClass(GeneralSectionButton, index == 0);
+        SetActiveClass(EnvSectionButton, index == 1);
+        GeneralScroll.IsVisible = index == 0;
+        EnvScroll.IsVisible = index == 1;
+    }
+
     private static void SetActiveClass(Button button, bool active)
     {
         if (active)
@@ -517,14 +558,35 @@ public partial class MainWindow : Window
 
         if (_activePageIndex != 0)
         {
-            // The options page has no focus navigation yet, but the d-pad or
-            // left stick can at least scroll it; ~11px per 16ms tick gives a
-            // smooth continuous glide while held.
-            var scrollUp = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-            var scrollDown = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
-            if ((scrollUp || scrollDown) &&
-                (OptionsTabs.SelectedItem as TabItem)?.Content is ScrollViewer optionsScroll)
+            // Options page: d-pad left/right switches the category, and the
+            // d-pad or left stick scrolls the active pane; ~11px per 16ms
+            // tick gives a smooth continuous glide while held.
+            var sectionPressed = pad.Buttons & ~_previousPadButtons;
+            if ((sectionPressed & HostGamepadButtons.Left) != 0)
             {
+                SetOptionsSection(Math.Max(0, _optionsSectionIndex - 1));
+            }
+
+            if ((sectionPressed & HostGamepadButtons.Right) != 0)
+            {
+                SetOptionsSection(Math.Min(1, _optionsSectionIndex + 1));
+            }
+
+            var scrollUp = pad.LeftY < 64;
+            var scrollDown = pad.LeftY > 192;
+            if ((pad.Buttons & HostGamepadButtons.Up) != 0)
+            {
+                scrollUp = true;
+            }
+
+            if ((pad.Buttons & HostGamepadButtons.Down) != 0)
+            {
+                scrollDown = true;
+            }
+
+            if (scrollUp || scrollDown)
+            {
+                var optionsScroll = _optionsSectionIndex == 0 ? GeneralScroll : EnvScroll;
                 var maxOffset = Math.Max(0, optionsScroll.Extent.Height - optionsScroll.Viewport.Height);
                 optionsScroll.Offset = new Vector(
                     optionsScroll.Offset.X,
@@ -710,10 +772,14 @@ public partial class MainWindow : Window
         LibraryTabButton.Content = loc.Get("Page.Library");
         OptionsTabButton.Content = loc.Get("Page.Options");
 
+        // The toolbar buttons are round icons; the localized labels go into
+        // tooltips instead of the button faces.
         SearchBox.Watermark = loc.Get("Library.SearchWatermark");
-        AddFolderButton.Content = loc.Get("Library.AddFolder");
-        RescanButton.Content = loc.Get("Library.Rescan");
-        OpenFileButton.Content = loc.Get("Library.OpenFile");
+        ToolTip.SetTip(SearchToggle, loc.Get("Library.SearchWatermark"));
+        ToolTip.SetTip(AddFolderButton, loc.Get("Library.AddFolder"));
+        ToolTip.SetTip(RescanButton, loc.Get("Library.Rescan"));
+        ToolTip.SetTip(OpenFileButton, loc.Get("Library.OpenFile"));
+        ToolTip.SetTip(ConsoleToggle, loc.Get("Launch.Console"));
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
         CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
@@ -725,8 +791,9 @@ public partial class MainWindow : Window
         EmptyAddFolderButton.Content = loc.Get("Library.Empty.AddFolder");
         LoadingStateText.Text = loc.Get("Library.Loading");
 
-        GeneralTabItem.Header = loc.Get("Options.General");
-        EnvTabItem.Header = loc.Get("Options.Env.Tab");
+        OptionsTitle.Text = loc.Get("Page.Options");
+        GeneralSectionButton.Content = loc.Get("Options.General");
+        EnvSectionButton.Content = loc.Get("Options.Env.Tab");
         EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
         EnvDesc.Text = loc.Get("Options.Env.Desc");
         EnvBthidRow.Description = loc.Get("Options.Env.Bthid.Desc");
@@ -794,7 +861,6 @@ public partial class MainWindow : Window
         CopyLogButton.Content = loc.Get("Console.Copy");
         ClearLogButton.Content = loc.Get("Console.Clear");
 
-        ConsoleToggle.Content = loc.Get("Launch.Console");
         LaunchButton.Content = loc.Get("Launch.Launch");
         StopButton.Content = loc.Get("Launch.Stop");
 
