@@ -28,6 +28,8 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const string GcRegionRangeEnvironment = "DOTNET_GCRegionRange";
+    private const string MitigatedChildGcRegionRange = "400000000";
     private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
@@ -566,6 +568,7 @@ internal static partial class Program
         nint attributeList = 0;
         nint mitigationPolicies = 0;
         var previousChildEnvironment = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+        var previousGcRegionRange = Environment.GetEnvironmentVariable(GcRegionRangeEnvironment);
         try
         {
             nuint attributeListSize = 0;
@@ -606,6 +609,15 @@ internal static partial class Program
             var cmdLineBuilder = new StringBuilder(commandLine);
             nint jobHandle = 0;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+            if (string.IsNullOrEmpty(previousGcRegionRange))
+            {
+                // The child's GC reserves its region range before any managed
+                // code runs. Capping it at 16 GiB keeps that reservation from
+                // covering the fixed PS5 main-image base at 0x8_0000_0000 when
+                // the host places it low in the address space.
+                Environment.SetEnvironmentVariable(GcRegionRangeEnvironment, MitigatedChildGcRegionRange);
+            }
+
             var created = CreateProcessW(
                 null,
                 cmdLineBuilder,
@@ -618,6 +630,10 @@ internal static partial class Program
                 ref startupInfoEx,
                 out var processInfo);
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            if (string.IsNullOrEmpty(previousGcRegionRange))
+            {
+                Environment.SetEnvironmentVariable(GcRegionRangeEnvironment, previousGcRegionRange);
+            }
             if (!created)
             {
                 childExitCode = 5;
@@ -677,6 +693,10 @@ internal static partial class Program
         finally
         {
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            if (string.IsNullOrEmpty(previousGcRegionRange))
+            {
+                Environment.SetEnvironmentVariable(GcRegionRangeEnvironment, previousGcRegionRange);
+            }
 
             if (attributeList != 0)
             {

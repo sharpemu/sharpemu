@@ -201,7 +201,9 @@ public sealed class SelfLoader : ISelfLoader
                 {
                     var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
                     throw new InvalidOperationException(
-                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}.");
+                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}. " +
+                        "If another host allocation owns this range (commonly the .NET GC reservation), " +
+                        "relaunch with the environment variable DOTNET_GCRegionRange=400000000 set.");
                 }
 
                 imageBase = allocatedBase;
