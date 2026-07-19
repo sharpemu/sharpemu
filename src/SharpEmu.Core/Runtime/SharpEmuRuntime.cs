@@ -541,8 +541,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             if (result != OrbisGen2Result.ORBIS_GEN2_OK)
             {
                 Console.Error.WriteLine(
-                    $"[RUNTIME] Module start failed: {moduleName} -> {result}");
-                return result;
+                    $"[RUNTIME] Module start failed (continuing): {moduleName} -> {result}");
             }
         }
 
