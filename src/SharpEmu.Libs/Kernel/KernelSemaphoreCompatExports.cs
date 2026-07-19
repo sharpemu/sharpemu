@@ -429,6 +429,22 @@ public static class KernelSemaphoreCompatExports
     }
 
     [SysAbiExport(
+        Nid = "GEnUkDZoUwY",
+        ExportName = "scePthreadSemInit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemInit(CpuContext ctx)
+    {
+        // scePthreadSemInit(sem, flag, value, name) seems to only support private semaphores
+        if (ctx[CpuRegister.Rsi] != 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        return PosixSemInit(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "YCV5dGGBcCo",
         ExportName = "sem_wait",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -447,6 +463,13 @@ public static class KernelSemaphoreCompatExports
     }
 
     [SysAbiExport(
+        Nid = "C36iRE0F5sE",
+        ExportName = "scePthreadSemWait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemWait(CpuContext ctx) => PosixSemWait(ctx);
+
+    [SysAbiExport(
         Nid = "WBWzsRifCEA",
         ExportName = "sem_trywait",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -461,6 +484,19 @@ public static class KernelSemaphoreCompatExports
         ctx[CpuRegister.Rdi] = handle;
         ctx[CpuRegister.Rsi] = 1;
         return KernelPollSema(ctx, handle, 1);
+    }
+
+    [SysAbiExport(
+        Nid = "H2a+IN9TP0E",
+        ExportName = "scePthreadSemTrywait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemTryWait(CpuContext ctx)
+    {
+        var result = PosixSemTryWait(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN)
+            : result;
     }
 
     [SysAbiExport(
@@ -498,6 +534,13 @@ public static class KernelSemaphoreCompatExports
         ctx[CpuRegister.Rsi] = 1;
         return KernelSignalSema(ctx, handle, 1);
     }
+
+    [SysAbiExport(
+        Nid = "aishVAiFaYM",
+        ExportName = "scePthreadSemPost",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemPost(CpuContext ctx) => PosixSemPost(ctx);
 
     [SysAbiExport(
         Nid = "Bq+LRV-N6Hk",
@@ -548,6 +591,13 @@ public static class KernelSemaphoreCompatExports
 
         return result;
     }
+
+    [SysAbiExport(
+        Nid = "Vwc+L05e6oE",
+        ExportName = "scePthreadSemDestroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadSemDestroy(CpuContext ctx) => PosixSemDestroy(ctx);
 
     private static bool TryGetPosixSemaphoreHandle(CpuContext ctx, ulong semaphoreAddress, out uint handle)
     {
