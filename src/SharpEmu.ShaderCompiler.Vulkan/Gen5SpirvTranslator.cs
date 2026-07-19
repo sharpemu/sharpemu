@@ -325,7 +325,10 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvPixelOutput(
             uint Variable,
             uint Type,
-            Gen5PixelOutputKind Kind);
+            Gen5PixelOutputBinding Binding)
+        {
+            public Gen5PixelOutputKind Kind => Binding.Kind;
+        }
 
         public CompilationContext(
             Gen5SpirvStage stage,
@@ -1267,7 +1270,7 @@ public static partial class Gen5SpirvTranslator
                         binding.HostLocation);
                     _pixelOutputs.Add(
                         binding.GuestSlot,
-                        new SpirvPixelOutput(variable, outputType, binding.Kind));
+                        new SpirvPixelOutput(variable, outputType, binding));
                     _interfaces.Add(variable);
                 }
             }
@@ -4187,8 +4190,9 @@ public static partial class Gen5SpirvTranslator
                 var values = new uint[4];
                 for (var component = 0; component < 4; component++)
                 {
-                    var enabled = (export.EnableMask & (1u << component)) != 0;
-                    if (!enabled)
+                    var sourceComponent = output.Binding.GetSourceComponent(component);
+                    if (sourceComponent < 0 ||
+                        (export.EnableMask & (1u << sourceComponent)) == 0)
                     {
                         values[component] = _module.AddInstruction(
                             SpirvOp.CompositeExtract,
@@ -4207,7 +4211,7 @@ public static partial class Gen5SpirvTranslator
                     {
                         var value = LoadCompressedExportComponent(
                             instruction,
-                            component);
+                            sourceComponent);
                         values[component] = output.Kind switch
                         {
                             Gen5PixelOutputKind.Uint => _module.AddInstruction(
@@ -4223,7 +4227,7 @@ public static partial class Gen5SpirvTranslator
                         continue;
                     }
 
-                    var raw = LoadV(instruction.Sources[component].Value);
+                    var raw = LoadV(instruction.Sources[sourceComponent].Value);
                     values[component] = output.Kind switch
                     {
                         Gen5PixelOutputKind.Uint => raw,

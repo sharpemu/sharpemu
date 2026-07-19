@@ -206,7 +206,7 @@ public static partial class AgcExports
     // shares _submitTraceGate with tracing).
     private static readonly ConcurrentDictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
-         uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
+         ulong OutputSwizzles, uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
          ulong AliasAlignment),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
@@ -408,6 +408,7 @@ public static partial class AgcExports
         uint Height,
         uint Format,
         uint NumberType,
+        uint ComponentSwap,
         uint TileMode);
 
     private sealed record TranslatedGuestDraw(
@@ -5957,6 +5958,7 @@ public static partial class AgcExports
             depthTarget.Height,
             Format: 0,
             NumberType: 0,
+            ComponentSwap: 0,
             TileMode: 0);
         var renderState = CreateRenderState(state.CxRegisters, syntheticTarget) with
         {
@@ -6170,10 +6172,13 @@ public static partial class AgcExports
         // byte positions. Replaces a per-draw LINQ + string build that allocated on every
         // draw, cache hit or not; the target count disambiguates trailing zero bytes.
         var outputLayout = 0UL;
+        var outputSwizzles = 0UL;
         for (var index = 0; index < renderTargets.Length; index++)
         {
             outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
                 (uint)renderTargetOutputKinds[index]) << (index * 8);
+            outputSwizzles |= (ulong)((renderTargets[index].ComponentSwap & 0x3u) |
+                ((renderTargets[index].Format & 0x1Fu) << 2)) << (index * 7);
         }
 
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
@@ -6189,6 +6194,7 @@ public static partial class AgcExports
             pixelShaderAddress,
             pixelStateFingerprint,
             outputLayout,
+            outputSwizzles,
             (uint)renderTargets.Length,
             attributeCount,
             psInputEna,
@@ -6213,7 +6219,10 @@ public static partial class AgcExports
                 pixelOutputs[location] = new Gen5PixelOutputBinding(
                     renderTargets[location].Slot,
                     (uint)location,
-                    renderTargetOutputKinds[location]);
+                    renderTargetOutputKinds[location],
+                    (Gen5PixelOutputComponentSwap)renderTargets[location].ComponentSwap,
+                    GetRenderTargetComponentCount(renderTargets[location].Format),
+                    renderTargets[location].Format);
             }
 
             if (!GuestGpu.Current.TryCompilePixelShader(
@@ -6815,11 +6824,20 @@ public static partial class AgcExports
                 (attrib2 & 0x3FFFu) + 1,
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
+                (info >> 11) & 0x3u,
                 (attrib3 >> 14) & 0x1Fu));
         }
 
         return targets;
     }
+
+    private static uint GetRenderTargetComponentCount(uint format) => format switch
+    {
+        4 => 1,
+        5 or 11 => 2,
+        6 or 7 or 13 => 3,
+        _ => 4,
+    };
 
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,

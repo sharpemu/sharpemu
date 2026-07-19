@@ -49,10 +49,99 @@ public enum Gen5PixelOutputKind
     Sint,
 }
 
+/// <summary>Raw CB_COLOR_INFO.COMP_SWAP mode for a guest color target.</summary>
+public enum Gen5PixelOutputComponentSwap
+{
+    Standard,
+    Alternate,
+    StandardReverse,
+    AlternateReverse,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
-    Gen5PixelOutputKind Kind);
+    Gen5PixelOutputKind Kind,
+    Gen5PixelOutputComponentSwap ComponentSwap = Gen5PixelOutputComponentSwap.Standard,
+    uint ComponentCount = 4,
+    uint DataFormat = 10)
+{
+    /// <summary>Maps a host output lane to the guest export lane selected by
+    /// CB_COLOR_INFO.COMP_SWAP, or -1 when that lane is not present.</summary>
+    public int GetSourceComponent(int destinationComponent)
+    {
+        if ((uint)destinationComponent >= 4 || ComponentCount is < 1 or > 4)
+        {
+            return -1;
+        }
+
+        // Vulkan represents guest 11_11_10 through B10G11R11, so match the
+        // guest-to-host data-format remap before applying COMP_SWAP.
+        if (DataFormat == 7)
+        {
+            destinationComponent = destinationComponent switch
+            {
+                0 => 2,
+                2 => 0,
+                _ => destinationComponent,
+            };
+        }
+
+        var sourceComponent = ComponentSwap switch
+        {
+            Gen5PixelOutputComponentSwap.Standard =>
+                (uint)destinationComponent < ComponentCount ? destinationComponent : -1,
+            Gen5PixelOutputComponentSwap.Alternate => (ComponentCount, destinationComponent) switch
+            {
+                (1, 0) => 1,
+                (2, 0) => 0,
+                (2, 1) => 3,
+                (3, 0) => 0,
+                (3, 1) => 1,
+                (3, 2) => 3,
+                (4, 0) => 2,
+                (4, 1) => 1,
+                (4, 2) => 0,
+                (4, 3) => 3,
+                _ => -1,
+            },
+            Gen5PixelOutputComponentSwap.StandardReverse => (ComponentCount, destinationComponent) switch
+            {
+                (1, 0) => 2,
+                (2, 0) => 1,
+                (2, 1) => 0,
+                (3, 0) => 2,
+                (3, 1) => 1,
+                (3, 2) => 0,
+                (4, 0) => 3,
+                (4, 1) => 2,
+                (4, 2) => 1,
+                (4, 3) => 0,
+                _ => -1,
+            },
+            Gen5PixelOutputComponentSwap.AlternateReverse => (ComponentCount, destinationComponent) switch
+            {
+                (1, 0) => 3,
+                (2, 0) => 3,
+                (2, 1) => 0,
+                (3, 0) => 3,
+                (3, 1) => 1,
+                (3, 2) => 0,
+                (4, 0) => 3,
+                (4, 1) => 0,
+                (4, 2) => 1,
+                (4, 3) => 2,
+                _ => -1,
+            },
+            _ => -1,
+        };
+
+        // Single-channel host formats expose their stored component as R.
+        return DataFormat is 1 or 2 or 4 && sourceComponent == 3
+            ? 0
+            : sourceComponent;
+    }
+}
 
 public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,

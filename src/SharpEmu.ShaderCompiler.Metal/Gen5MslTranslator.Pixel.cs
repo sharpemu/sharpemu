@@ -705,7 +705,9 @@ public static partial class Gen5MslTranslator
             var values = new string[4];
             for (var component = 0; component < 4; component++)
             {
-                if ((export.EnableMask & (1u << component)) == 0)
+                var sourceComponent = binding.Value.GetSourceComponent(component);
+                if (sourceComponent < 0 ||
+                    (export.EnableMask & (1u << sourceComponent)) == 0)
                 {
                     values[component] = $"{field}[{component}]";
                     continue;
@@ -713,8 +715,8 @@ public static partial class Gen5MslTranslator
 
                 if (export.Compressed)
                 {
-                    var packed = $"v[{instruction.Sources[component >> 1].Value}]";
-                    var half = $"(float)as_type<half2>({packed})[{component & 1}]";
+                    var packed = $"v[{instruction.Sources[sourceComponent >> 1].Value}]";
+                    var half = $"(float)as_type<half2>({packed})[{sourceComponent & 1}]";
                     values[component] = binding.Value.Kind switch
                     {
                         Gen5PixelOutputKind.Uint => $"(uint)({half})",
@@ -724,7 +726,7 @@ public static partial class Gen5MslTranslator
                     continue;
                 }
 
-                var raw = $"v[{instruction.Sources[component].Value}]";
+                var raw = $"v[{instruction.Sources[sourceComponent].Value}]";
                 values[component] = binding.Value.Kind switch
                 {
                     Gen5PixelOutputKind.Uint => raw,

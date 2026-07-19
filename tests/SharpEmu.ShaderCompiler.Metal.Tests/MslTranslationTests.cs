@@ -101,6 +101,24 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void PixelExportAppliesColorTargetComponentSwap()
+    {
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow(
+            new Gen5PixelOutputBinding(
+                0,
+                0,
+                Gen5PixelOutputKind.Float,
+                Gen5PixelOutputComponentSwap.Alternate,
+                ComponentCount: 4));
+
+        Assert.Contains(
+            "vec<float, 4>(as_type<float>(v[2]), as_type<float>(v[1]), " +
+            "as_type<float>(v[0]), as_type<float>(v[3]))",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void VertexStageEmitsVertexInterface()
     {
         var shader = Gen5ComputeFixtures.CompileVertexOrThrow();

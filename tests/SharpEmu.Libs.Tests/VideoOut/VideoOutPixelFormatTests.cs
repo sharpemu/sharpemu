@@ -1,9 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
-using Silk.NET.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -99,35 +97,6 @@ public sealed class VideoOutPixelFormatTests
         Assert.Equal(56u, InvokeMapPixelFormat(0xDEADBEEFUL));
     }
 
-    [Fact]
-    public void MapPixelFormat_PreservesComponentOrder()
-    {
-        Assert.Equal(GuestImageComponentOrder.Bgra, InvokeMapComponentOrder(0x80000000UL));
-        Assert.Equal(GuestImageComponentOrder.Rgba, InvokeMapComponentOrder(0x80002200UL));
-        Assert.Equal(GuestImageComponentOrder.Rgba, InvokeMapComponentOrder(0x8000000022000000UL));
-        Assert.Equal(GuestImageComponentOrder.Bgra, InvokeMapComponentOrder(0x8000000000000000UL));
-    }
-
-    [Fact]
-    public void DisplayBufferComponentOrder_SelectsVulkanBgraViewFormat()
-    {
-        Assert.Equal(
-            Format.B8G8R8A8Unorm,
-            VulkanVideoPresenter.GetDisplayBufferViewFormat(
-                Format.R8G8B8A8Unorm,
-                GuestImageComponentOrder.Bgra));
-        Assert.Equal(
-            Format.B8G8R8A8Srgb,
-            VulkanVideoPresenter.GetDisplayBufferViewFormat(
-                Format.R8G8B8A8Srgb,
-                GuestImageComponentOrder.Bgra));
-        Assert.Equal(
-            Format.R8G8B8A8Unorm,
-            VulkanVideoPresenter.GetDisplayBufferViewFormat(
-                Format.R8G8B8A8Unorm,
-                GuestImageComponentOrder.Rgba));
-    }
-
     // ---- Self-check activation ----
 
     [Fact]
@@ -160,12 +129,5 @@ public sealed class VideoOutPixelFormatTests
         var method = typeof(VideoOutExports)
             .GetMethod("MapPixelFormatToGuestTextureFormat", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         return (uint)method!.Invoke(null, [pixelFormat])!;
-    }
-
-    private static GuestImageComponentOrder InvokeMapComponentOrder(ulong pixelFormat)
-    {
-        var method = typeof(VideoOutExports)
-            .GetMethod("MapPixelFormatToComponentOrder", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        return (GuestImageComponentOrder)method!.Invoke(null, [pixelFormat])!;
     }
 }

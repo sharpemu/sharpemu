@@ -116,6 +116,14 @@ const ulong ProgramAddress = 0x100000;
         0xF800080C, 0x07060504, // exp mrt0 off, off, v6, v7 done
         0xBF810000,             // s_endpgm
     ]),
+    ("mrt-swap", true, [
+        0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
+        0x7E0202FF, 0x3F000000, // v_mov_b32 v1, 0.5f
+        0x7E0402FF, 0x3E800000, // v_mov_b32 v2, 0.25f
+        0x7E0602FF, 0x3F800000, // v_mov_b32 v3, 1.0f
+        0xF800080F, 0x03020100, // exp mrt0 v0, v1, v2, v3 done
+        0xBF810000,             // s_endpgm
+    ]),
     ("sopp-hints", true, [
         0xBFA10001,             // s_clause 0x1
         0xBFA30000,             // s_waitcnt_depctr 0x0
@@ -287,6 +295,15 @@ foreach (var (name, expectTranslate, words) in testPrograms)
                 new Gen5PixelOutputBinding(5, 5, Gen5PixelOutputKind.Float),
                 new Gen5PixelOutputBinding(6, 6, Gen5PixelOutputKind.Float),
                 new Gen5PixelOutputBinding(7, 7, Gen5PixelOutputKind.Float),
+            ],
+            "mrt-swap" =>
+            [
+                new Gen5PixelOutputBinding(
+                    0,
+                    0,
+                    Gen5PixelOutputKind.Float,
+                    Gen5PixelOutputComponentSwap.Alternate,
+                    ComponentCount: 4),
             ],
             _ => [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
         };
