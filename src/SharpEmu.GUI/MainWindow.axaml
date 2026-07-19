@@ -22,9 +22,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto">
 
-    <!-- Selected-game backdrop: key art behind the main content, dimmed by
-         a scrim so tiles and text stay readable. Fades on selection. -->
-    <Panel Grid.Row="1" ClipToBounds="True">
+    <!-- Selected-game backdrop: full-bleed key art behind everything (PS5
+         home-screen style), dimmed by a scrim so text stays readable.
+         Fades on selection. -->
+    <Panel Grid.Row="0" Grid.RowSpan="3" ClipToBounds="True">
       <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
              HorizontalAlignment="Center" VerticalAlignment="Center">
         <Image.Transitions>
@@ -36,17 +37,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border>
         <Border.Background>
           <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-            <GradientStop Offset="0" Color="#730D1017" />
-            <GradientStop Offset="0.55" Color="#BF0D1017" />
-            <GradientStop Offset="1" Color="#EB0D1017" />
+            <GradientStop Offset="0" Color="#590D1017" />
+            <GradientStop Offset="0.55" Color="#A60D1017" />
+            <GradientStop Offset="1" Color="#E60D1017" />
           </LinearGradientBrush>
         </Border.Background>
       </Border>
     </Panel>
 
     <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
-         the game gets the whole screen. -->
-    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="{StaticResource ChromeBrush}">
+         the game gets the whole screen. Transparent so the key art bleeds
+         through behind it. -->
+    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="Transparent">
       <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
@@ -58,11 +60,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto">
 
       <!-- The game owns the full client area while running. Session controls
            use a native popup so they can stay above this native child surface. -->
-      <Border x:Name="GameView" Grid.Row="0" Grid.RowSpan="4" IsVisible="False" Background="#000000" ClipToBounds="True">
+      <Border x:Name="GameView" Grid.Row="0" Grid.RowSpan="3" IsVisible="False" Background="#000000" ClipToBounds="True">
         <Grid x:Name="GameSurfaceContainer" />
       </Border>
 
@@ -88,17 +90,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
           <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
+          <ToggleButton x:Name="ConsoleToggle" Classes="ghost" Content="≡ Console" VerticalAlignment="Center" />
         </StackPanel>
       </Grid>
 
       <Panel Grid.Row="1" x:Name="PagesHost">
 
-        <!-- Library page. The tile row gets extra top margin so it sits
-             closer to eye level (PS5 home-screen style) instead of hugging
-             the Library/Options switcher above it. -->
-        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
-          <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                   SelectionMode="Single" Padding="0">
+        <!-- Library page, PS5 home-screen style: a horizontal cover strip at
+             the top, the selected game's key art filling the window behind
+             everything, and a hero block (big title + Play pill) at the
+             bottom left. -->
+        <Grid x:Name="LibraryPage" RowDefinitions="Auto,*,Auto" Margin="0,4,0,0">
+          <ListBox x:Name="GameList" Grid.Row="0" Classes="tileStrip" Background="Transparent"
+                   SelectionMode="Single" Padding="0" Height="156"
+                   ScrollViewer.HorizontalScrollBarVisibility="Hidden"
+                   ScrollViewer.VerticalScrollBarVisibility="Disabled">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
@@ -144,34 +150,82 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <WrapPanel />
+                <StackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
             <ListBox.ItemTemplate>
               <DataTemplate>
-                <StackPanel Width="128" Height="172" Spacing="7">
-                  <Border Classes="coverShadow" Width="128" Height="128">
-                    <Border Classes="coverClip">
-                      <Panel>
-                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                          <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
-                                     Foreground="#E8ECF4" Opacity="0.85"
-                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
-                      </Panel>
+                <Border Classes="coverClip" Width="104" Height="104" CornerRadius="16"
+                        ToolTip.Tip="{Binding Name}">
+                  <Panel>
+                    <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                      <TextBlock Text="{Binding Initials}" FontSize="30" FontWeight="Bold"
+                                 Foreground="#E8ECF4" Opacity="0.85"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                  </Border>
-                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
-                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
-                             TextAlignment="Center" HorizontalAlignment="Center" />
-                </StackPanel>
+                    <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
+                  </Panel>
+                </Border>
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
 
+          <!-- "PS5 | <name>" caption below the strip, console style. -->
+          <StackPanel Grid.Row="1" x:Name="StripCaptionRow" Orientation="Horizontal" Spacing="9"
+                      Margin="12,10,0,0" VerticalAlignment="Top" IsVisible="False">
+            <Border Background="#E8ECF4" CornerRadius="4" Padding="8,2" VerticalAlignment="Center">
+              <TextBlock Text="PS5" FontSize="11" FontWeight="Bold" Foreground="#11141B" />
+            </Border>
+            <TextBlock x:Name="StripCaptionText" FontSize="16" FontWeight="SemiBold"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="480" />
+          </StackPanel>
+
+          <!-- Hero: big title, path, Play pill, status; badges bottom right. -->
+          <Grid Grid.Row="2" x:Name="LaunchBar" ColumnDefinitions="*,Auto" Margin="12,0,12,30">
+            <StackPanel Grid.Column="0" Spacing="10" VerticalAlignment="Bottom" MaxWidth="760"
+                        HorizontalAlignment="Left">
+              <TextBlock x:Name="SelectedGameTitle" Text="No game selected" FontSize="44"
+                         FontWeight="Light" TextTrimming="CharacterEllipsis" MaxLines="2"
+                         TextWrapping="Wrap" LineHeight="50" />
+              <TextBlock x:Name="SelectedGamePath"
+                         Text="Pick a game from the library, or open an eboot.bin directly."
+                         FontSize="11" Foreground="{StaticResource MutedBrush}"
+                         TextTrimming="CharacterEllipsis" />
+              <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,8,0,0">
+                <Button x:Name="LaunchButton" Classes="play" Content="Play Game" IsEnabled="False" />
+                <Button x:Name="MoreButton" Classes="round" Content="•••" FontSize="14"
+                        IsEnabled="False" />
+                <Button x:Name="StopButton" Classes="danger" Content="■  Stop" CornerRadius="999"
+                        IsEnabled="False" IsVisible="False" />
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="7">
+                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
+                         VerticalAlignment="Center" />
+                <TextBlock x:Name="StatusText" Text="Idle" FontSize="11"
+                           Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+              </StackPanel>
+            </StackPanel>
+
+            <!-- Title id / version / size pills, playtime-pill style. -->
+            <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="6"
+                        IsVisible="False" VerticalAlignment="Bottom">
+              <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
+                <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
+                <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill">
+                <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+            </StackPanel>
+          </Grid>
+
           <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel Grid.Row="1" x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
             <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
@@ -185,13 +239,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <!-- Loading state: covers the grid while a scan (initial load,
                rescan, or a just-added folder) is in flight, so the screen
                never looks blank mid-scan. -->
-          <StackPanel x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel Grid.Row="1" x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
             <TextBlock x:Name="LoadingStateText" Text="Loading library…" FontSize="13"
                        Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
           </StackPanel>
-        </Panel>
+        </Grid>
 
         <!-- Options page: sub-tabs so future categories (Graphics, …) slot
              in next to General. Card-grouped sections match the visual
@@ -496,70 +550,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
       </Border>
 
-      <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
-      <Border Grid.Row="3" x:Name="LaunchBar" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
-        <StackPanel Spacing="14">
-          <Grid ColumnDefinitions="Auto,*,Auto">
-
-            <!-- Selected game cover thumbnail -->
-            <Border Grid.Column="0" Classes="coverClip" Width="56" Height="56" CornerRadius="8"
-                    VerticalAlignment="Center">
-              <Panel x:Name="SelectedCoverPanel">
-                <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}"
-                        IsVisible="{Binding !HasCover, FallbackValue=False}">
-                  <TextBlock Text="{Binding Initials}" FontSize="20" FontWeight="Bold"
-                             Foreground="#E8ECF4" Opacity="0.85"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </Border>
-                <Image Source="{Binding Cover}" Stretch="UniformToFill"
-                       IsVisible="{Binding HasCover, FallbackValue=False}" />
-              </Panel>
-            </Border>
-
-            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="14,0,14,0">
-              <Grid ColumnDefinitions="Auto,Auto,*">
-                <TextBlock Grid.Column="0" x:Name="SelectedGameTitle" Text="No game selected" FontSize="16"
-                           FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                           MaxWidth="340" Margin="0,0,10,0" />
-
-                <!-- Title id / version / size badges, right next to the
-                     title. The title's own MaxWidth (not a "*" column) is
-                     what keeps them from drifting to the far right. -->
-                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="6"
-                            IsVisible="False" VerticalAlignment="Center">
-                  <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
-                    <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
-                    <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill">
-                    <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                </StackPanel>
-              </Grid>
-
-              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
-                         FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-              <StackPanel Orientation="Horizontal" Spacing="7">
-                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
-                         VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusText" Text="Idle" FontSize="11" Foreground="{StaticResource MutedBrush}"
-                           VerticalAlignment="Center" />
-              </StackPanel>
-            </StackPanel>
-
-            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-              <ToggleButton x:Name="ConsoleToggle" Classes="ghost" Content="≡ Console" />
-              <Button x:Name="LaunchButton" Classes="accent" Content="▶  Launch" IsEnabled="False" />
-              <Button x:Name="StopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
-            </StackPanel>
-          </Grid>
-        </StackPanel>
-      </Border>
     </Grid>
 
     <!-- Avalonia's regular overlay layer cannot appear over a native child
@@ -626,7 +616,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </primitives:Popup>
 
     <!-- Status bar -->
-    <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"
+    <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="#B3090C12"
           ColumnDefinitions="*,Auto">
       <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="11"
                  Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0"

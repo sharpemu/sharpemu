@@ -223,34 +223,79 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="MinHeight" Value="0" />
     </Style>
 
-    <!-- Cover-art library grid -->
-    <Style Selector="ListBox.tileGrid ListBoxItem">
-      <Setter Property="Padding" Value="10" />
-      <Setter Property="Margin" Value="5" />
-      <Setter Property="CornerRadius" Value="14" />
+    <!-- PS5-style horizontal cover strip. The selected tile scales up and
+         gains a white frame; the Margin change (animated by the
+         ThicknessTransition) pushes its neighbours aside so the scaled tile
+         never overlaps them. -->
+    <Style Selector="ListBox.tileStrip ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="7,0" />
       <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
       <Setter Property="Transitions">
         <Transitions>
-          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.15" Easing="CubicEaseOut" />
+          <ThicknessTransition Property="Margin" Duration="0:0:0.15" Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover">
-      <Setter Property="RenderTransform" Value="translateY(-3px)" />
+    <Style Selector="ListBox.tileStrip ListBoxItem /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="3" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="20" />
+      <Setter Property="Padding" Value="4" />
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    <Style Selector="ListBox.tileStrip ListBoxItem:pointerover">
+      <Setter Property="RenderTransform" Value="scale(1.06)" />
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+    <Style Selector="ListBox.tileStrip ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#66FFFFFF" />
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+    <Style Selector="ListBox.tileStrip ListBoxItem:selected">
+      <Setter Property="RenderTransform" Value="scale(1.24)" />
+      <Setter Property="Margin" Value="22,0" />
+      <Setter Property="ZIndex" Value="1" />
+    </Style>
+    <Style Selector="ListBox.tileStrip ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#F2FFFFFF" />
+    </Style>
+    <Style Selector="ListBox.tileStrip ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#FFFFFFFF" />
+    </Style>
+
+    <!-- PS5-style hero "Play Game" pill: light fill, dark text. -->
+    <Style Selector="Button.play">
+      <Setter Property="Background" Value="#E8ECF4" />
+      <Setter Property="Foreground" Value="#11141B" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="Padding" Value="40,12" />
+      <Setter Property="CornerRadius" Value="999" />
+    </Style>
+    <Style Selector="Button.play:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#FFFFFF" />
+      <Setter Property="Foreground" Value="#11141B" />
+    </Style>
+
+    <!-- Small round "•••" companion button next to Play. -->
+    <Style Selector="Button.round">
+      <Setter Property="Background" Value="#2EFFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Width" Value="46" />
+      <Setter Property="Height" Value="46" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.round:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#47FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     </Style>
 
     <Style Selector="Border.coverShadow">

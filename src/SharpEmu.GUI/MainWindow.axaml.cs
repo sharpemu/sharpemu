@@ -102,8 +102,6 @@ public partial class MainWindow : Window
     private HostGamepadButtons _previousPadButtons;
     private long _navLeftNextAt;
     private long _navRightNextAt;
-    private long _navUpNextAt;
-    private long _navDownNextAt;
 
     //Github http client for latest commit
     private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
@@ -239,6 +237,37 @@ public partial class MainWindow : Window
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
 
+        // The hero "•••" button opens the same context menu the tiles use.
+        // The menu must be attached to the button as well: ContextMenu.Open
+        // throws for a control the menu is not attached to.
+        MoreButton.ContextMenu = GameContextMenu;
+        MoreButton.Click += (_, _) =>
+        {
+            if (GameList.SelectedItem is not GameEntry game || GameContextMenu.IsOpen)
+            {
+                return;
+            }
+
+            PrepareGameContextMenu(game);
+            GameContextMenu.Placement = PlacementMode.Bottom;
+            GameContextMenu.Open(MoreButton);
+        };
+
+        // Right-clicking the button opens the attached menu automatically;
+        // prep the item states (and placement) before that happens.
+        MoreButton.AddHandler(ContextRequestedEvent, (_, e) =>
+        {
+            if (GameList.SelectedItem is GameEntry game)
+            {
+                PrepareGameContextMenu(game);
+                GameContextMenu.Placement = PlacementMode.Bottom;
+            }
+            else
+            {
+                e.Handled = true;
+            }
+        }, RoutingStrategies.Tunnel);
+
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
 
@@ -246,7 +275,8 @@ public partial class MainWindow : Window
         WindowsXInputReader.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(50),
+            // ~60Hz so stick/d-pad presses register with no perceptible lag.
+            Interval = TimeSpan.FromMilliseconds(16),
         };
         _gamepadTimer.Tick += (_, _) => PollGamepad();
         _gamepadTimer.Start();
@@ -455,11 +485,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        // The library is a single horizontal strip, so navigation is purely
+        // left/right (d-pad or left stick).
         var now = Environment.TickCount64;
         var left = (pad.Buttons & HostGamepadButtons.Left) != 0 || pad.LeftX < 64;
         var right = (pad.Buttons & HostGamepadButtons.Right) != 0 || pad.LeftX > 192;
-        var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-        var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
@@ -469,16 +499,6 @@ public partial class MainWindow : Window
         if (ShouldNavigate(right, ref _navRightNextAt, now))
         {
             MoveSelection(1);
-        }
-
-        if (ShouldNavigate(up, ref _navUpNextAt, now))
-        {
-            MoveSelection(-TilesPerRow());
-        }
-
-        if (ShouldNavigate(down, ref _navDownNextAt, now))
-        {
-            MoveSelection(TilesPerRow());
         }
 
         var pressed = pad.Buttons & ~_previousPadButtons;
@@ -492,7 +512,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Edge-triggered with hold-to-repeat: fires on press, then repeats
-    /// after 400ms at 130ms intervals while held.
+    /// after 350ms at 120ms intervals while held.
     /// </summary>
     private static bool ShouldNavigate(bool held, ref long nextAt, long now)
     {
@@ -504,13 +524,13 @@ public partial class MainWindow : Window
 
         if (nextAt == 0)
         {
-            nextAt = now + 400;
+            nextAt = now + 350;
             return true;
         }
 
         if (now >= nextAt)
         {
-            nextAt = now + 130;
+            nextAt = now + 120;
             return true;
         }
 
@@ -529,14 +549,6 @@ public partial class MainWindow : Window
             : Math.Clamp(GameList.SelectedIndex + delta, 0, _visibleGames.Count - 1);
         GameList.SelectedIndex = index;
         GameList.ScrollIntoView(index);
-    }
-
-    private int TilesPerRow()
-    {
-        // Tile footprint: 128 content + 20 item padding + 10 item margin.
-        const double TileOuterWidth = 158;
-        var width = GameList.Bounds.Width;
-        return width > TileOuterWidth ? (int)(width / TileOuterWidth) : 1;
     }
 
     private async Task OnOpenedAsync()
@@ -566,6 +578,10 @@ public partial class MainWindow : Window
             _ = CheckForUpdatesAsync();
         }
         await RescanLibraryAsync();
+
+        // Keyboard arrows should page through the strip immediately, without
+        // requiring a click first.
+        GameList.Focus();
     }
 
     private void PopulateLanguageBox()
@@ -1420,6 +1436,17 @@ public partial class MainWindow : Window
         }
 
         GameList.SelectedItem = game;
+        PrepareGameContextMenu(game);
+        // The hero "•••" button may have left the menu anchored to itself.
+        GameContextMenu.Placement = PlacementMode.Pointer;
+    }
+
+    /// <summary>
+    /// Syncs the shared game context menu's item states to the given game.
+    /// Used by both the tile right-click path and the hero "•••" button.
+    /// </summary>
+    private void PrepareGameContextMenu(GameEntry game)
+    {
         CtxLaunch.IsEnabled = !_isRunning;
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
@@ -1532,6 +1559,14 @@ public partial class MainWindow : Window
             GameList.SelectedItem = reselected;
         }
 
+        // Console home screens always have a focused tile; keeping a live
+        // selection also means the controller always has somewhere to move
+        // from and Cross always has something to launch.
+        if (GameList.SelectedItem is null && _visibleGames.Count > 0)
+        {
+            GameList.SelectedIndex = 0;
+        }
+
         EmptyState.IsVisible = _visibleGames.Count == 0;
         UpdateEmptyStateTexts();
 
@@ -1565,7 +1600,6 @@ public partial class MainWindow : Window
         if (GameList.SelectedItem is GameEntry game)
         {
             UpdateSelectedGameTexts();
-            SelectedCoverPanel.DataContext = game;
             SelectedBadgesRow.DataContext = game;
             SelectedBadgesRow.IsVisible = true;
             _ = UpdateBackdropAsync(game);
@@ -1574,7 +1608,6 @@ public partial class MainWindow : Window
         else
         {
             UpdateSelectedGameTexts();
-            SelectedCoverPanel.DataContext = null;
             SelectedBadgesRow.DataContext = null;
             SelectedBadgesRow.IsVisible = false;
             _ = UpdateBackdropAsync(null);
@@ -1595,11 +1628,14 @@ public partial class MainWindow : Window
         {
             SelectedGameTitle.Text = game.Name;
             SelectedGamePath.Text = game.Path;
+            StripCaptionText.Text = game.Name;
+            StripCaptionRow.IsVisible = true;
         }
         else
         {
             SelectedGameTitle.Text = Localization.Instance.Get("Launch.NoGameSelected");
             SelectedGamePath.Text = Localization.Instance.Get("Launch.NoGameHint");
+            StripCaptionRow.IsVisible = false;
         }
     }
 
@@ -2318,7 +2354,9 @@ public partial class MainWindow : Window
     private void UpdateRunButtons()
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
+        MoreButton.IsEnabled = GameList.SelectedItem is GameEntry;
         StopButton.IsEnabled = _isRunning && !_isStopping;
+        StopButton.IsVisible = _isRunning;
         SessionStopButton.IsEnabled = _isRunning && !_isStopping;
         OpenFileButton.IsEnabled = !_isRunning;
     }

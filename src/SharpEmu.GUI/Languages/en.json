@@ -102,7 +102,7 @@
   "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
   "Launch.Idle": "Idle",
   "Launch.Console": "≡ Console",
-  "Launch.Launch": "▶  Launch",
+  "Launch.Launch": "Play Game",
   "Launch.Stop": "■  Stop",
   "Launch.Running": "Running — {0}",
   "Launch.Stopping": "Stopping…",
