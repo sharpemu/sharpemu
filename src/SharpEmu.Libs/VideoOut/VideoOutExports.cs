@@ -197,6 +197,7 @@ public static class VideoOutExports
         public int FlipRate { get; set; }
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
+        public long LastFlipArg { get; set; }
         public int CurrentBuffer { get; set; } = -1;
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
@@ -709,18 +710,30 @@ public static class VideoOutExports
         }
 
         ulong count;
+        long flipArg;
         uint currentBuffer;
         lock (_stateGate)
         {
             count = port.FlipCount;
+            flipArg = port.LastFlipArg;
             currentBuffer = unchecked((uint)port.CurrentBuffer);
         }
 
+        // SceVideoOutFlipStatus: count(0x00) processTime(0x08) tsc(0x10) flipArg(0x18)
+        // submitTsc(0x20) reserved(0x28) gcQueueNum(0x30,u32) flipPendingNum(0x34,u32)
+        // currentBuffer(0x38,u32) reserved(0x3C,u32).
+        var tsc = unchecked((ulong)Stopwatch.GetTimestamp());
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, tsc);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, unchecked((ulong)flipArg));
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, tsc);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
+        // No flips are ever left outstanding: SubmitFlip completes synchronously.
+        KernelMemoryCompatExports.TryWriteUInt32Compat(ctx, statusAddress + 0x30, 0);
+        KernelMemoryCompatExports.TryWriteUInt32Compat(ctx, statusAddress + 0x34, 0);
+        KernelMemoryCompatExports.TryWriteUInt32Compat(ctx, statusAddress + 0x38, currentBuffer);
+        KernelMemoryCompatExports.TryWriteUInt32Compat(ctx, statusAddress + 0x3C, 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1159,6 +1172,7 @@ public static class VideoOutExports
 
             port.CurrentBuffer = bufferIndex;
             port.FlipCount++;
+            port.LastFlipArg = flipArg;
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;

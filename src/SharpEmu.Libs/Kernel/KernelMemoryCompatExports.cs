@@ -5408,7 +5408,7 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    private static bool TryWriteUInt32Compat(CpuContext ctx, ulong address, uint value)
+    internal static bool TryWriteUInt32Compat(CpuContext ctx, ulong address, uint value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
