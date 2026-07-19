@@ -80,6 +80,25 @@ public static class NpTrophy2Exports
         LibraryName = "libSceNpTrophy2")]
     public static int NpTrophy2ShowTrophyList(CpuContext ctx) => ReturnOk(ctx);
 
+    /// <summary>
+    /// Gen5 ABI: context, handle, trophy id, then SceNpTrophy2Details and
+    /// SceNpTrophy2Data output pointers.
+    /// </summary>
+    /// <remarks>
+    /// Reports "no such trophy" rather than succeeding. Succeeding would require
+    /// filling both output structures, and their exact layouts are not confirmed
+    /// here — a title that trusted zeroed details would read an empty name and a
+    /// grade of zero as real data. NOT_FOUND is a documented outcome that callers
+    /// must already handle, so it degrades along a path the game tests.
+    /// </remarks>
+    [SysAbiExport(
+        Nid = "EwNylPdWUTM",
+        ExportName = "sceNpTrophy2GetTrophyInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpTrophy2")]
+    public static int NpTrophy2GetTrophyInfo(CpuContext ctx) =>
+        SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+
     private static int WriteIdAndReturn(CpuContext ctx, ulong outAddress, ref int nextId)
     {
         if (outAddress == 0)
