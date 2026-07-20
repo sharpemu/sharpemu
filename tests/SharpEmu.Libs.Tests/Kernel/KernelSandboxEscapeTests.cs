@@ -116,4 +116,51 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
         Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
     }
+
+    // Finding #3: lexical containment does not follow symlinks/junctions. A dump
+    // that plants a reparse point inside app0 pointing outside it must not let a
+    // guest path through it escape onto the host filesystem. Creating a symlink
+    // can require privilege (Windows without Developer Mode); skip if it fails.
+    [Fact]
+    public void ResolveGuestPath_ReparsePointInsideMountIsDenied()
+    {
+        var outsideDir = Path.Combine(_tempRoot, "outside");
+        Directory.CreateDirectory(outsideDir);
+        File.WriteAllBytes(Path.Combine(outsideDir, "secret.bin"), [1, 2, 3]);
+
+        var linkPath = Path.Combine(_app0Root, "link");
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, outsideDir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Unprivileged host cannot create the link; nothing to assert.
+            return;
+        }
+
+        // Sanity: the link genuinely redirects outside the mount, so a resolver
+        // that followed it would reach the planted secret.
+        Assert.True(File.Exists(Path.Combine(linkPath, "secret.bin")));
+
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath("/app0/link/secret.bin");
+
+        Assert.Equal(string.Empty, resolved);
+    }
+
+    // The reparse defense must not break a legitimate real (non-link) file that
+    // happens to sit deep under the mount root.
+    [Fact]
+    public void ResolveGuestPath_RealNestedFileUnderMountResolves()
+    {
+        var nested = Path.Combine(_app0Root, "a", "b");
+        Directory.CreateDirectory(nested);
+        File.WriteAllBytes(Path.Combine(nested, "c.bin"), [9]);
+
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath("/app0/a/b/c.bin");
+
+        Assert.False(string.IsNullOrEmpty(resolved));
+        var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
+        Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
+    }
 }

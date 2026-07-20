@@ -4947,6 +4947,14 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
+        // Textual containment does not follow symlinks/junctions; refuse a
+        // reparse point planted inside the mount that would redirect onto the
+        // host filesystem. See EscapesMountViaReparsePoint.
+        if (EscapesMountViaReparsePoint(Path.GetFullPath(matchedHostRoot), candidate))
+        {
+            return false;
+        }
+
         hostPath = candidate;
         return true;
     }
@@ -5026,7 +5034,66 @@ public static partial class KernelMemoryCompatExports
             return string.Empty;
         }
 
+        if (EscapesMountViaReparsePoint(Path.GetFullPath(mountRoot), candidate))
+        {
+            return string.Empty;
+        }
+
         return candidate;
+    }
+
+    // Lexical containment (Path.GetFullPath + StartsWith) proves the TEXTUAL
+    // path stays under the mount root, but it does not follow symlinks or
+    // Windows junctions. A malicious game dump can plant a reparse point inside
+    // an otherwise-contained mount (e.g. "/app0/link" -> "/") so that
+    // "/app0/link/etc/passwd" passes the textual check yet resolves onto the
+    // host filesystem. Walk each already-existing component from the mount root
+    // down to the candidate and refuse if any is a reparse point. Components
+    // that do not yet exist (e.g. an O_CREAT target and its parents) carry no
+    // link to follow and are simply skipped. Mirrors the reparse rejection in
+    // AvPlayerExports.TryResolveSandboxedFile.
+    private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
+    {
+        var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
+        if (string.Equals(candidate, rootTrimmed, HostFsPathComparison))
+        {
+            return false;
+        }
+
+        var relative = Path.GetRelativePath(rootTrimmed, candidate);
+        if (relative == "." || Path.IsPathRooted(relative) ||
+            relative.StartsWith("..", StringComparison.Ordinal))
+        {
+            // Not actually under the root (should have been caught lexically);
+            // treat as an escape rather than walk outside it.
+            return true;
+        }
+
+        var current = rootTrimmed;
+        foreach (var segment in relative.Split(
+                     Path.DirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                // Component does not exist yet (create path); nothing to follow.
+                break;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                break;
+            }
+        }
+
+        return false;
     }
 
     private static string ResolveDevlogAppRoot()
