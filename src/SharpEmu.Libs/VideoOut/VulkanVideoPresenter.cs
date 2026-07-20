@@ -3088,6 +3088,9 @@ internal static unsafe class VulkanVideoPresenter
             public ulong WriteAddress;
             public uint Width;
             public uint Height;
+            // Unscaled guest-requested size; Width/Height are the physical (scaled) backing size.
+            public uint LogicalWidth;
+            public uint LogicalHeight;
             public uint GuestFormat;
             public uint SwizzleMode;
             public Image Image;
@@ -3117,6 +3120,9 @@ internal static unsafe class VulkanVideoPresenter
             public long FlipVersion;
             public uint Width;
             public uint Height;
+            // Unscaled guest-requested size; Width/Height are the physical (scaled) backing size.
+            public uint LogicalWidth;
+            public uint LogicalHeight;
             public uint MipLevels;
             public uint GuestFormat;
             public Format Format;
@@ -7116,8 +7122,8 @@ internal static unsafe class VulkanVideoPresenter
                 // but it must not make a differently sized alias outrank the image
                 // that the texture descriptor actually names.
                 var score = 0;
-                if (candidate.Width == texture.Width &&
-                    candidate.Height == texture.Height)
+                if (candidate.LogicalWidth == texture.Width &&
+                    candidate.LogicalHeight == texture.Height)
                 {
                     score += 32;
                 }
@@ -7202,7 +7208,7 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                if (texture.Width > depth.Width || texture.Height > depth.Height)
+                if (texture.Width > depth.LogicalWidth || texture.Height > depth.LogicalHeight)
                 {
                     continue;
                 }
@@ -7412,8 +7418,8 @@ internal static unsafe class VulkanVideoPresenter
             GuestDrawTexture texture,
             GuestImageResource guestImage)
         {
-            if (guestImage.Width == texture.Width &&
-                guestImage.Height == texture.Height)
+            if (guestImage.LogicalWidth == texture.Width &&
+                guestImage.LogicalHeight == texture.Height)
             {
                 return true;
             }
@@ -7425,8 +7431,8 @@ internal static unsafe class VulkanVideoPresenter
                 return false;
             }
 
-            return texture.Width <= guestImage.Width &&
-                texture.Height <= guestImage.Height;
+            return texture.Width <= guestImage.LogicalWidth &&
+                texture.Height <= guestImage.LogicalHeight;
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -9161,10 +9167,18 @@ internal static unsafe class VulkanVideoPresenter
 
         private static GuestRect ClampScissor(GuestRect? scissor, Extent2D extent)
         {
-            if (scissor is not { } rect)
+            if (scissor is not { } guestRect)
             {
                 return new GuestRect(0, 0, extent.Width, extent.Height);
             }
+
+            var rect = _renderResolutionScale == 1.0
+                ? guestRect
+                : new GuestRect(
+                    (int)Math.Round(guestRect.X * _renderResolutionScale),
+                    (int)Math.Round(guestRect.Y * _renderResolutionScale),
+                    Math.Max(1u, (uint)Math.Round(guestRect.Width * _renderResolutionScale)),
+                    Math.Max(1u, (uint)Math.Round(guestRect.Height * _renderResolutionScale)));
 
             var left = Math.Clamp(rect.X, 0, checked((int)extent.Width));
             var top = Math.Clamp(rect.Y, 0, checked((int)extent.Height));
@@ -9193,10 +9207,21 @@ internal static unsafe class VulkanVideoPresenter
 
         private static Viewport ClampViewport(GuestViewport? viewport, Extent2D extent)
         {
-            if (viewport is not { } rect)
+            if (viewport is not { } guestRect)
             {
                 return new Viewport(0, 0, extent.Width, extent.Height, 0, 1);
             }
+
+            var scale = (float)_renderResolutionScale;
+            var rect = scale == 1f
+                ? guestRect
+                : guestRect with
+                {
+                    X = guestRect.X * scale,
+                    Y = guestRect.Y * scale,
+                    Width = guestRect.Width * scale,
+                    Height = guestRect.Height * scale,
+                };
 
             // Do NOT trim the rectangle to the render target: Vulkan allows
             // viewports that extend beyond the framebuffer (rendering is
@@ -10513,10 +10538,11 @@ internal static unsafe class VulkanVideoPresenter
                         draw.RenderState.Depth) &&
                     work.DepthTarget is { } depthTarget)
                 {
+                    // Logical dims: GetOrCreateGuestDepth below scales itself.
                     var resolution = GuestDepthExtentResolver.Resolve(
                         depthTarget,
-                        firstTarget.Width,
-                        firstTarget.Height,
+                        firstTarget.LogicalWidth,
+                        firstTarget.LogicalHeight,
                         draw.Textures);
                     var effectiveDepthTarget = resolution.IsUsable &&
                         (resolution.Width != depthTarget.Width ||
@@ -11216,7 +11242,14 @@ internal static unsafe class VulkanVideoPresenter
                     $"address 0x{target.Address:X16}.");
             }
 
-            var mipLevels = ClampMipLevels(target.Width, target.Height, target.MipLevels);
+            // Storage/UAV images keep native guest dimensions (compute shaders index them directly).
+            var physicalWidth = requiresStorage
+                ? target.Width
+                : ScaleGuestDimension(target.Width);
+            var physicalHeight = requiresStorage
+                ? target.Height
+                : ScaleGuestDimension(target.Height);
+            var mipLevels = ClampMipLevels(physicalWidth, physicalHeight, target.MipLevels);
             var guestFormat = GetGuestTextureFormat(target.Format, target.NumberType);
             var requestedKey = new GuestImageVariantKey(
                 target.Address,
@@ -11227,8 +11260,8 @@ internal static unsafe class VulkanVideoPresenter
                 format);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
-                if (existing.Width == target.Width &&
-                    existing.Height == target.Height &&
+                if (existing.LogicalWidth == target.Width &&
+                    existing.LogicalHeight == target.Height &&
                     existing.MipLevels == mipLevels &&
                     existing.GuestFormat == guestFormat &&
                     existing.Format == format)
@@ -11278,8 +11311,8 @@ internal static unsafe class VulkanVideoPresenter
                 _guestImageVariants.Add(
                     new GuestImageVariantKey(
                         existing.Address,
-                        existing.Width,
-                        existing.Height,
+                        existing.LogicalWidth,
+                        existing.LogicalHeight,
                         existing.MipLevels,
                     existing.GuestFormat,
                     existing.Format),
@@ -11348,7 +11381,7 @@ internal static unsafe class VulkanVideoPresenter
                     ImageCreateFlags.CreateExtendedUsageBit,
                 ImageType = ImageType.Type2D,
                 Format = format,
-                Extent = new Extent3D(target.Width, target.Height, 1),
+                Extent = new Extent3D(physicalWidth, physicalHeight, 1),
                 MipLevels = mipLevels,
                 ArrayLayers = 1,
                 Samples = SampleCountFlags.Count1Bit,
@@ -11421,15 +11454,17 @@ internal static unsafe class VulkanVideoPresenter
                     CreateRenderPassAndFramebuffer(
                         format,
                         mipViews[0],
-                        target.Width,
-                        target.Height);
+                        physicalWidth,
+                        physicalHeight);
             }
 
             var resource = new GuestImageResource
             {
                 Address = target.Address,
-                Width = target.Width,
-                Height = target.Height,
+                Width = physicalWidth,
+                Height = physicalHeight,
+                LogicalWidth = target.Width,
+                LogicalHeight = target.Height,
                 MipLevels = mipLevels,
                 GuestFormat = guestFormat,
                 Format = format,
@@ -11685,15 +11720,19 @@ internal static unsafe class VulkanVideoPresenter
                 return existing;
             }
 
-            var (image, memory, view) = CreateDepthAttachment(target.Width, target.Height);
+            var physicalWidth = ScaleGuestDimension(target.Width);
+            var physicalHeight = ScaleGuestDimension(target.Height);
+            var (image, memory, view) = CreateDepthAttachment(physicalWidth, physicalHeight);
             var resource = new GuestDepthResource
             {
                 Key = key,
                 Address = target.Address,
                 ReadAddress = target.ReadAddress,
                 WriteAddress = target.WriteAddress,
-                Width = target.Width,
-                Height = target.Height,
+                Width = physicalWidth,
+                Height = physicalHeight,
+                LogicalWidth = target.Width,
+                LogicalHeight = target.Height,
                 GuestFormat = target.GuestFormat,
                 SwizzleMode = target.SwizzleMode,
                 Image = image,
@@ -14153,6 +14192,22 @@ internal static unsafe class VulkanVideoPresenter
             !string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable(
                     "SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
+        private static readonly double _renderResolutionScale =
+            double.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_RENDER_SCALE"),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var renderResolutionScale) &&
+            renderResolutionScale > 0 &&
+            renderResolutionScale <= 2.0
+                ? renderResolutionScale
+                : 1.0;
+
+        private static uint ScaleGuestDimension(uint value) =>
+            _renderResolutionScale == 1.0
+                ? value
+                : Math.Max(1u, (uint)Math.Round(value * _renderResolutionScale));
+
         private static readonly bool _forceFullscreenPipeline =
             Environment.GetEnvironmentVariable("SHARPEMU_FORCE_FULLSCREEN_PIPELINE") == "1";
         private static readonly bool _forceFullscreenVertex =

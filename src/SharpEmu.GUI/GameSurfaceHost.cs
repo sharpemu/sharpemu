@@ -351,6 +351,13 @@ public sealed class GameSurfaceHost : NativeControlHost
         var width = Math.Max(1, (int)Math.Round(Bounds.Width * renderScale));
         var height = Math.Max(1, (int)Math.Round(Bounds.Height * renderScale));
         var sizeChanged = _surface.PixelWidth != width || _surface.PixelHeight != height;
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_SURFACE_SIZE") == "1")
+        {
+            Console.Error.WriteLine(
+                $"[GUI][TRACE] GameSurfaceHost.UpdateSurfaceSize bounds={Bounds.Width}x{Bounds.Height} " +
+                $"scale={renderScale} computed={width}x{height} changed={sizeChanged} " +
+                $"prevSurface={_surface.PixelWidth}x{_surface.PixelHeight}");
+        }
         _surface.UpdatePixelSize(width, height);
 
         if (!sizeChanged)

@@ -192,6 +192,18 @@ public partial class MainWindow : Window
         // it is open already uses the new values.
         LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
         TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
+        RenderResolutionBox.SelectionChanged += (_, _) =>
+        {
+            if (RenderResolutionBox.SelectedItem is ComboBoxItem { Tag: string tag } &&
+                double.TryParse(
+                    tag,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var scale))
+            {
+                _settings.RenderResolutionScale = scale;
+            }
+        };
         StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
@@ -869,6 +881,13 @@ public partial class MainWindow : Window
             _ => 2,
         };
         TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
+        RenderResolutionBox.SelectedIndex = _settings.RenderResolutionScale switch
+        {
+            >= 0.875 => 0,
+            >= 0.625 => 1,
+            >= 0.375 => 2,
+            _ => 3,
+        };
         StrictToggle.IsChecked = _settings.StrictDynlibResolution;
         LogToFileToggle.IsChecked = _settings.LogToFile;
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
@@ -1788,6 +1807,12 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
+        Environment.SetEnvironmentVariable(
+            "SHARPEMU_RENDER_SCALE",
+            _settings.RenderResolutionScale.ToString(
+                "0.###",
+                System.Globalization.CultureInfo.InvariantCulture));
+
         if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
         {
             SharpEmuLog.MinimumLevel = logLevel;
@@ -2030,8 +2055,6 @@ public partial class MainWindow : Window
                 RestoreGameViewToFull();
                 GameView.Background = Brushes.Black;
                 GameView.IsHitTestVisible = true;
-                _gameSurfaceHost?.SetPresentationVisible(true);
-                _gameSurfaceHost?.SetCursorAutoHide(true);
                 LibraryPage.IsVisible = false;
                 OptionsPage.IsVisible = false;
                 LibraryToolbar.IsVisible = false;
@@ -2040,6 +2063,19 @@ public partial class MainWindow : Window
                 LaunchBar.IsVisible = false;
                 HideSessionLoading();
                 UpdateSessionBarVisibility();
+
+                // Defer so the layout pass from the margin change above settles first.
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!_isRunning || _isStopping)
+                    {
+                        return;
+                    }
+
+                    _gameSurfaceHost?.RefreshSurfaceSize();
+                    _gameSurfaceHost?.SetPresentationVisible(true);
+                    _gameSurfaceHost?.SetCursorAutoHide(true);
+                });
             }
         });
     }

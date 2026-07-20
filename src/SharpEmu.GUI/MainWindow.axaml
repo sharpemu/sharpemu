@@ -400,6 +400,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </ScrollViewer>
             </TabItem>
+            <TabItem x:Name="GraphicsTabItem" Header="Graphics" FontSize="15">
+              <ScrollViewer>
+                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="RenderingSectionTitle" Classes="sectionTitle" Text="RENDERING" />
+
+                      <local:SettingRow x:Name="RenderResolutionRow" Label="Internal resolution"
+                                        Description="Render offscreen targets below native resolution and upscale on present. Lower values trade image quality for GPU headroom; takes effect on next launch.">
+                        <ComboBox x:Name="RenderResolutionBox" Width="160" SelectedIndex="0"
+                                  VerticalAlignment="Center" CornerRadius="8">
+                          <ComboBoxItem x:Name="RenderResolution100Item" Content="100% (native)" Tag="1.0" />
+                          <ComboBoxItem x:Name="RenderResolution75Item" Content="75%" Tag="0.75" />
+                          <ComboBoxItem x:Name="RenderResolution50Item" Content="50%" Tag="0.5" />
+                          <ComboBoxItem x:Name="RenderResolution25Item" Content="25%" Tag="0.25" />
+                        </ComboBox>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
+            </TabItem>
             <TabItem x:Name="EnvTabItem" Header="Environment" FontSize="15">
               <ScrollViewer>
                 <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
