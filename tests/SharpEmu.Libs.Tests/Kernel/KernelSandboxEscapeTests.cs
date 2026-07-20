@@ -178,10 +178,11 @@ public sealed class KernelSandboxEscapeTests : IDisposable
             ? prefix + new string('a', 40_000)
             : prefix;
 
-        // The contract is "no throw"; denial (empty) is the expected outcome, but
-        // a contained resolution would also be acceptable as long as it doesn't crash.
+        // Fail closed: the resolver must return an empty host path (never throw,
+        // never a non-empty resolution). A 40k-char segment exceeds NAME_MAX on
+        // Linux and a NUL trips GetFullPath on Windows; both must deny.
         var resolved = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
 
-        Assert.NotNull(resolved);
+        Assert.Equal(string.Empty, resolved);
     }
 }
