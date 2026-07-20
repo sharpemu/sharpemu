@@ -4787,13 +4787,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
         }
 
         if (guestPath.StartsWith("devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
@@ -4805,7 +4805,7 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/temp0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/temp0/".Length..]);
-            return Path.Combine(ResolveTemp0Root(), relative);
+            return CombineWithinMount(ResolveTemp0Root(), relative);
         }
 
         if (string.Equals(guestPath, "/temp0", StringComparison.OrdinalIgnoreCase))
@@ -4816,13 +4816,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/download0/".Length..]);
-            return Path.Combine(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative);
         }
 
         if (guestPath.StartsWith("download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["download0/".Length..]);
-            return Path.Combine(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative);
         }
 
         if (string.Equals(guestPath, "/download0", StringComparison.OrdinalIgnoreCase) ||
@@ -4834,13 +4834,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/hostapp/".Length..]);
-            return Path.Combine(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative);
         }
 
         if (guestPath.StartsWith("hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["hostapp/".Length..]);
-            return Path.Combine(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/hostapp", StringComparison.OrdinalIgnoreCase) ||
@@ -4863,7 +4863,7 @@ public static partial class KernelMemoryCompatExports
                 guestPath.StartsWith("$\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath[2..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (string.Equals(guestPath, "/app0", StringComparison.OrdinalIgnoreCase) ||
@@ -4875,13 +4875,13 @@ public static partial class KernelMemoryCompatExports
             if (guestPath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["/app0/".Length..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (guestPath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["app0/".Length..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (!Path.IsPathFullyQualified(guestPath) &&
@@ -4889,7 +4889,7 @@ public static partial class KernelMemoryCompatExports
                 !guestPath.StartsWith("\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
         }
 
@@ -5003,6 +5003,30 @@ public static partial class KernelMemoryCompatExports
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
+    }
+
+    // Combines a mount-relative guest path onto a built-in mount root and
+    // re-verifies the result stays under that root. NormalizeMountRelativePath
+    // strips "." / ".." but splits only on separators, so a drive-qualified
+    // token like "C:" survives as a segment; Path.Combine then DISCARDS the
+    // mount root because its second argument is drive-rooted, yielding a raw
+    // host path such as "C:\Windows\...". Re-resolving with Path.GetFullPath and
+    // checking containment (the same guard TryResolveRegisteredGuestMount uses)
+    // rejects that escape. Returns string.Empty on denial, which callers treat
+    // as an unresolved path.
+    private static string CombineWithinMount(string mountRoot, string relative)
+    {
+        var candidate = Path.GetFullPath(Path.Combine(mountRoot, relative));
+        var rootWithSeparator =
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(mountRoot)) +
+            Path.DirectorySeparatorChar;
+        if (!string.Equals(candidate, Path.GetFullPath(mountRoot), HostFsPathComparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        {
+            return string.Empty;
+        }
+
+        return candidate;
     }
 
     private static string ResolveDevlogAppRoot()

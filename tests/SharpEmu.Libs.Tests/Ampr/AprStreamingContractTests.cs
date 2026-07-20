@@ -24,14 +24,25 @@ public sealed class AprStreamingContractTests
         const ulong destinationAddress = memoryBase + 0x2000;
         const ulong stackAddress = memoryBase + 0x3000;
         byte[] fileContents = [10, 11, 12, 13, 14, 15, 16, 17];
-        var hostPath = Path.GetTempFileName();
+        // The kernel FS resolver default-denies raw absolute host paths, so the
+        // guest addresses the file through a registered mount instead of handing
+        // in a bare host temp path.
+        var mountRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-apr-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(mountRoot);
+        var mountPoint = $"/sharpemu_apr_mnt_{Guid.NewGuid():N}";
+        const string fileName = "asset.bin";
+        var hostPath = Path.Combine(mountRoot, fileName);
+        var guestPath = $"{mountPoint}/{fileName}";
 
         try
         {
             File.WriteAllBytes(hostPath, fileContents);
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, mountRoot);
             var memory = new FakeCpuMemory(memoryBase, 0x4000);
             var context = new CpuContext(memory, Generation.Gen5);
-            memory.WriteCString(pathAddress, hostPath);
+            memory.WriteCString(pathAddress, guestPath);
             WriteUInt64(memory, pathListAddress, pathAddress);
 
             context[CpuRegister.Rdi] = pathListAddress;
@@ -86,7 +97,11 @@ public sealed class AprStreamingContractTests
         }
         finally
         {
-            File.Delete(hostPath);
+            KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            if (Directory.Exists(mountRoot))
+            {
+                Directory.Delete(mountRoot, recursive: true);
+            }
         }
     }
 

@@ -28,10 +28,17 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         _app0Root = Path.Combine(_tempRoot, "app0");
         Directory.CreateDirectory(_app0Root);
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _app0Root);
+
+        // ResolveApp0Root caches _cachedApp0Root once, so a per-test env var is
+        // ignored after an earlier test populates it. Registering an explicit
+        // mount routes /app0 through the updatable mount table instead, which is
+        // the pattern KernelPathCaseSensitivityTests uses for the same reason.
+        KernelMemoryCompatExports.RegisterGuestPathMount("/app0", _app0Root);
     }
 
     public void Dispose()
     {
+        KernelMemoryCompatExports.UnregisterGuestPathMount("/app0");
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _originalApp0);
         if (Directory.Exists(_tempRoot))
         {
@@ -59,6 +66,51 @@ public sealed class KernelSandboxEscapeTests : IDisposable
     public void ResolveGuestPath_App0PathResolvesUnderApp0Root()
     {
         var resolved = KernelMemoryCompatExports.ResolveGuestPath("/app0/game.bin");
+
+        Assert.False(string.IsNullOrEmpty(resolved));
+        var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
+        Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
+    }
+
+    // Drive-letter injection: NormalizeMountRelativePath clamps "." / ".." but
+    // splits only on separators, so a "C:" token survives as a segment.
+    // Path.Combine then discards the mount root because the tail is drive-rooted,
+    // yielding a raw host path. A resolved path outside the mount root must be
+    // denied. On non-Windows hosts "C:" is an ordinary directory name and stays
+    // contained, so this specifically pins the Windows escape.
+    [Theory]
+    [InlineData("app0/C:/Windows/Temp/evil.dll")]
+    [InlineData("/app0/C:/Windows/Temp/evil.dll")]
+    [InlineData("download0/C:/Windows/Temp/evil.dll")]
+    [InlineData("/temp0/C:/Windows/Temp/evil.dll")]
+    public void ResolveGuestPath_DriveLetterInjectionCannotEscapeMount(string guestPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+
+        // Either denied outright, or (defensively) still under a SharpEmu mount
+        // root — never a bare "C:\Windows\..." host path.
+        if (!string.IsNullOrEmpty(resolved))
+        {
+            Assert.DoesNotContain("Windows", Path.GetFullPath(resolved), StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // A "C:"-style token under app0 must resolve inside the app0 root, not to the
+    // host drive root.
+    [Fact]
+    public void ResolveGuestPath_DriveTokenStaysUnderApp0OnNonWindows()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath("/app0/C:/data.bin");
 
         Assert.False(string.IsNullOrEmpty(resolved));
         var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
