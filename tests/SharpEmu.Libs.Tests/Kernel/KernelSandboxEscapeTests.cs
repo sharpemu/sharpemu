@@ -163,4 +163,25 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
         Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
     }
+
+    // The containment guard resolves paths via Path.GetFullPath / File.GetAttributes,
+    // which throw on a crafted over-long or invalid path. Because ResolveGuestPath
+    // runs outside the callers' try blocks, an uncaught throw would crash the
+    // syscall on untrusted input. The resolver must instead fail closed: return an
+    // empty host path (which callers map to NOT_FOUND), never throw.
+    [Theory]
+    [InlineData("/app0/")]     // filled with a long segment below
+    [InlineData("/app0/bad\0name")]
+    public void ResolveGuestPath_MalformedPathUnderMountFailsClosed(string prefix)
+    {
+        var guestPath = prefix.EndsWith('/')
+            ? prefix + new string('a', 40_000)
+            : prefix;
+
+        // The contract is "no throw"; denial (empty) is the expected outcome, but
+        // a contained resolution would also be acceptable as long as it doesn't crash.
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+
+        Assert.NotNull(resolved);
+    }
 }

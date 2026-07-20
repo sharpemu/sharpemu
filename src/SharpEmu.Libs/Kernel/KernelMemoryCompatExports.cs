@@ -4933,9 +4933,23 @@ public static partial class KernelMemoryCompatExports
         }
 
         var relativePath = normalizedGuestPath[matchedMountPoint.Length..].TrimStart('/');
-        var candidate = Path.GetFullPath(Path.Combine(
-            matchedHostRoot,
-            NormalizeMountRelativePath(relativePath)));
+        string candidate;
+        try
+        {
+            candidate = Path.GetFullPath(Path.Combine(
+                matchedHostRoot,
+                NormalizeMountRelativePath(relativePath)));
+        }
+        catch (Exception ex) when (
+            ex is IOException or ArgumentException or NotSupportedException)
+        {
+            // The relative part comes from an untrusted guest path; a crafted
+            // over-long or invalid path can make GetFullPath throw. Fail closed
+            // rather than propagate out of ResolveGuestPath (which callers invoke
+            // outside their try blocks).
+            return false;
+        }
+
         var rootWithSeparator = Path.TrimEndingDirectorySeparator(matchedHostRoot) + Path.DirectorySeparatorChar;
         // Host-semantics comparison: an ignore-case check on a case-sensitive
         // host would let a relative path escape into a sibling directory that
@@ -5024,17 +5038,32 @@ public static partial class KernelMemoryCompatExports
     // as an unresolved path.
     private static string CombineWithinMount(string mountRoot, string relative)
     {
-        var candidate = Path.GetFullPath(Path.Combine(mountRoot, relative));
+        string fullRoot;
+        string candidate;
+        try
+        {
+            fullRoot = Path.GetFullPath(mountRoot);
+            candidate = Path.GetFullPath(Path.Combine(fullRoot, relative));
+        }
+        catch (Exception ex) when (
+            ex is IOException or ArgumentException or NotSupportedException)
+        {
+            // The relative part comes from an untrusted guest path; a crafted
+            // over-long or invalid path can make GetFullPath throw. Fail closed
+            // rather than propagate out of ResolveGuestPath (which callers invoke
+            // outside their try blocks).
+            return string.Empty;
+        }
+
         var rootWithSeparator =
-            Path.TrimEndingDirectorySeparator(Path.GetFullPath(mountRoot)) +
-            Path.DirectorySeparatorChar;
-        if (!string.Equals(candidate, Path.GetFullPath(mountRoot), HostFsPathComparison) &&
+            Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar;
+        if (!string.Equals(candidate, fullRoot, HostFsPathComparison) &&
             !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
         {
             return string.Empty;
         }
 
-        if (EscapesMountViaReparsePoint(Path.GetFullPath(mountRoot), candidate))
+        if (EscapesMountViaReparsePoint(fullRoot, candidate))
         {
             return string.Empty;
         }
@@ -5061,8 +5090,13 @@ public static partial class KernelMemoryCompatExports
         }
 
         var relative = Path.GetRelativePath(rootTrimmed, candidate);
-        if (relative == "." || Path.IsPathRooted(relative) ||
-            relative.StartsWith("..", StringComparison.Ordinal))
+        // A leading ".." segment means the candidate is not under the root. Match
+        // the segment precisely: bare ".." or a "../" prefix, NOT a legitimate
+        // file merely named "..foo". This branch is a defensive fallback (lexical
+        // containment already passed before it runs), so it fails closed.
+        if (relative == "." || relative == ".." || Path.IsPathRooted(relative) ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
         {
             // Not actually under the root (should have been caught lexically);
             // treat as an escape rather than walk outside it.
@@ -5082,14 +5116,21 @@ public static partial class KernelMemoryCompatExports
                     return true;
                 }
             }
-            catch (FileNotFoundException)
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
                 // Component does not exist yet (create path); nothing to follow.
                 break;
             }
-            catch (DirectoryNotFoundException)
+            catch (Exception ex) when (
+                ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
-                break;
+                // The path comes from an untrusted dump, so a crafted over-long,
+                // invalid-char, or unreadable intermediate component can make
+                // GetAttributes throw. Fail closed: if containment cannot be
+                // verified, treat it as an escape rather than let the exception
+                // crash the syscall (ResolveGuestPath runs outside the callers'
+                // try blocks).
+                return true;
             }
         }
 
