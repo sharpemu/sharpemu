@@ -7,7 +7,7 @@ namespace SharpEmu.HLE.Host.Posix;
 /// Bridges a window-provided input source into the host input seam. POSIX
 /// hosts have no user32/XInput/raw-HID readers; keyboard and gamepad state
 /// come from the presenter's GLFW window instead, which registers itself via
-/// <see cref="SetSource"/> once the window exists. Until then (and with no
+/// <see cref="PosixHostInput.SetSource(IPosixWindowInputSource)"/> once the window exists. Until then (and with no
 /// window at all, e.g. headless runs) every query reports neutral input.
 /// Rumble and lightbar are unsupported by the GLFW input layer and no-op.
 /// </summary>

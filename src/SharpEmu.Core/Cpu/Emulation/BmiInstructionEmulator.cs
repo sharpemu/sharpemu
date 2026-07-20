@@ -18,7 +18,7 @@ namespace SharpEmu.Core.Cpu.Emulation;
 /// The methods deliberately operate on plain integers rather than on the OS CONTEXT record so the
 /// semantics can be unit-tested in isolation; the unsafe register/memory plumbing lives in the
 /// backend adapter. Each method returns the result already masked to the operand width and, where
-/// the instruction is defined to touch flags, updates <paramref name="eflags"/> in place. Flags
+/// the instruction is defined to touch flags, updates the <c>eflags</c> argument in place. Flags
 /// documented as "undefined" by the vendor manuals are left untouched so behaviour stays
 /// deterministic across hosts.
 /// </summary>
