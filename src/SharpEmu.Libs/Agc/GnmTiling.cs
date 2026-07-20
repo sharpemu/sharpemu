@@ -422,6 +422,18 @@ internal static class GnmTiling
             }
         }
 
+        // The XOR equation offset factors cleanly into independent X and Y
+        // fields — each output bit is parity(x & XMask) XOR parity(y & YMask),
+        // and parity distributes over XOR, so offset(x, y) == xTerm(x) ^ yTerm(y).
+        // Precompute the per-column X term once (reused across every row) so the
+        // inner loop drops from a 16-bit interleave with 32 PopCounts per element
+        // to a single array load and one XOR.
+        var xTermByColumn = hasExactXorPattern ? new int[elementsWide] : [];
+        for (var x = 0; hasExactXorPattern && x < elementsWide; x++)
+        {
+            xTermByColumn[x] = (int)PatternAxisTerm((uint)x, xorPattern, useX: true);
+        }
+
         for (var y = 0; y < elementsHigh; y++)
         {
             var blockY = y / blockHeight;
@@ -429,6 +441,8 @@ internal static class GnmTiling
             var rowBlockBase = (long)blockY * blocksPerRow;
             var tableRowBase = inBlockY * blockWidth;
             var destRowBase = (long)y * elementsWide * bytesPerElement;
+            // Y term is constant across the row; hoist it out of the inner loop.
+            var yTerm = hasExactXorPattern ? (int)PatternAxisTerm((uint)y, xorPattern, useX: false) : 0;
             for (var x = 0; x < elementsWide; x++)
             {
                 var blockX = x / blockWidth;
@@ -436,7 +450,7 @@ internal static class GnmTiling
 
                 var blockIndex = rowBlockBase + blockX;
                 var sourceByte = hasExactXorPattern
-                    ? blockIndex * blockBytes + ComputePatternOffset((uint)x, (uint)y, xorPattern)
+                    ? blockIndex * blockBytes + (xTermByColumn[x] ^ yTerm)
                     : (blockIndex * blockElements + blockTable[tableRowBase + inBlockX]) *
                       (long)bytesPerElement;
                 var destByte = destRowBase + (long)x * bytesPerElement;
@@ -493,14 +507,20 @@ internal static class GnmTiling
         return pattern.Length != 0;
     }
 
-    private static long ComputePatternOffset(uint x, uint y, AddressBit[] pattern)
+    // The AddrLib within-block byte offset is a per-bit XOR equation:
+    //   offset = OR over bits of ( parity(x & XMask) XOR parity(y & YMask) ) << bit
+    // Because parity distributes over XOR, that whole offset factors into two
+    // independent axis terms: PatternAxisTerm(x, useX: true) ^
+    // PatternAxisTerm(y, useX: false). Splitting the axes lets TryDetile cache
+    // the X term per column and hoist the Y term per row instead of recomputing
+    // the full 16-bit interleave (32 PopCounts) for every element.
+    private static uint PatternAxisTerm(uint coordinate, AddressBit[] pattern, bool useX)
     {
         uint offset = 0;
         for (var bit = 0; bit < pattern.Length; bit++)
         {
-            var equation = pattern[bit];
-            var parity = (System.Numerics.BitOperations.PopCount(x & equation.XMask) +
-                          System.Numerics.BitOperations.PopCount(y & equation.YMask)) & 1;
+            var mask = useX ? pattern[bit].XMask : pattern[bit].YMask;
+            var parity = System.Numerics.BitOperations.PopCount(coordinate & mask) & 1;
             offset |= (uint)parity << bit;
         }
 
