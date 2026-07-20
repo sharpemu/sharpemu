@@ -11506,6 +11506,69 @@ public static partial class AgcExports
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    private static int RemoveResourcesForOwner(SubmittedGpuState state, uint owner)
+    {
+        var stale = new List<uint>();
+        foreach (var (handle, resource) in state.RegisteredResources)
+        {
+            if (resource.Owner == owner)
+            {
+                stale.Add(handle);
+            }
+        }
+
+        foreach (var handle in stale)
+        {
+            state.RegisteredResources.Remove(handle);
+        }
+
+        return stale.Count;
+    }
+
+    [SysAbiExport(
+        Nid = "ZLJk9r2+2Aw",
+        ExportName = "sceAgcDriverUnregisterOwnerAndResources",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverUnregisterOwnerAndResources(CpuContext ctx)
+    {
+        var owner = (uint)ctx[CpuRegister.Rdi];
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        int resources;
+        lock (state.Gate)
+        {
+            if (!state.ResourceOwners.Remove(owner))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            resources = RemoveResourcesForOwner(state, owner);
+            state.ComputeQueues.Remove(owner);
+        }
+
+        TraceAgc($"agc.driver_unregister_owner owner={owner} resources={resources}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "SCoAN5fYlUM",
+        ExportName = "sceAgcDriverUnregisterAllResourcesForOwner",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DriverUnregisterAllResourcesForOwner(CpuContext ctx)
+    {
+        var owner = (uint)ctx[CpuRegister.Rdi];
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        int resources;
+        lock (state.Gate)
+        {
+            resources = RemoveResourcesForOwner(state, owner);
+        }
+
+        TraceAgc($"agc.driver_unregister_owner_resources owner={owner} resources={resources}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     [SysAbiExport(
         Nid = "pWLG7WOpVcw",
         ExportName = "sceAgcDriverUnregisterResource",
