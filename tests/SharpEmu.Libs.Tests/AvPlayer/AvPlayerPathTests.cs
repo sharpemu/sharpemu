@@ -41,6 +41,65 @@ public sealed class AvPlayerPathTests : IDisposable
     }
 
     [Fact]
+    public void UnrealRelativeRawPathAnchorsAtApp0AndResolvesMedia()
+    {
+        var mediaPath = CreateFile("SampleProject/Content/Movies/Startup.mp4");
+
+        var resolved = AvPlayerExports.ResolveGuestPath(
+            "../../../SampleProject/Content/Movies/Startup.mp4");
+
+        Assert.NotNull(resolved);
+        Assert.Equal(File.ReadAllBytes(mediaPath), File.ReadAllBytes(resolved));
+        AssertPathIsInsideApp0(resolved);
+    }
+
+    [Fact]
+    public void UnrealRelativeRawPathCannotEscapeApp0()
+    {
+        var outsidePath = Path.Combine(_tempRoot, "outside.mp4");
+        File.WriteAllBytes(outsidePath, [0x7F]);
+        CreateFile("outside.mp4");
+
+        Assert.Null(AvPlayerExports.ResolveGuestPath("../../../outside.mp4"));
+    }
+
+    [Fact]
+    public void CurrentDirectoryRawPathResolvesInsideApp0()
+    {
+        var mediaPath = CreateFile("Movies/Intro.mp4");
+
+        var resolved = AvPlayerExports.ResolveGuestPath("./Movies/Intro.mp4");
+
+        Assert.NotNull(resolved);
+        Assert.Equal(Path.GetFullPath(mediaPath), resolved);
+        AssertPathIsInsideApp0(resolved);
+    }
+
+    [Theory]
+    [InlineData(false, "ffmpeg", "ffprobe")]
+    [InlineData(true, "ffmpeg.exe", "ffprobe.exe")]
+    public void MediaToolLookupUsesPlatformNames(
+        bool isWindows,
+        string ffmpegName,
+        string ffprobeName)
+    {
+        var toolDirectory = Path.Combine(_tempRoot, "Media Tools");
+        Directory.CreateDirectory(toolDirectory);
+        var ffmpeg = Path.Combine(toolDirectory, ffmpegName);
+        File.WriteAllBytes(ffmpeg, []);
+
+        var resolved = AvPlayerExports.FindFfmpeg(
+            configured: null,
+            searchPath: $"\"{toolDirectory}\"",
+            isWindows);
+
+        Assert.Equal(ffmpeg, resolved);
+        Assert.Equal(
+            Path.Combine(toolDirectory, ffprobeName),
+            AvPlayerExports.GetFfprobePath(ffmpeg, isWindows));
+    }
+
+    [Fact]
     public void RelativeFileUriCannotEscapeApp0()
     {
         var outsidePath = Path.Combine(_tempRoot, "outside.mp4");
@@ -143,12 +202,14 @@ public sealed class AvPlayerPathTests : IDisposable
 
     private void AssertPathIsInsideApp0(string resolved)
     {
-        var rootWithSeparator =
-            Path.TrimEndingDirectorySeparator(Path.GetFullPath(_app0Root)) +
-            Path.DirectorySeparatorChar;
-        Assert.StartsWith(
-            rootWithSeparator,
-            Path.GetFullPath(resolved),
-            StringComparison.OrdinalIgnoreCase);
+        var relative = Path.GetRelativePath(
+            Path.GetFullPath(_app0Root),
+            Path.GetFullPath(resolved));
+        Assert.False(Path.IsPathFullyQualified(relative));
+        Assert.NotEqual("..", relative);
+        Assert.False(
+            relative.StartsWith(
+                ".." + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal));
     }
 }

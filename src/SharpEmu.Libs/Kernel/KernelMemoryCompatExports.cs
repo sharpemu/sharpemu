@@ -1685,6 +1685,7 @@ public static partial class KernelMemoryCompatExports
         var count = ctx[CpuRegister.Rsi];
         var idsAddress = ctx[CpuRegister.Rdx];
         var sizesAddress = ctx[CpuRegister.Rcx];
+        var errorIndexAddress = ctx[CpuRegister.R8];
         if (pathListAddress == 0 || count == 0 || sizesAddress == 0 || count > 1024)
         {
             KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
@@ -1709,12 +1710,8 @@ public static partial class KernelMemoryCompatExports
             var hostPath = ResolveGuestPath(guestPath);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
-                // Per-file resolve: a missing entry gets an invalid id
-                // (0xFFFFFFFF, already written above) and size 0, and the batch
-                // CONTINUES. Aborting the whole batch on the first miss left the
-                // remaining paths unresolved and could stall the guest's asset
-                // streaming when a batch happens to include an absent (e.g.
-                // patch/DLC) file; the caller checks per-file id/size.
+                // Stop at the first miss and report its index.
+                // The caller can then use its normal file-open fallback.
                 LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
                 if (sizesAddress != 0 &&
                     !TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), 0))
@@ -1723,7 +1720,16 @@ public static partial class KernelMemoryCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
 
-                continue;
+                if (errorIndexAddress != 0 &&
+                    !TryWriteUInt32Compat(ctx, errorIndexAddress, (uint)i))
+                {
+                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                KernelRuntimeCompatExports.TrySetErrno(ctx, 2); // ENOENT
+                ctx[CpuRegister.Rax] = ulong.MaxValue;
+                return -1;
             }
 
             var fileId = AmprFileRegistry.Register(guestPath, hostPath);
