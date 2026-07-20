@@ -203,6 +203,21 @@ jobs:
             "$SPIRV_TARGET_ENV" \
             artifacts/shader-dump
 
+      - name: Execute synthetic shader through Vulkan
+        if: matrix.rid == 'linux-x64'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends mesa-vulkan-drivers
+
+          lavapipe_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          test -n "$lavapipe_icd"
+
+          VK_DRIVER_FILES="$lavapipe_icd" \
+            dotnet run \
+              --project tools/SharpEmu.Tools.GpuConformance/SharpEmu.Tools.GpuConformance.csproj \
+              -c Release -- artifacts/shader-dump/exec-cs.spv
+
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"
 

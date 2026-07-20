@@ -76,17 +76,20 @@ unsafe
     Check(vk.CreateInstance(in instanceInfo, null, out var instance), "vkCreateInstance");
 
     uint deviceCount = 0;
-    vk.EnumeratePhysicalDevices(instance, &deviceCount, null);
+    Check(
+        vk.EnumeratePhysicalDevices(instance, &deviceCount, null),
+        "vkEnumeratePhysicalDevices(count)");
     if (deviceCount == 0)
     {
-        Console.WriteLine("no Vulkan devices found");
-        return;
+        throw new InvalidOperationException("no Vulkan devices found");
     }
 
     var physicalDevices = new PhysicalDevice[deviceCount];
     fixed (PhysicalDevice* pDevices = physicalDevices)
     {
-        vk.EnumeratePhysicalDevices(instance, &deviceCount, pDevices);
+        Check(
+            vk.EnumeratePhysicalDevices(instance, &deviceCount, pDevices),
+            "vkEnumeratePhysicalDevices(devices)");
     }
 
     // Prefer the first discrete GPU; fall back to the first device.
