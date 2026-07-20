@@ -2414,6 +2414,42 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
+
+		if (OperatingSystem.IsWindows())
+		{
+			// Native pre-filter: these exception codes are raised while the thread can be in
+			// cooperative GC mode (a C# throw is RaiseException(0xE0434352) on the throwing
+			// thread; FailFast/stack-overflow arrive mid-runtime-failure). Entering the managed
+			// handler then trips the CLR's reverse-P/Invoke check and kills the process with
+			// "Invalid Program: attempted to call a UnmanagedCallersOnly method from managed
+			// code" — this is why no managed throw (even one with a catch handler) ever
+			// survived inside the emulator. Continue the handler search without touching
+			// managed code; the CLR's own VEH handles its exceptions. MSVC C++ exceptions
+			// (Vulkan drivers, host CRT) are excluded too: the managed handler only ever
+			// returned CONTINUE_SEARCH for them.
+			ReadOnlySpan<uint> nonManagedExceptionCodes =
+				[0xE0434352u, 0xE06D7363u, 0xC0000409u, 0xC00000FDu];
+			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx] (ExceptionRecord*)
+			EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00);                                   // mov eax, [rax] (ExceptionCode)
+			var passJumpOffsets = stackalloc int[nonManagedExceptionCodes.Length];
+			for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
+			{
+				EmitByte(code, ref offset, 0x3D);                                                                 // cmp eax, imm32
+				EmitUInt32(code, ref offset, nonManagedExceptionCodes[i]);
+				EmitByte(code, ref offset, 0x74);                                                                 // je pass
+				passJumpOffsets[i] = offset;
+				EmitByte(code, ref offset, 0x00);
+			}
+			EmitByte(code, ref offset, 0xEB); EmitByte(code, ref offset, 0x03);                                   // jmp over pass block
+			int passOffset = offset;
+			EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);                                   // pass: xor eax, eax (EXCEPTION_CONTINUE_SEARCH)
+			EmitByte(code, ref offset, 0xC3);                                                                     // ret
+			for (int i = 0; i < nonManagedExceptionCodes.Length; i++)
+			{
+				code[passJumpOffsets[i]] = checked((byte)(passOffset - (passJumpOffsets[i] + 1)));
+			}
+		}
+
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x54); // push r12
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
@@ -5134,7 +5170,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ActiveGuestThreadYieldReason = null;
 			try
 			{
-				var nativeReturn = CallNativeEntry(ptr);
+				var nativeReturn = RunGuestEntryStub(ptr, hostRspSlot);
 				if (ActiveGuestThreadYieldRequested)
 				{
 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
@@ -5289,7 +5325,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ActiveGuestThreadYieldReason = null;
 			try
 			{
-				var nativeReturn = CallNativeEntry(ptr);
+				var nativeReturn = RunGuestEntryStub(ptr, hostRspSlot);
 				if (ActiveGuestThreadYieldRequested)
 				{
 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
@@ -5619,7 +5655,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			int num6 = -1;
 			try
 			{
-				num6 = CallNativeEntry(ptr);
+				num6 = RunGuestEntryStub(ptr, num2);
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest
 				// continuations here can re-enter a blocked HLE call after its owner
