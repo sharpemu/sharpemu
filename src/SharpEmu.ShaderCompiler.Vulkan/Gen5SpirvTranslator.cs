@@ -5290,10 +5290,20 @@ public static partial class Gen5SpirvTranslator
                 UInt(0x108));
         }
 
+        // A wave-mask SGPR (VCC/EXEC) consumed as a per-lane predicate — the
+        // condition of VCndmask, a VCC/EXEC branch, or the derived _vcc/_exec
+        // bool — must be tested at the CURRENT lane's bit, exactly as the
+        // hardware does, not as "the 64-bit value is non-zero". The two coincide
+        // for comparison results (only the lane's own bit is ever set), so the
+        // single-lane path historically used a cheaper whole-word non-zero test.
+        // But bitwise-complement wave-mask idioms (S_NOT/S_ORN2/S_ANDN2/S_NAND/
+        // S_NOR on a 64-bit mask) set the unused upper 63 bits; a whole-word test
+        // then reports "lane active" even when this lane's bit is clear. Unity's
+        // PostProcessing NaN killer does exactly this (`anyNaN | ~allFinite`),
+        // which made every valid pixel read as NaN and get replaced with 0 —
+        // zeroing the whole scene before tonemap. Extract the lane bit always.
         private uint IsWaveMaskActive(uint mask) =>
-            _subgroupInvocationIdInput == 0
-                ? IsNotZero64(mask)
-                : IsCurrentLaneSet(mask);
+            IsCurrentLaneSet(mask);
 
         private uint IsCurrentLaneSet(uint mask) =>
             IsNotZero64(
