@@ -3634,7 +3634,8 @@ public static partial class AgcExports
                         ctx,
                         destinationAddress,
                         byteCount,
-                        immediateFill ? (uint)sourceAddress : null);
+                        immediateFill ? (uint)sourceAddress : null,
+                        immediateFill ? 0 : sourceAddress);
                 }
 
                 if (tracePacket)
@@ -4117,7 +4118,8 @@ public static partial class AgcExports
         CpuContext ctx,
         ulong destinationAddress,
         ulong byteCount,
-        uint? fillValue)
+        uint? fillValue,
+        ulong sourceAddress = 0)
     {
         var hasImage = GuestGpu.Current.TryGetGuestImageExtent(
             destinationAddress,
@@ -4144,6 +4146,17 @@ public static partial class AgcExports
         if (fillValue is { } fill)
         {
             GuestGpu.Current.SubmitGuestImageFill(destinationAddress, fill);
+            return;
+        }
+
+        // When the DMA source is itself a live guest image (e.g. a movie
+        // frame just rendered by the NV12 conversion pass), its freshest
+        // pixels exist only GPU-side; the guest CPU copy this DMA moved is
+        // stale until a writeback lands. Copy image-to-image so the
+        // destination sees what unified memory would hold on hardware.
+        if (sourceAddress != 0 &&
+            VulkanVideoPresenter.SubmitGuestImageCopy(sourceAddress, destinationAddress))
+        {
             return;
         }
 
@@ -4255,7 +4268,12 @@ public static partial class AgcExports
                     byteCount);
                 if (copied)
                 {
-                    MirrorDmaWriteToGuestImage(ctx, destinationAddress, byteCount, fillValue: null);
+                    MirrorDmaWriteToGuestImage(
+                        ctx,
+                        destinationAddress,
+                        byteCount,
+                        fillValue: null,
+                        sourceAddress);
                 }
             }
         }
