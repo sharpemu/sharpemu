@@ -4785,9 +4785,20 @@ public static partial class KernelMemoryCompatExports
             return guestPath;
         }
 
-        if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath))
+        if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath, out var mountPrefixMatched))
         {
             return mountedPath;
+        }
+
+        // A registered mount claimed this path by prefix but denied it (failed
+        // containment or a reparse point inside the mount). That denial is
+        // authoritative: do NOT fall through to the built-in branches below,
+        // which could re-resolve an overlapping prefix (e.g. a registered
+        // "/app0" vs the built-in SHARPEMU_APP0_DIR branch) against a different
+        // root and turn the denial back into a resolution.
+        if (mountPrefixMatched)
+        {
+            return string.Empty;
         }
 
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
@@ -4908,9 +4919,13 @@ public static partial class KernelMemoryCompatExports
         return string.Empty;
     }
 
-    private static bool TryResolveRegisteredGuestMount(string guestPath, out string hostPath)
+    private static bool TryResolveRegisteredGuestMount(
+        string guestPath,
+        out string hostPath,
+        out bool mountPrefixMatched)
     {
         hostPath = string.Empty;
+        mountPrefixMatched = false;
         var normalizedGuestPath = NormalizeGuestStatCachePath(guestPath);
         if (normalizedGuestPath is null)
         {
@@ -4937,6 +4952,12 @@ public static partial class KernelMemoryCompatExports
         {
             return false;
         }
+
+        // A registered mount owns this prefix. Whatever the outcome below
+        // (containment or reparse denial), the caller must NOT fall through to a
+        // built-in branch for the same prefix, or a denied path could be
+        // re-resolved against a different root.
+        mountPrefixMatched = true;
 
         var relativePath = normalizedGuestPath[matchedMountPoint.Length..].TrimStart('/');
         string candidate;

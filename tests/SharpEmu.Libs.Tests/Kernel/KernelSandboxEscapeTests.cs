@@ -47,17 +47,35 @@ public sealed class KernelSandboxEscapeTests : IDisposable
     }
 
     // Finding #1: an absolute guest path that matches no mount prefix used to be
-    // returned verbatim, letting the guest open arbitrary host files.
+    // returned verbatim, letting the guest open arbitrary host files. These forms
+    // are absolute (or a UNC/backslash root) on every host, so they are denied
+    // everywhere.
     [Theory]
     [InlineData("/etc/passwd")]
     [InlineData("/etc/shadow")]
     [InlineData("/root/.ssh/id_rsa")]
-    [InlineData("C:\\Windows\\System32\\drivers\\etc\\hosts")]
     [InlineData("\\\\server\\share\\secret")]
     [InlineData("/proc/self/mem")]
     public void ResolveGuestPath_UnmappedAbsolutePathIsDenied(string guestPath)
     {
         Assert.Equal(string.Empty, KernelMemoryCompatExports.ResolveGuestPath(guestPath));
+    }
+
+    // A Windows drive-qualified path (e.g. "C:\Windows\...") is only absolute on
+    // Windows. On Unix "C:" is an ordinary relative filename, so the resolver
+    // legitimately contains it under app0 rather than denying it; this escape is
+    // therefore Windows-specific.
+    [Fact]
+    public void ResolveGuestPath_UnmappedWindowsDrivePathIsDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Assert.Equal(
+            string.Empty,
+            KernelMemoryCompatExports.ResolveGuestPath("C:\\Windows\\System32\\drivers\\etc\\hosts"));
     }
 
     // A recognized mount prefix must still resolve to a path under its root, so
