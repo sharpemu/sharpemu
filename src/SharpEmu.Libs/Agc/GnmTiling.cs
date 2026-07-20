@@ -194,6 +194,155 @@ internal static class GnmTiling
         }
     }
 
+    public static bool TryGetBlockElementDimensions(
+        uint swizzleMode,
+        int bytesPerElement,
+        out int blockWidth,
+        out int blockHeight)
+    {
+        blockWidth = 0;
+        blockHeight = 0;
+        if (bytesPerElement <= 0 ||
+            !TryGetSwizzleKind(swizzleMode, out _, out var blockBytes))
+        {
+            return false;
+        }
+
+        var bppLog2 = BitLog2((uint)bytesPerElement);
+        if (bppLog2 < 0)
+        {
+            return false;
+        }
+
+        (blockWidth, blockHeight) = SquareBlockDimensions(blockBytes >> bppLog2);
+        return blockWidth != 0 && blockHeight != 0;
+    }
+
+    /// <summary>
+    /// Locates mip 0 in a GFX10 mip chain, which AddrLib stores smallest-first
+    /// (Gfx10Lib::ComputeSurfaceInfoMacroTiled/MicroTiled).
+    /// </summary>
+    public static bool TryGetBaseMipPlacement(
+        uint swizzleMode,
+        int elementsWide,
+        int elementsHigh,
+        int bytesPerElement,
+        uint resourceMipLevels,
+        out ulong byteOffset,
+        out bool inMipTail,
+        out int tailElementX,
+        out int tailElementY)
+    {
+        byteOffset = 0;
+        inMipTail = false;
+        tailElementX = 0;
+        tailElementY = 0;
+        if (resourceMipLevels <= 1 ||
+            !ShouldDetile(swizzleMode) ||
+            elementsWide <= 0 ||
+            elementsHigh <= 0 ||
+            bytesPerElement <= 0 ||
+            !TryGetSwizzleKind(swizzleMode, out _, out var blockBytes))
+        {
+            return false;
+        }
+
+        var bppLog2 = BitLog2((uint)bytesPerElement);
+        if (bppLog2 < 0)
+        {
+            return false;
+        }
+
+        var (blockWidth, blockHeight) = SquareBlockDimensions(blockBytes >> bppLog2);
+        var blockSizeLog2 = BitLog2((uint)blockBytes);
+        if (blockWidth == 0 || blockHeight == 0 || blockSizeLog2 < 8)
+        {
+            return false;
+        }
+
+        var mipLevels = (int)Math.Min(resourceMipLevels, 16u);
+        var maxMipsInTail = blockSizeLog2 <= 8 ? 0
+            : blockSizeLog2 <= 11
+                ? 1 + (1 << (blockSizeLog2 - 9))
+                : blockSizeLog2 - 4;
+        var tailWidth = (blockSizeLog2 & 1) != 0 ? blockWidth >> 1 : blockWidth;
+        var tailHeight = (blockSizeLog2 & 1) != 0 ? blockHeight : blockHeight >> 1;
+
+        var firstMipInTail = mipLevels;
+        var mipSizes = new ulong[mipLevels];
+        for (var i = 0; i < mipLevels; i++)
+        {
+            var mipWidth = Math.Max(elementsWide >> i, 1);
+            var mipHeight = Math.Max(elementsHigh >> i, 1);
+            if (maxMipsInTail > 0 &&
+                mipWidth <= tailWidth &&
+                mipHeight <= tailHeight &&
+                mipLevels - i <= maxMipsInTail)
+            {
+                firstMipInTail = i;
+                break;
+            }
+
+            var alignedWidth = (ulong)(mipWidth + blockWidth - 1) / (ulong)blockWidth * (ulong)blockWidth;
+            var alignedHeight = (ulong)(mipHeight + blockHeight - 1) / (ulong)blockHeight * (ulong)blockHeight;
+            mipSizes[i] = alignedWidth * alignedHeight * (ulong)bytesPerElement;
+        }
+
+        if (firstMipInTail == 0)
+        {
+            var m = maxMipsInTail - 1;
+            var mipOffset = m > 6 ? 16 << m : m << 8;
+            var mipX = ((mipOffset >> 9) & 1) |
+                       ((mipOffset >> 10) & 2) |
+                       ((mipOffset >> 11) & 4) |
+                       ((mipOffset >> 12) & 8) |
+                       ((mipOffset >> 13) & 16) |
+                       ((mipOffset >> 14) & 32);
+            var mipY = ((mipOffset >> 8) & 1) |
+                       ((mipOffset >> 9) & 2) |
+                       ((mipOffset >> 10) & 4) |
+                       ((mipOffset >> 11) & 8) |
+                       ((mipOffset >> 12) & 16) |
+                       ((mipOffset >> 13) & 32);
+            if ((blockSizeLog2 & 1) != 0)
+            {
+                (mipX, mipY) = (mipY, mipX);
+                if ((bppLog2 & 1) != 0)
+                {
+                    mipY = (mipY << 1) | (mipX & 1);
+                    mipX >>= 1;
+                }
+            }
+
+            var (microWidth, microHeight) = SquareBlockDimensions(256 >> bppLog2);
+            if (microWidth == 0 || microHeight == 0)
+            {
+                return false;
+            }
+
+            tailElementX = mipX * microWidth;
+            tailElementY = mipY * microHeight;
+            if (tailElementX + elementsWide > blockWidth ||
+                tailElementY + elementsHigh > blockHeight)
+            {
+                tailElementX = 0;
+                tailElementY = 0;
+                return false;
+            }
+
+            inMipTail = true;
+            return true;
+        }
+
+        byteOffset = firstMipInTail < mipLevels ? (ulong)blockBytes : 0;
+        for (var i = firstMipInTail - 1; i >= 1; i--)
+        {
+            byteOffset += mipSizes[i];
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// Deswizzles <paramref name="tiled"/> into linear row-major order.
     /// Elements are pixels for uncompressed formats and 4x4 blocks for

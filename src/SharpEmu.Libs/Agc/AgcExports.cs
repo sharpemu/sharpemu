@@ -7782,7 +7782,10 @@ public static partial class AgcExports
         TextureDescriptor descriptor,
         uint sourceWidth,
         int logicalByteCount,
-        byte[] source)
+        byte[] source,
+        bool baseMipInTail = false,
+        int tailElementX = 0,
+        int tailElementY = 0)
     {
         if (!GnmTiling.NeedsDetile(descriptor.TileMode) ||
             !TryGetTextureElementLayout(
@@ -7793,6 +7796,48 @@ public static partial class AgcExports
                 out var bytesPerElement))
         {
             return null;
+        }
+
+        if (baseMipInTail)
+        {
+            if (!GnmTiling.TryGetBlockElementDimensions(
+                    descriptor.TileMode,
+                    bytesPerElement,
+                    out var blockWidth,
+                    out var blockHeight))
+            {
+                return null;
+            }
+
+            var blockByteCount = (long)blockWidth * blockHeight * bytesPerElement;
+            if (source.Length < blockByteCount ||
+                (long)elementsWide * elementsHigh * bytesPerElement > logicalByteCount)
+            {
+                return null;
+            }
+
+            var blockLinear = new byte[blockByteCount];
+            if (!GnmTiling.TryDetile(
+                    source,
+                    blockLinear,
+                    descriptor.TileMode,
+                    blockWidth,
+                    blockHeight,
+                    bytesPerElement))
+            {
+                return null;
+            }
+
+            var tailLinear = new byte[logicalByteCount];
+            var rowBytes = elementsWide * bytesPerElement;
+            for (var y = 0; y < elementsHigh; y++)
+            {
+                var sourceOffset = (((long)tailElementY + y) * blockWidth + tailElementX) * bytesPerElement;
+                blockLinear.AsSpan((int)sourceOffset, rowBytes)
+                    .CopyTo(tailLinear.AsSpan(y * rowBytes, rowBytes));
+            }
+
+            return tailLinear;
         }
 
         var linear = new byte[logicalByteCount];
@@ -7869,13 +7914,17 @@ public static partial class AgcExports
         }
 
         var physicalSourceByteCount = sourceByteCount;
-        if (GnmTiling.NeedsDetile(descriptor.TileMode) &&
+        var elementsWide = 0;
+        var elementsHigh = 0;
+        var bytesPerElement = 0;
+        var hasElementLayout = GnmTiling.NeedsDetile(descriptor.TileMode) &&
             TryGetTextureElementLayout(
                 descriptor,
                 sourceWidth,
-                out var elementsWide,
-                out var elementsHigh,
-                out var bytesPerElement) &&
+                out elementsWide,
+                out elementsHigh,
+                out bytesPerElement);
+        if (hasElementLayout &&
             GnmTiling.TryGetTiledByteCount(
                 descriptor.TileMode,
                 elementsWide,
@@ -7891,6 +7940,27 @@ public static partial class AgcExports
         {
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
+        }
+
+        var resourceMipLevels = descriptor.HasExtendedDescriptor
+            ? descriptor.ResourceMipLevels
+            : 1u;
+        var baseMipByteOffset = 0UL;
+        var baseMipInTail = false;
+        var mipTailElementX = 0;
+        var mipTailElementY = 0;
+        if (hasElementLayout && resourceMipLevels > 1)
+        {
+            GnmTiling.TryGetBaseMipPlacement(
+                descriptor.TileMode,
+                elementsWide,
+                elementsHigh,
+                bytesPerElement,
+                resourceMipLevels,
+                out baseMipByteOffset,
+                out baseMipInTail,
+                out mipTailElementX,
+                out mipTailElementY);
         }
 
         // Upload-known (not plain availability): the presenter's answer goes
@@ -7943,14 +8013,17 @@ public static partial class AgcExports
                 // and run the same AddrLib-derived detile path used below for
                 // sampled textures before seeding the Vulkan image.
                 var storageSource = new byte[(int)physicalSourceByteCount];
-                if (ctx.Memory.TryRead(descriptor.Address, storageSource))
+                if (ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
                     readSucceeded = true;
                     var linearStorage = TryDetileTextureSource(
                         descriptor,
                         sourceWidth,
                         checked((int)sourceByteCount),
-                        storageSource) ?? storageSource
+                        storageSource,
+                        baseMipInTail,
+                        mipTailElementX,
+                        mipTailElementY) ?? storageSource
                             .AsSpan(0, checked((int)sourceByteCount))
                             .ToArray();
                     if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
@@ -8055,7 +8128,7 @@ public static partial class AgcExports
         }
 
         var source = new byte[(int)physicalSourceByteCount];
-        if (!ctx.Memory.TryRead(descriptor.Address, source))
+        if (!ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, source))
         {
             TraceTextureFallback(
                 descriptor,
@@ -8092,7 +8165,10 @@ public static partial class AgcExports
             descriptor,
             sourceWidth,
             checked((int)sourceByteCount),
-            source) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+            source,
+            baseMipInTail,
+            mipTailElementX,
+            mipTailElementY) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
         texture = new GuestDrawTexture(
             descriptor.Address,
