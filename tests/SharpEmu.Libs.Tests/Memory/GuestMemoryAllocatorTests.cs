@@ -122,6 +122,27 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
+    public void TryBackFixedRangeRollsBackEarlierGapsWhenLaterGapCannotBeBacked()
+    {
+        // Layout: committed | free | committed | free
+        // First free gap allocates successfully, second fails.
+        // The first allocation must be freed — nothing should leak.
+        const ulong rangeBase = 0x0000_0020_2F00_0000;
+        const ulong rangeSize = 0x4000;
+        using var host = new GappedHostMemory(rangeBase);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.False(memory.TryBackFixedRange(rangeBase, rangeSize, executable: false));
+
+        // First gap allocates successfully; second gap is attempted and fails.
+        Assert.Equal(
+            [(rangeBase + 0x1000, 0x1000), (rangeBase + 0x3000, 0x1000)],
+            host.AllocationCalls);
+        // First gap must have been freed during rollback — nothing leaks.
+        Assert.Equal([rangeBase + 0x1000], host.FreedAddresses);
+    }
+
+    [Fact]
     public void TryBackFixedRangeFillsOnlyTheFreePagesOfAPartiallyOccupiedRange()
     {
         const ulong rangeBase = 0x0000_0020_2F00_0000;
@@ -226,6 +247,108 @@ public sealed class GuestMemoryAllocatorTests
         public void Dispose()
         {
         }
+    }
+
+    private sealed class GappedHostMemory : IHostMemory, IDisposable
+    {
+        // Layout (4 × 0x1000 pages):
+        //   [committed] [free] [committed] [free]
+        // Allocate succeeds for the first free gap, fails for the second.
+        private readonly ulong _base;
+        private readonly ulong _firstGapStart;
+        private readonly ulong _firstGapEnd;
+        private readonly ulong _secondGapStart;
+        private readonly ulong _secondGapEnd;
+        private readonly ulong _end;
+
+        public GappedHostMemory(ulong @base)
+        {
+            _base = @base;
+            _firstGapStart = @base + 0x1000;
+            _firstGapEnd = @base + 0x2000;
+            _secondGapStart = @base + 0x3000;
+            _secondGapEnd = @base + 0x4000;
+            _end = @base + 0x4000;
+        }
+
+        public List<(ulong Address, ulong Size)> AllocationCalls { get; } = [];
+        public List<ulong> FreedAddresses { get; } = [];
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            AllocationCalls.Add((desiredAddress, size));
+
+            // First free gap — succeed.
+            if (desiredAddress == _firstGapStart && size == 0x1000)
+            {
+                return desiredAddress;
+            }
+
+            // Second free gap — fail to trigger rollback.
+            return 0;
+        }
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address)
+        {
+            FreedAddresses.Add(address);
+            return true;
+        }
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (address < _firstGapStart)
+            {
+                // First block: committed.
+                info = new HostRegionInfo(address, _base, _firstGapStart - address,
+                    HostRegionState.Committed, RawState: 0x1000,
+                    HostPageProtection.ReadWrite, RawProtection: 0x04, RawAllocationProtection: 0x04);
+                return true;
+            }
+
+            if (address < _firstGapEnd)
+            {
+                // Second block: free (first gap).
+                info = new HostRegionInfo(address, AllocationBase: 0, _firstGapEnd - address,
+                    HostRegionState.Free, RawState: 0x10000,
+                    HostPageProtection.NoAccess, RawProtection: 0x01, RawAllocationProtection: 0);
+                return true;
+            }
+
+            if (address < _secondGapStart)
+            {
+                // Third block: committed.
+                info = new HostRegionInfo(address, _base + 0x2000, _secondGapStart - address,
+                    HostRegionState.Committed, RawState: 0x1000,
+                    HostPageProtection.ReadWrite, RawProtection: 0x04, RawAllocationProtection: 0x04);
+                return true;
+            }
+
+            // Fourth block: free (second gap — this one will fail to allocate).
+            info = new HostRegionInfo(address, AllocationBase: 0, _end - address,
+                HostRegionState.Free, RawState: 0x10000,
+                HostPageProtection.NoAccess, RawProtection: 0x01, RawAllocationProtection: 0);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size) { }
+
+        public void Dispose() { }
     }
 
     private sealed class FakeHostMemory : IHostMemory
