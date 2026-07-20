@@ -1612,6 +1612,11 @@ public static class Gen5ShaderTranslator
             binding.ResourceDescriptor.SequenceEqual(candidate.ResourceDescriptor));
     }
 
+    public static bool IsArrayedImageBinding(Gen5ImageBinding binding) =>
+        binding.Control.IsArray &&
+        (binding.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
+         binding.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal));
+
     public static bool IsDataShareAtomic(string name) => name switch
     {
         "DsAddU32" or "DsSubU32" or "DsIncU32" or "DsDecU32" or

@@ -231,12 +231,14 @@ internal static class GnmTiling
         out ulong byteOffset,
         out bool inMipTail,
         out int tailElementX,
-        out int tailElementY)
+        out int tailElementY,
+        out ulong chainSliceBytes)
     {
         byteOffset = 0;
         inMipTail = false;
         tailElementX = 0;
         tailElementY = 0;
+        chainSliceBytes = 0;
         if (resourceMipLevels <= 1 ||
             !ShouldDetile(swizzleMode) ||
             elementsWide <= 0 ||
@@ -331,13 +333,20 @@ internal static class GnmTiling
             }
 
             inMipTail = true;
+            chainSliceBytes = (ulong)blockBytes;
             return true;
         }
 
         byteOffset = firstMipInTail < mipLevels ? (ulong)blockBytes : 0;
+        chainSliceBytes = byteOffset;
         for (var i = firstMipInTail - 1; i >= 1; i--)
         {
             byteOffset += mipSizes[i];
+        }
+
+        for (var i = 0; i < firstMipInTail; i++)
+        {
+            chainSliceBytes += mipSizes[i];
         }
 
         return true;
