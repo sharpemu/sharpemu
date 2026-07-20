@@ -198,6 +198,10 @@ public static class VideoOutExports
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
         public int CurrentBuffer { get; set; } = -1;
+
+        // The flip token the guest passed to its most recent flip submission,
+        // reported back through SceVideoOutFlipStatus.flipArg.
+        public long LastFlipArg { get; set; }
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
         public uint RefreshRate { get; set; } = 60;
@@ -710,17 +714,32 @@ public static class VideoOutExports
 
         ulong count;
         uint currentBuffer;
+        long flipArg;
         lock (_stateGate)
         {
             count = port.FlipCount;
             currentBuffer = unchecked((uint)port.CurrentBuffer);
+            flipArg = port.LastFlipArg;
         }
 
+        // SceVideoOutFlipStatus is a 0x40-byte struct:
+        //   0x00 count, 0x08 processTime, 0x10 tsc, 0x18 flipArg,
+        //   0x20 submitTsc, 0x28 reserved0, 0x30 gcQueueNum,
+        //   0x34 flipPendingNum, 0x38 currentBuffer, 0x3C reserved1.
+        // currentBuffer was being written at 0x20 (the submitTsc slot), so its
+        // real field at 0x38 stayed stale and the flipArg the guest submitted
+        // was never reported. Titles that read flipArg/currentBuffer from this
+        // struct therefore saw wrong values.
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, unchecked((ulong)flipArg));
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, 0);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
+        // gcQueueNum (0x30) and flipPendingNum (0x34) together in one 64-bit
+        // write, then currentBuffer (0x38) with reserved1 (0x3C) zeroed above it.
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x30, 0);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x38, currentBuffer);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1159,6 +1178,7 @@ public static class VideoOutExports
 
             port.CurrentBuffer = bufferIndex;
             port.FlipCount++;
+            port.LastFlipArg = flipArg;
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;
