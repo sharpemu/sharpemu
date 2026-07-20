@@ -267,6 +267,11 @@ public static partial class KernelMemoryCompatExports
         }
 
         var hostPath = ResolveGuestPath(guestPath);
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
         try
         {
             using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
@@ -310,6 +315,11 @@ public static partial class KernelMemoryCompatExports
 
         var fromHost = ResolveGuestPath(fromGuest);
         var toHost = ResolveGuestPath(toGuest);
+        if (string.IsNullOrEmpty(fromHost) || string.IsNullOrEmpty(toHost))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
         try
         {
             if (Directory.Exists(fromHost))

@@ -1,0 +1,67 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.Kernel;
+using Xunit;
+
+namespace SharpEmu.Libs.Tests.Kernel;
+
+// The kernel path resolver is the guest->host sandbox boundary: every real
+// file syscall (open/stat/unlink/mkdir/rmdir/rename/chmod) maps a guest path
+// to a host path through KernelMemoryCompatExports.ResolveGuestPath and then
+// hands the result straight to the host filesystem. These tests pin the
+// containment guarantees: an unmapped or absolute guest path must resolve to
+// nothing (default-deny), and a mount-relative path must never escape its root.
+[Collection(KernelMemoryCompatStateCollection.Name)]
+public sealed class KernelSandboxEscapeTests : IDisposable
+{
+    private readonly string? _originalApp0;
+    private readonly string _tempRoot;
+    private readonly string _app0Root;
+
+    public KernelSandboxEscapeTests()
+    {
+        _originalApp0 = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        _tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-sandbox-{Guid.NewGuid():N}");
+        _app0Root = Path.Combine(_tempRoot, "app0");
+        Directory.CreateDirectory(_app0Root);
+        Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _app0Root);
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _originalApp0);
+        if (Directory.Exists(_tempRoot))
+        {
+            Directory.Delete(_tempRoot, recursive: true);
+        }
+    }
+
+    // Finding #1: an absolute guest path that matches no mount prefix used to be
+    // returned verbatim, letting the guest open arbitrary host files.
+    [Theory]
+    [InlineData("/etc/passwd")]
+    [InlineData("/etc/shadow")]
+    [InlineData("/root/.ssh/id_rsa")]
+    [InlineData("C:\\Windows\\System32\\drivers\\etc\\hosts")]
+    [InlineData("\\\\server\\share\\secret")]
+    [InlineData("/proc/self/mem")]
+    public void ResolveGuestPath_UnmappedAbsolutePathIsDenied(string guestPath)
+    {
+        Assert.Equal(string.Empty, KernelMemoryCompatExports.ResolveGuestPath(guestPath));
+    }
+
+    // A recognized mount prefix must still resolve to a path under its root, so
+    // the default-deny does not regress legitimate access.
+    [Fact]
+    public void ResolveGuestPath_App0PathResolvesUnderApp0Root()
+    {
+        var resolved = KernelMemoryCompatExports.ResolveGuestPath("/app0/game.bin");
+
+        Assert.False(string.IsNullOrEmpty(resolved));
+        var rootWithSep = Path.TrimEndingDirectorySeparator(_app0Root) + Path.DirectorySeparatorChar;
+        Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
+    }
+}

@@ -1448,6 +1448,13 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
+        // A denied path (empty host path) must not reach FileStream, which would
+        // throw an ArgumentException the catch below does not cover.
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            LogOpenTrace($"_open denied path='{guestPath}' flags=0x{flags:X8}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
         try
         {
             if (Bink2MovieBridge.ShouldSkipGuestMovie(hostPath))
@@ -4886,7 +4893,13 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        return guestPath;
+        // Default-deny: a guest path that matched no mount prefix must NOT be
+        // handed back verbatim as a host path. Returning it raw let any absolute
+        // guest path address the host filesystem directly ("/etc/passwd",
+        // "C:\\Windows\\...") because it is already fully qualified and skips the
+        // relative-path app0 fallback above. Callers treat an empty host path as
+        // "resolves to nothing" and fail the syscall with NOT_FOUND.
+        return string.Empty;
     }
 
     private static bool TryResolveRegisteredGuestMount(string guestPath, out string hostPath)
