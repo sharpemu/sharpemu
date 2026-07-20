@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
+using SharpEmu.Core;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using Xunit;
@@ -125,6 +127,121 @@ public sealed class SelfLoaderTests
         Assert.Equal(62, image.ElfHeader.Machine);
         Assert.Empty(image.ProgramHeaders);
         Assert.Empty(image.MappedRegions);
+    }
+
+    [Fact]
+    public void Load_ResolvesParamJsonFromParentWhenEbootIsInDecryptedSidecar()
+    {
+        // Dump layout: the decrypted eboot lives in <root>/decrypted, but the
+        // real param.json sits in the parent <root>/sce_sys. mountRoot is the
+        // decrypted folder, so only the parent candidate can resolve it.
+        var imageData = new byte[ElfHeaderSize];
+        WriteMinimalElfHeader(imageData);
+        var fs = new FakeFileSystem();
+        fs.AddParamJson(
+            "C:/game/sce_sys/param.json",
+            titleId: "PPSA12345",
+            titleName: "Sidecar Title",
+            contentVersion: "01.002.000");
+
+        var image = new SelfLoader().Load(
+            imageData,
+            new VirtualMemory(),
+            fs,
+            mountRoot: "C:/game/decrypted");
+
+        Assert.Equal("Sidecar Title", image.Title);
+        Assert.Equal("PPSA12345", image.TitleId);
+        Assert.Equal("01.002.000", image.Version);
+    }
+
+    [Fact]
+    public void Load_PrefersDecryptedParamJsonOverParentWhenBothExist()
+    {
+        // First match wins: a param.json inside the decrypted folder itself must
+        // still take precedence over the parent fallback, so this change never
+        // reroutes a layout that already resolved.
+        var imageData = new byte[ElfHeaderSize];
+        WriteMinimalElfHeader(imageData);
+        var fs = new FakeFileSystem();
+        fs.AddParamJson(
+            "C:/game/decrypted/sce_sys/param.json",
+            titleId: "PPSA00001",
+            titleName: "Decrypted Title",
+            contentVersion: "01.000.000");
+        fs.AddParamJson(
+            "C:/game/sce_sys/param.json",
+            titleId: "PPSA99999",
+            titleName: "Parent Title",
+            contentVersion: "09.000.000");
+
+        var image = new SelfLoader().Load(
+            imageData,
+            new VirtualMemory(),
+            fs,
+            mountRoot: "C:/game/decrypted");
+
+        Assert.Equal("Decrypted Title", image.Title);
+        Assert.Equal("PPSA00001", image.TitleId);
+    }
+
+    [Fact]
+    public void Load_DoesNotSearchParentWhenMountRootIsNotDecryptedSidecar()
+    {
+        // A normal (non-"decrypted") mount root must not gain the parent
+        // fallback: a param.json one level up is unrelated and must not be
+        // adopted. The load resolves nothing and Title stays null.
+        var imageData = new byte[ElfHeaderSize];
+        WriteMinimalElfHeader(imageData);
+        var fs = new FakeFileSystem();
+        fs.AddParamJson(
+            "C:/game/sce_sys/param.json",
+            titleId: "PPSA55555",
+            titleName: "Parent Title",
+            contentVersion: "01.000.000");
+
+        var image = new SelfLoader().Load(
+            imageData,
+            new VirtualMemory(),
+            fs,
+            mountRoot: "C:/game/app");
+
+        Assert.Null(image.Title);
+        Assert.Null(image.TitleId);
+    }
+
+    private sealed class FakeFileSystem : IFileSystem
+    {
+        private readonly Dictionary<string, byte[]> _files = new(StringComparer.Ordinal);
+
+        // The production code composes parent candidates with Path.GetDirectoryName,
+        // which yields a backslash separator on Windows, while other candidates keep
+        // the forward slashes from mountRoot. The real OS treats both as equivalent,
+        // so normalize here to mirror that rather than fail on separator style.
+        private static string Normalize(string path) => path.Replace('\\', '/');
+
+        public void AddParamJson(string path, string titleId, string titleName, string contentVersion)
+        {
+            var json =
+                $"{{\"titleId\":\"{titleId}\",\"contentVersion\":\"{contentVersion}\"," +
+                $"\"localizedParameters\":{{\"defaultLanguage\":\"en-US\"," +
+                $"\"en-US\":{{\"titleName\":\"{titleName}\"}}}}}}";
+            _files[Normalize(path)] = Encoding.UTF8.GetBytes(json);
+        }
+
+        public bool Exists(string path) => _files.ContainsKey(Normalize(path));
+
+        public bool TryReadAllBytes(string path, out byte[] data)
+        {
+            if (_files.TryGetValue(Normalize(path), out var stored))
+            {
+                data = stored;
+                return true;
+            }
+
+            data = Array.Empty<byte>();
+            return false;
+        }
     }
 
     private static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)

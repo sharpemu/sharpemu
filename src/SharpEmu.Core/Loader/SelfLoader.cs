@@ -321,9 +321,40 @@ public sealed class SelfLoader : ISelfLoader
             return default;
         }
 
-        string[] possiblePaths = string.IsNullOrEmpty(mountRoot)
-            ? new[] { "sce_sys/param.json", "param.json" }
-            : new[] { $"{mountRoot}/sce_sys/param.json", $"{mountRoot}/param.json" };
+        var possiblePaths = new List<string>(4);
+        if (string.IsNullOrEmpty(mountRoot))
+        {
+            possiblePaths.Add("sce_sys/param.json");
+            possiblePaths.Add("param.json");
+        }
+        else
+        {
+            possiblePaths.Add($"{mountRoot}/sce_sys/param.json");
+            possiblePaths.Add($"{mountRoot}/param.json");
+
+            // Dump tools commonly place the decrypted eboot in a "decrypted"
+            // sidecar while leaving the real sce_sys/param.json (and the rest of
+            // the game data) in the parent app0 directory. BindApp0Root already
+            // mounts /app0 at that parent for the same layout; mirror it here so
+            // param.json resolution agrees with the guest filesystem mount
+            // instead of only searching the near-empty decrypted subfolder.
+            // Appended after the primary candidates, so packaged layouts that
+            // already resolve are unaffected (first match wins); the parent
+            // candidates take effect only when the decrypted folder lacks
+            // param.json and the parent actually has it.
+            if (string.Equals(
+                    Path.GetFileName(mountRoot),
+                    "decrypted",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                var parentRoot = Path.GetDirectoryName(mountRoot);
+                if (!string.IsNullOrEmpty(parentRoot))
+                {
+                    possiblePaths.Add($"{parentRoot}/sce_sys/param.json");
+                    possiblePaths.Add($"{parentRoot}/param.json");
+                }
+            }
+        }
 
         string? foundPath = null;
         foreach (var path in possiblePaths)
