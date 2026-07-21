@@ -341,6 +341,18 @@ public static class AmprExports
     }
 
     [SysAbiExport(
+        Nid = "4fgtGfXDrFc",
+        ExportName = "sceAmprMeasureCommandSizeWriteAddress_04_00",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureCommandSizeWriteAddress0400(CpuContext ctx)
+    {
+        TraceAmpr(ctx, "measure_write_address", 0, WriteAddressRecordSize, 0);
+        ctx[CpuRegister.Rax] = WriteAddressRecordSize;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "tZDDEo2tE5k",
         ExportName = "sceAmprCommandBufferGetSize",
         Target = Generation.Gen5,
@@ -505,6 +517,32 @@ public static class AmprExports
         }
 
         TraceAmpr(ctx, "write_address_complete", commandBuffer, address, value);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "j0+3uJMxYJY",
+        ExportName = "sceAmprCommandBufferWriteAddress_04_00",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferWriteAddress0400(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var value = ctx[CpuRegister.Rdx];
+
+        if (commandBuffer == 0 || address == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!AppendWriteAddressRecord(ctx, commandBuffer, address, value))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        TraceAmpr(ctx, "write_address", commandBuffer, address, value);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
