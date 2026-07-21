@@ -33,8 +33,9 @@ public static class Gen5ShaderScalarEvaluator
             Environment.GetEnvironmentVariable("SHARPEMU_STRICT_BUFFER_LOAD"),
             "1",
             StringComparison.Ordinal);
-    private static readonly object _scalarFallbackTraceGate = new();
+    private static readonly object _fallbackTraceGate = new();
     private static readonly HashSet<(ulong Shader, uint Pc)> _tracedScalarFallbacks = [];
+    private static readonly HashSet<(ulong Shader, uint Pc)> _tracedBufferFallbacks = [];
 
     // Uniform forward branches select material/resource bodies that remain
     // statically present in the translated shader. Discover the skipped body's
@@ -457,11 +458,12 @@ public static class Gen5ShaderScalarEvaluator
                             bufferMemory.ScalarResource,
                             0,
                             new List<uint> { instruction.Pc },
-                            new byte[sizeof(uint)],
+                            RentZeroedGlobalMemory(sizeof(uint)),
                             sizeof(uint),
-                            DataPooled: false)
+                            DataPooled: true)
                         {
                             Writable = writable,
+                            WriteBackToGuest = false,
                         };
                         globalMemoryByAddress.Add(nullKey, binding);
                         globalMemoryBindings.Add(binding);
@@ -542,7 +544,7 @@ public static class Gen5ShaderScalarEvaluator
                 }
                 else
                 {
-                    var dataPooled = true;
+                    var writeBackToGuest = true;
                     if (!TryReadGlobalMemory(
                             ctx,
                             bufferDescriptor.BaseAddress,
@@ -550,12 +552,11 @@ public static class Gen5ShaderScalarEvaluator
                             out var data,
                             out var dataLength))
                     {
-                        var descriptorWords = string.Join(
-                            ':',
-                            Enumerable.Range(0, 4).Select(index =>
-                                $"{scalarRegisters[bufferMemory.ScalarResource + (uint)index]:X8}"));
                         if (_strictBufferLoad)
                         {
+                            var descriptorWords = FormatBufferDescriptorWords(
+                                scalarRegisters,
+                                bufferMemory.ScalarResource);
                             error =
                                 $"buffer-memory-read-failed pc=0x{instruction.Pc:X} " +
                                 $"address=0x{bufferDescriptor.BaseAddress:X16} " +
@@ -568,14 +569,15 @@ public static class Gen5ShaderScalarEvaluator
                         dataLength = checked((int)Math.Min(
                             bufferDescriptor.SizeBytes,
                             (ulong)MaxGlobalMemoryBindingBytes));
-                        data = new byte[Math.Max(dataLength, sizeof(uint))];
-                        dataLength = data.Length;
-                        dataPooled = false;
-                        Console.Error.WriteLine(
-                            $"[LOADER][WARN] AGC buffer read unavailable; using zero buffer " +
-                            $"pc=0x{instruction.Pc:X} address=0x{bufferDescriptor.BaseAddress:X16} " +
-                            $"bytes={bufferDescriptor.SizeBytes} guest_writeback=disabled " +
-                            $"s{bufferMemory.ScalarResource}=[{descriptorWords}]");
+                        dataLength = Math.Max(dataLength, sizeof(uint));
+                        data = RentZeroedGlobalMemory(dataLength);
+                        writeBackToGuest = false;
+                        TraceBufferFallback(
+                            state,
+                            instruction,
+                            bufferMemory.ScalarResource,
+                            bufferDescriptor,
+                            scalarRegisters);
                     }
 
                     var binding = new Gen5GlobalMemoryBinding(
@@ -584,10 +586,10 @@ public static class Gen5ShaderScalarEvaluator
                         new List<uint> { instruction.Pc },
                         data,
                         dataLength,
-                        DataPooled: dataPooled)
+                        DataPooled: true)
                     {
                         Writable = writable,
-                        WriteBackToGuest = dataPooled,
+                        WriteBackToGuest = writeBackToGuest,
                     };
                     globalMemoryByAddress.Add(key, binding);
                     globalMemoryBindings.Add(binding);
@@ -988,6 +990,14 @@ public static class Gen5ShaderScalarEvaluator
     public static void EndGlobalMemoryReadScope()
     {
     }
+
+    private static byte[] RentZeroedGlobalMemory(int dataLength)
+    {
+        var data = GlobalMemoryPool.Rent(Math.Max(dataLength, sizeof(uint)));
+        data.AsSpan(0, Math.Max(dataLength, sizeof(uint))).Clear();
+        return data;
+    }
+
     private static bool TryReadGlobalMemory(
         CpuContext ctx,
         ulong baseAddress,
@@ -2066,7 +2076,7 @@ public static class Gen5ShaderScalarEvaluator
         ulong baseAddress,
         ulong dynamicOffset)
     {
-        lock (_scalarFallbackTraceGate)
+        lock (_fallbackTraceGate)
         {
             if (!_tracedScalarFallbacks.Add((state.Program.Address, instruction.Pc)))
             {
@@ -2102,6 +2112,37 @@ public static class Gen5ShaderScalarEvaluator
             $"user_data=[{userData}] metadata=" +
             $"{(state.Metadata is null ? "missing" : $"srt={state.Metadata.ShaderResourceTableSizeDwords},eud={state.Metadata.ExtendedUserDataSizeDwords}")}");
     }
+
+    private static void TraceBufferFallback(
+        Gen5ShaderState state,
+        Gen5ShaderInstruction instruction,
+        uint scalarResource,
+        BufferDescriptor descriptor,
+        IReadOnlyList<uint> scalarRegisters)
+    {
+        lock (_fallbackTraceGate)
+        {
+            if (!_tracedBufferFallbacks.Add((state.Program.Address, instruction.Pc)))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] AGC buffer read unavailable; using zero buffer " +
+            $"shader=0x{state.Program.Address:X16} pc=0x{instruction.Pc:X} " +
+            $"address=0x{descriptor.BaseAddress:X16} bytes={descriptor.SizeBytes} " +
+            $"guest_writeback=disabled s{scalarResource}=" +
+            $"[{FormatBufferDescriptorWords(scalarRegisters, scalarResource)}]");
+    }
+
+    private static string FormatBufferDescriptorWords(
+        IReadOnlyList<uint> scalarRegisters,
+        uint scalarResource) =>
+        $"{scalarRegisters[(int)scalarResource]:X8}:" +
+        $"{scalarRegisters[(int)scalarResource + 1]:X8}:" +
+        $"{scalarRegisters[(int)scalarResource + 2]:X8}:" +
+        $"{scalarRegisters[(int)scalarResource + 3]:X8}";
 
     [Conditional("DEBUG")]
     private static void RunScalarLoadSelfChecks()
