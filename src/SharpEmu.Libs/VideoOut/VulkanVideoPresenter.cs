@@ -11105,6 +11105,65 @@ internal static unsafe class VulkanVideoPresenter
             target.Initialized = true;
         }
 
+        // Returns the source row length in texels when the upload is a linear
+        // image whose rows are padded to a wider hardware pitch, or 0 when the
+        // data is an exact tightly packed match or not a recognisable padded
+        // layout (in which case the caller keeps rejecting it). Only a pitch
+        // equal to the width rounded up to a common alignment is accepted, so an
+        // oversized buffer that still carries mip data is left rejected rather
+        // than mis-copied.
+        private static uint TryGetPaddedUploadRowLength(
+            GuestImageResource target,
+            ulong uploadByteCount,
+            ulong expectedByteCount)
+        {
+            if (expectedByteCount == 0
+                || target.Width == 0
+                || target.Height == 0
+                || uploadByteCount <= expectedByteCount)
+            {
+                return 0;
+            }
+
+            var texelCount = (ulong)target.Width * target.Height;
+            if (texelCount == 0 || expectedByteCount % texelCount != 0)
+            {
+                // Block-compressed or otherwise non-linear: no per-texel pitch.
+                return 0;
+            }
+
+            var bytesPerTexel = expectedByteCount / texelCount;
+            if (bytesPerTexel == 0 || uploadByteCount % target.Height != 0)
+            {
+                return 0;
+            }
+
+            var rowBytes = uploadByteCount / target.Height;
+            if (rowBytes % bytesPerTexel != 0)
+            {
+                return 0;
+            }
+
+            var rowTexels = rowBytes / bytesPerTexel;
+            if (rowTexels < target.Width || rowTexels > uint.MaxValue)
+            {
+                return 0;
+            }
+
+            foreach (var alignment in (ReadOnlySpan<uint>)[8, 16, 32, 64, 128, 256])
+            {
+                if (AlignUp(target.Width, alignment) == rowTexels)
+                {
+                    return (uint)rowTexels;
+                }
+            }
+
+            return 0;
+        }
+
+        private static uint AlignUp(uint value, uint alignment) =>
+            (value + alignment - 1) / alignment * alignment;
+
         private void UploadGuestImageInitialData(GuestImageResource target, byte[] pixels)
         {
             var guestDataFormat = (target.GuestFormat & 0x8000_0000u) != 0
@@ -11117,7 +11176,19 @@ internal static unsafe class VulkanVideoPresenter
                 target.Format,
                 target.Width,
                 target.Height);
-            if (expectedByteCount == 0 || (ulong)uploadPixels.Length != expectedByteCount)
+
+            // The guest can hand us linear pixel data whose rows are padded out
+            // to a hardware pitch wider than the image, so the byte count runs
+            // past the tightly packed width*height*bpp we compute. Recover the
+            // real source row length and copy with it instead of dropping the
+            // upload, which would otherwise leave the texture blank.
+            var uploadRowLengthTexels = TryGetPaddedUploadRowLength(
+                target,
+                (ulong)uploadPixels.Length,
+                expectedByteCount);
+            if (expectedByteCount == 0
+                || ((ulong)uploadPixels.Length != expectedByteCount
+                    && uploadRowLengthTexels == 0))
             {
                 if (_rejectedGuestImageUploads.Add(
                         (target.Address, uploadPixels.Length, expectedByteCount, target.Format)))
@@ -11191,7 +11262,7 @@ internal static unsafe class VulkanVideoPresenter
                 var copyRegion = new BufferImageCopy
                 {
                     BufferOffset = 0,
-                    BufferRowLength = 0,
+                    BufferRowLength = uploadRowLengthTexels,
                     BufferImageHeight = 0,
                     ImageSubresource = new ImageSubresourceLayers(
                         ImageAspectFlags.ColorBit,

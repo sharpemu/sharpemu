@@ -714,8 +714,9 @@ public sealed class SelfLoader : ISelfLoader
 
         importedRelocations = BuildImportedRelocations(descriptors);
 
+        var stubEligibleNids = CollectStubEligibleNids(descriptors, moduleManager);
         var stubImportNids = orderedImportNids
-            .Where(nid => ShouldCreateImportStub(nid, descriptors, moduleManager))
+            .Where(stubEligibleNids.Contains)
             .ToArray();
         var stubsByAddress = CreateImportStubMapping(virtualMemory, stubImportNids);
         Console.WriteLine($"[LOADER] Created {stubsByAddress.Count} import stubs");
@@ -1158,6 +1159,35 @@ public sealed class SelfLoader : ISelfLoader
             IsDataImport: GetSymbolType(symbol.Info) == SymbolTypeObject,
             writeKind,
             isWeak);
+    }
+
+    // Collects every NID that needs a trap import stub in a single pass over the
+    // descriptors. This mirrors ShouldCreateImportStub applied per NID, but avoids
+    // the O(nids * descriptors) rescan that filtering each unique NID against the
+    // full descriptor list would incur on large modules. A NID qualifies as soon as
+    // one of its descriptors is non-weak, or is weak but resolvable via the module
+    // manager.
+    private static HashSet<string> CollectStubEligibleNids(
+        IReadOnlyList<RelocationDescriptor> descriptors,
+        IModuleManager? moduleManager)
+    {
+        var eligible = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < descriptors.Count; i++)
+        {
+            var descriptor = descriptors[i];
+            var nid = descriptor.ImportNid;
+            if (nid is null || eligible.Contains(nid))
+            {
+                continue;
+            }
+
+            if (!descriptor.IsWeak || moduleManager?.TryGetExport(nid, out _) == true)
+            {
+                eligible.Add(nid);
+            }
+        }
+
+        return eligible;
     }
 
     private static bool ShouldCreateImportStub(
@@ -2431,6 +2461,19 @@ public sealed class SelfLoader : ISelfLoader
         Debug.Assert(
             !ShouldCreateImportStub("weak", [weak], moduleManager: null),
             "An unresolved weak symbol incorrectly received a trap import stub.");
+
+        var strong = new RelocationDescriptor(
+            TargetAddress: 0x3000,
+            Addend: 0,
+            ImportNid: "strong",
+            SymbolValue: 0,
+            RelocationValueKind.Pointer,
+            IsDataImport: false);
+        var mixed = new List<RelocationDescriptor> { weak, strong };
+        var eligible = CollectStubEligibleNids(mixed, moduleManager: null);
+        Debug.Assert(
+            eligible.Contains("strong") && !eligible.Contains("weak"),
+            "CollectStubEligibleNids disagreed with the per-NID stub eligibility rule.");
     }
 
     private static ulong AlignUp(ulong value, ulong alignment)

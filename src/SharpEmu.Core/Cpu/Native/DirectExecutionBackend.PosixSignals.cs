@@ -50,6 +50,19 @@ public sealed unsafe partial class DirectExecutionBackend
 	private const int LinuxUcontextGregsOffset = 40;
 	private const int LinuxGregsErrOffset = 19 * 8;
 
+	// The kernel's x86-64 sigcontext places the FXSAVE-image pointer right
+	// after the general registers it hands to the handler: err(152)
+	// trapno(160) oldmask(168) cr2(176) fpstate(184), all relative to
+	// GetPosixRegisterBase. glibc and musl both overlay this kernel layout
+	// verbatim (glibc's mcontext_t.fpregs is the same slot), so the offset
+	// is libc-independent. Inside the FXSAVE image the XMM registers start
+	// at +160 (32-byte header + 8 legacy x87/MMX slots x 16 bytes) - the
+	// same relative position they occupy in the Win64 CONTEXT's FltSave
+	// area (Win64ContextXmm0Offset = 256 + 160).
+	private const int LinuxGregsFpstateOffset = 184;
+	private const int FxsaveXmmOffset = 160;
+	private const int XmmBlockSize = 16 * 16;
+
 	// Byte offsets of the general registers relative to GetPosixRegisterBase,
 	// ordered to match the contiguous Win64 CONTEXT block CTX_RAX..CTX_RIP
 	// (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15, rip). Verified
@@ -70,6 +83,15 @@ public sealed unsafe partial class DirectExecutionBackend
 
 	[ThreadStatic]
 	private static int _posixSignalHandlerDepth;
+
+	// True while the current thread's in-flight POSIX fault carries the real
+	// XMM registers in the CONTEXT scratch buffer and writes to them will
+	// reach the mcontext on resume. Gates recovery paths (SSE4a EXTRQ/
+	// INSERTQ) that would otherwise compute results from a zeroed XMM area
+	// and silently discard what they "wrote". Darwin is not bridged yet, so
+	// the flag stays false there.
+	[ThreadStatic]
+	private static bool _posixXmmContextBridged;
 
 	private void SetupPosixExceptionHandler()
 	{
@@ -252,6 +274,26 @@ public sealed unsafe partial class DirectExecutionBackend
 			WriteCtxU64(contextRecord, CTX_RAX + i * 8, *(ulong*)(registers + offsets[i]));
 		}
 
+		// Bridge the XMM registers alongside the GPRs where the layout is
+		// known: on Linux the fpstate pointer and FXSAVE image are kernel
+		// ABI, so recovery paths that read or write XMM state (SSE4a
+		// EXTRQ/INSERTQ) see the live registers and their writes reach the
+		// guest through sigreturn.
+		byte* fpstate = null;
+		if (OperatingSystem.IsLinux())
+		{
+			fpstate = *(byte**)(registers + LinuxGregsFpstateOffset);
+			if (fpstate != null)
+			{
+				Buffer.MemoryCopy(
+					fpstate + FxsaveXmmOffset,
+					contextRecord + Win64ContextXmm0Offset,
+					XmmBlockSize,
+					XmmBlockSize);
+			}
+		}
+		_posixXmmContextBridged = fpstate != null;
+
 		EXCEPTION_RECORD record = default;
 		record.ExceptionAddress = (void*)ReadCtxU64(contextRecord, CTX_RIP);
 		if (signal == PosixSigIll)
@@ -316,6 +358,14 @@ public sealed unsafe partial class DirectExecutionBackend
 		for (int i = 0; i < offsets.Length; i++)
 		{
 			*(ulong*)(registers + offsets[i]) = ReadCtxU64(contextRecord, CTX_RAX + i * 8);
+		}
+		if (fpstate != null)
+		{
+			Buffer.MemoryCopy(
+				contextRecord + Win64ContextXmm0Offset,
+				fpstate + FxsaveXmmOffset,
+				XmmBlockSize,
+				XmmBlockSize);
 		}
 		return true;
 	}

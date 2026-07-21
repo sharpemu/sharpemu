@@ -25,6 +25,10 @@ internal static class AudioPcmConversion
         float volume)
     {
         var sourceFrameSize = checked(channels * bytesPerSample);
+        // Volume is constant for the whole submission, so clamp it once here
+        // rather than per sample inside the loop (this runs on every real-time
+        // audio buffer, hundreds of frames at a time).
+        var clampedVolume = Math.Clamp(volume, 0.0f, 1.0f);
         for (var frame = 0; frame < frames; frame++)
         {
             var sourceFrame = source.Slice(frame * sourceFrameSize, sourceFrameSize);
@@ -32,8 +36,8 @@ internal static class AudioPcmConversion
             var right = channels == 1
                 ? left
                 : ReadSample(sourceFrame, 1, bytesPerSample, isFloat);
-            left = ApplyVolume(left, volume);
-            right = ApplyVolume(right, volume);
+            left = ApplyVolume(left, clampedVolume);
+            right = ApplyVolume(right, clampedVolume);
             BinaryPrimitives.WriteInt16LittleEndian(destination[(frame * OutputFrameSize)..], left);
             BinaryPrimitives.WriteInt16LittleEndian(destination[((frame * OutputFrameSize) + 2)..], right);
         }
@@ -67,9 +71,10 @@ internal static class AudioPcmConversion
         return checked((short)MathF.Round(value * scale));
     }
 
+    // <paramref name="volume"/> is expected pre-clamped to [0, 1] by the caller.
     private static short ApplyVolume(short sample, float volume)
     {
-        var scaled = MathF.Round(sample * Math.Clamp(volume, 0.0f, 1.0f));
+        var scaled = MathF.Round(sample * volume);
         return (short)Math.Clamp(scaled, short.MinValue, short.MaxValue);
     }
 }

@@ -1448,6 +1448,13 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
+        // A denied path (empty host path) must not reach FileStream, which would
+        // throw an ArgumentException the catch below does not cover.
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            LogOpenTrace($"_open denied path='{guestPath}' flags=0x{flags:X8}");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
         try
         {
             if (Bink2MovieBridge.ShouldSkipGuestMovie(hostPath))
@@ -4798,21 +4805,32 @@ public static partial class KernelMemoryCompatExports
             return guestPath;
         }
 
-        if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath))
+        if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath, out var mountPrefixMatched))
         {
             return mountedPath;
+        }
+
+        // A registered mount claimed this path by prefix but denied it (failed
+        // containment or a reparse point inside the mount). That denial is
+        // authoritative: do NOT fall through to the built-in branches below,
+        // which could re-resolve an overlapping prefix (e.g. a registered
+        // "/app0" vs the built-in SHARPEMU_APP0_DIR branch) against a different
+        // root and turn the denial back into a resolution.
+        if (mountPrefixMatched)
+        {
+            return string.Empty;
         }
 
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
         }
 
         if (guestPath.StartsWith("devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["devlog/app/".Length..]);
-            return Path.Combine(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
@@ -4824,7 +4842,7 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/temp0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/temp0/".Length..]);
-            return Path.Combine(ResolveTemp0Root(), relative);
+            return CombineWithinMount(ResolveTemp0Root(), relative);
         }
 
         if (string.Equals(guestPath, "/temp0", StringComparison.OrdinalIgnoreCase))
@@ -4835,13 +4853,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/download0/".Length..]);
-            return Path.Combine(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative);
         }
 
         if (guestPath.StartsWith("download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["download0/".Length..]);
-            return Path.Combine(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative);
         }
 
         if (string.Equals(guestPath, "/download0", StringComparison.OrdinalIgnoreCase) ||
@@ -4853,13 +4871,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/hostapp/".Length..]);
-            return Path.Combine(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative);
         }
 
         if (guestPath.StartsWith("hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["hostapp/".Length..]);
-            return Path.Combine(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative);
         }
 
         if (string.Equals(guestPath, "/hostapp", StringComparison.OrdinalIgnoreCase) ||
@@ -4882,7 +4900,7 @@ public static partial class KernelMemoryCompatExports
                 guestPath.StartsWith("$\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath[2..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (string.Equals(guestPath, "/app0", StringComparison.OrdinalIgnoreCase) ||
@@ -4894,13 +4912,13 @@ public static partial class KernelMemoryCompatExports
             if (guestPath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["/app0/".Length..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (guestPath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["app0/".Length..]);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
 
             if (!Path.IsPathFullyQualified(guestPath) &&
@@ -4908,16 +4926,26 @@ public static partial class KernelMemoryCompatExports
                 !guestPath.StartsWith("\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath);
-                return Path.Combine(app0Root, relative);
+                return CombineWithinMount(app0Root, relative);
             }
         }
 
-        return guestPath;
+        // Default-deny: a guest path that matched no mount prefix must NOT be
+        // handed back verbatim as a host path. Returning it raw let any absolute
+        // guest path address the host filesystem directly ("/etc/passwd",
+        // "C:\\Windows\\...") because it is already fully qualified and skips the
+        // relative-path app0 fallback above. Callers treat an empty host path as
+        // "resolves to nothing" and fail the syscall with NOT_FOUND.
+        return string.Empty;
     }
 
-    private static bool TryResolveRegisteredGuestMount(string guestPath, out string hostPath)
+    private static bool TryResolveRegisteredGuestMount(
+        string guestPath,
+        out string hostPath,
+        out bool mountPrefixMatched)
     {
         hostPath = string.Empty;
+        mountPrefixMatched = false;
         var normalizedGuestPath = NormalizeGuestStatCachePath(guestPath);
         if (normalizedGuestPath is null)
         {
@@ -4945,10 +4973,30 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
+        // A registered mount owns this prefix. Whatever the outcome below
+        // (containment or reparse denial), the caller must NOT fall through to a
+        // built-in branch for the same prefix, or a denied path could be
+        // re-resolved against a different root.
+        mountPrefixMatched = true;
+
         var relativePath = normalizedGuestPath[matchedMountPoint.Length..].TrimStart('/');
-        var candidate = Path.GetFullPath(Path.Combine(
-            matchedHostRoot,
-            NormalizeMountRelativePath(relativePath)));
+        string candidate;
+        try
+        {
+            candidate = Path.GetFullPath(Path.Combine(
+                matchedHostRoot,
+                NormalizeMountRelativePath(relativePath)));
+        }
+        catch (Exception ex) when (
+            ex is IOException or ArgumentException or NotSupportedException)
+        {
+            // The relative part comes from an untrusted guest path; a crafted
+            // over-long or invalid path can make GetFullPath throw. Fail closed
+            // rather than propagate out of ResolveGuestPath (which callers invoke
+            // outside their try blocks).
+            return false;
+        }
+
         var rootWithSeparator = Path.TrimEndingDirectorySeparator(matchedHostRoot) + Path.DirectorySeparatorChar;
         // Host-semantics comparison: an ignore-case check on a case-sensitive
         // host would let a relative path escape into a sibling directory that
@@ -4956,6 +5004,14 @@ public static partial class KernelMemoryCompatExports
         // sibling ".../save").
         if (!string.Equals(candidate, matchedHostRoot, HostFsPathComparison) &&
             !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        {
+            return false;
+        }
+
+        // Textual containment does not follow symlinks/junctions; refuse a
+        // reparse point planted inside the mount that would redirect onto the
+        // host filesystem. See EscapesMountViaReparsePoint.
+        if (EscapesMountViaReparsePoint(Path.GetFullPath(matchedHostRoot), candidate))
         {
             return false;
         }
@@ -5016,6 +5072,116 @@ public static partial class KernelMemoryCompatExports
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
+    }
+
+    // Combines a mount-relative guest path onto a built-in mount root and
+    // re-verifies the result stays under that root. NormalizeMountRelativePath
+    // strips "." / ".." but splits only on separators, so a drive-qualified
+    // token like "C:" survives as a segment; Path.Combine then DISCARDS the
+    // mount root because its second argument is drive-rooted, yielding a raw
+    // host path such as "C:\Windows\...". Re-resolving with Path.GetFullPath and
+    // checking containment (the same guard TryResolveRegisteredGuestMount uses)
+    // rejects that escape. Returns string.Empty on denial, which callers treat
+    // as an unresolved path.
+    private static string CombineWithinMount(string mountRoot, string relative)
+    {
+        string fullRoot;
+        string candidate;
+        try
+        {
+            fullRoot = Path.GetFullPath(mountRoot);
+            candidate = Path.GetFullPath(Path.Combine(fullRoot, relative));
+        }
+        catch (Exception ex) when (
+            ex is IOException or ArgumentException or NotSupportedException)
+        {
+            // The relative part comes from an untrusted guest path; a crafted
+            // over-long or invalid path can make GetFullPath throw. Fail closed
+            // rather than propagate out of ResolveGuestPath (which callers invoke
+            // outside their try blocks).
+            return string.Empty;
+        }
+
+        var rootWithSeparator =
+            Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar;
+        if (!string.Equals(candidate, fullRoot, HostFsPathComparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        {
+            return string.Empty;
+        }
+
+        if (EscapesMountViaReparsePoint(fullRoot, candidate))
+        {
+            return string.Empty;
+        }
+
+        return candidate;
+    }
+
+    // Lexical containment (Path.GetFullPath + StartsWith) proves the TEXTUAL
+    // path stays under the mount root, but it does not follow symlinks or
+    // Windows junctions. A malicious game dump can plant a reparse point inside
+    // an otherwise-contained mount (e.g. "/app0/link" -> "/") so that
+    // "/app0/link/etc/passwd" passes the textual check yet resolves onto the
+    // host filesystem. Walk each already-existing component from the mount root
+    // down to the candidate and refuse if any is a reparse point. Components
+    // that do not yet exist (e.g. an O_CREAT target and its parents) carry no
+    // link to follow and are simply skipped. Mirrors the reparse rejection in
+    // AvPlayerExports.TryResolveSandboxedFile.
+    private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
+    {
+        var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
+        if (string.Equals(candidate, rootTrimmed, HostFsPathComparison))
+        {
+            return false;
+        }
+
+        var relative = Path.GetRelativePath(rootTrimmed, candidate);
+        // A leading ".." segment means the candidate is not under the root. Match
+        // the segment precisely: bare ".." or a "../" prefix, NOT a legitimate
+        // file merely named "..foo". This branch is a defensive fallback (lexical
+        // containment already passed before it runs), so it fails closed.
+        if (relative == "." || relative == ".." || Path.IsPathRooted(relative) ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            // Not actually under the root (should have been caught lexically);
+            // treat as an escape rather than walk outside it.
+            return true;
+        }
+
+        var current = rootTrimmed;
+        foreach (var segment in relative.Split(
+                     Path.DirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Component does not exist yet (create path); nothing to follow.
+                break;
+            }
+            catch (Exception ex) when (
+                ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                // The path comes from an untrusted dump, so a crafted over-long,
+                // invalid-char, or unreadable intermediate component can make
+                // GetAttributes throw. Fail closed: if containment cannot be
+                // verified, treat it as an escape rather than let the exception
+                // crash the syscall (ResolveGuestPath runs outside the callers'
+                // try blocks).
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string ResolveDevlogAppRoot()

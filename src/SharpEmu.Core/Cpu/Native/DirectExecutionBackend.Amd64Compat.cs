@@ -51,12 +51,13 @@ public sealed partial class DirectExecutionBackend
         // round-trips through the real ucontext, so it works on every supported OS. EXTRQ/
         // INSERTQ additionally read and write an XMM register: on Windows contextRecord is the
         // live CONTEXT the OS resumes the thread from, so touching the Xmm0.. slots is visible
-        // to the guest, but on POSIX contextRecord is a CONTEXT-shaped scratch buffer that the
-        // bridge only populates with the 17 general-purpose registers - the XMM region is never
-        // read from or written back to the real mcontext/ucontext. Running this on POSIX would
-        // silently compute a result from stale/zeroed XMM bytes and then discard whatever it
-        // "wrote", so keep it Windows-only, matching Kyty's own scope for the identical fix.
-        return OperatingSystem.IsWindows() && TryRecoverSse4aExtractInsert(contextRecord, rip);
+        // to the guest, and on Linux the bridge copies the mcontext's FXSAVE image into the
+        // Xmm0.. slots and writes them back through sigreturn (_posixXmmContextBridged). On
+        // Darwin the XMM area is still a zeroed scratch buffer - running this there would
+        // silently compute a result from stale bytes and then discard whatever it "wrote", so
+        // the recovery declines until that bridge exists.
+        return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
+            TryRecoverSse4aExtractInsert(contextRecord, rip);
     }
 
     private unsafe bool TryRecoverMonitorxMwaitx(void* contextRecord, ulong rip)
@@ -97,7 +98,8 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe bool TryRecoverSse4aExtractInsert(void* contextRecord, ulong rip)
     {
-        if (!OperatingSystem.IsWindows() || !TryReadFaultingInstruction(rip, out var instruction))
+        if (!OperatingSystem.IsWindows() && !_posixXmmContextBridged ||
+            !TryReadFaultingInstruction(rip, out var instruction))
         {
             return false;
         }

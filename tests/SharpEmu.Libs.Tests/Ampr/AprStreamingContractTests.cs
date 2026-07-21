@@ -24,14 +24,25 @@ public sealed class AprStreamingContractTests
         const ulong destinationAddress = memoryBase + 0x2000;
         const ulong stackAddress = memoryBase + 0x3000;
         byte[] fileContents = [10, 11, 12, 13, 14, 15, 16, 17];
-        var hostPath = Path.GetTempFileName();
+        // The kernel FS resolver default-denies raw absolute host paths, so the
+        // guest addresses the file through a registered mount instead of handing
+        // in a bare host temp path.
+        var mountRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-apr-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(mountRoot);
+        var mountPoint = $"/sharpemu_apr_mnt_{Guid.NewGuid():N}";
+        const string fileName = "asset.bin";
+        var hostPath = Path.Combine(mountRoot, fileName);
+        var guestPath = $"{mountPoint}/{fileName}";
 
         try
         {
             File.WriteAllBytes(hostPath, fileContents);
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, mountRoot);
             var memory = new FakeCpuMemory(memoryBase, 0x4000);
             var context = new CpuContext(memory, Generation.Gen5);
-            memory.WriteCString(pathAddress, hostPath);
+            memory.WriteCString(pathAddress, guestPath);
             WriteUInt64(memory, pathListAddress, pathAddress);
 
             context[CpuRegister.Rdi] = pathListAddress;
@@ -86,7 +97,11 @@ public sealed class AprStreamingContractTests
         }
         finally
         {
-            File.Delete(hostPath);
+            KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            if (Directory.Exists(mountRoot))
+            {
+                Directory.Delete(mountRoot, recursive: true);
+            }
         }
     }
 
@@ -156,19 +171,29 @@ public sealed class AprStreamingContractTests
         const ulong sizesAddress = memoryBase + 0x880;
         const ulong errorIndexAddress = memoryBase + 0x8F0;
         byte[] fileContents = [1, 2, 3, 4, 5];
-        var hostPath = Path.GetTempFileName();
-        var missingHostPath = Path.Combine(
+        // Entries 0 and 2 must resolve to a real file; the kernel FS resolver
+        // default-denies raw absolute host paths, so the present file is reached
+        // through a registered mount. The missing entry stays an unresolvable
+        // path so the batch fails mid-way at index 1.
+        var mountRoot = Path.Combine(
             Path.GetTempPath(),
-            $"sharpemu-apr-missing-{Guid.NewGuid():N}.bin");
+            $"sharpemu-apr-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(mountRoot);
+        var mountPoint = $"/sharpemu_apr_mnt_{Guid.NewGuid():N}";
+        const string fileName = "asset.bin";
+        var hostPath = Path.Combine(mountRoot, fileName);
+        var guestPath = $"{mountPoint}/{fileName}";
+        var missingGuestPath = $"{mountPoint}/missing-{Guid.NewGuid():N}.bin";
 
         try
         {
             File.WriteAllBytes(hostPath, fileContents);
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, mountRoot);
             var memory = new FakeCpuMemory(memoryBase, 0x4000);
             var context = new CpuContext(memory, Generation.Gen5);
-            memory.WriteCString(memoryBase + 0x200, hostPath);
-            memory.WriteCString(memoryBase + 0x400, missingHostPath);
-            memory.WriteCString(memoryBase + 0x600, hostPath);
+            memory.WriteCString(memoryBase + 0x200, guestPath);
+            memory.WriteCString(memoryBase + 0x400, missingGuestPath);
+            memory.WriteCString(memoryBase + 0x600, guestPath);
             WriteUInt64(memory, pathListAddress, memoryBase + 0x200);
             WriteUInt64(memory, pathListAddress + 8, memoryBase + 0x400);
             WriteUInt64(memory, pathListAddress + 16, memoryBase + 0x600);
@@ -192,7 +217,11 @@ public sealed class AprStreamingContractTests
         }
         finally
         {
-            File.Delete(hostPath);
+            KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            if (Directory.Exists(mountRoot))
+            {
+                Directory.Delete(mountRoot, recursive: true);
+            }
         }
     }
 
