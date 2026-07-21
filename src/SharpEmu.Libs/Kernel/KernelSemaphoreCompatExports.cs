@@ -191,6 +191,27 @@ public static class KernelSemaphoreCompatExports
                 WakePredicate,
                 deadline))
         {
+            // A signal may have arrived between releasing the semaphore gate
+            // (after incrementing WaitingThreads) and the scheduler registering
+            // this block.  When that happens WakeBlockedThreads cannot find the
+            // waiter yet and the exit-handler re-check runs later; a re-check
+            // here keeps the thread from yielding to the scheduler at all when
+            // the count is already sufficient.
+            lock (semaphore.Gate)
+            {
+                if (semaphore.Count >= needCount)
+                {
+                    semaphore.Count -= needCount;
+                    semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                    GuestThreadExecution.TryConsumeCurrentThreadBlock(out _);
+                    if (_traceSema)
+                    {
+                        TraceSemaphore($"wait-recheck handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
+                    }
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+                }
+            }
+
             if (_traceSema)
             {
                 TraceSemaphore($"wait-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} waiters={semaphore.WaitingThreads} {FormatCallSite(ctx)}");
