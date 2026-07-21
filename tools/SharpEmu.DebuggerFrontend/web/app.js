@@ -567,7 +567,12 @@ function handleActivityNotification(message) {
 function showToast(title, message, tone = "") {
   const toast = document.createElement("div");
   toast.className = `toast ${tone}`;
-  toast.append(createTextElement("strong", title), createTextElement("span", message));
+  const closeButton = createTextElement("button", "×");
+  closeButton.type = "button";
+  closeButton.className = "toast-close";
+  closeButton.setAttribute("aria-label", "Dismiss notification");
+  closeButton.addEventListener("click", () => toast.remove());
+  toast.append(closeButton, createTextElement("strong", title), createTextElement("span", message));
   byId("toast-stack").append(toast);
   window.setTimeout(() => toast.remove(), 4300);
 }
