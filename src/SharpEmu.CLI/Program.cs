@@ -74,6 +74,7 @@ internal static partial class Program
         // itself to a console before the first write.
         EnsureCliConsole();
         UseUtf8ConsoleOutput();
+        Console.SetError(Console.Out);
         if (isMitigatedChild && TryGetLogFileArgument(args, out var earlyLogFilePath))
         {
             TryEnableConsoleFileMirror(earlyLogFilePath);
@@ -860,7 +861,7 @@ internal static partial class Program
                 };
 
                 Console.SetOut(new TeeTextWriter(Console.Out, _consoleMirrorFile));
-                Console.SetError(new TeeTextWriter(Console.Error, _consoleMirrorFile));
+                Console.SetError(Console.Out);
                 Console.Error.WriteLine($"[DEBUG] Log file: {Path.GetFullPath(path)}");
             }
             catch (Exception ex)

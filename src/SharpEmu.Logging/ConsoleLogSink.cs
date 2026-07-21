@@ -7,8 +7,6 @@ namespace SharpEmu.Logging;
 
 public sealed class ConsoleLogSink : ISharpEmuLogSink
 {
-    private readonly object _sync = new();
-
     public ConsoleLogSink(bool useColors = true, bool includeTimestamp = false)
     {
         UseColors = useColors;
@@ -21,9 +19,10 @@ public sealed class ConsoleLogSink : ISharpEmuLogSink
 
     public void Write(in LogEntry entry)
     {
-        lock (_sync)
+        var writer = entry.Level >= LogLevel.Error ? Console.Error : Console.Out;
+
+        lock (writer)
         {
-            var writer = entry.Level >= LogLevel.Error ? Console.Error : Console.Out;
             if (IncludeTimestamp)
             {
                 writer.Write('[');
