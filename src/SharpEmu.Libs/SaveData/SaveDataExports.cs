@@ -28,6 +28,7 @@ public static class SaveDataExports
     private const ulong ResultInfosOffset = 0x20;
     private const uint SortKeyFreeBlocks = 5;
     private const uint SortOrderDescent = 1;
+    private const uint MountModeReadOnly = 1u << 0;
     private const uint MountModeCreate = 1u << 2;
     private const uint MountModeCreate2 = 1u << 5;
     private const int MountResultSize = 0x40;
@@ -713,16 +714,43 @@ public static class SaveDataExports
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        if (userId < 0 || string.IsNullOrWhiteSpace(dirName))
+        return MountSaveData(
+            ctx,
+            "mount3",
+            userId,
+            ResolveConfiguredTitleId(),
+            dirName,
+            blocks,
+            systemBlocks,
+            mountMode,
+            resource,
+            mode,
+            resultAddress);
+    }
+
+    private static int MountSaveData(
+        CpuContext ctx,
+        string operation,
+        int userId,
+        string titleId,
+        string dirName,
+        ulong blocks,
+        ulong systemBlocks,
+        uint mountMode,
+        uint resource,
+        uint mode,
+        ulong resultAddress)
+    {
+        if (userId < 0 || string.IsNullOrWhiteSpace(titleId) || string.IsNullOrWhiteSpace(dirName))
         {
             return SetReturn(ctx, OrbisSaveDataErrorParameter);
         }
 
         try
         {
-            var titleId = ResolveConfiguredTitleId();
+            var sanitizedTitleId = SanitizePathSegment(titleId.Trim());
             var savePath = Path.Combine(
-                ResolveTitleSaveRoot(userId, titleId),
+                ResolveTitleSaveRoot(userId, sanitizedTitleId),
                 SanitizePathSegment(dirName));
             var existed = Directory.Exists(savePath);
             var create = (mountMode & MountModeCreate) != 0;
@@ -760,7 +788,7 @@ public static class SaveDataExports
             }
 
             TraceSaveData(
-                $"mount3 user={userId} title={titleId} dir={dirName} blocks={blocks} " +
+                $"{operation} user={userId} title={sanitizedTitleId} dir={dirName} blocks={blocks} " +
                 $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
                 $"mount_point={mountPoint} created={!existed} root='{savePath}'");
             return SetReturn(ctx, 0);
@@ -786,8 +814,36 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataTransferringMount(CpuContext ctx)
     {
-        _ = ctx;
-        return SetReturn(ctx, 0);
+        var mountAddress = ctx[CpuRegister.Rdi];
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (mountAddress == 0 || resultAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadInt32(ctx, mountAddress, out var userId) ||
+            !ctx.TryReadUInt64(mountAddress + 0x08, out var titleIdAddress) ||
+            !ctx.TryReadUInt64(mountAddress + 0x10, out var dirNameAddress) ||
+            titleIdAddress == 0 ||
+            dirNameAddress == 0 ||
+            !TryReadFixedAscii(ctx, titleIdAddress, SaveDataTitleIdSize, out var titleId) ||
+            !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return MountSaveData(
+            ctx,
+            "transferring_mount",
+            userId,
+            titleId,
+            dirName,
+            0,
+            0,
+            MountModeReadOnly,
+            0,
+            0,
+            resultAddress);
     }
 
     [SysAbiExport(
@@ -795,11 +851,7 @@ public static class SaveDataExports
         ExportName = "sceSaveDataTransferringMountPs4",
         Target = Generation.Gen5,
         LibraryName = "libSceSaveData")]
-    public static int SaveDataTransferringMountPs4(CpuContext ctx)
-    {
-        _ = ctx;
-        return SetReturn(ctx, 0);
-    }
+    public static int SaveDataTransferringMountPs4(CpuContext ctx) => SaveDataTransferringMount(ctx);
 
     private static int _nextTransactionResource;
     [SysAbiExport(
