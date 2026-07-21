@@ -38,6 +38,24 @@ public static class NpWebApi2Exports
     }
 
     [SysAbiExport(
+        Nid = "MsaFhR+lPE4",
+        ExportName = "sceNpWebApi2PushEventCreateFilter",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventCreateFilter(CpuContext ctx)
+    {
+        var libraryContextId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!IsValidLibraryContextId(libraryContextId))
+        {
+            return ctx.SetReturn(NpWebApi2ErrorInvalidArgument);
+        }
+
+        var filterHandle = Interlocked.Increment(ref _nextPushEventHandle);
+        TraceNpWebApi2("push-event-create-filter", libraryContextId, (ulong)filterHandle);
+        return ctx.SetReturn(filterHandle);
+    }
+
+    [SysAbiExport(
         Nid = "WV1GwM32NgY",
         ExportName = "sceNpWebApi2PushEventCreateHandle",
         Target = Generation.Gen4 | Generation.Gen5,
