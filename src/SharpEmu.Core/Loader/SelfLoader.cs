@@ -199,9 +199,32 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
-                    var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
-                    throw new InvalidOperationException(
-                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}.");
+                    // Exact allocation failed — the host may have already claimed
+                    // part of this range (ASLR, Rosetta 2, or another process).
+                    // Try backing the fixed range page by page to claim whatever
+                    // free gaps exist. If the whole range is occupied the backfill
+                    // returns false and we surface the original failure reason.
+                    Console.Error.WriteLine(
+                        $"[LOADER] Exact allocation at main image base 0x{imageBase:X16} " +
+                        $"(size=0x{totalImageSize:X}) failed; attempting fixed-range backfill.");
+                    if (!physicalVm.TryBackFixedRange(imageBase, totalImageSize, executable: true))
+                    {
+                        // TryBackFixedRange may have partially backed pages before
+                        // failing. The earlier Clear() already reset all regions, so
+                        // this second Clear() is idempotent for everything except the
+                        // partial backfill — it frees only those orphaned pages.
+                        physicalVm.Clear();
+                        var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
+                        throw new InvalidOperationException(
+                            $"Could not allocate main image at required base 0x{imageBase:X16} " +
+                            $"(size=0x{totalImageSize:X}): {reason}. " +
+                            "Try closing other applications, rebooting, or " +
+                            (OperatingSystem.IsWindows()
+                                ? "setting SHARPEMU_DISABLE_MITIGATION_RELAUNCH=1."
+                                : "ensuring no other process maps into this address range."));
+                    }
+
+                    allocatedBase = imageBase;
                 }
 
                 imageBase = allocatedBase;
