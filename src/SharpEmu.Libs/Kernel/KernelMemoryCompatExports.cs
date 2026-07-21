@@ -125,6 +125,14 @@ public static partial class KernelMemoryCompatExports
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
     private static readonly HashSet<string> _negativeStatCache = new(HostFsPathComparer);
     private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPathComparer);
+    private static readonly bool _logWidePrintfArgs =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_WIDE_PRINTF_ARGS"), "1", StringComparison.Ordinal);
+    private static readonly string? _widePrintfFilter =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_WIDE_PRINTF_FILTER");
+    private static readonly bool _logIo =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal);
+    private static readonly string? _ioTraceFilter =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO_FILTER");
     private static long _nextFileDescriptor = 2;
 
     internal static int AllocateGuestFileDescriptor()
@@ -1692,6 +1700,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var verifiedPathComponents = new HashSet<string>(HostFsPathComparer);
         for (ulong i = 0; i < count; i++)
         {
             if (idsAddress != 0 &&
@@ -1707,7 +1716,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, verifiedPathComponents);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
                 // Stop at the first miss and report its index.
@@ -1775,6 +1784,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var verifiedPathComponents = new HashSet<string>(HostFsPathComparer);
         for (ulong i = 0; i < count; i++)
         {
             if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
@@ -1789,7 +1799,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, verifiedPathComponents);
             if (!TryGetAprFileSize(hostPath, out _))
             {
                 LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
@@ -3928,13 +3938,12 @@ public static partial class KernelMemoryCompatExports
 
     private static bool ShouldTraceWidePrintfArgs(string format)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_WIDE_PRINTF_ARGS"), "1", StringComparison.Ordinal))
+        if (!_logWidePrintfArgs)
         {
             return false;
         }
 
-        var filter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_WIDE_PRINTF_FILTER");
-        return string.IsNullOrEmpty(filter) || format.Contains(filter, StringComparison.Ordinal);
+        return string.IsNullOrEmpty(_widePrintfFilter) || format.Contains(_widePrintfFilter, StringComparison.Ordinal);
     }
 
     private static void TracePrintfStringArgument(CpuContext ctx, string lengthMod, ulong address)
@@ -4798,14 +4807,23 @@ public static partial class KernelMemoryCompatExports
         return FileMode.Open;
     }
 
-    public static string ResolveGuestPath(string guestPath)
+    public static string ResolveGuestPath(string guestPath) =>
+        ResolveGuestPath(guestPath, verifiedPathComponents: null);
+
+    private static string ResolveGuestPath(
+        string guestPath,
+        HashSet<string>? verifiedPathComponents)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
         {
             return guestPath;
         }
 
-        if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath, out var mountPrefixMatched))
+        if (TryResolveRegisteredGuestMount(
+                guestPath,
+                verifiedPathComponents,
+                out var mountedPath,
+                out var mountPrefixMatched))
         {
             return mountedPath;
         }
@@ -4824,13 +4842,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/devlog/app/".Length..]);
-            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative, verifiedPathComponents);
         }
 
         if (guestPath.StartsWith("devlog/app/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["devlog/app/".Length..]);
-            return CombineWithinMount(ResolveDevlogAppRoot(), relative);
+            return CombineWithinMount(ResolveDevlogAppRoot(), relative, verifiedPathComponents);
         }
 
         if (string.Equals(guestPath, "/devlog/app", StringComparison.OrdinalIgnoreCase) ||
@@ -4842,7 +4860,7 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/temp0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/temp0/".Length..]);
-            return CombineWithinMount(ResolveTemp0Root(), relative);
+            return CombineWithinMount(ResolveTemp0Root(), relative, verifiedPathComponents);
         }
 
         if (string.Equals(guestPath, "/temp0", StringComparison.OrdinalIgnoreCase))
@@ -4853,13 +4871,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/download0/".Length..]);
-            return CombineWithinMount(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative, verifiedPathComponents);
         }
 
         if (guestPath.StartsWith("download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["download0/".Length..]);
-            return CombineWithinMount(ResolveDownload0Root(), relative);
+            return CombineWithinMount(ResolveDownload0Root(), relative, verifiedPathComponents);
         }
 
         if (string.Equals(guestPath, "/download0", StringComparison.OrdinalIgnoreCase) ||
@@ -4871,13 +4889,13 @@ public static partial class KernelMemoryCompatExports
         if (guestPath.StartsWith("/hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/hostapp/".Length..]);
-            return CombineWithinMount(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative, verifiedPathComponents);
         }
 
         if (guestPath.StartsWith("hostapp/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["hostapp/".Length..]);
-            return CombineWithinMount(ResolveHostappRoot(), relative);
+            return CombineWithinMount(ResolveHostappRoot(), relative, verifiedPathComponents);
         }
 
         if (string.Equals(guestPath, "/hostapp", StringComparison.OrdinalIgnoreCase) ||
@@ -4900,7 +4918,7 @@ public static partial class KernelMemoryCompatExports
                 guestPath.StartsWith("$\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath[2..]);
-                return CombineWithinMount(app0Root, relative);
+                return CombineWithinMount(app0Root, relative, verifiedPathComponents);
             }
 
             if (string.Equals(guestPath, "/app0", StringComparison.OrdinalIgnoreCase) ||
@@ -4912,13 +4930,13 @@ public static partial class KernelMemoryCompatExports
             if (guestPath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["/app0/".Length..]);
-                return CombineWithinMount(app0Root, relative);
+                return CombineWithinMount(app0Root, relative, verifiedPathComponents);
             }
 
             if (guestPath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase))
             {
                 var relative = NormalizeMountRelativePath(guestPath["app0/".Length..]);
-                return CombineWithinMount(app0Root, relative);
+                return CombineWithinMount(app0Root, relative, verifiedPathComponents);
             }
 
             if (!Path.IsPathFullyQualified(guestPath) &&
@@ -4926,7 +4944,7 @@ public static partial class KernelMemoryCompatExports
                 !guestPath.StartsWith("\\", StringComparison.Ordinal))
             {
                 var relative = NormalizeMountRelativePath(guestPath);
-                return CombineWithinMount(app0Root, relative);
+                return CombineWithinMount(app0Root, relative, verifiedPathComponents);
             }
         }
 
@@ -4941,6 +4959,7 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryResolveRegisteredGuestMount(
         string guestPath,
+        HashSet<string>? verifiedPathComponents,
         out string hostPath,
         out bool mountPrefixMatched)
     {
@@ -5011,7 +5030,10 @@ public static partial class KernelMemoryCompatExports
         // Textual containment does not follow symlinks/junctions; refuse a
         // reparse point planted inside the mount that would redirect onto the
         // host filesystem. See EscapesMountViaReparsePoint.
-        if (EscapesMountViaReparsePoint(Path.GetFullPath(matchedHostRoot), candidate))
+        if (EscapesMountViaReparsePoint(
+                Path.GetFullPath(matchedHostRoot),
+                candidate,
+                verifiedPathComponents))
         {
             return false;
         }
@@ -5083,7 +5105,10 @@ public static partial class KernelMemoryCompatExports
     // checking containment (the same guard TryResolveRegisteredGuestMount uses)
     // rejects that escape. Returns string.Empty on denial, which callers treat
     // as an unresolved path.
-    private static string CombineWithinMount(string mountRoot, string relative)
+    private static string CombineWithinMount(
+        string mountRoot,
+        string relative,
+        HashSet<string>? verifiedPathComponents)
     {
         string fullRoot;
         string candidate;
@@ -5110,7 +5135,7 @@ public static partial class KernelMemoryCompatExports
             return string.Empty;
         }
 
-        if (EscapesMountViaReparsePoint(fullRoot, candidate))
+        if (EscapesMountViaReparsePoint(fullRoot, candidate, verifiedPathComponents))
         {
             return string.Empty;
         }
@@ -5128,7 +5153,10 @@ public static partial class KernelMemoryCompatExports
     // that do not yet exist (e.g. an O_CREAT target and its parents) carry no
     // link to follow and are simply skipped. Mirrors the reparse rejection in
     // AvPlayerExports.TryResolveSandboxedFile.
-    private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
+    private static bool EscapesMountViaReparsePoint(
+        string mountRoot,
+        string candidate,
+        HashSet<string>? verifiedPathComponents)
     {
         var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
         if (string.Equals(candidate, rootTrimmed, HostFsPathComparison))
@@ -5156,12 +5184,19 @@ public static partial class KernelMemoryCompatExports
                      StringSplitOptions.RemoveEmptyEntries))
         {
             current = Path.Combine(current, segment);
+            if (verifiedPathComponents?.Contains(current) == true)
+            {
+                continue;
+            }
+
             try
             {
                 if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                 {
                     return true;
                 }
+
+                verifiedPathComponents?.Add(current);
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -7219,14 +7254,13 @@ public static partial class KernelMemoryCompatExports
 
     private static void LogIoTrace(string operation, string path, string detail)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal))
+        if (!_logIo)
         {
             return;
         }
 
-        var filter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO_FILTER");
-        if (!string.IsNullOrWhiteSpace(filter) &&
-            path.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+        if (!string.IsNullOrWhiteSpace(_ioTraceFilter) &&
+            path.IndexOf(_ioTraceFilter, StringComparison.OrdinalIgnoreCase) < 0)
         {
             return;
         }
@@ -7236,7 +7270,7 @@ public static partial class KernelMemoryCompatExports
 
     private static void LogUniqueStatTrace(string guestPath, string hostPath, bool found)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal))
+        if (!_logIo)
         {
             return;
         }

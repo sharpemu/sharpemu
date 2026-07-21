@@ -6021,9 +6021,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (forceRasterState)
             {
-                resources.Blends = Enumerable.Repeat(
-                    GuestBlendState.Default,
-                    renderTargetFormats.Count).ToArray();
+                Array.Fill(resources.Blends, GuestBlendState.Default);
                 resources.Scissor = null;
                 resources.Viewport = null;
                 resources.Raster = GuestRasterState.Default;
@@ -6031,9 +6029,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (isTitleDraw && _forceTitleDefaultBlend)
             {
-                resources.Blends = Enumerable.Repeat(
-                    GuestBlendState.Default,
-                    renderTargetFormats.Count).ToArray();
+                Array.Fill(resources.Blends, GuestBlendState.Default);
             }
             if (isTitleDraw && _forceTitleDefaultViewportScissor)
             {

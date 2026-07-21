@@ -340,6 +340,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _logStackCheck;
 
+	private bool _logFocusedContinuation;
+
 	private string? _probeImportReturn;
 
 	private ulong _probeImportReturnAddress;
@@ -355,6 +357,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly HashSet<ulong> _patchedResolverReturnSites = new HashSet<ulong>();
 
 	private readonly HashSet<ulong> _patchedTlsImmediateThunkTargets = new HashSet<ulong>();
+
+	private readonly HashSet<(ulong Address, ulong Size)> _scannedTlsRegions = new();
 
 	private readonly HashSet<ulong> _contextualUnresolvedReturnSites = new HashSet<ulong>();
 
@@ -492,6 +496,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public GuestContinuationRunner? ContinuationRunner { get; set; }
 
 		public GuestExecutionRunner? ExecutionRunner { get; set; }
+
+		public Action? ExecutionWork { get; set; }
+
+		public string? ExecutionReason { get; set; }
 	}
 
 	private sealed class ExternalGuestThreadState
@@ -1135,6 +1143,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_logImportFrames = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_FRAMES"), "1", StringComparison.Ordinal);
 		_logImportRecent = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_RECENT"), "1", StringComparison.Ordinal);
 		_logStackCheck = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STACK_CHK"), "1", StringComparison.Ordinal);
+		_logFocusedContinuation = string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FOCUSED_CONTINUATION"),
+			"1",
+			StringComparison.Ordinal);
 		_probeImportReturn = Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_RET");
 		_probeImportReturnAddress = ParseOptionalHexAddress(
 			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_RET_ADDRESS"));
@@ -2560,6 +2572,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int num4 = 0;
 		int num9 = 0;
 		int sse4aPatchCount = 0;
+		int cachedRegionCount = 0;
 		while (num < num2)
 		{
 			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
@@ -2576,7 +2589,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			uint num7 = lpBuffer.Protect & 0xFF;
 			bool flag = lpBuffer.State == 4096 && (lpBuffer.Protect & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
 			bool flag2 = num7 == PAGE_EXECUTE || num7 == 32 || num7 == 64 || num7 == PAGE_EXECUTE_WRITECOPY;
-			if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
+			if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes &&
+				_scannedTlsRegions.Add((num5, num6 - num5)))
 			{
 				byte* ptr = (byte*)num5;
 				int scanBytes = (int)(num6 - num5);
@@ -2602,9 +2616,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					}
 				}
 			}
+			else if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
+			{
+				cachedRegionCount++;
+			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
+		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends (cached regions: {cachedRegionCount})");
 	}
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
@@ -4933,16 +4951,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			out reason);
 	}
 
-	private static void TraceFocusedContinuation(
+	private void TraceFocusedContinuation(
 		string operation,
 		ulong threadHandle,
 		GuestCpuContinuation continuation,
 		string detail)
 	{
-		if (!string.Equals(
-				Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FOCUSED_CONTINUATION"),
-				"1",
-				StringComparison.Ordinal) ||
+		if (!_logFocusedContinuation ||
 			continuation.Rsp < 0x00006FFFAC000000UL ||
 			continuation.Rsp >= 0x00006FFFAC200000UL)
 		{
@@ -6013,12 +6028,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		GuestExecutionRunner runner;
 		lock (_guestThreadGate)
 		{
-			runner = thread.ExecutionRunner ??= new GuestExecutionRunner(
-				thread.ThreadHandle,
-				thread.Name,
-				MapGuestThreadPriority(thread.Priority));
+			if (thread.ExecutionRunner is null)
+			{
+				thread.ExecutionRunner = new GuestExecutionRunner(
+					thread.ThreadHandle,
+					thread.Name,
+					MapGuestThreadPriority(thread.Priority));
+				thread.ExecutionWork = () => RunGuestThread(thread, thread.ExecutionReason!);
+			}
+
+			thread.ExecutionReason = reason;
+			runner = thread.ExecutionRunner;
 		}
-		runner.Schedule(() => RunGuestThread(thread, reason));
+		runner.Schedule(thread.ExecutionWork!);
 	}
 
 	// Caller must hold _guestThreadGate. A guest wait can be satisfied before
