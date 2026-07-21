@@ -12,7 +12,9 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
+using SharpEmu.Core.Cpu.Native.Windows;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -187,6 +189,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private const ulong TlsModuleAllocStride = 65536uL;
 
 	private readonly IModuleManager _moduleManager;
+
+	private readonly IHostFaultHandling _faultHandling;
 
 	private nint _tlsHandlerAddress;
 
@@ -1037,6 +1041,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	public unsafe DirectExecutionBackend(IModuleManager moduleManager)
 	{
 		_moduleManager = moduleManager ?? throw new ArgumentNullException("moduleManager");
+		_faultHandling = OperatingSystem.IsWindows()
+			? new WindowsFaultHandling(HostPlatform.Current.Memory)
+			: NullHostFaultHandling.Instance;
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = TlsAlloc();
@@ -2405,98 +2412,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			VirtualFree(ptr, 0u, 32768u);
 			return 0;
 		}
-		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
-		return (nint)ptr;
-	}
-
-	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
-	{
-		const uint stubSize = 256u;
-		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
-		if (ptr == null)
-		{
-			return 0;
-		}
-
-		byte* code = (byte*)ptr;
-		int offset = 0;
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x54); // push r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xCD); // mov r13, rcx
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[8]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 8u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x83); // jae guestStack
-		int aboveStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x48); // mov rax, gs:[0x10]
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x04); EmitByte(code, ref offset, 0x25);
-		EmitUInt32(code, ref offset, 0x10u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xC4); // cmp r12, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x82); // jb guestStack
-		int belowStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xE9);
-		int hostRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int guestStackOffset = offset;
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xB9);
-		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = _tlsGetValueAddress;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingTlsJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x18); // mov r11, [rax]
-		EmitByte(code, ref offset, 0x4D); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xDB); // test r11, r11
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int missingHostStackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xDC); // mov rsp, r11
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
-		*(nint*)(code + offset) = managedHandler;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0xE9);
-		int guestRestoreJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-
-		int passThroughOffset = offset;
-		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
-		int restoreOffset = offset;
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-		EmitByte(code, ref offset, 0xC3);
-
-		*(int*)(code + aboveStackJump) = guestStackOffset - (aboveStackJump + sizeof(int));
-		*(int*)(code + belowStackJump) = guestStackOffset - (belowStackJump + sizeof(int));
-		*(int*)(code + hostRestoreJump) = restoreOffset - (hostRestoreJump + sizeof(int));
-		*(int*)(code + missingTlsJump) = passThroughOffset - (missingTlsJump + sizeof(int));
-		*(int*)(code + missingHostStackJump) = passThroughOffset - (missingHostStackJump + sizeof(int));
-		*(int*)(code + guestRestoreJump) = restoreOffset - (guestRestoreJump + sizeof(int));
-
-		uint oldProtect = default;
-		VirtualProtect(ptr, stubSize, 32u, &oldProtect);
 		FlushInstructionCache(GetCurrentProcess(), ptr, (nuint)offset);
 		return (nint)ptr;
 	}
@@ -6219,15 +6134,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static nint TlsGetValue(uint dwTlsIndex) =>
 		OperatingSystem.IsWindows() ? Win32TlsGetValue(dwTlsIndex) : PosixHostStubs.TlsGetValue(dwTlsIndex);
 
-	private unsafe static void* AddVectoredExceptionHandler(uint first, IntPtr handler) =>
-		OperatingSystem.IsWindows() ? Win32AddVectoredExceptionHandler(first, handler) : null;
-
-	private unsafe static uint RemoveVectoredExceptionHandler(void* handle) =>
-		OperatingSystem.IsWindows() ? Win32RemoveVectoredExceptionHandler(handle) : 0u;
-
-	private static IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter) =>
-		OperatingSystem.IsWindows() ? Win32SetUnhandledExceptionFilter(lpTopLevelExceptionFilter) : IntPtr.Zero;
-
 	private static uint GetCurrentThreadId() =>
 		OperatingSystem.IsWindows() ? Win32GetCurrentThreadId() : PosixHostStubs.GetCurrentThreadId();
 
@@ -6269,15 +6175,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	[DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
 	private static extern nint GetProcAddress(nint hModule, string procName);
-
-	[DllImport("kernel32.dll", EntryPoint = "AddVectoredExceptionHandler")]
-	private unsafe static extern void* Win32AddVectoredExceptionHandler(uint first, IntPtr handler);
-
-	[DllImport("kernel32.dll", EntryPoint = "RemoveVectoredExceptionHandler")]
-	private unsafe static extern uint Win32RemoveVectoredExceptionHandler(void* handle);
-
-	[DllImport("kernel32.dll", EntryPoint = "SetUnhandledExceptionFilter")]
-	private static extern IntPtr Win32SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
 
 	[DllImport("kernel32.dll", EntryPoint = "GetCurrentThreadId")]
 	private static extern uint Win32GetCurrentThreadId();
@@ -6381,28 +6278,28 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		StopStallWatchdog();
 		if (_exceptionHandler != 0)
 		{
-			RemoveVectoredExceptionHandler((void*)_exceptionHandler);
+			_faultHandling.RemoveHandler(_exceptionHandler);
 			_exceptionHandler = 0;
 		}
 		if (_rawExceptionHandler != 0)
 		{
-			RemoveVectoredExceptionHandler((void*)_rawExceptionHandler);
+			_faultHandling.RemoveHandler(_rawExceptionHandler);
 			_rawExceptionHandler = 0;
 		}
 		if (_rawExceptionHandlerStub != 0)
 		{
-			VirtualFree((void*)_rawExceptionHandlerStub, 0u, 32768u);
+			_faultHandling.FreeThunk(_rawExceptionHandlerStub);
 			_rawExceptionHandlerStub = 0;
 		}
 		if (_exceptionHandlerStub != 0)
 		{
-			VirtualFree((void*)_exceptionHandlerStub, 0u, 32768u);
+			_faultHandling.FreeThunk(_exceptionHandlerStub);
 			_exceptionHandlerStub = 0;
 		}
 		if (_unhandledFilterStub != 0)
 		{
-			SetUnhandledExceptionFilter(0);
-			VirtualFree((void*)_unhandledFilterStub, 0u, 32768u);
+			_faultHandling.SetUnhandledFilter(0);
+			_faultHandling.FreeThunk(_unhandledFilterStub);
 			_unhandledFilterStub = 0;
 		}
 		if (_handlerHandle.IsAllocated)
