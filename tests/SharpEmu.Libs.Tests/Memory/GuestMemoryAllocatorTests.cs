@@ -150,6 +150,23 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Empty(host.AllocationCalls);
     }
 
+    [Fact]
+    public void TryBackFixedRangeRollsBackPartialAllocationsOnQueryFailure()
+    {
+        const ulong rangeBase = 0x0000_0030_1000_0000;
+        const ulong rangeSize = 0x80_0000;
+        // Query succeeds once (reports free), then fails on the second call,
+        // so the first gap is backed and must be rolled back.
+        using var host = new IntermittentQueryFailureHostMemory(rangeBase, rangeSize, succeedCount: 1);
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.False(memory.TryBackFixedRange(rangeBase, rangeSize, executable: false));
+        // The first gap was allocated and then freed during rollback.
+        Assert.Single(host.AllocationCalls);
+        Assert.Single(host.FreedAddresses);
+        Assert.Equal(host.AllocationCalls[0].Address, host.FreedAddresses[0]);
+    }
+
     private sealed class PartialOverlapHostMemory : IHostMemory, IDisposable
     {
         private readonly ulong _rangeBase;
@@ -434,6 +451,91 @@ public sealed class GuestMemoryAllocatorTests
         }
 
         public void FlushInstructionCache(ulong flushAddress, ulong size)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>
+    /// Reports free pages for the first <c>succeedCount</c> Query calls
+    /// (so TryBackFixedRange backs those gaps), then returns false on the
+    /// next Query to simulate a host query failure mid-range.
+    /// </summary>
+    private sealed class IntermittentQueryFailureHostMemory : IHostMemory, IDisposable
+    {
+        private readonly ulong _rangeBase;
+        private readonly ulong _rangeSize;
+        private int _remainingSucceedCount;
+
+        public IntermittentQueryFailureHostMemory(ulong rangeBase, ulong rangeSize, int succeedCount)
+        {
+            _rangeBase = rangeBase;
+            _rangeSize = rangeSize;
+            _remainingSucceedCount = succeedCount;
+        }
+
+        public List<(ulong Address, ulong Size)> AllocationCalls { get; } = [];
+
+        public List<ulong> FreedAddresses { get; } = [];
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection)
+        {
+            AllocationCalls.Add((desiredAddress, size));
+            return desiredAddress;
+        }
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address)
+        {
+            FreedAddresses.Add(address);
+            return true;
+        }
+
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
+        {
+            rawOldProtection = 0;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (_remainingSucceedCount <= 0)
+            {
+                info = default;
+                return false;
+            }
+
+            _remainingSucceedCount--;
+
+            // Report a free run that covers only part of the requested range
+            // so the caller's loop advances past it and issues a second Query
+            // that triggers the failure path.
+            var runSize = Math.Min(_rangeSize / 2, _rangeSize - (address - _rangeBase));
+            info = new HostRegionInfo(
+                address,
+                AllocationBase: 0,
+                runSize,
+                HostRegionState.Free,
+                RawState: 0x10000,
+                HostPageProtection.NoAccess,
+                RawProtection: 0x01,
+                RawAllocationProtection: 0);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
         {
         }
 

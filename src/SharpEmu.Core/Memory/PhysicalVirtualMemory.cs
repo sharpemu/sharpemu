@@ -446,13 +446,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // us over whole free or occupied stretches. Only free stretches get backed;
         // stretches already reserved or committed by another allocation are left as
         // they are, which is exactly what a fixed mapping does on hardware.
+        //
+        // Backed runs are collected and only inserted into _regions after the
+        // entire range succeeds. If a later gap cannot be backed, every previously
+        // backed run is freed so no orphaned pages leak into the region table.
+        var backedRuns = new List<(ulong Address, ulong Size)>();
         var cursor = start;
-        var backedAny = false;
-        while (cursor < end)
+        var failed = false;
+        while (!failed && cursor < end)
         {
             if (!_hostMemory.Query(cursor, out var info))
             {
-                return false;
+                failed = true;
+                break;
             }
 
             var queriedEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
@@ -461,7 +467,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             var runEnd = Math.Min(end, queriedEnd);
             if (runEnd <= cursor)
             {
-                return false;
+                failed = true;
+                break;
             }
 
             if (info.State == HostRegionState.Free)
@@ -475,35 +482,58 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                         _hostMemory.Free(allocated);
                     }
 
-                    return false;
+                    failed = true;
+                    break;
                 }
 
-                var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
-                _gate.EnterWriteLock();
-                try
-                {
-                    InsertRegionSorted(new MemoryRegion
-                    {
-                        VirtualAddress = cursor,
-                        Size = runSize,
-                        IsExecutable = executable,
-                        IsReservedOnly = false,
-                        Protection = protection
-                    });
-                }
-                finally
-                {
-                    _gate.ExitWriteLock();
-                }
-
-                TraceVmem($"Backed fixed range gap: 0x{cursor:X16} - 0x{runEnd:X16} ({runSize} bytes)");
-                backedAny = true;
+                backedRuns.Add((cursor, runSize));
             }
 
             cursor = runEnd;
         }
 
-        return backedAny;
+        if (failed)
+        {
+            foreach (var (runAddress, _) in backedRuns)
+            {
+                _hostMemory.Free(runAddress);
+            }
+
+            return false;
+        }
+
+        if (backedRuns.Count == 0)
+        {
+            return false;
+        }
+
+        var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+        _gate.EnterWriteLock();
+        try
+        {
+            foreach (var (runAddress, runSize) in backedRuns)
+            {
+                InsertRegionSorted(new MemoryRegion
+                {
+                    VirtualAddress = runAddress,
+                    Size = runSize,
+                    IsExecutable = executable,
+                    IsReservedOnly = false,
+                    Protection = protection
+                });
+            }
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+
+        foreach (var (runAddress, runSize) in backedRuns)
+        {
+            TraceVmem($"Backed fixed range gap: 0x{runAddress:X16} - 0x{runAddress + runSize:X16} ({runSize} bytes)");
+        }
+
+        return true;
     }
 
     public bool TryAllocateAtOrAbove(
