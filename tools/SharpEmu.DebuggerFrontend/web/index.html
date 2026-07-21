@@ -8,9 +8,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#090c12">
+  <meta name="description" content="Live debugger and memory inspector for SharpEmu.">
   <title>SharpEmu Debugger</title>
-  <link rel="icon" type="image/webp" href="/sharpemu-logo.webp">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" type="image/webp" href="sharpemu-logo.webp">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -18,7 +23,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <header class="app-header">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true"><img src="/sharpemu-logo.webp" alt=""></div>
+      <div class="brand-mark"><img src="sharpemu-logo.webp" alt="SharpEmu logo"></div>
       <div>
         <div class="eyebrow">LIVE DEVELOPMENT TOOLS</div>
         <h1>SharpEmu <span>Debugger</span></h1>
@@ -200,6 +205,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </form>
         <div class="table-wrap">
           <table class="data-table">
+            <caption class="visually-hidden">Configured breakpoints</caption>
             <thead><tr><th>On</th><th>ID</th><th>Kind</th><th>Address</th><th>Length</th><th></th></tr></thead>
             <tbody id="breakpoint-table">
               <tr class="empty-row"><td colspan="6">No breakpoints configured.</td></tr>
@@ -262,6 +268,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <details class="raw-command">
           <summary>Advanced: send raw JSON request</summary>
           <form id="raw-command-form">
+            <label class="visually-hidden" for="raw-command-input">Raw JSON request</label>
             <textarea id="raw-command-input" spellcheck="false">{"command":"status"}</textarea>
             <button class="button button-secondary" type="submit">Send request</button>
           </form>
@@ -297,6 +304,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </dialog>
 
   <div id="toast-stack" class="toast-stack" aria-live="assertive"></div>
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
