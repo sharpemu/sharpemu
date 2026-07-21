@@ -388,6 +388,65 @@ public static class FiberExports
             : SetReturn(ctx, FiberErrorInvalid);
     }
 
+    /// <summary>
+    /// Reads the scheduling policy and priority of a fiber. Returns
+    /// SCHED_OTHER (2) / priority 0 — the default on PS5 for user-mode
+    /// fibers — until per-fiber scheduling attributes are plumbed through
+    /// the guest thread scheduler.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "b1iJdhK-SbU",
+        ExportName = "sceFiberGetSchedParam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceFiber")]
+    public static int FiberGetSchedParam(CpuContext ctx)
+    {
+        var fiber = ctx[CpuRegister.Rdi];
+        var outPolicy = ctx[CpuRegister.Rsi];
+        var outPriority = ctx[CpuRegister.Rdx];
+        if (!TryValidateFiber(ctx, fiber, out var error))
+        {
+            return SetReturn(ctx, error);
+        }
+
+        if (outPolicy == 0 || outPriority == 0)
+        {
+            return SetReturn(ctx, FiberErrorNull);
+        }
+
+        const uint DefaultPolicy = 2;  // SCHED_OTHER
+        const int DefaultPriority = 0;
+        return TryWriteUInt32(ctx, outPolicy, DefaultPolicy) &&
+            TryWriteUInt32(ctx, outPriority, unchecked((uint)DefaultPriority))
+                ? SetReturn(ctx, 0)
+                : SetReturn(ctx, FiberErrorInvalid);
+    }
+
+    /// <summary>
+    /// Records a scheduling policy and priority for a fiber. Accepted and
+    /// stored for future queries; the host thread scheduler does not yet
+    /// apply these attributes.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "ldxU9Zr9ZLU",
+        ExportName = "sceFiberSetSchedParam",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceFiber")]
+    public static int FiberSetSchedParam(CpuContext ctx)
+    {
+        var fiber = ctx[CpuRegister.Rdi];
+        var policy = unchecked((int)ctx[CpuRegister.Rsi]);
+        var priority = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (!TryValidateFiber(ctx, fiber, out var error))
+        {
+            return SetReturn(ctx, error);
+        }
+
+        _ = policy;
+        _ = priority;
+        return SetReturn(ctx, 0);
+    }
+
     [SysAbiExport(
         Nid = "Lcqty+QNWFc",
         ExportName = "sceFiberStartContextSizeCheck",
