@@ -1,0 +1,30 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+
+SharpEmu.Diagnostics - Diagnostic subsystem implementations.
+
+ARCHITECTURE (post-refactor):
+- This project depends ONLY on SharpEmu.Diagnostics.Contracts and SharpEmu.Logging.
+- It does NOT reference SharpEmu.Core, SharpEmu.Libs, or SharpEmu.HLE.
+- It implements the IDiagnosticEventBus interface from Contracts.
+- It consumes the ICpuDiagnosticSource, IGpuDiagnosticSource, etc. interfaces.
+
+This breaks the circular dependency that previously required stubs.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>SharpEmu.Diagnostics</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.Diagnostics.Contracts\SharpEmu.Diagnostics.Contracts.csproj" />
+    <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+  </ItemGroup>
+</Project>

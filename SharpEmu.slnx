@@ -9,6 +9,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.Core/SharpEmu.Core.csproj" />
     <Project Path="src/SharpEmu.DebugClient/SharpEmu.DebugClient.csproj" />
     <Project Path="src/SharpEmu.Debugger/SharpEmu.Debugger.csproj" />
+    <Project Path="src/SharpEmu.Diagnostics/SharpEmu.Diagnostics.csproj" />
+    <Project Path="src/SharpEmu.Diagnostics.Contracts/SharpEmu.Diagnostics.Contracts.csproj" />
     <Project Path="src/SharpEmu.GUI/SharpEmu.GUI.csproj" />
     <Project Path="src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
     <Project Path="src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
@@ -21,6 +23,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Folder Name="/tests/">
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
     <Project Path="tests/SharpEmu.ShaderCompiler.Metal.Tests/SharpEmu.ShaderCompiler.Metal.Tests.csproj" />
+    <Project Path="tests/SharpEmu.Diagnostics.Tests/SharpEmu.Diagnostics.Tests.csproj" />
     <Project Path="tests/SharpEmu.SourceGenerators.Tests/SharpEmu.SourceGenerators.Tests.csproj" />
   </Folder>
 </Solution>
