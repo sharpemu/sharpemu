@@ -8,6 +8,20 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
+// Gen5ShaderScalarEvaluator.FallbackMemoryReader is a process-global static. This
+// test swaps it, but the SharpEmu.Libs [ModuleInitializer] (AgcShaderCompilerHooks)
+// reassigns the same static the first time any Libs type is touched. Under xUnit's
+// default cross-class parallelism a Libs test running concurrently can fire that
+// initializer mid-test and clobber the swapped-in reader (observed as all-zero
+// reads on CI). A DisableParallelization collection runs alone in the non-parallel
+// phase, so nothing else can mutate the static while this test holds it.
+[CollectionDefinition(Gen5ScalarEvaluatorStateCollection.Name, DisableParallelization = true)]
+public sealed class Gen5ScalarEvaluatorStateCollection
+{
+    public const string Name = "Gen5ScalarEvaluatorState";
+}
+
+[Collection(Gen5ScalarEvaluatorStateCollection.Name)]
 public sealed class Gen5ScalarMemoryFallbackTests
 {
     private const ulong ScalarTableAddress = 0x4_4665_4FD0;
