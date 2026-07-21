@@ -41,4 +41,32 @@ public sealed class FontExportsTests
         Assert.Equal(0.0f, BinaryPrimitives.ReadSingleLittleEndian(layout[8..]));
         Assert.Equal(Sentinel, BinaryPrimitives.ReadUInt32LittleEndian(layout[12..]));
     }
+
+    [Fact]
+    public void GetVerticalLayout_WritesExactlyThreeFloats()
+    {
+        const uint Sentinel = 0xDEADBEEF;
+        Span<byte> sentinelBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(sentinelBytes, Sentinel);
+        Assert.True(_ctx.Memory.TryWrite(LayoutAddress + 12, sentinelBytes));
+
+        _ctx[CpuRegister.Rsi] = LayoutAddress;
+        Assert.Equal(0, FontExports.GetVerticalLayout(_ctx));
+
+        Span<byte> layout = stackalloc byte[16];
+        Assert.True(_ctx.Memory.TryRead(LayoutAddress, layout));
+        Assert.Equal(8.0f, BinaryPrimitives.ReadSingleLittleEndian(layout));
+        Assert.Equal(16.0f, BinaryPrimitives.ReadSingleLittleEndian(layout[4..]));
+        Assert.Equal(0.0f, BinaryPrimitives.ReadSingleLittleEndian(layout[8..]));
+        Assert.Equal(Sentinel, BinaryPrimitives.ReadUInt32LittleEndian(layout[12..]));
+    }
+
+    [Fact]
+    public void GetVerticalLayout_NullBuffer_ReturnsInvalidArgument()
+    {
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+            FontExports.GetVerticalLayout(_ctx));
+    }
 }
