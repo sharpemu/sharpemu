@@ -28,6 +28,10 @@ public sealed partial class DirectExecutionBackend
 			return;
 		}
 
+		// Pre-JIT the write-tracker fault path before the vectored handler can
+		// enter it on a guest thread (mirrors the POSIX bridge's warm-up).
+		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
+
 		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RAW_HANDLER"), "1", StringComparison.Ordinal))
 		{
 			_rawExceptionHandlerStub = CreateExceptionHandlerTrampoline(RawVectoredHandlerPtrManaged);
@@ -110,6 +114,19 @@ public sealed partial class DirectExecutionBackend
 
 			ulong rip = ReadCtxU64(contextRecord, 248);
 			ulong rsp = ReadCtxU64(contextRecord, 152);
+			// Guest-image write tracking runs first (mirroring the POSIX
+			// signal bridge): a store into a tracked, armed page restores
+			// write access, dirties every overlapping owner and retries the
+			// faulting instruction. Only write access violations are
+			// considered, and untracked addresses fall through untouched.
+			if (exceptionCode == 3221225477u &&
+				exceptionRecord->NumberParameters >= 2 &&
+				exceptionRecord->ExceptionInformation[0] == 1 &&
+				SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
+					exceptionRecord->ExceptionInformation[1]))
+			{
+				return -1;
+			}
 			if (TryRecoverGuestInt41(exceptionCode, contextRecord, rip))
 			{
 				return -1;

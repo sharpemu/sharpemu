@@ -58,7 +58,10 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            // AlignedAlloc memory must be released with AlignedFree: on
+            // Windows the pair is _aligned_malloc/_aligned_free, and a plain
+            // free() of the aligned pointer corrupts the heap (0xC0000374).
+            NativeMemory.AlignedFree(allocation);
         }
     }
 
@@ -89,7 +92,10 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            // AlignedAlloc memory must be released with AlignedFree: on
+            // Windows the pair is _aligned_malloc/_aligned_free, and a plain
+            // free() of the aligned pointer corrupts the heap (0xC0000374).
+            NativeMemory.AlignedFree(allocation);
         }
     }
 
@@ -118,7 +124,10 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            // AlignedAlloc memory must be released with AlignedFree: on
+            // Windows the pair is _aligned_malloc/_aligned_free, and a plain
+            // free() of the aligned pointer corrupts the heap (0xC0000374).
+            NativeMemory.AlignedFree(allocation);
         }
     }
 

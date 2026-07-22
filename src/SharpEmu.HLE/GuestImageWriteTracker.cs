@@ -15,12 +15,19 @@ namespace SharpEmu.HLE;
 /// write-protected; the first write faults, the fault handler restores write
 /// access and marks the range dirty, and the video backend consumes the dirty
 /// flag once per flip and re-arms protection after re-uploading.
+///
+/// Protection uses mprotect under the POSIX signal bridge and VirtualProtect
+/// under the Windows vectored exception handler; the fault-side contract is
+/// identical on both (restore access, dirty every overlapping owner, retry
+/// the faulting store).
 /// </summary>
 public static unsafe class GuestImageWriteTracker
 {
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
     private const int ClockMonotonicRaw = 4;
+    private const uint PageReadOnly = 0x02;
+    private const uint PageReadWrite = 0x04;
 
     private sealed class TrackedRange
     {
@@ -80,7 +87,7 @@ public static unsafe class GuestImageWriteTracker
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
 
-    private static readonly bool _enabled = !OperatingSystem.IsWindows() &&
+    private static readonly bool _enabled =
         Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
@@ -98,8 +105,37 @@ public static unsafe class GuestImageWriteTracker
     [DllImport("libc", EntryPoint = "mprotect", SetLastError = true)]
     private static extern int Mprotect(nint address, nuint length, int protection);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualProtect(
+        nint address,
+        nuint length,
+        uint newProtection,
+        out uint oldProtection);
+
     [DllImport("libc", EntryPoint = "clock_gettime", SetLastError = false)]
     private static extern int ClockGetTime(int clockId, Timespec* time);
+
+    /// <summary>
+    /// Applies read-only or read-write protection to a page range. Must stay
+    /// allocation- and lock-free: it is called from POSIX signal context and
+    /// from the Windows vectored exception handler.
+    /// </summary>
+    private static bool TryProtect(ulong start, ulong length, bool writable)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return VirtualProtect(
+                (nint)start,
+                (nuint)length,
+                writable ? PageReadWrite : PageReadOnly,
+                out _) != 0;
+        }
+
+        return Mprotect(
+            (nint)start,
+            (nuint)length,
+            writable ? ProtRead | ProtWrite : ProtRead) == 0;
+    }
 
     public static bool Enabled => _enabled;
 
@@ -115,11 +151,14 @@ public static unsafe class GuestImageWriteTracker
             return;
         }
 
-        var scratch = NativeMemory.AllocZeroed(4096);
+        // Page-aligned and page-sized so arming never touches a page that
+        // holds unrelated heap allocations another thread may be writing.
+        var scratch = NativeMemory.AlignedAlloc(4096, 4096);
         try
         {
-            // Warm the timestamp P/Invoke used by the signal-safe scalar
-            // capture path before a real protected-page write reaches it.
+            new Span<byte>(scratch, 4096).Clear();
+            // Warm the timestamp path used by the signal-safe scalar capture
+            // before a real protected-page write reaches it.
             _ = GetMonotonicNanoseconds();
             var address = (ulong)scratch;
             Track(address, 4096);
@@ -129,7 +168,7 @@ public static unsafe class GuestImageWriteTracker
         }
         finally
         {
-            NativeMemory.Free(scratch);
+            NativeMemory.AlignedFree(scratch);
         }
     }
 
@@ -445,10 +484,7 @@ public static unsafe class GuestImageWriteTracker
         }
 
         if (needsUnprotect &&
-            Mprotect(
-                (nint)writableStart,
-                (nuint)(writableEnd - writableStart),
-                ProtRead | ProtWrite) != 0)
+            !TryProtect(writableStart, writableEnd - writableStart, writable: true))
         {
             return false;
         }
@@ -497,10 +533,7 @@ public static unsafe class GuestImageWriteTracker
 
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
-        var failed = Mprotect(
-            (nint)range.Start,
-            (nuint)(range.End - range.Start),
-            ProtRead) != 0;
+        var failed = !TryProtect(range.Start, range.End - range.Start, writable: false);
         if (failed)
         {
             Volatile.Write(ref range.Armed, 0);
@@ -520,10 +553,7 @@ public static unsafe class GuestImageWriteTracker
         var wasArmed = Interlocked.Exchange(ref range.Armed, 0) == 1;
         if (wasArmed)
         {
-            _ = Mprotect(
-                (nint)range.Start,
-                (nuint)(range.End - range.Start),
-                ProtRead | ProtWrite);
+            _ = TryProtect(range.Start, range.End - range.Start, writable: true);
         }
 
         if (range.TraceLifetime)
@@ -681,6 +711,12 @@ public static unsafe class GuestImageWriteTracker
 
     private static long GetMonotonicNanoseconds()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            return unchecked((long)(System.Diagnostics.Stopwatch.GetTimestamp() *
+                (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency)));
+        }
+
         Timespec time;
         return ClockGetTime(ClockMonotonicRaw, &time) == 0
             ? unchecked((time.Seconds * 1_000_000_000L) + time.Nanoseconds)
