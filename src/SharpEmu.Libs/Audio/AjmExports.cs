@@ -17,7 +17,7 @@ public static class AjmExports
     private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
     private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
     private const int OrbisAjmErrorWrongRevisionFlag = unchecked((int)0x8093000B);
-    private const uint MaxCodecType = 23;
+    private const uint MaxCodecType = 25;
     private const int MaxInstanceIndex = 0x2FFF;
     private static readonly ConcurrentDictionary<uint, AjmContextState> Contexts = new();
     private static int _nextContextId;

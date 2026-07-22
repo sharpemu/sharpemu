@@ -80,6 +80,19 @@ public sealed class AjmExportsTests : IDisposable
         Assert.Equal(InvalidContext, RegisterCodec(contextId + 1, 1));
     }
 
+    [Theory]
+    [InlineData(23u)]
+    [InlineData(24u)]
+    public void Gen5CodecTypesCanRegisterAndCreateInstances(uint codecType)
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, RegisterCodec(contextId, codecType));
+        Assert.Equal(
+            0,
+            CreateInstance(contextId, codecType, 0x401, InstanceAddress));
+    }
+
     [Fact]
     public void InstanceDestroy_RejectsUnknownContextAndSlot()
     {
