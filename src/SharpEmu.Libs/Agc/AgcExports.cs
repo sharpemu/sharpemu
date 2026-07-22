@@ -1432,6 +1432,26 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RUcRegsIndirect, "uc");
 
     [SysAbiExport(
+        Nid = "w4-d0n60hdo",
+        ExportName = "sceAgcDcbSetUcRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegisterDirect(CpuContext ctx) =>
+        DcbSetRegisterDirect(ctx, ItSetUconfigReg, "uc");
+
+    [SysAbiExport(
+        Nid = "aP1Ki9G3++4",
+        ExportName = "sceAgcDcbSetUcRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegisterDirectGetSize(CpuContext ctx)
+    {
+        // SET_UCONFIG_REG header + offset + value.
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "GIIW2J37e70",
         ExportName = "sceAgcDcbSetIndexSize",
         Target = Generation.Gen5,
@@ -10811,6 +10831,33 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.dcb_set_{registerSpace}_indirect buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16} count={registerCount}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    private static int DcbSetRegisterDirect(CpuContext ctx, uint op, string registerSpace)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        // Uc/Cx/Sh register is passed by value as {u32 offset, u32 value} in RSI.
+        var packedRegister = ctx[CpuRegister.Rsi];
+        var registerOffset = (uint)(packedRegister & 0xFFFF_FFFFUL);
+        var registerValue = (uint)(packedRegister >> 32);
+        if (commandBufferAddress == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        const uint packetDwords = 3;
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, op, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, registerOffset & 0xFFFFu) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, registerValue))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_set_{registerSpace}_direct buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} offset=0x{registerOffset:X4} value=0x{registerValue:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
