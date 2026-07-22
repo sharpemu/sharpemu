@@ -10,6 +10,28 @@ namespace SharpEmu.ShaderCompiler;
 /// </summary>
 public static class Gfx10UnifiedFormat
 {
+    /// <summary>
+    /// Attempts to decode a GFX10 unified FORMAT value into its legacy
+    /// (DATA_FORMAT, NUMBER_FORMAT) pair.
+    /// </summary>
+    /// <param name="unifiedFormat">The raw unified FORMAT field value.</param>
+    /// <param name="dataFormat">
+    /// The resulting DATA_FORMAT value. For image-only encodings that have
+    /// no legacy DATA_FORMAT equivalent (documented per-entry below), this
+    /// is instead set to <paramref name="unifiedFormat"/> itself so that
+    /// downstream dispatch can still key off a stable identifier. Callers
+    /// that switch on <paramref name="dataFormat"/> must be aware of this
+    /// dual meaning; see the per-entry comments for exactly which values
+    /// are passthrough IDs rather than legacy DATA_FORMAT codes.
+    /// </param>
+    /// <param name="numberFormat">The resulting NUMBER_FORMAT value.</param>
+    /// <returns>
+    /// <c>true</c> if <paramref name="unifiedFormat"/> is a recognized,
+    /// non-reserved encoding; <c>false</c> if it falls into one of the
+    /// reserved/unassigned slots in RDNA2 ISA table 47, in which case
+    /// <paramref name="dataFormat"/> and <paramref name="numberFormat"/>
+    /// are both set to 0 and must not be used.
+    /// </returns>
     public static bool TryDecode(
         uint unifiedFormat,
         out uint dataFormat,
@@ -21,6 +43,15 @@ public static class Gfx10UnifiedFormat
         // table; so are 10_10_10_2 USCALED/SSCALED. Keep this an exact table
         // instead of deriving ranges that accidentally make reserved encodings
         // look valid.
+        //
+        // NOTE ON VALIDITY: unlike an earlier version of this method, we do
+        // NOT infer "reserved" by checking whether dataFormat == 0 after the
+        // fact. Unified format 0 legitimately decodes to (0, 0), which is
+        // indistinguishable from the "not found" default under that scheme.
+        // Instead every case below explicitly participates in the switch and
+        // `found` is only false when we fall through to `_`.
+        bool found = true;
+
         (dataFormat, numberFormat) = unifiedFormat switch
         {
             0 => (0u, 0u),
@@ -90,8 +121,11 @@ public static class Gfx10UnifiedFormat
             128 => (1u, 9u),
             129 => (3u, 9u),
             130 => (10u, 9u),
+
             // Image-only encodings without a legacy DATA_FORMAT equivalent
             // retain the unified identifier for exact downstream dispatch.
+            // dataFormat is a PASSTHROUGH of unifiedFormat here, not a
+            // legacy DATA_FORMAT code.
             131 => (131u, 7u),
             132 => (34u, 7u),
             133 => (16u, 0u),
@@ -130,9 +164,21 @@ public static class Gfx10UnifiedFormat
             180 => (180u, 7u),
             181 => (181u, 0u),
             182 => (182u, 9u),
-            _ => (0u, 0u),
+
+            // Reserved / unassigned slots (RDNA2 ISA table 47), e.g.
+            // 30-35, 37-42, 46-47, 78-127, 155-168, and anything above 182.
+            // These fall through here intentionally: do not add ranges
+            // that guess at values, only add entries confirmed against
+            // the ISA table.
+            _ => Reserved(out found),
         };
 
-        return unifiedFormat == 0 || dataFormat != 0;
+        return found;
+
+        static (uint, uint) Reserved(out bool found)
+        {
+            found = false;
+            return (0u, 0u);
+        }
     }
 }
