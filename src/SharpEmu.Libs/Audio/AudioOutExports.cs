@@ -175,6 +175,14 @@ public static class AudioOutExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        // Same rule as AudioOut2 PortGetState: never bulk-write onto the caller
+        // stack. Some titles place small locals next to the canary; a full
+        // SceAudioOutPortState write smashes it.
+        if (IsGuestStackAddress(stateAddress))
+        {
+            return ctx.SetReturn(0);
+        }
+
         // SceAudioOutPortState: report a connected primary output at full volume
         // so pacing/mixing code sees a live port. We do no host rerouting, so
         // rerouteCounter and flag stay zero.
@@ -191,6 +199,9 @@ public static class AudioOutExports
 
         return ctx.SetReturn(0);
     }
+
+    private static bool IsGuestStackAddress(ulong value) =>
+        value >= 0x0000_7FF0_0000_0000UL && value <= 0x0000_7FFF_FFFF_FFFFUL;
 
     [SysAbiExport(
         Nid = "QOQtbeDqsT4",
