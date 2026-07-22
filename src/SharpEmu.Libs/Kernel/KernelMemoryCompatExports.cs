@@ -1753,6 +1753,113 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // WithPrefix sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
+    // Resource streamers resolve relative asset paths against a shared directory
+    // prefix. Without HLE, every call returned the generic NOT_FOUND sentinel
+    // and no asset received a real file id/size. Signature inferred from
+    // observed guest registers (rdi=prefix, rsi=path list, rdx=count, rcx=ids,
+    // r8=sizes, r9=error index): the no-prefix sibling's args shifted right by
+    // one with a leading `const char* prefix`.
+    [SysAbiExport(
+        Nid = "w5fcCG+t31g",
+        ExportName = "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(CpuContext ctx)
+    {
+        var prefixAddress = ctx[CpuRegister.Rdi];
+        var pathListAddress = ctx[CpuRegister.Rsi];
+        var count = ctx[CpuRegister.Rdx];
+        var idsAddress = ctx[CpuRegister.Rcx];
+        var sizesAddress = ctx[CpuRegister.R8];
+        var errorIndexAddress = ctx[CpuRegister.R9];
+        if (pathListAddress == 0 || count == 0 || sizesAddress == 0 || count > 1024)
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var prefix = string.Empty;
+        if (prefixAddress != 0)
+        {
+            _ = TryReadNullTerminatedUtf8(ctx, prefixAddress, MaxGuestStringLength, out prefix);
+        }
+
+        for (ulong i = 0; i < count; i++)
+        {
+            if (idsAddress != 0 &&
+                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (!TryResolveAprFilepath(ctx, pathListAddress, i, out var relativePath))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            var guestPath = CombineAprPrefixedPath(prefix, relativePath);
+            var hostPath = ResolveGuestPath(guestPath);
+            if (!TryGetAprFileSize(hostPath, out var fileSize))
+            {
+                LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                if (sizesAddress != 0 &&
+                    !TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), 0))
+                {
+                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                if (errorIndexAddress != 0 &&
+                    !TryWriteUInt32Compat(ctx, errorIndexAddress, (uint)i))
+                {
+                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                KernelRuntimeCompatExports.TrySetErrno(ctx, 2); // ENOENT
+                ctx[CpuRegister.Rax] = ulong.MaxValue;
+                return -1;
+            }
+
+            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
+            LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+
+            if (idsAddress != 0 &&
+                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (!TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), fileSize))
+            {
+                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static string CombineAprPrefixedPath(string prefix, string relative)
+    {
+        if (string.IsNullOrEmpty(prefix))
+        {
+            return relative;
+        }
+
+        if (string.IsNullOrEmpty(relative))
+        {
+            return prefix;
+        }
+
+        return $"{prefix.TrimEnd('/')}/{relative.TrimStart('/')}";
+    }
+
     // The IDs-only sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
     // Games that stream via AMPR APR call this to turn asset paths into file
     // IDs, then hand those IDs to sceAmprAprCommandBufferReadFile. Without it

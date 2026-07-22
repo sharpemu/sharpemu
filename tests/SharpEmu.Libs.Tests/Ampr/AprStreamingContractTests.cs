@@ -106,6 +106,92 @@ public sealed class AprStreamingContractTests
     }
 
     [Fact]
+    public void ResolveFilepathsWithPrefixToIdsAndFileSizes_CombinesPrefixAndResolvesRealFile()
+    {
+        // Resource streamers call WithPrefix to join a directory prefix with a
+        // relative asset path. Without HLE every call returned NOT_FOUND and no
+        // asset received a real file id/size.
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong prefixAddress = memoryBase + 0x80;
+        const ulong pathListAddress = memoryBase + 0x100;
+        const ulong pathAddress = memoryBase + 0x200;
+        const ulong idsAddress = memoryBase + 0x800;
+        const ulong sizesAddress = memoryBase + 0x880;
+        byte[] fileContents = [1, 2, 3, 4, 5, 6];
+        var mountRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-apr-prefix-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(mountRoot);
+        var mountPoint = $"/sharpemu_apr_prefix_mnt_{Guid.NewGuid():N}";
+        const string fileName = "asset.bin";
+        var hostPath = Path.Combine(mountRoot, fileName);
+
+        try
+        {
+            File.WriteAllBytes(hostPath, fileContents);
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, mountRoot);
+            var memory = new FakeCpuMemory(memoryBase, 0x4000);
+            var context = new CpuContext(memory, Generation.Gen5);
+            memory.WriteCString(prefixAddress, mountPoint);
+            memory.WriteCString(pathAddress, fileName);
+            WriteUInt64(memory, pathListAddress, pathAddress);
+
+            context[CpuRegister.Rdi] = prefixAddress;
+            context[CpuRegister.Rsi] = pathListAddress;
+            context[CpuRegister.Rdx] = 1;
+            context[CpuRegister.Rcx] = idsAddress;
+            context[CpuRegister.R8] = sizesAddress;
+            context[CpuRegister.R9] = 0;
+
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                KernelMemoryCompatExports.KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(context));
+            Assert.NotEqual(uint.MaxValue, ReadUInt32(memory, idsAddress));
+            Assert.Equal((ulong)fileContents.Length, ReadUInt64(memory, sizesAddress));
+        }
+        finally
+        {
+            KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            if (Directory.Exists(mountRoot))
+            {
+                Directory.Delete(mountRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ResolveFilepathsWithPrefixToIdsAndFileSizes_MissingFile_FailsFastWithErrorIndex()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong prefixAddress = memoryBase + 0x80;
+        const ulong pathListAddress = memoryBase + 0x100;
+        const ulong pathAddress = memoryBase + 0x200;
+        const ulong idsAddress = memoryBase + 0x800;
+        const ulong sizesAddress = memoryBase + 0x880;
+        const ulong errorIndexAddress = memoryBase + 0x8F0;
+        var memory = new FakeCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(prefixAddress, "/does-not-exist-prefix");
+        memory.WriteCString(pathAddress, $"missing-{Guid.NewGuid():N}.bin");
+        WriteUInt64(memory, pathListAddress, pathAddress);
+
+        context[CpuRegister.Rdi] = prefixAddress;
+        context[CpuRegister.Rsi] = pathListAddress;
+        context[CpuRegister.Rdx] = 1;
+        context[CpuRegister.Rcx] = idsAddress;
+        context[CpuRegister.R8] = sizesAddress;
+        context[CpuRegister.R9] = errorIndexAddress;
+
+        Assert.Equal(
+            -1,
+            KernelMemoryCompatExports.KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(context));
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.Equal(uint.MaxValue, ReadUInt32(memory, idsAddress));
+        Assert.Equal(0ul, ReadUInt64(memory, sizesAddress));
+        Assert.Equal(0u, ReadUInt32(memory, errorIndexAddress));
+    }
+
+    [Fact]
     public void ResolveFilepathsToIdsAndFileSizes_MissingFile_FailsFastWithErrorIndex()
     {
         const ulong memoryBase = 0x1_0000_0000;
