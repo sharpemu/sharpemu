@@ -24,8 +24,8 @@ public static class VoiceQoSExports
         LibraryName = "libSceVoiceQoS")]
     public static int VoiceQoSGetStatus(CpuContext ctx)
     {
-        // Returns 1 to indicate disconnected/offline state (no network voice available)
-        return ctx.SetReturn(1);
+        // Returns 0 to indicate connected state (voice available)
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
