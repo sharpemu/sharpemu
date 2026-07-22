@@ -2127,7 +2127,7 @@ public sealed partial class DirectExecutionBackend
 			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
 
-		cpuContext[CpuRegister.Rax] = 0;
+		cpuContext[CpuRegister.Rax] = resolvedAddress;
 		return OrbisGen2Result.ORBIS_GEN2_OK;
 	}
 
@@ -2138,8 +2138,23 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		return Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
-			TryResolveRuntimeSymbolAddress(symbol.Nid, out address);
+		if (Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
+			TryResolveRuntimeSymbolAddress(symbol.Nid, out address))
+		{
+			return true;
+		}
+
+		// Unity's IL2CPP API table is populated through this resolver, then the
+		// returned pointers are called directly by the title. Returning an
+		// unresolved sentinel here turns the subsequent indirect call into a
+		// jump to 0xFFFFFFFFFFFFFFFF rather than a recoverable HLE miss.
+		if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal))
+		{
+			address = _unresolvedReturnStub != 0 ? (ulong)_unresolvedReturnStub : 0x10000;
+			return true;
+		}
+
+		return false;
 	}
 
 	private OrbisGen2Result DispatchBootstrapBridge()
