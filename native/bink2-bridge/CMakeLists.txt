@@ -15,8 +15,8 @@ endif()
 
 project(sharpemu_bink2_bridge LANGUAGES C)
 
-set(SHARPEMU_FFMPEG_TAG "1dd3916")
-set(SHARPEMU_FFMPEG_COMMIT "1dd39167f692d0f571aac16e3bed685c75ae5447")
+set(SHARPEMU_FFMPEG_TAG "6a6861e")
+set(SHARPEMU_FFMPEG_COMMIT "6a6861e357a263edee51d2f4894941f50aed59f5")
 # Keyed by tag so bumping SHARPEMU_FFMPEG_TAG always fetches fresh instead of
 # silently reusing a previous tag's cached download.
 set(SHARPEMU_FFMPEG_ROOT "${CMAKE_BINARY_DIR}/ffmpeg-core-${SHARPEMU_FFMPEG_TAG}")
