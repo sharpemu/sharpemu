@@ -2110,20 +2110,15 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		var symbolNameAddress = cpuContext[CpuRegister.Rdi];
-		var outputAddress = cpuContext[CpuRegister.Rsi];
 		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
-			outputAddress == 0 ||
-			!TryResolveIl2CppApiAddress(symbolName, out var resolvedAddress) ||
-			!TryWriteUInt64Compat(outputAddress, resolvedAddress))
+			!TryResolveIl2CppApiAddress(symbolName, out var resolvedAddress))
 		{
 			Console.Error.WriteLine(
-				$"[LOADER][WARN] il2cpp_api_lookup_symbol failed: name='{symbolName}' out=0x{outputAddress:X16}");
-			if (outputAddress != 0)
-			{
-				_ = TryWriteUInt64Compat(outputAddress, 0);
-			}
-
-			cpuContext[CpuRegister.Rax] = ulong.MaxValue;
+				$"[LOADER][WARN] il2cpp_api_lookup_symbol failed: name='{symbolName}'");
+			// il2cpp_api_lookup_symbol is a normal one-argument pointer-returning
+			// function. In particular, RSI is not an output pointer; the title's
+			// caller leaves it live from an earlier call. Do not write through it.
+			cpuContext[CpuRegister.Rax] = 0;
 			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
 
@@ -2145,12 +2140,12 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		// Unity's IL2CPP API table is populated through this resolver, then the
-		// returned pointers are called directly by the title. Returning an
-		// unresolved sentinel here turns the subsequent indirect call into a
-		// jump to 0xFFFFFFFFFFFFFFFF rather than a recoverable HLE miss.
-		if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal))
+		// returned pointers are called directly by the title. Use the callable
+		// zero-return stub for missing APIs rather than a non-callable sentinel.
+		if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal) &&
+			_unresolvedReturnStub != 0)
 		{
-			address = _unresolvedReturnStub != 0 ? (ulong)_unresolvedReturnStub : 0x10000;
+			address = (ulong)_unresolvedReturnStub;
 			return true;
 		}
 

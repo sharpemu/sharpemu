@@ -780,7 +780,11 @@ public static class LibcStdioExports
             for (var i = 0; i < CtypeTableEntryCount; i++)
             {
                 var c = i + CtypeTableLowerBound;
-                entries[i] = c is >= 0 and <= 0x7F ? (ushort)char.ToLowerInvariant((char)c) : (ushort)(c & 0xFF);
+                entries[i] = c == -1
+                    ? ushort.MaxValue
+                    : c is >= 0 and <= 0x7F
+                        ? (ushort)char.ToLowerInvariant((char)c)
+                        : (ushort)(c & 0xFF);
             }
 
             _ctypeLowerTableBase = storage - (CtypeTableLowerBound * sizeof(ushort));
@@ -802,7 +806,11 @@ public static class LibcStdioExports
             for (var i = 0; i < CtypeTableEntryCount; i++)
             {
                 var c = i + CtypeTableLowerBound;
-                entries[i] = c is >= 0 and <= 0x7F ? (ushort)char.ToUpperInvariant((char)c) : (ushort)(c & 0xFF);
+                entries[i] = c == -1
+                    ? ushort.MaxValue
+                    : c is >= 0 and <= 0x7F
+                        ? (ushort)char.ToUpperInvariant((char)c)
+                        : (ushort)(c & 0xFF);
             }
 
             _ctypeUpperTableBase = storage - (CtypeTableLowerBound * sizeof(ushort));

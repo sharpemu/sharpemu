@@ -34,8 +34,12 @@ public static class MessengerCompatExports
     [SysAbiExport(Nid = "-P6FNMzk2Kc", ExportName = "cosf", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libc")]
     public static int Cosf(CpuContext ctx)
     {
-        var value = BitConverter.Int32BitsToSingle(unchecked((int)ctx[CpuRegister.Rdi]));
-        ctx[CpuRegister.Rax] = unchecked((ulong)BitConverter.SingleToInt32Bits(MathF.Cos(value)));
+        // AMD64 passes a scalar float in XMM0 and returns it in XMM0. RDI is
+        // unrelated caller state and must not be interpreted as the argument.
+        ctx.GetXmmRegister(0, out var low, out var high);
+        var value = BitConverter.Int32BitsToSingle(unchecked((int)low));
+        var resultBits = unchecked((uint)BitConverter.SingleToInt32Bits(MathF.Cos(value)));
+        ctx.SetXmmRegister(0, (low & 0xFFFFFFFF00000000UL) | resultBits, high);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

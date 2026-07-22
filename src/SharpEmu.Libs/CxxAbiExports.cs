@@ -303,6 +303,10 @@ public static class CxaGuardExports
             }
 
             Monitor.PulseAll(gate);
+            // A completed once flag no longer needs a host-side gate. Waiters
+            // already holding this gate will observe OnceComplete after the
+            // pulse; future callers take the fast path before looking it up.
+            _ = _onceGates.TryRemove(onceAddress, out _);
         }
 
         ctx[CpuRegister.Rax] = 0;

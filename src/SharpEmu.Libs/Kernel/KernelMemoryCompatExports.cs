@@ -6508,7 +6508,7 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    internal static bool TryReadTrackedLibcHeap(
+    internal static unsafe bool TryReadTrackedLibcHeap(
         ulong address,
         Span<byte> destination)
     {
@@ -6532,7 +6532,18 @@ public static partial class KernelMemoryCompatExports
                     continue;
                 }
 
-                return TryReadHostMemory(address, destination);
+                try
+                {
+                    // Marshal.AllocHGlobal allocations are not present in the
+                    // emulator's POSIX HostMemory map, so TryReadHostMemory
+                    // would reject this already-bounds-checked range.
+                    new ReadOnlySpan<byte>((void*)address, destination.Length).CopyTo(destination);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
             }
         }
 
