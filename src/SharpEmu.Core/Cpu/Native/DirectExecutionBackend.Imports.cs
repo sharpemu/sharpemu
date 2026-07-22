@@ -2118,12 +2118,10 @@ public sealed partial class DirectExecutionBackend
 			// il2cpp_api_lookup_symbol is a normal one-argument pointer-returning
 			// function. In particular, RSI is not an output pointer; the title's
 			// caller leaves it live from an earlier call. Do not write through it.
-			cpuContext[CpuRegister.Rax] = 0;
-			return OrbisGen2Result.ORBIS_GEN2_OK;
+			return Il2CppApiLookupAbi.SetResult(cpuContext, resolved: false, address: 0);
 		}
 
-		cpuContext[CpuRegister.Rax] = resolvedAddress;
-		return OrbisGen2Result.ORBIS_GEN2_OK;
+		return Il2CppApiLookupAbi.SetResult(cpuContext, resolved: true, resolvedAddress);
 	}
 
 	private bool TryResolveIl2CppApiAddress(string symbolName, out ulong address)

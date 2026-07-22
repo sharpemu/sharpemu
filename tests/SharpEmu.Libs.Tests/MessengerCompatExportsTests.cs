@@ -1,9 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Collections.Generic;
-using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Native;
 using SharpEmu.HLE;
@@ -67,19 +64,7 @@ public sealed class MessengerCompatExportsTests
         context[CpuRegister.Rsi] = outputAddress; // Live caller state, not an output pointer.
         Assert.True(context.TryWriteUInt64(outputAddress, 0xCAFE_BABE));
 
-        var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
-        typeof(DirectExecutionBackend).GetField("_cpuContext", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(backend, context);
-        typeof(DirectExecutionBackend).GetField("_runtimeSymbolsByName", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(backend, new Dictionary<string, ulong>(StringComparer.Ordinal)
-            {
-                ["il2cpp_test"] = resolvedAddress,
-            });
-        var dispatch = typeof(DirectExecutionBackend).GetMethod(
-            "DispatchIl2CppApiLookupSymbol",
-            BindingFlags.Instance | BindingFlags.NonPublic)!;
-
-        var result = (OrbisGen2Result)dispatch.Invoke(backend, null)!;
+        var result = Il2CppApiLookupAbi.SetResult(context, resolved: true, resolvedAddress);
 
         Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
         Assert.Equal(resolvedAddress, context[CpuRegister.Rax]);
@@ -100,16 +85,7 @@ public sealed class MessengerCompatExportsTests
         context[CpuRegister.Rsi] = outputAddress;
         Assert.True(context.TryWriteUInt64(outputAddress, 0xCAFE_BABE));
 
-        var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
-        typeof(DirectExecutionBackend).GetField("_cpuContext", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(backend, context);
-        typeof(DirectExecutionBackend).GetField("_runtimeSymbolsByName", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(backend, new Dictionary<string, ulong>(StringComparer.Ordinal));
-        var dispatch = typeof(DirectExecutionBackend).GetMethod(
-            "DispatchIl2CppApiLookupSymbol",
-            BindingFlags.Instance | BindingFlags.NonPublic)!;
-
-        var result = (OrbisGen2Result)dispatch.Invoke(backend, null)!;
+        var result = Il2CppApiLookupAbi.SetResult(context, resolved: false, address: 0);
 
         Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
         Assert.Equal(0UL, context[CpuRegister.Rax]);
