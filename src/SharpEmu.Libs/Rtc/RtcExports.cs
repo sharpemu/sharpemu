@@ -390,6 +390,11 @@ public static class RtcExports
         {
             return validationResult;
         }
+        
+        if (time.Year < 1980 || time.Year > 2107)
+        {
+            return unchecked((int)0x80B50008);
+        }
 
         uint dosTime = 0;
         dosTime |= (uint)((time.Second / 2) & 0x1F);
@@ -710,7 +715,16 @@ public static class RtcExports
             return unchecked((int)0x80B50003);
         }
 
-        var tick = UnixEpochTicks + unchecked((ulong)timeSeconds) * MicrosecondsPerSecond;
+        ulong tick;
+        try
+        {
+            tick = UnixEpochTicks + checked((ulong)timeSeconds * MicrosecondsPerSecond);
+        }
+        catch (OverflowException)
+        {
+            return unchecked((int)0x80B50003);
+        }
+
         if (!TryConvertTickToRtcDateTime(tick, out var time))
         {
             return unchecked((int)0x80B50003);
@@ -1000,6 +1014,17 @@ public static class RtcExports
 
     private static bool TryConvertTickToRtcDateTime(ulong tick, out RtcDateTime time)
     {
+        // Guard against overflow before the checked cast below. Mirrors the bound check
+        // already used in TryConvertTickToDateTime, so a tick that's too large to represent
+        // as a DateTime is reported as an invalid argument instead of throwing an unhandled
+        // OverflowException out of this HLE export.
+        var maxSupportedTick = unchecked((ulong)(DateTime.MaxValue.Ticks / DateTimeTicksPerMicrosecond));
+        if (tick > maxSupportedTick)
+        {
+            time = default;
+            return false;
+        }
+
         try
         {
             var dateTime = new DateTime(checked((long)(tick * DateTimeTicksPerMicrosecond)), DateTimeKind.Utc);
