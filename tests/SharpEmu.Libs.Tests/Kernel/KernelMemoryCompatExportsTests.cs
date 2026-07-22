@@ -126,6 +126,110 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void PosixPread_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixPread);
+    }
+
+    [Fact]
+    public void PosixPwrite_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixPwrite);
+    }
+
+    [Fact]
+    public void PosixFsync_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixFsync);
+    }
+
+    [Fact]
+    public void PosixFdatasync_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixFdatasync);
+    }
+
+    [Fact]
+    public void PosixFtruncate_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixFtruncate);
+    }
+
+    [Fact]
+    public void PosixDup_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixDup);
+    }
+
+    [Fact]
+    public void PosixDup2_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixDup2);
+    }
+
+    [Fact]
+    public void PosixFcntl_BadDescriptorReturnsMinusOne()
+    {
+        AssertBadDescriptorReturnsMinusOne(KernelMemoryCompatExports.PosixFcntl);
+    }
+
+    [Fact]
+    public void PosixTruncate_MissingFileReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context.FsBase = memoryBase + 0x800;
+        memory.WriteCString(pathAddress, "/__sharpemu_test_missing__/truncate.bin");
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0;
+
+        var result = KernelMemoryCompatExports.PosixTruncate(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.True(context.TryReadUInt32(context.FsBase + 0x40, out var errno));
+        Assert.Equal(2u, errno);
+    }
+
+    [Fact]
+    public void PosixRename_MissingFileReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong sourceAddress = memoryBase + 0x100;
+        const ulong destinationAddress = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context.FsBase = memoryBase + 0x800;
+        memory.WriteCString(sourceAddress, "/__sharpemu_test_missing__/source.bin");
+        memory.WriteCString(destinationAddress, "/__sharpemu_test_missing__/destination.bin");
+        context[CpuRegister.Rdi] = sourceAddress;
+        context[CpuRegister.Rsi] = destinationAddress;
+
+        var result = KernelMemoryCompatExports.PosixRename(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.True(context.TryReadUInt32(context.FsBase + 0x40, out var errno));
+        Assert.Equal(2u, errno);
+    }
+
+    private static void AssertBadDescriptorReturnsMinusOne(Func<CpuContext, int> export)
+    {
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+        context.FsBase = GuestMemoryBase + 0x800;
+        context[CpuRegister.Rdi] = 0x80020002;
+
+        var result = export(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.True(context.TryReadUInt32(context.FsBase + 0x40, out var errno));
+        Assert.Equal(9u, errno);
+    }
+
+    [Fact]
     public void Sprintf_ReadsVariadicDoubleFromXmmRegister()
     {
         const ulong memoryBase = 0x1_0000_0000;
