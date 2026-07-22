@@ -81,6 +81,9 @@ target_include_directories(sharpemu_bink2_bridge PRIVATE
     "${SHARPEMU_FFMPEG_SOURCE_DIR}/include")
 
 function(sharpemu_link_ffmpeg_library target library_name)
+    # find_library caches absolute paths; discard paths from an older FFmpeg
+    # tag when a build directory is reused after a package update.
+    unset(SHARPEMU_${library_name}_LIBRARY CACHE)
     find_library(SHARPEMU_${library_name}_LIBRARY
         NAMES "${library_name}" "lib${library_name}"
         PATHS "${SHARPEMU_FFMPEG_LIB_DIR}"
