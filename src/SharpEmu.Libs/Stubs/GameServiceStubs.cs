@@ -59,4 +59,9 @@ public static class GameServiceStubs
     public static int NpUniversalDataSystemCreateEvent(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpUniversalDataSystemPostEvent(CpuContext ctx) => Ok(ctx);
     public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx) => Ok(ctx);
+
+    // ---- NpTrophy2: trophy info array lookup ----
+    [SysAbiExport(Nid = "y3zHpdZO6ME", ExportName = "sceNpTrophy2GetTrophyInfoArray",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx) => Ok(ctx);
 }

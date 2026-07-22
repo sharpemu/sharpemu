@@ -347,6 +347,13 @@ public static class AudioOut2Exports
     public static int AudioOut2UserDestroy(CpuContext ctx) => SetReturn(ctx, 0);
 
     [SysAbiExport(
+        Nid = "4dq2rblWlg0",
+        ExportName = "sceAudioOut2ContextSetAttributes",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2ContextSetAttributes(CpuContext ctx) => SetReturn(ctx, 0);
+
+    [SysAbiExport(
         Nid = "xywYcRB7nbQ",
         ExportName = "sceAudioOut2UserCreate",
         Target = Generation.Gen5,

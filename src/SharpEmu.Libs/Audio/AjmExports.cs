@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -225,6 +226,17 @@ public static class AjmExports
         // value or an additional output object here.
         ctx[CpuRegister.Rax] = 0;
         return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "bkRHEYG6lEM",
+        ExportName = "sceAjmMemoryRegister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryRegister(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     internal static void ResetForTests()

@@ -11,6 +11,18 @@ namespace SharpEmu.Libs.SaveData;
 
 public static class SaveDataExports
 {
+    [SysAbiExport(
+        Nid = "PHnuI4LhuRk",
+        ExportName = "sceSaveDataDirNameSearch2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int DirNameSearch2(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+
     private const int OrbisSaveDataErrorParameter = unchecked((int)0x809F0000);
     private const int OrbisSaveDataErrorExists = unchecked((int)0x809F0007);
     private const int OrbisSaveDataErrorNotFound = unchecked((int)0x809F0008);

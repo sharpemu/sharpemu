@@ -2170,4 +2170,15 @@ public static class KernelRuntimeCompatExports
         ctx[CpuRegister.Rax] = unchecked((uint)processId);
         return processId;
     }
+
+    [SysAbiExport(
+        Nid = "uWyW3v98sU4",
+        ExportName = "sceKernelCheckReachability",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelCheckReachability(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
