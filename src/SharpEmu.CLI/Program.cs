@@ -64,6 +64,7 @@ internal static partial class Program
         }
 
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
+        PreloadGlfw();
 
         if (args.Length == 0)
         {
@@ -211,6 +212,27 @@ internal static partial class Program
             "[LOADER][WARN] No x86-64 Vulkan loader found; video output will be unavailable. " +
             "Place a universal libMoltenVK.dylib (from the MoltenVK releases) next to SharpEmu " +
             "as libvulkan.1.dylib.");
+    }
+
+    /// <summary>
+    /// SharpEmu.CLI.csproj publishes glfw into a "plugins" subfolder rather
+    /// than flat next to the executable, which falls outside the default OS
+    /// DLL/dlopen search path. Preloading it here by full path first means
+    /// any later bare-name lookup (however Silk.NET/GLFW itself resolves the
+    /// library) finds it already loaded in the process and reuses it -- the
+    /// same technique <see cref="PreloadMacVulkanLoader"/> already relies on
+    /// for the Vulkan loader.
+    /// </summary>
+    private static void PreloadGlfw()
+    {
+        var fileName = OperatingSystem.IsWindows() ? "glfw3.dll"
+            : OperatingSystem.IsMacOS() ? "libglfw.3.dylib"
+            : "libglfw.so.3";
+        var candidate = Path.Combine(AppContext.BaseDirectory, "plugins", fileName);
+        if (File.Exists(candidate))
+        {
+            NativeLibrary.TryLoad(candidate, out _);
+        }
     }
 
     private static int RunEmulator(string[] args, bool isMitigatedChild)

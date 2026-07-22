@@ -25,6 +25,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="FFmpeg.AutoGen" />
     <PackageReference Include="Silk.NET.Input" />
     <PackageReference Include="Silk.NET.Vulkan" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />

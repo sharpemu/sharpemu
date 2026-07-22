@@ -14,6 +14,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
 
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And $([MSBuild]::IsOSPlatform('Windows'))">win</_HostRidOSPrefix>
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_HostRidOSPrefix>
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">osx</_HostRidOSPrefix>
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)' == 'Arm64'">arm64</_HostRidArch>
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$(_HostRidArch)' == ''">x64</_HostRidArch>
+    <RuntimeIdentifier Condition="'$(_HostRidOSPrefix)' != ''">$(_HostRidOSPrefix)-$(_HostRidArch)</RuntimeIdentifier>
+
     <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
     <BaseOutputPath>$(RepoRoot)artifacts/bin/</BaseOutputPath>
 
