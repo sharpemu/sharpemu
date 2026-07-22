@@ -5545,6 +5545,13 @@ internal static unsafe class VulkanVideoPresenter
                 DestroyTranslatedDrawResources(resourceEntry.Resources);
             }
 
+            while (_deferredVertexBufferRecycles.TryPeek(out var vertexEntry) &&
+                   vertexEntry.RetireTimeline <= _completedTimeline)
+            {
+                _deferredVertexBufferRecycles.Dequeue();
+                RecycleHostBuffer(vertexEntry.Buffer, vertexEntry.Memory);
+            }
+
             while (_deferredGuestImageVersionDestroys.TryPeek(out var imageEntry) &&
                    imageEntry.RetireTimeline <= _completedTimeline)
             {
@@ -8776,6 +8783,14 @@ internal static unsafe class VulkanVideoPresenter
                     $"[LOADER][TRACE] vk.vertex_force_title_color_white " +
                     $"base=0x{guestBuffer.BaseAddress:X16} bytes={guestBuffer.Length}");
             }
+
+            var cacheable = forcedVertexColors is null && guestBuffer.BaseAddress != 0;
+            if (cacheable &&
+                TryGetCachedVertexBufferResource(guestBuffer, source, out var cachedResource))
+            {
+                return cachedResource;
+            }
+
             var buffer = CreateHostBuffer(
                 source,
                 BufferUsageFlags.VertexBufferBit,
@@ -8800,12 +8815,194 @@ internal static unsafe class VulkanVideoPresenter
                     $"bytes={guestBuffer.Length}");
             }
 
+            if (cacheable)
+            {
+                AdoptCachedVertexBuffer(guestBuffer, source, buffer, memory, size);
+                return CreateVertexBufferResource(
+                    buffer,
+                    memory,
+                    size,
+                    guestBuffer,
+                    ownsBuffer: false);
+            }
+
             return CreateVertexBufferResource(
                 buffer,
                 memory,
                 size,
                 guestBuffer,
                 ownsBuffer: true);
+        }
+
+        private sealed class CachedVertexBuffer
+        {
+            public VkBuffer Buffer;
+            public DeviceMemory Memory;
+            public ulong Size;
+            // Change detection: where the guest write tracker is available the
+            // entry stores the range's write generation; elsewhere (Windows) it
+            // keeps a heap shadow of the uploaded bytes and compares against the
+            // freshly captured guest data. A vectorized compare on cacheable
+            // heap memory is far cheaper than the write-combined upload it
+            // replaces.
+            public long WriteGeneration;
+            public byte[]? Shadow;
+        }
+
+        /// <summary>
+        /// Guest vertex streams are static geometry in the common case, but
+        /// every draw used to memcpy the full captured stream into a freshly
+        /// rented write-combined host buffer. Cache the uploaded buffer per
+        /// (base address, merged length) so unchanged streams re-bind the
+        /// existing Vulkan buffer, invalidating through the CPU write tracker
+        /// or a shadow compare so animated streams still refresh.
+        /// </summary>
+        private readonly Dictionary<VertexContentIdentity, CachedVertexBuffer>
+            _vertexBufferCache = new();
+
+        private readonly Queue<(VkBuffer Buffer, DeviceMemory Memory, ulong RetireTimeline)>
+            _deferredVertexBufferRecycles = new();
+
+        private bool TryGetCachedVertexBufferResource(
+            GuestVertexBuffer guestBuffer,
+            ReadOnlySpan<byte> source,
+            out VertexBufferResource resource)
+        {
+            resource = null!;
+            var key = new VertexContentIdentity(guestBuffer.BaseAddress, guestBuffer.Length);
+            if (!_vertexBufferCache.TryGetValue(key, out var cached))
+            {
+                return false;
+            }
+
+            bool unchanged;
+            if (SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                    key.Address,
+                    out var generation))
+            {
+                // Non-consuming: entries at overlapping addresses (or the
+                // texture cache) each compare their own snapshot, so nobody
+                // steals anyone else's dirty flag.
+                unchanged = generation == cached.WriteGeneration;
+            }
+            else
+            {
+                unchanged = cached.Shadow is not null &&
+                    source.SequenceEqual(cached.Shadow.AsSpan(0, guestBuffer.Length));
+            }
+
+            if (!unchanged)
+            {
+                _vertexBufferCache.Remove(key);
+                RetireCachedVertexBuffer(cached);
+                return false;
+            }
+
+            resource = CreateVertexBufferResource(
+                cached.Buffer,
+                cached.Memory,
+                cached.Size,
+                guestBuffer,
+                ownsBuffer: false);
+            return true;
+        }
+
+        private void AdoptCachedVertexBuffer(
+            GuestVertexBuffer guestBuffer,
+            ReadOnlySpan<byte> source,
+            VkBuffer buffer,
+            DeviceMemory memory,
+            ulong size)
+        {
+            var key = new VertexContentIdentity(guestBuffer.BaseAddress, guestBuffer.Length);
+            var cached = new CachedVertexBuffer
+            {
+                Buffer = buffer,
+                Memory = memory,
+                Size = size,
+            };
+            if (SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+            {
+                SharpEmu.HLE.GuestImageWriteTracker.Track(
+                    guestBuffer.BaseAddress,
+                    (ulong)guestBuffer.Length,
+                    CurrentGuestWorkSequenceForDiagnostics,
+                    "vulkan.vertex-cache");
+                _ = SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                    key.Address,
+                    out cached.WriteGeneration);
+            }
+            else
+            {
+                var shadow = GuestDataPool.Shared.Rent(guestBuffer.Length);
+                source.CopyTo(shadow);
+                cached.Shadow = shadow;
+            }
+
+            _vertexBufferCache[key] = cached;
+        }
+
+        /// <summary>
+        /// Queues a cached vertex buffer's storage for recycling once every
+        /// submission that may still bind it has retired. Earlier draws in the
+        /// open batch may reference the buffer, and that batch submits at
+        /// <c>_submitTimeline + 1</c>, so the retire timeline must cover it.
+        /// </summary>
+        private void RetireCachedVertexBuffer(CachedVertexBuffer cached)
+        {
+            if (cached.Shadow is not null)
+            {
+                GuestDataPool.Shared.Return(cached.Shadow);
+                cached.Shadow = null;
+            }
+
+            _deferredVertexBufferRecycles.Enqueue((
+                cached.Buffer,
+                cached.Memory,
+                _batchOpen ? _submitTimeline + 1 : _submitTimeline));
+        }
+
+        private void EvictDirtyCachedVertexBuffers()
+        {
+            if (_vertexBufferCache.Count == 0)
+            {
+                return;
+            }
+
+            List<VertexContentIdentity>? evicted = null;
+            foreach (var entry in _vertexBufferCache)
+            {
+                if (SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                        entry.Key.Address,
+                        out var generation) &&
+                    generation != entry.Value.WriteGeneration)
+                {
+                    (evicted ??= []).Add(entry.Key);
+                }
+            }
+
+            if (evicted is not null)
+            {
+                foreach (var key in evicted)
+                {
+                    if (_vertexBufferCache.Remove(key, out var cached))
+                    {
+                        RetireCachedVertexBuffer(cached);
+                    }
+                }
+            }
+
+            if (_vertexBufferCache.Count <= 2048)
+            {
+                return;
+            }
+
+            foreach (var entry in _vertexBufferCache)
+            {
+                RetireCachedVertexBuffer(entry.Value);
+            }
+
+            _vertexBufferCache.Clear();
         }
 
         private static VertexBufferResource CreateVertexBufferResource(
@@ -12474,6 +12671,7 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             EvictDirtyCachedTextures();
+            EvictDirtyCachedVertexBuffers();
             var completedWork = 0;
             HashSet<string>? deferredOrderedQueues = null;
             var renderWorkDeadline = _renderWorkBudgetTicks > 0

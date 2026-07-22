@@ -57,6 +57,13 @@ internal readonly record struct TextureContentIdentity(
     bool Arrayed = false,
     uint ArrayLayers = 1);
 
+/// <summary>Identity of a vertex stream's content in a backend vertex-buffer
+/// cache. Captured streams merge overlapping attribute spans, so the guest base
+/// address plus the merged byte length uniquely names the uploaded bytes.</summary>
+internal readonly record struct VertexContentIdentity(
+    ulong Address,
+    int Length);
+
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,
     byte[] Data,
