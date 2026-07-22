@@ -7182,28 +7182,41 @@ public static partial class KernelMemoryCompatExports
     {
         if (fd < 0 || bufferAddress == 0 || requested < 512)
         {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         OpenDirectory? directory;
+        bool isOpenFile;
         lock (_fdGate)
         {
             _openDirectories.TryGetValue(fd, out directory);
+            isOpenFile = directory is null && _openFiles.ContainsKey(fd);
         }
 
         if (directory is null)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            // A regular file fd used with getdents must not look like EOF (rax=0);
+            // that path has caused GTA's fiWriteAsyncDataWorker to treat the fd
+            // integer as a pointer and AV at address 0xB1.
+            var error = isOpenFile
+                ? OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
+                : OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            LogIoTrace("getdents", $"fd:{fd}", $"result={(isOpenFile ? "not_directory" : "badfd")}");
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)error);
+            return (int)error;
         }
 
         var currentIndex = directory.NextIndex;
         if (basePointerAddress != 0 && !TryWriteUInt64Compat(ctx, basePointerAddress, (ulong)currentIndex))
         {
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         if (currentIndex >= directory.Entries.Length)
         {
+            LogIoTrace("getdents", directory.Path, $"fd={fd} result=eof entries={directory.Entries.Length}");
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -7234,11 +7247,16 @@ public static partial class KernelMemoryCompatExports
 
     private static string[] EnumerateDirectoryEntries(string hostPath)
     {
-        return Directory.EnumerateFileSystemEntries(hostPath)
+        // Real getdents always yields "." / ".." before other names. An empty
+        // host dir previously returned EOF on the first call (rax=0), which
+        // sent GTA's fiWriteAsyncDataWorker down a path that treated the fd as
+        // a pointer (AV at 0xB1 on /download0/cloudcache/).
+        var children = Directory.EnumerateFileSystemEntries(hostPath)
             .Select(Path.GetFileName)
             .Where(static name => !string.IsNullOrEmpty(name))
-            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
-            .ToArray()!;
+            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase);
+
+        return new[] { ".", ".." }.Concat(children).ToArray()!;
     }
 
     private static uint ComputeDirectoryEntryHash(ReadOnlySpan<byte> utf8Name)
