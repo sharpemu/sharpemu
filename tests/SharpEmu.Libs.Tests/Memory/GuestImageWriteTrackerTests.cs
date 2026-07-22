@@ -24,11 +24,51 @@ public sealed unsafe class GuestImageWriteTrackerTests
     // spilling onto neighbouring heap pages.
     private const nuint TrackedByteCount = 4096;
     private const nuint HostPageAlignment = 16384;
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+    private const uint PageReadWrite = 0x04;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint VirtualAlloc(
+        nint lpAddress,
+        nuint dwSize,
+        uint flAllocationType,
+        uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
 
     private static ulong AllocateTrackedPages(out void* allocation)
     {
+        // VirtualProtect (Windows) / mprotect (POSIX) must target
+        // VirtualAlloc/mmap pages. Protecting CRT heap pages poisons
+        // neighbouring allocator metadata and crashes the test host.
+        if (OperatingSystem.IsWindows())
+        {
+            var windowsAllocation = VirtualAlloc(
+                0,
+                HostPageAlignment,
+                MemCommit | MemReserve,
+                PageReadWrite);
+            Assert.NotEqual(nint.Zero, windowsAllocation);
+            allocation = (void*)windowsAllocation;
+            return (ulong)windowsAllocation;
+        }
+
         allocation = NativeMemory.AlignedAlloc(2 * HostPageAlignment, HostPageAlignment);
         return (ulong)allocation;
+    }
+
+    private static void FreeTrackedPages(void* allocation)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            _ = VirtualFree((nint)allocation, 0, MemRelease);
+            return;
+        }
+
+        NativeMemory.Free(allocation);
     }
 
     [Fact]
@@ -58,7 +98,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 
@@ -89,7 +129,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 
@@ -118,7 +158,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 

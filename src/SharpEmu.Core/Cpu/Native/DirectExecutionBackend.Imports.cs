@@ -69,6 +69,15 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
+		EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
+		if (exceptionRecord->ExceptionCode == 3221225477u &&
+			exceptionRecord->NumberParameters >= 2 &&
+			SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
+				exceptionRecord->ExceptionInformation[1]))
+		{
+			return -1;
+		}
+
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
 	}
 
