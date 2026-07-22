@@ -712,11 +712,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<ulong, PendingGuestException> _pendingGuestExceptions = new Dictionary<ulong, PendingGuestException>();
 
-	// Import dispatch is the hottest managed path in UE titles. Most imports do
-	// not have an exception queued, so publish the dictionary population and let
-	// safe points skip _guestThreadGate entirely in the common case.
-	private int _pendingGuestExceptionCount;
-
 	private readonly HashSet<ulong> _activeGuestExceptionDeliveries = new HashSet<ulong>();
 
 	private int _guestThreadPumpDepth;
@@ -1123,9 +1118,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_logStrlenBursts = _logStrlenImports ||
 			string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STRLEN_BURSTS"), "1", StringComparison.Ordinal);
 		_logGuestContext = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_CONTEXT"), "1", StringComparison.Ordinal);
-		var ignoreGuestInt41Env = Environment.GetEnvironmentVariable("SHARPEMU_IGNORE_INT41");
-		_ignoreGuestInt41 = !string.Equals(ignoreGuestInt41Env, "0", StringComparison.Ordinal) &&
-			!string.Equals(ignoreGuestInt41Env, "false", StringComparison.OrdinalIgnoreCase);
+		_ignoreGuestInt41 = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_IGNORE_INT41"), "1", StringComparison.Ordinal);
 		_ignoredGuestInt41Count = 0;
 		_logGuestThreads = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
 		_logUsleep = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
@@ -3105,6 +3098,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				Context = context,
 			};
+
+			if (!GuestThreadExecution.IsGuestThread &&
+				Environment.CurrentManagedThreadId == HostMainThread.GetManagedThreadId() &&
+				HostMainThread.ExternalGuestThreadHandle == 0)
+			{
+				HostMainThread.ExternalGuestThreadHandle = threadHandle;
+			}
 		}
 	}
 
@@ -3951,14 +3951,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				}
 				if (_activeGuestExceptionDeliveries.Contains(threadHandle))
 				{
-					// Preserve one signal raised while the previous handler is
-					// unwinding. Unity can begin its next stop-the-world cycle in
-					// that window; treating the new raise as part of the old delivery
-					// strands the collector waiting for an acknowledgement.
-					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
+					_pendingGuestExceptions[threadHandle] = new PendingGuestException(
 						handler,
 						exceptionType,
-						external.ExceptionStackBase));
+						external.ExceptionStackBase);
 					return true;
 				}
 
@@ -3967,15 +3963,32 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				// managed thread corrupts the worker's control state. Queue the
 				// request and let that exact executor consume it at its next HLE
 				// boundary, where the original guest thread is safely paused.
-				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
+				_pendingGuestExceptions[threadHandle] = new PendingGuestException(
 					handler,
 					exceptionType,
-					external.ExceptionStackBase));
+					external.ExceptionStackBase);
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
 						$"[LOADER][TRACE] guest_exception.queued " +
 						$"target=0x{threadHandle:X16} type=0x{exceptionType:X2} mode=external");
+				}
+
+				// If the main thread is blocked on a host semaphore, the pending
+				// exception will never be delivered because the thread never reaches
+				// an HLE boundary. Wake the semaphore so the wait returns and the
+				// import dispatch's safe-point check delivers the exception.
+				if (threadHandle == HostMainThread.ExternalGuestThreadHandle)
+				{
+					HostMainThread.SetPendingException();
+					var blockedGate = HostMainThread.BlockedSemaphoreGate;
+					if (blockedGate != null)
+					{
+						lock (blockedGate)
+						{
+							Monitor.PulseAll(blockedGate);
+						}
+					}
 				}
 				return true;
 			}
@@ -4015,17 +4028,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				}
 				if (target.ExceptionDeliveryActive)
 				{
-					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
+					_pendingGuestExceptions[threadHandle] = new PendingGuestException(
 						handler,
 						exceptionType,
-						exceptionStackBase));
+						exceptionStackBase);
 					return true;
 				}
 
-				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
+				_pendingGuestExceptions[threadHandle] = new PendingGuestException(
 					handler,
 					exceptionType,
-					exceptionStackBase));
+					exceptionStackBase);
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -4186,7 +4199,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					RestoreInterruptedGuestThread();
 					if (target.State == GuestThreadRunState.Blocked &&
 						!target.ExecutorActive &&
-						TryRemovePendingGuestExceptionLocked(threadHandle, out var queued))
+						_pendingGuestExceptions.Remove(threadHandle, out var queued))
 					{
 						followUp = queued;
 					}
@@ -4272,11 +4285,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		CpuContext currentContext,
 		GuestCpuContinuation interruptedContinuation)
 	{
-		if (Volatile.Read(ref _pendingGuestExceptionCount) == 0)
-		{
-			return;
-		}
-
 		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
 		if (threadHandle == 0)
 		{
@@ -4290,12 +4298,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return;
 			}
 
-			if (!TryRemovePendingGuestExceptionLocked(threadHandle, out pending))
+			if (!_pendingGuestExceptions.Remove(threadHandle, out pending))
 			{
 				return;
 			}
 
 			_activeGuestExceptionDeliveries.Add(threadHandle);
+		}
+
+		if (threadHandle == HostMainThread.ExternalGuestThreadHandle)
+		{
+			HostMainThread.ClearPendingException();
 		}
 
 		const ulong exceptionContextSize = 0x500;
@@ -4350,27 +4363,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_activeGuestExceptionDeliveries.Remove(threadHandle);
 			}
 		}
-	}
-
-	private void QueuePendingGuestExceptionLocked(
-		ulong threadHandle,
-		PendingGuestException pending)
-	{
-		_pendingGuestExceptions[threadHandle] = pending;
-		Volatile.Write(ref _pendingGuestExceptionCount, _pendingGuestExceptions.Count);
-	}
-
-	private bool TryRemovePendingGuestExceptionLocked(
-		ulong threadHandle,
-		out PendingGuestException pending)
-	{
-		if (!_pendingGuestExceptions.Remove(threadHandle, out pending))
-		{
-			return false;
-		}
-
-		Volatile.Write(ref _pendingGuestExceptionCount, _pendingGuestExceptions.Count);
-		return true;
 	}
 
 	private static bool TryWriteGuestExceptionContext(
@@ -4467,7 +4459,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_guestThreads.Clear();
 			_externalGuestThreads.Clear();
 			_pendingGuestExceptions.Clear();
-			Volatile.Write(ref _pendingGuestExceptionCount, 0);
 			_activeGuestExceptionDeliveries.Clear();
 		}
 
@@ -5464,6 +5455,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] ExecuteEntry starting at 0x{entryPoint:X16}");
 		Console.Error.WriteLine($"[LOADER][INFO] RSP=0x{context[CpuRegister.Rsp]:X16}, RDI=0x{context[CpuRegister.Rdi]:X16}");
+
+		if (HostMainThread.GetManagedThreadId() == -1)
+		{
+			HostMainThread.SetManagedThreadId(Environment.CurrentManagedThreadId);
+			Console.Error.WriteLine($"[LOADER][INFO] Main thread managed ID: {HostMainThread.GetManagedThreadId()}");
+		}
+
 		ulong num = context[CpuRegister.Rsp];
 		if (num == 0)
 		{
@@ -6136,19 +6134,32 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
 						$"rdi=0x{Volatile.Read(ref thread.LastImportRdi):X16} rsi=0x{Volatile.Read(ref thread.LastImportRsi):X16} " +
 						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={thread.BlockReason ?? "none"}{hostContextText}");
-					logged++;
-					if (logged >= 48 && threads.Length > logged)
-					{
-						Console.Error.WriteLine($"[LOADER][ERROR] Stall guest-thread: ... {threads.Length - logged} more");
-						break;
-					}
+				logged++;
+				if (logged >= 48 && threads.Length > logged)
+				{
+					Console.Error.WriteLine($"[LOADER][ERROR] Stall guest-thread: ... {threads.Length - logged} more");
+					break;
 				}
 			}
 		}
-		catch
+
+		if (HostMainThread.GetManagedThreadId() != -1)
 		{
+			var mainThreadState = HostMainThread.IsBlocked() ? "Blocked" : "Running";
+			var mainThreadBlockReason = HostMainThread.GetBlockReason() ?? "none";
+			var mainThreadLastImport = HostMainThread.GetLastImportNid() ?? "none";
+			var mainThreadLastRip = HostMainThread.GetLastRip();
+
+			Console.Error.WriteLine(
+				$"[LOADER][ERROR] Stall main-thread: managed_id={HostMainThread.GetManagedThreadId()} " +
+				$"state={mainThreadState} block={mainThreadBlockReason} " +
+				$"last_import={mainThreadLastImport} last_rip=0x{mainThreadLastRip:X16}");
 		}
 	}
+	catch
+	{
+	}
+}
 
 	private unsafe static bool TryCaptureHostThreadContext(int hostThreadId, out HostThreadContextSnapshot snapshot)
 	{

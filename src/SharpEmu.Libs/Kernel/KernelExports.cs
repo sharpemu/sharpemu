@@ -362,7 +362,24 @@ public static class KernelExports
         ExportName = "open",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int Open(CpuContext ctx) => KernelMemoryCompatExports.PosixOpen(ctx);
+    public static int Open(CpuContext ctx)
+    {
+        var result = KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return unchecked((int)ctx[CpuRegister.Rax]);
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => 13,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => 22,
+            _ => 2,
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
 
     [SysAbiExport(
         Nid = "1G3lF1Gg1k8",
@@ -376,7 +393,24 @@ public static class KernelExports
         ExportName = "fstat",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libc")]
-    public static int Fstat(CpuContext ctx) => KernelMemoryCompatExports.PosixFstat(ctx);
+    public static int Fstat(CpuContext ctx)
+    {
+        var result = KernelMemoryCompatExports.KernelFstat(ctx);
+        if (result == (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => 22,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => 14,
+            _ => 9,
+        };
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
+    }
 
     [SysAbiExport(
         Nid = "hcuQgD53UxM",
@@ -459,11 +493,34 @@ public static class KernelExports
         LibraryName = "libc")]
     public static int Abort(CpuContext ctx)
     {
-        // Route through the same graceful guest-entry-exit path as exit(): letting the call
-        // fall through to the host's native abort() does not unwind the guest thread cleanly.
         Console.Error.WriteLine("[LOADER][INFO] abort() called by guest - terminating");
         GuestThreadExecution.RequestCurrentEntryExit("abort", -1);
         ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "VAzswvTOCzI",
+        ExportName = "unlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int UnlinkPosix(CpuContext ctx) =>
+        KernelMemoryCompatExports.KernelUnlink(ctx);
+
+    [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdx];
+        if (infoAddress != 0)
+        {
+            Span<byte> zero = stackalloc byte[0x130];
+            zero.Clear();
+            _ = ctx.Memory.TryWrite(infoAddress, zero);
+        }
+        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

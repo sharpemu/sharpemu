@@ -530,12 +530,9 @@ public sealed partial class DirectExecutionBackend
 			{
 				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
 			}
-			if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
-			{
-				DeliverPendingGuestExceptionAtSafePoint(
+			DeliverPendingGuestExceptionAtSafePoint(
 					cpuContext,
 					CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
-			}
 			StoreImportVectorReturn(cpuContext, argPackPtr);
 			if (dispatchResolved &&
 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
@@ -1329,12 +1326,9 @@ public sealed partial class DirectExecutionBackend
 				GuestThreadExecution.RestoreImportCallFrame(previousImportCallFrame);
 			}
 		}
-		if (Volatile.Read(ref _pendingGuestExceptionCount) != 0)
-		{
-			DeliverPendingGuestExceptionAtSafePoint(
+		DeliverPendingGuestExceptionAtSafePoint(
 				cpuContext,
 				CaptureImportBoundaryContinuation(cpuContext, argPackPtr, returnRip));
-		}
 		StoreImportVectorReturn(cpuContext, argPackPtr);
 
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
