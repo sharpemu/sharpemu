@@ -387,7 +387,12 @@ internal sealed class EmulatorProcess : IDisposable
 
     private void ForwardOutput(string? line, bool isError)
     {
-        if (!string.IsNullOrEmpty(line))
+        // Forward blank lines through — the GUI console groups output by
+        // blank-line separators, so swallowing them collapses adjacent log
+        // sections into a single block and makes it harder to follow
+        // sequential events (e.g. shader compile → render → swapchain
+        // present). Only skip the null sentinel that signals stream EOF.
+        if (line is not null)
         {
             OutputReceived?.Invoke(line, isError);
         }
