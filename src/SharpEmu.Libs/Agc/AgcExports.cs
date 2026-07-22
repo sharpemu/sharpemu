@@ -273,6 +273,7 @@ public static partial class AgcExports
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
     private static long _createShaderTraceCount;
+    private static long _cbMetadataSkipTraceCount;
     private static long _packetPayloadTraceCount;
     private static bool _tracedMissingPixelShaderBindings;
     private static long _unsatisfiedWaitTraceCount;
@@ -5619,6 +5620,25 @@ public static partial class AgcExports
         }
         state.TranslatedDraw = null;
         state.GuestDrawKind = GuestDrawKind.None;
+
+        // CB modes EliminateFastClear / FmaskDecompress / DccDecompress run
+        // colour-buffer metadata ops. The bound shader is only a vehicle and
+        // must not be applied as a normal colour draw.
+        if (TryGetCbColorControlMode(state.CxRegisters, out var cbMode) &&
+            IsCbMetadataColorMode(cbMode))
+        {
+            if (_traceAgcShader || ShouldTraceHotPath(ref _cbMetadataSkipTraceCount))
+            {
+                TraceAgcShader(
+                    $"agc.cb_metadata_skip seq={drawSequence} mode={cbMode} " +
+                    $"es=0x{(hasExportShader ? exportShaderAddress : 0):X16} " +
+                    $"ps=0x{(hasPixelShader ? pixelShaderAddress : 0):X16} " +
+                    $"vertices={vertexCount}");
+            }
+
+            return;
+        }
+
         foreach (var target in renderTargets)
         {
             state.KnownRenderTargets[target.Address] = target;
@@ -6953,6 +6973,35 @@ public static partial class AgcExports
         return hash;
     }
 
+    private enum CbColorMode : byte
+    {
+        Disable = 0,
+        Normal = 1,
+        EliminateFastClear = 2,
+        Resolve = 3,
+        FmaskDecompress = 5,
+        DccDecompress = 6,
+    }
+
+    private static bool TryGetCbColorControlMode(
+        IReadOnlyDictionary<uint, uint> registers,
+        out uint mode)
+    {
+        mode = 0;
+        if (!registers.TryGetValue(CbColorControl, out var colorControl))
+        {
+            return false;
+        }
+
+        mode = (colorControl >> 4) & 0x7u;
+        return true;
+    }
+
+    private static bool IsCbMetadataColorMode(uint mode) =>
+        mode is (uint)CbColorMode.EliminateFastClear or
+            (uint)CbColorMode.FmaskDecompress or
+            (uint)CbColorMode.DccDecompress;
+
     private static bool TryGetHardwareColorResolveTargets(
         IReadOnlyDictionary<uint, uint> registers,
         out RenderTargetDescriptor source,
@@ -6960,8 +7009,8 @@ public static partial class AgcExports
     {
         source = default;
         destination = default;
-        if (!registers.TryGetValue(CbColorControl, out var colorControl) ||
-            ((colorControl >> 4) & 0x7u) != 3u)
+        if (!TryGetCbColorControlMode(registers, out var mode) ||
+            mode != (uint)CbColorMode.Resolve)
         {
             return false;
         }
