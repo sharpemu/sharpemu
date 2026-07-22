@@ -343,6 +343,45 @@ internal static class GpuWaitRegistry
         return expired;
     }
 
+    public static List<WaitingDcb>? CollectAllForMemory(object memory)
+    {
+        List<WaitingDcb>? collected = null;
+        lock (_gate)
+        {
+            List<ulong>? emptied = null;
+            foreach (var (address, list) in _waiters)
+            {
+                for (var index = list.Count - 1; index >= 0; index--)
+                {
+                    if (!ReferenceEquals(list[index].Memory, memory))
+                    {
+                        continue;
+                    }
+
+                    collected ??= new List<WaitingDcb>();
+                    collected.Add(list[index]);
+                    list.RemoveAt(index);
+                }
+
+                if (list.Count == 0)
+                {
+                    emptied ??= new List<ulong>();
+                    emptied.Add(address);
+                }
+            }
+
+            if (emptied is not null)
+            {
+                foreach (var address in emptied)
+                {
+                    _waiters.Remove(address);
+                }
+            }
+        }
+
+        return collected;
+    }
+
     /// <summary>Records the value a label producer wrote, for the deadlock
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
     public static bool RecordProduced(object memory, ulong address, ulong value)

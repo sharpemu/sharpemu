@@ -26,6 +26,25 @@ Before opening a pull request, please keep the following in mind:
 
 If you're unsure about a design decision, feel free to open a discussion or draft PR first.
 
+## Pull Request Expectations
+
+Pull requests should provide real, observable emulator behavior rather than only suppressing errors or unresolved imports.
+
+Changes that only return success, zero, or fabricated handles without implementing the expected state, output, or side effects will generally not be accepted. Functions that create resources, write output structures, register callbacks, or expose runtime state should model the behavior required by the guest.
+
+When applicable, PRs should include:
+
+- The affected game or application.
+- Relevant logs or failing imports.
+- Behavior before and after the change.
+- Real game testing and known limitations.
+
+Avoid submitting large collections of speculative NIDs or unrelated exports. Keep each PR focused on one problem or a closely related set of changes.
+
+Large architectural changes should be discussed with the maintainers before implementation. Contributors are encouraged to ask first when they are uncertain whether a proposed direction fits the project.
+
+Opening a PR does not guarantee that it will be merged. Maintainers evaluate changes based on correctness, evidence, testing, scope, maintenance cost, and the long-term direction of the project.
+
 ## AI-Assisted Contributions
 
 AI-assisted development is welcome and may be used for research, reverse engineering, code generation, or documentation.

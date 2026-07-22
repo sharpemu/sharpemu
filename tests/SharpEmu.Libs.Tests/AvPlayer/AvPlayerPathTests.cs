@@ -99,6 +99,25 @@ public sealed class AvPlayerPathTests : IDisposable
             AvPlayerExports.GetFfprobePath(ffmpeg, isWindows));
     }
 
+    [Theory]
+    [InlineData(false, "ffmpeg")]
+    [InlineData(true, "ffmpeg.exe")]
+    public void MediaToolLookupFindsPackagedBinary(bool isWindows, string executable)
+    {
+        var publishDirectory = Path.Combine(_tempRoot, "publish");
+        Directory.CreateDirectory(Path.Combine(publishDirectory, "ffmpeg"));
+        var ffmpeg = Path.Combine(publishDirectory, "ffmpeg", executable);
+        File.WriteAllBytes(ffmpeg, []);
+
+        Assert.Equal(
+            ffmpeg,
+            AvPlayerExports.FindFfmpeg(
+                configured: null,
+                searchPath: null,
+                isWindows,
+                publishDirectory));
+    }
+
     [Fact]
     public void RelativeFileUriCannotEscapeApp0()
     {

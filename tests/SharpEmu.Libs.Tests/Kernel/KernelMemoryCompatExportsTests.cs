@@ -302,6 +302,38 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void VirtualQuery_PreservesReservationPastFixedCommitAtSameBase()
+    {
+        const ulong memoryBase = 0x12_0000_0000;
+        const ulong reservedLength = 0x1_0000;
+        const ulong committedLength = 0x2000;
+        const ulong inOutAddress = memoryBase + 0x1_7000;
+        const ulong infoAddress = memoryBase + 0x1_8000;
+        var memory = new FakeCpuMemory(memoryBase, 0x2_0000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        KernelMemoryCompatExports.RegisterReservedVirtualRange(memoryBase, reservedLength);
+        Assert.True(memory.TryWrite(inOutAddress, BitConverter.GetBytes(memoryBase)));
+        context[CpuRegister.Rdi] = inOutAddress;
+        context[CpuRegister.Rsi] = committedLength;
+        context[CpuRegister.Rdx] = 0x03;
+        context[CpuRegister.Rcx] = 0x10; // fixed mapping
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context));
+
+        context[CpuRegister.Rdi] = memoryBase + 0x8000;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = infoAddress;
+        context[CpuRegister.Rcx] = 0x48;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelVirtualQuery(context));
+        Assert.True(context.TryReadUInt64(infoAddress, out var regionStart));
+        Assert.True(context.TryReadUInt64(infoAddress + 8, out var regionEnd));
+        Assert.Equal(memoryBase + committedLength, regionStart);
+        Assert.Equal(memoryBase + reservedLength, regionEnd);
+    }
+
+    [Fact]
     public void Mprotect_ZeroAddressReturnsInvalidArgument()
     {
         var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);

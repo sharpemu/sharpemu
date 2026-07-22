@@ -108,10 +108,17 @@ release includes the MoltenVK Vulkan implementation.
 ## Build
 
 1. Install the .NET SDK version specified in [`global.json`](./global.json).
-2. Clone the repository: `git clone https://github.com/sharpemu/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
-4. Build the project: `dotnet build` or `dotnet publish`
-5. Build artifacts will be located in the `artifacts` directory.
+2. `dotnet publish` also builds the Bink 2 bridge
+   (`native/bink2-bridge/sharpemu_bink2_bridge.c`) from source, so also
+   install:
+   * **Windows:** [CMake](https://cmake.org/download/), [Ninja](https://github.com/ninja-build/ninja/releases), and [LLVM](https://github.com/llvm/llvm-project/releases) (for `clang-cl`)
+   * **Linux/macOS:** CMake and a C compiler toolchain (e.g. `build-essential` on Linux, Xcode Command Line Tools on macOS)
+
+   `dotnet build` alone doesn't need these; it skips the bridge.
+3. Clone the repository: `git clone https://github.com/sharpemu/sharpemu.git`
+4. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
+5. Build the project: `dotnet build` or `dotnet publish`
+6. Build artifacts will be located in the `artifacts` directory.
 
 ## Disclaimer
 
