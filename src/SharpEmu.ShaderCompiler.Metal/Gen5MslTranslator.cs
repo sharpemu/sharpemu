@@ -74,6 +74,7 @@ public static partial class Gen5MslTranslator
         int pixelRenderTargetSlot = 0,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1) =>
         TryCompilePixelShader(
             state,
@@ -87,6 +88,7 @@ public static partial class Gen5MslTranslator
             initialScalarBufferIndex,
             pixelInputEnable,
             pixelInputAddress,
+            pixelInputCntl,
             storageBufferOffsetAlignment);
 
     public static bool TryCompilePixelShader(
@@ -101,6 +103,7 @@ public static partial class Gen5MslTranslator
         int initialScalarBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1)
     {
         shader = default!;
@@ -161,7 +164,8 @@ public static partial class Gen5MslTranslator
             pixelOutputBindings: outputs,
             imageBindingBase: imageBindingBase,
             pixelInputEnable: pixelInputEnable,
-            pixelInputAddress: pixelInputAddress);
+            pixelInputAddress: pixelInputAddress,
+            pixelInputCntl: pixelInputCntl);
         return context.TryCompile(out shader, out error);
     }
 
@@ -254,6 +258,7 @@ public static partial class Gen5MslTranslator
         private readonly int _imageBindingBase;
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
+        private readonly uint[] _pixelInputCntl;
         private readonly Dictionary<uint, int> _imageBindingByPc = [];
         private readonly Dictionary<uint, int> _bufferBindingByPc = [];
         private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
@@ -294,12 +299,20 @@ public static partial class Gen5MslTranslator
             int imageBindingBase = 0,
             uint pixelInputEnable = 0,
             uint pixelInputAddress = 0,
+            IReadOnlyList<uint>? pixelInputCntl = null,
             int requiredVertexOutputCount = 0)
         {
             _pixelOutputBindings = pixelOutputBindings ?? [];
             _imageBindingBase = imageBindingBase;
             _pixelInputEnable = pixelInputEnable;
             _pixelInputAddress = pixelInputAddress;
+            _pixelInputCntl = new uint[32];
+            for (uint i = 0; i < 32u; i++)
+            {
+                _pixelInputCntl[i] = pixelInputCntl is not null && i < (uint)pixelInputCntl.Count
+                    ? pixelInputCntl[(int)i]
+                    : i;
+            }
             _requiredVertexOutputCount = requiredVertexOutputCount;
             _stage = stage;
             _state = state;
@@ -592,7 +605,13 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("    float4 sharpemu_frag_coord [[position]];");
                 foreach (var attribute in _pixelAttributes)
                 {
-                    source.AppendLine($"    float4 attr{attribute} [[user(locn{attribute})]];");
+                    var cntl = attribute < (uint)_pixelInputCntl.Length
+                        ? _pixelInputCntl[attribute]
+                        : attribute;
+                    var location = cntl & 0x1Fu;
+                    var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
+                    source.AppendLine(
+                        $"    float4 attr{attribute} [[user(locn{location}){flat}]];");
                 }
 
                 source.AppendLine("};");

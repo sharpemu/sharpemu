@@ -70,6 +70,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         int scalarRegisterBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1)
     {
         shader = null;
@@ -85,6 +86,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
                 scalarRegisterBufferIndex,
                 pixelInputEnable,
                 pixelInputAddress,
+                pixelInputCntl,
                 storageBufferOffsetAlignment))
         {
             return false;

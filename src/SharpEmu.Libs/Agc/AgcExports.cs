@@ -215,7 +215,7 @@ public static partial class AgcExports
     private static readonly ConcurrentDictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
          uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
-         ulong AliasAlignment),
+         ulong PsInputCntl, ulong AliasAlignment),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
@@ -846,53 +846,228 @@ public static partial class AgcExports
         var geometryShaderAddress = ctx[CpuRegister.Rsi];
         var pixelShaderAddress = ctx[CpuRegister.Rdx];
 
-        if (registersAddress == 0 || geometryShaderAddress == 0)
+        if (registersAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadUInt64(ctx, geometryShaderAddress + ShaderOutputSemanticsOffset, out var outputSemanticsAddress) ||
-            !TryReadUInt32(ctx, geometryShaderAddress + ShaderNumOutputSemanticsOffset, out var outputSemanticsCount))
-        {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
+        // SPI_PS_INPUT_CNTL maps each PS VINTRP ATTR slot to a VS/GS param export.
+        // Walk PS input semantics, find the GS output with the same semantic id,
+        // and pack the hardware CNTL word (location in bits [4:0], Flat at 0x400).
+        uint inputSemanticsCount = 0;
         ulong inputSemanticsAddress = 0;
-        if (pixelShaderAddress != 0 &&
-            (!TryReadUInt64(ctx, pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
-             !TryReadUInt32(ctx, pixelShaderAddress + ShaderNumInputSemanticsOffset, out _)))
+        if (pixelShaderAddress != 0)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        for (uint i = 0; i < 32; i++)
-        {
-            uint value = 0;
-            if (i < outputSemanticsCount && outputSemanticsAddress != 0)
-            {
-                var flat = false;
-                if (pixelShaderAddress != 0 && inputSemanticsAddress != 0 &&
-                    TryReadUInt32(ctx, inputSemanticsAddress + (i * sizeof(uint)), out var inputSemantic))
-                {
-                    flat = ((inputSemantic >> 22) & 0x1) != 0;
-                }
-
-                value = i | (flat ? 0x400u : 0u);
-            }
-
-            var destination = registersAddress + (i * 8);
-            if (!TryWriteUInt32(ctx, destination, SpiPsInputCntl0 + i) ||
-                !TryWriteUInt32(ctx, destination + sizeof(uint), value))
+            if (!TryReadUInt64(ctx, pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
+                !TryReadUInt32(ctx, pixelShaderAddress + ShaderNumInputSemanticsOffset, out inputSemanticsCount))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
         }
 
-        TraceAgc($"agc.create_interpolant_mapping regs=0x{registersAddress:X16} gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16}");
+        if (inputSemanticsCount == 0 || inputSemanticsAddress == 0)
+        {
+            if (!TryWriteIdentityInterpolantRegisters(ctx, registersAddress, 0))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            TraceAgc(
+                $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} " +
+                $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (geometryShaderAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // NumOutputSemantics is a u16 at header +0x56.
+        if (!TryReadUInt64(ctx, geometryShaderAddress + ShaderOutputSemanticsOffset, out var outputSemanticsAddress) ||
+            !TryReadUInt16(ctx, geometryShaderAddress + ShaderNumOutputSemanticsOffset, out var outputSemanticsCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        inputSemanticsCount = Math.Min(inputSemanticsCount, 32u);
+        for (uint psIndex = 0; psIndex < inputSemanticsCount; psIndex++)
+        {
+            if (!TryReadUInt32(
+                    ctx,
+                    inputSemanticsAddress + (psIndex * sizeof(uint)),
+                    out var psWord))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            var psSemantic = psWord & 0xFFu;
+            uint? gsWord = null;
+            if (outputSemanticsAddress != 0)
+            {
+                for (uint gsIndex = 0; gsIndex < outputSemanticsCount; gsIndex++)
+                {
+                    if (!TryReadUInt32(
+                            ctx,
+                            outputSemanticsAddress + (gsIndex * sizeof(uint)),
+                            out var candidate))
+                    {
+                        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                    }
+
+                    if ((candidate & 0xFFu) == psSemantic)
+                    {
+                        gsWord = candidate;
+                        break;
+                    }
+                }
+            }
+
+            var value = (psWord & 0x0030_0000u) != 0
+                ? CreateInterpolantF16Value(psWord, gsWord)
+                : CreateInterpolantNonF16Value(psWord, gsWord.HasValue);
+            value = gsWord is { } matched
+                ? CreateInterpolantMappingValue(value, psWord, matched)
+                : CreateInterpolantDefaultParamValue(value, psWord);
+
+            if (!TryWriteInterpolantRegister(ctx, registersAddress, psIndex, value))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        if (!TryWriteIdentityInterpolantRegisters(ctx, registersAddress, inputSemanticsCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc(
+            $"agc.create_interpolant_mapping regs=0x{registersAddress:X16} " +
+            $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
+            $"inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
     #pragma warning restore SHEM004
+
+    private static uint ApplyInterpolantDefaultValue(uint value, uint psWord)
+    {
+        value &= ~0x0000_0300u;
+        value |= ((psWord >> 28) & 0x3u) << 8;
+        return value;
+    }
+
+    private static uint ApplyInterpolantDefaultValueHi(uint value, uint psWord)
+    {
+        value &= ~0x0060_0000u;
+        value |= ((psWord >> 30) & 0x3u) << 21;
+        return value;
+    }
+
+    private static uint CreateInterpolantMappingValue(uint value, uint psWord, uint gsWord)
+    {
+        var flatShade =
+            (psWord & 0x0040_0000u) != 0 || (psWord & 0x0100_0000u) != 0
+                ? 0x0000_0400u
+                : 0u;
+        value &= ~0x0000_001Fu;
+        value |= (gsWord >> 8) & 0x1Fu;
+        value &= ~0x0000_0400u;
+        value |= flatShade;
+        return ApplyInterpolantDefaultValue(value, psWord);
+    }
+
+    private static uint CreateInterpolantDefaultParamValue(uint value, uint psWord)
+    {
+        value &= ~0x0000_001Fu;
+        value &= ~0x0000_0400u;
+        return ApplyInterpolantDefaultValue(value, psWord);
+    }
+
+    private static uint CreateInterpolantF16Value(uint psWord, uint? gsWord)
+    {
+        var value = (psWord << 4) & 0x0300_0000u;
+        if (gsWord is null)
+        {
+            value |= 0x0018_0020u;
+        }
+        else
+        {
+            var commonWord = psWord & gsWord.Value;
+            value &= 0xFFF7_FFDFu;
+            value |= (commonWord >> 15) & 0x20u;
+            value ^= 0x0008_0020u;
+            value &= ~0x0010_0000u;
+            value |= (~commonWord >> 1) & 0x0010_0000u;
+        }
+
+        return ApplyInterpolantDefaultValueHi(value, psWord);
+    }
+
+    private static uint CreateInterpolantNonF16Value(uint psWord, bool hasGsSemantic)
+    {
+        uint value = 0;
+        if ((psWord & 0x0100_0000u) != 0 || !hasGsSemantic)
+        {
+            value |= 0x20u;
+        }
+
+        return value;
+    }
+
+    private static bool TryWriteInterpolantRegister(
+        CpuContext ctx,
+        ulong registersAddress,
+        uint index,
+        uint value)
+    {
+        var destination = registersAddress + (index * 8);
+        return TryWriteUInt32(ctx, destination, SpiPsInputCntl0 + index) &&
+               TryWriteUInt32(ctx, destination + sizeof(uint), value);
+    }
+
+    private static bool TryWriteIdentityInterpolantRegisters(
+        CpuContext ctx,
+        ulong registersAddress,
+        uint firstIndex)
+    {
+        for (uint i = firstIndex; i < 32u; i++)
+        {
+            if (!TryWriteInterpolantRegister(ctx, registersAddress, i, i))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static uint[] ReadPsInputCntlRegisters(IReadOnlyDictionary<uint, uint> cxRegisters)
+    {
+        var cntl = new uint[32];
+        for (uint i = 0; i < 32u; i++)
+        {
+            // Unprogrammed slots default to identity (ATTR i → param i).
+            cntl[i] = cxRegisters.TryGetValue(SpiPsInputCntl0 + i, out var value)
+                ? value
+                : i;
+        }
+
+        return cntl;
+    }
+
+    private static ulong ComputePsInputCntlFingerprint(ReadOnlySpan<uint> cntl)
+    {
+        const ulong prime = 1099511628211UL;
+        var hash = 14695981039346656037UL;
+        foreach (var value in cntl)
+        {
+            hash = (hash ^ value) * prime;
+        }
+
+        return hash;
+    }
 
     // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
     #pragma warning disable SHEM004
@@ -6503,6 +6678,8 @@ public static partial class AgcExports
         var pixelStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(pixelEvaluation)
             : ComputeShaderStructuralFingerprint(pixelEvaluation);
+        var psInputCntl = ReadPsInputCntlRegisters(state.CxRegisters);
+        var psInputCntlFingerprint = ComputePsInputCntlFingerprint(psInputCntl);
         var shaderKey = (
             exportShaderAddress,
             exportStateFingerprint,
@@ -6513,6 +6690,7 @@ public static partial class AgcExports
             attributeCount,
             psInputEna,
             psInputAddr,
+            psInputCntlFingerprint,
             _storageBufferOffsetAlignment);
 
         var guestGlobalBuffers =
@@ -6586,6 +6764,7 @@ public static partial class AgcExports
                         scalarRegisterBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers,
                         pixelInputEnable: psInputEna,
                         pixelInputAddress: psInputAddr,
+                        pixelInputCntl: psInputCntl,
                         storageBufferOffsetAlignment:
                             _storageBufferOffsetAlignment) ||
                     !GuestGpu.Current.TryCompileVertexShader(
@@ -10504,6 +10683,7 @@ public static partial class AgcExports
                                  out var compileError,
                                  pixelInputEnable: psInputEna,
                                  pixelInputAddress: psInputAddr,
+                                 pixelInputCntl: ReadPsInputCntlRegisters(state.CxRegisters),
                                  storageBufferOffsetAlignment:
                                      _storageBufferOffsetAlignment))
                         {
@@ -11507,6 +11687,28 @@ public static partial class AgcExports
             _dcbWindowBuffer = null;
             _dcbWindowByteLength = 0;
         }
+    }
+
+    private static bool TryReadUInt16(CpuContext ctx, ulong address, out ushort value)
+    {
+        if (_dcbWindowBuffer is { } window &&
+            address >= _dcbWindowStart &&
+            address - _dcbWindowStart + sizeof(ushort) <= (ulong)_dcbWindowByteLength)
+        {
+            value = BinaryPrimitives.ReadUInt16LittleEndian(
+                window.AsSpan((int)(address - _dcbWindowStart)));
+            return true;
+        }
+
+        Span<byte> buffer = stackalloc byte[sizeof(ushort)];
+        if (!ctx.Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt16LittleEndian(buffer);
+        return true;
     }
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)

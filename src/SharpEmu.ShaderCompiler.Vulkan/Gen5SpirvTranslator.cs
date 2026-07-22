@@ -31,6 +31,7 @@ public static partial class Gen5SpirvTranslator
         int pixelRenderTargetSlot = 0,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1) =>
         TryCompilePixelShader(
             state,
@@ -44,6 +45,7 @@ public static partial class Gen5SpirvTranslator
             initialScalarBufferIndex,
             pixelInputEnable,
             pixelInputAddress,
+            pixelInputCntl,
             storageBufferOffsetAlignment);
 
     public static bool TryCompilePixelShader(
@@ -58,6 +60,7 @@ public static partial class Gen5SpirvTranslator
         int initialScalarBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1)
     {
         if (outputs.Count > 8 || outputs.Any(output => output.GuestSlot > 7))
@@ -99,6 +102,7 @@ public static partial class Gen5SpirvTranslator
             initialScalarBufferIndex,
             pixelInputEnable: pixelInputEnable,
             pixelInputAddress: pixelInputAddress,
+            pixelInputCntl: pixelInputCntl,
             storageBufferOffsetAlignment: storageBufferOffsetAlignment);
         return context.TryCompile(out shader, out error);
     }
@@ -231,6 +235,7 @@ public static partial class Gen5SpirvTranslator
         private readonly int _initialScalarBufferIndex;
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
+        private readonly uint[] _pixelInputCntl;
         private readonly ulong _storageBufferOffsetAlignment;
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
@@ -342,6 +347,7 @@ public static partial class Gen5SpirvTranslator
             int initialScalarBufferIndex,
             uint pixelInputEnable = 0,
             uint pixelInputAddress = 0,
+            IReadOnlyList<uint>? pixelInputCntl = null,
             int requiredVertexOutputCount = 0,
             uint waveLaneCount = 32,
             ulong storageBufferOffsetAlignment = 1)
@@ -367,6 +373,13 @@ public static partial class Gen5SpirvTranslator
             _initialScalarBufferIndex = initialScalarBufferIndex;
             _pixelInputEnable = pixelInputEnable;
             _pixelInputAddress = pixelInputAddress;
+            _pixelInputCntl = new uint[32];
+            for (uint i = 0; i < 32u; i++)
+            {
+                _pixelInputCntl[i] = pixelInputCntl is not null && i < (uint)pixelInputCntl.Count
+                    ? pixelInputCntl[(int)i]
+                    : i;
+            }
             if (storageBufferOffsetAlignment == 0 ||
                 (storageBufferOffsetAlignment & (storageBufferOffsetAlignment - 1)) != 0 ||
                 storageBufferOffsetAlignment > uint.MaxValue)
@@ -1236,7 +1249,18 @@ public static partial class Gen5SpirvTranslator
                     var variable = _module.AddGlobalVariable(
                         inputVec4Pointer,
                         SpirvStorageClass.Input);
-                    _module.AddDecoration(variable, SpirvDecoration.Location, attribute);
+                    // VINTRP ATTR selects the PS input slot. SPI_PS_INPUT_CNTL
+                    // maps that slot to a VS parameter export location.
+                    var cntl = attribute < (uint)_pixelInputCntl.Length
+                        ? _pixelInputCntl[attribute]
+                        : attribute;
+                    var location = cntl & 0x1Fu;
+                    _module.AddDecoration(variable, SpirvDecoration.Location, location);
+                    if ((cntl & 0x400u) != 0)
+                    {
+                        _module.AddDecoration(variable, SpirvDecoration.Flat);
+                    }
+
                     _pixelInputs.Add(attribute, variable);
                     _interfaces.Add(variable);
                 }
