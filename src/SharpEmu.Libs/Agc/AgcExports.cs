@@ -2892,6 +2892,38 @@ public static partial class AgcExports
             $"arg1=0x{ctx[CpuRegister.Rsi]:X16} arg2=0x{ctx[CpuRegister.Rdx]:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
+
+    // Synthetic labels for uncatalogued AGC helper NIDs; the NID is authoritative.
+    #pragma warning disable SHEM006
+    [SysAbiExport(
+        Nid = "zlqfTyrQSPk",
+        ExportName = "sceAgcUnknownZlqfTyrQSPk",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int UnknownZlqfTyrQSPk(CpuContext ctx)
+    {
+        TraceAgc(
+            $"agc.unknown_zlqf rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
+            $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
+            $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "dZGYu5wObJs",
+        ExportName = "sceAgcUnknownDZGYu5wObJs",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int UnknownDZGYu5wObJs(CpuContext ctx)
+    {
+        TraceAgc(
+            $"agc.unknown_dzgy rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
+            $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
+            $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
     #pragma warning restore SHEM006
 
     private static void EnqueueSubmittedDcb(
