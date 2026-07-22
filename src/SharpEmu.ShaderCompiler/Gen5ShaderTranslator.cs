@@ -80,7 +80,7 @@ public static class Gen5ShaderTranslator
     public static bool IsScalarConsumed(ulong[] mask, uint register) =>
         register < 256 && (mask[register >> 6] & (1UL << (int)(register & 63))) != 0;
 
-    private const int MaxInstructions = 4096;
+    private const int MaxInstructions = 16384;
     private const uint PsUserDataRegister = 0x0C;
     private const uint VsUserDataRegister = 0x4C;
     private const uint GsUserDataRegister = 0x8C;
