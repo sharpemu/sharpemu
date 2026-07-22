@@ -60,6 +60,13 @@ public static class SaveDataStorage
             return "default";
         }
 
+        // Block path traversal: ".." is not in GetInvalidFileNameChars but
+        // allows a guest name to escape the save root.
+        if (value == ".." || value.Contains("/..") || value.Contains("\\.."))
+        {
+            return "default";
+        }
+
         var invalid = Path.GetInvalidFileNameChars();
         Span<char> buffer = value.Length <= 128 ? stackalloc char[value.Length] : new char[value.Length];
         for (var i = 0; i < value.Length; i++)
@@ -69,6 +76,12 @@ public static class SaveDataStorage
         }
 
         var sanitized = new string(buffer).Trim();
+        // Double-check: the result must not resolve outside the save root.
+        if (sanitized == ".." || sanitized.Contains("/..") || sanitized.Contains("\\.."))
+        {
+            return "default";
+        }
+
         return string.IsNullOrWhiteSpace(sanitized) ? "default" : sanitized;
     }
 

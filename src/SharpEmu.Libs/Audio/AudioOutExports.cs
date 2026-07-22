@@ -83,7 +83,8 @@ public static class AudioOutExports
             }
         }
 
-        public void Dispose() => Backend?.Dispose();
+        public volatile bool Disposed;
+        public void Dispose() { Disposed = true; Backend?.Dispose(); }
     }
 
     [SysAbiExport(
@@ -206,9 +207,15 @@ public static class AudioOutExports
             // Host shutdown disposes the ports while guest audio threads are
             // still draining their last buffers; report success so the guest
             // winds down without a per-buffer error (and its WARN log flood).
-            return ctx.SetReturn(_shutdown
+            return ctx.SetReturn(Volatile.Read(ref _shutdown)
                 ? 0
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // Port may have been disposed by ShutdownAllPorts racing with this call.
+        if (port.Disposed)
+        {
+            return ctx.SetReturn(0);
         }
 
         if (sourceAddress == 0)
@@ -362,7 +369,7 @@ public static class AudioOutExports
         }
     }
 
-    private static bool _shutdown;
+    private static volatile bool _shutdown;
 
     private static bool TryGetFormat(
         int rawFormat,

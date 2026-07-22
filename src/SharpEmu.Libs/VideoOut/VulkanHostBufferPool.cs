@@ -18,6 +18,7 @@ internal readonly record struct VulkanHostBufferAllocation(
 
 internal sealed class VulkanHostBufferPool : IDisposable
 {
+    private readonly object _gate = new();
     private readonly Dictionary<VulkanHostBufferPoolKey, Stack<VulkanHostBufferAllocation>>
         _available = [];
     private readonly Dictionary<ulong, VulkanHostBufferAllocation> _allocations = [];
@@ -40,16 +41,19 @@ internal sealed class VulkanHostBufferPool : IDisposable
         VulkanHostBufferPoolKey key,
         out VulkanHostBufferAllocation allocation)
     {
-        if (!_available.TryGetValue(key, out var available) ||
-            !available.TryPop(out allocation))
+        lock (_gate)
         {
-            allocation = default;
-            return false;
-        }
+            if (!_available.TryGetValue(key, out var available) ||
+                !available.TryPop(out allocation))
+            {
+                allocation = default;
+                return false;
+            }
 
-        _cachedHandles.Remove(allocation.Buffer.Handle);
-        CachedBytes -= allocation.Key.Capacity;
-        return true;
+            _cachedHandles.Remove(allocation.Buffer.Handle);
+            CachedBytes -= allocation.Key.Capacity;
+            return true;
+        }
     }
 
     public void Register(VulkanHostBufferAllocation allocation)
@@ -59,51 +63,60 @@ internal sealed class VulkanHostBufferPool : IDisposable
             throw new ArgumentException("A pooled buffer must have a valid handle.", nameof(allocation));
         }
 
-        _allocations.Add(allocation.Buffer.Handle, allocation);
+        lock (_gate)
+        {
+            _allocations.Add(allocation.Buffer.Handle, allocation);
+        }
     }
 
     public bool Return(VkBuffer buffer, DeviceMemory memory)
     {
-        if (!_allocations.TryGetValue(buffer.Handle, out var allocation) ||
-            allocation.Memory.Handle != memory.Handle)
+        lock (_gate)
         {
-            return false;
-        }
+            if (!_allocations.TryGetValue(buffer.Handle, out var allocation) ||
+                allocation.Memory.Handle != memory.Handle)
+            {
+                return false;
+            }
 
-        if (!_cachedHandles.Add(buffer.Handle))
-        {
+            if (!_cachedHandles.Add(buffer.Handle))
+            {
+                return true;
+            }
+
+            if (allocation.Key.Capacity > MaximumCachedBytes - CachedBytes)
+            {
+                _cachedHandles.Remove(buffer.Handle);
+                _allocations.Remove(buffer.Handle);
+                _destroy(allocation);
+                return true;
+            }
+
+            if (!_available.TryGetValue(allocation.Key, out var available))
+            {
+                available = [];
+                _available.Add(allocation.Key, available);
+            }
+
+            available.Push(allocation);
+            CachedBytes += allocation.Key.Capacity;
             return true;
         }
-
-        if (allocation.Key.Capacity > MaximumCachedBytes - CachedBytes)
-        {
-            _cachedHandles.Remove(buffer.Handle);
-            _allocations.Remove(buffer.Handle);
-            _destroy(allocation);
-            return true;
-        }
-
-        if (!_available.TryGetValue(allocation.Key, out var available))
-        {
-            available = [];
-            _available.Add(allocation.Key, available);
-        }
-
-        available.Push(allocation);
-        CachedBytes += allocation.Key.Capacity;
-        return true;
     }
 
     public void Dispose()
     {
-        foreach (var allocation in _allocations.Values)
+        lock (_gate)
         {
-            _destroy(allocation);
-        }
+            foreach (var allocation in _allocations.Values)
+            {
+                _destroy(allocation);
+            }
 
-        _allocations.Clear();
-        _available.Clear();
-        _cachedHandles.Clear();
-        CachedBytes = 0;
+            _allocations.Clear();
+            _available.Clear();
+            _cachedHandles.Clear();
+            CachedBytes = 0;
+        }
     }
 }

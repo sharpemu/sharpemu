@@ -65,10 +65,12 @@ internal static class KernelVirtualRangeAllocator
             mappedAddress = allocated;
             return true;
         }
-        catch
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             // Expected when a fixed-address request cannot be satisfied on
             // this host; the caller falls back or reports the failure.
+            // OutOfMemoryException is re-thrown because it indicates a
+            // critical system state that should not be silently swallowed.
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] {traceName}: no host mapping at 0x{desiredAddress:X16} len=0x{length:X}");
             return false;

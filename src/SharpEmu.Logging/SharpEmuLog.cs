@@ -80,9 +80,9 @@ public static class SharpEmuLog
     }
 
     /// <summary>
-    /// Disposes the active sink if it implements <see cref="IDisposable"/>.
-    /// Call at shutdown to flush file buffers. Logging after this call
-    /// continues to work for non-disposable sinks (e.g. <see cref="ConsoleLogSink"/>).
+    /// Disposes the active sink if it implements <see cref="IDisposable"/>,
+    /// then replaces it with a no-op sink so that subsequent Write calls
+    /// don't hit a disposed object. Call at shutdown to flush file buffers.
     /// </summary>
     public static void Shutdown()
     {
@@ -92,7 +92,16 @@ public static class SharpEmuLog
             {
                 disposable.Dispose();
             }
+
+            _sink = NullLogSink.Instance;
         }
+    }
+
+    /// <summary>No-op sink that safely absorbs writes after shutdown.</summary>
+    private sealed class NullLogSink : ISharpEmuLogSink
+    {
+        internal static readonly NullLogSink Instance = new();
+        public void Write(in LogEntry entry) { }
     }
 
     public static SharpEmuLogger For(string category)
