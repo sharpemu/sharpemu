@@ -21,6 +21,7 @@ public static class AjmExports
     private const int MaxInstanceIndex = 0x2FFF;
     private static readonly ConcurrentDictionary<uint, AjmContextState> Contexts = new();
     private static int _nextContextId;
+    private static int _nextBatchId;
 
     private sealed class AjmContextState
     {
@@ -227,10 +228,250 @@ public static class AjmExports
         return 0;
     }
 
+    /// <summary>
+    /// Enqueues a decode job on a batch. Titles call this on the Bink/AJM hot
+    /// path; leaving it unresolved floods Import WARN spam. This is a silence
+    /// stub, not a codec: advance the batch cursor and report the input as
+    /// consumed with silence produced so the title does not spin on the same
+    /// packet.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "39WxhR-ePew",
+        ExportName = "sceAjmBatchJobDecode",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecode(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var inputAddress = ctx[CpuRegister.Rdx];
+        var inputSize = ctx[CpuRegister.Rcx];
+        var outputAddress = ctx[CpuRegister.R8];
+        var outputSize = ctx[CpuRegister.R9];
+        var resultAddress = ReadStackArg64(ctx, 0);
+
+        if (infoAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        // Best-effort: bump the batch cursor when the guest filled AjmBatchInfo.
+        // Still succeed without it — the unresolved stub returned 0 and titles
+        // keep calling; failing here would reintroduce hot-path spam via retries.
+        _ = TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize);
+
+        // Silence: clear PCM out and claim full input consumed so the guest
+        // advances its bitstream cursor instead of re-submitting forever.
+        if (outputAddress != 0 && outputSize != 0 && outputSize <= MaxSilentPcmBytes)
+        {
+            ClearGuestMemory(ctx, outputAddress, outputSize);
+        }
+
+        WriteDecodeStreamResult(
+            ctx,
+            resultAddress,
+            inputConsumed: inputSize > int.MaxValue ? int.MaxValue : (int)inputSize,
+            outputWritten: 0,
+            totalDecodedSamples: 0,
+            frames: inputSize != 0 || outputSize != 0 ? 1u : 0u);
+
+        Trace(
+            $"batch_job_decode info=0x{infoAddress:X16} instance=0x{instanceId:X8} " +
+            $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
+            $"result=0x{resultAddress:X16}");
+        return ctx.SetReturn(0);
+    }
+
+    /// <summary>
+    /// Submits a built batch. Instant-complete silence stub: publish a batch id
+    /// and clear any error out. Decode sidebands were already filled at
+    /// job-enqueue time.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "5tOfnaClcqM",
+        ExportName = "sceAjmBatchStart",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchStart(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var infoAddress = ctx[CpuRegister.Rsi];
+        var priority = unchecked((int)ctx[CpuRegister.Rdx]);
+        var errorAddress = ctx[CpuRegister.Rcx];
+        var batchOutAddress = ctx[CpuRegister.R8];
+
+        if (infoAddress == 0 || batchOutAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        ClearAjmBatchError(ctx, errorAddress);
+
+        var batchId = unchecked((uint)Interlocked.Increment(ref _nextBatchId));
+        Span<byte> batchValue = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(batchValue, batchId);
+        if (!ctx.Memory.TryWrite(batchOutAddress, batchValue))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Trace(
+            $"batch_start context={contextId} info=0x{infoAddress:X16} " +
+            $"priority={priority} batch={batchId} error=0x{errorAddress:X16}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "-qLsfDAywIY",
+        ExportName = "sceAjmBatchWait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchWait(CpuContext ctx)
+    {
+        // Batches complete synchronously in Start; Wait is a no-op success.
+        var errorAddress = ctx[CpuRegister.Rcx];
+        ClearAjmBatchError(ctx, errorAddress);
+        Trace(
+            $"batch_wait context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
+            $"batch={unchecked((uint)ctx[CpuRegister.Rsi])} " +
+            $"timeout={unchecked((uint)ctx[CpuRegister.Rdx])}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "NVDXiUesSbA",
+        ExportName = "sceAjmBatchCancel",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchCancel(CpuContext ctx)
+    {
+        Trace(
+            $"batch_cancel context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
+            $"batch={unchecked((uint)ctx[CpuRegister.Rsi])}");
+        return ctx.SetReturn(0);
+    }
+
     internal static void ResetForTests()
     {
         Contexts.Clear();
         Interlocked.Exchange(ref _nextContextId, 0);
+        Interlocked.Exchange(ref _nextBatchId, 0);
+    }
+
+    // AjmBatchInfo: buffer, offset, size, last_good_job, last_good_job_ra (5× u64).
+    private const ulong AjmBatchInfoOffsetField = 8;
+    private const ulong AjmBatchInfoSizeField = 16;
+    private const ulong AjmBatchInfoLastGoodJobField = 24;
+    private const ulong AjmJobRunSize = 64;
+    private const ulong MaxSilentPcmBytes = 1 << 20;
+    // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).
+    private const int DecodeSidebandBytes = 32;
+
+    private static bool TryAppendBatchJob(CpuContext ctx, ulong infoAddress, ulong jobSize)
+    {
+        if (!TryReadUInt64(ctx, infoAddress, out var buffer) ||
+            !TryReadUInt64(ctx, infoAddress + AjmBatchInfoOffsetField, out var offset) ||
+            !TryReadUInt64(ctx, infoAddress + AjmBatchInfoSizeField, out var size))
+        {
+            return false;
+        }
+
+        if (buffer == 0 || jobSize == 0 || offset > size || size - offset < jobSize)
+        {
+            return false;
+        }
+
+        var jobAddress = buffer + offset;
+        ClearGuestMemory(ctx, jobAddress, jobSize);
+        return TryWriteUInt64(ctx, infoAddress + AjmBatchInfoLastGoodJobField, jobAddress) &&
+               TryWriteUInt64(ctx, infoAddress + AjmBatchInfoOffsetField, offset + jobSize);
+    }
+
+    // AjmBatchError: int error_code; const void* job_addr; uint32_t cmd_offset; const void* job_ra;
+    private const int AjmBatchErrorBytes = 24;
+
+    private static void ClearAjmBatchError(CpuContext ctx, ulong errorAddress)
+    {
+        if (errorAddress == 0)
+        {
+            return;
+        }
+
+        Span<byte> error = stackalloc byte[AjmBatchErrorBytes];
+        error.Clear();
+        _ = ctx.Memory.TryWrite(errorAddress, error);
+    }
+
+    private static void WriteDecodeStreamResult(
+        CpuContext ctx,
+        ulong resultAddress,
+        int inputConsumed,
+        int outputWritten,
+        ulong totalDecodedSamples,
+        uint frames)
+    {
+        if (resultAddress == 0)
+        {
+            return;
+        }
+
+        Span<byte> sideband = stackalloc byte[DecodeSidebandBytes];
+        sideband.Clear();
+        // AjmSidebandResult.result / internal_result = 0 (OK)
+        BinaryPrimitives.WriteInt32LittleEndian(sideband.Slice(8, 4), inputConsumed);
+        BinaryPrimitives.WriteInt32LittleEndian(sideband.Slice(12, 4), outputWritten);
+        BinaryPrimitives.WriteUInt64LittleEndian(sideband.Slice(16, 8), totalDecodedSamples);
+        BinaryPrimitives.WriteUInt32LittleEndian(sideband.Slice(24, 4), frames);
+        _ = ctx.Memory.TryWrite(resultAddress, sideband);
+    }
+
+    private static void ClearGuestMemory(CpuContext ctx, ulong address, ulong byteCount)
+    {
+        if (address == 0 || byteCount == 0)
+        {
+            return;
+        }
+
+        var remaining = byteCount;
+        var cursor = address;
+        Span<byte> zero = stackalloc byte[256];
+        while (remaining > 0)
+        {
+            var chunk = (int)Math.Min(remaining, (ulong)zero.Length);
+            if (!ctx.Memory.TryWrite(cursor, zero[..chunk]))
+            {
+                return;
+            }
+
+            cursor += (ulong)chunk;
+            remaining -= (ulong)chunk;
+        }
+    }
+
+    private static ulong ReadStackArg64(CpuContext ctx, int index)
+    {
+        var address = ctx[CpuRegister.Rsp] + sizeof(ulong) + ((ulong)index * sizeof(ulong));
+        return TryReadUInt64(ctx, address, out var value) ? value : 0;
+    }
+
+    private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
+        if (!ctx.Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
+        return true;
+    }
+
+    private static bool TryWriteUInt64(CpuContext ctx, ulong address, ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
+        return ctx.Memory.TryWrite(address, buffer);
     }
 
     private static void Trace(string message)
