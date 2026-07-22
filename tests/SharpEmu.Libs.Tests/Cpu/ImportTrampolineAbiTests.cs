@@ -60,6 +60,39 @@ public sealed class ImportTrampolineAbiTests
         }
     }
 
+    [Fact]
+    public unsafe void GeneratedGuestReturnStub_PreservesGuestRaxAcrossTlsLookup()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
+            typeof(DirectExecutionBackend));
+        var createStub = typeof(DirectExecutionBackend).GetMethod(
+            "CreateGuestReturnStub",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(createStub);
+        var stub = (nint)createStub.Invoke(backend, null)!;
+        Assert.NotEqual(0, stub);
+
+        try
+        {
+            var code = new ReadOnlySpan<byte>((void*)stub, 256);
+            AssertContains(code, [0x48, 0x83, 0xEC, 0x30]);       // sub rsp,0x30
+            AssertContains(code, [0x48, 0x89, 0x44, 0x24, 0x20]); // mov [rsp+0x20],rax
+            AssertContains(code, [0x49, 0x89, 0xC3]);             // mov r11,rax
+            AssertContains(code, [0x48, 0x8B, 0x44, 0x24, 0x20]); // mov rax,[rsp+0x20]
+            AssertContains(code, [0x48, 0x83, 0xC4, 0x30]);       // add rsp,0x30
+            AssertContains(code, [0x49, 0x8B, 0x23]);             // mov rsp,[r11]
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free((void*)stub, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
     private static unsafe byte[] CreateTrampolineBytes()
     {
         var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
