@@ -80,8 +80,13 @@ public static partial class AgcExports
     private const uint RIndexCount = 0x1C;
     private const uint SpiShaderPgmLoPs = 0x8;
     private const uint SpiShaderPgmHiPs = 0x9;
+    private const uint SpiShaderPgmLoVs = 0x48;
+    private const uint SpiShaderPgmHiVs = 0x49;
     private const uint SpiShaderPgmLoEs = 0xC8;
     private const uint SpiShaderPgmHiEs = 0xC9;
+    private const uint SpiShaderPgmLoHs = 0x108;
+    private const uint SpiShaderPgmHiHs = 0x109;
+    private const uint SpiShaderPgmRsrc1Hs = 0x10A;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
     private const uint SpiShaderPgmLoGs = 0x8A;
@@ -10656,18 +10661,14 @@ public static partial class AgcExports
             return false;
         }
 
-        if (!TryReadUInt32(ctx, shRegistersAddress, out var loRegister) ||
-            !TryReadUInt32(ctx, shRegistersAddress + 8, out var hiRegister))
-        {
-            return false;
-        }
-
         var expectedLo = shaderType switch
         {
             0 => ComputePgmLo,
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
+            3 => SpiShaderPgmLoVs,
             4 => SpiShaderPgmLoGs,
+            5 => SpiShaderPgmLoHs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -10676,20 +10677,187 @@ public static partial class AgcExports
             0 => ComputePgmHi,
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
+            3 => SpiShaderPgmHiVs,
             4 => SpiShaderPgmHiGs,
+            5 => SpiShaderPgmHiHs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
-        if (expectedLo == 0 || loRegister != expectedLo || hiRegister != expectedHi)
+
+        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
+        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
+        // filled later via SetShRegisterDirect).
+        if (!TryFindShaderProgramRegisterPair(
+                ctx,
+                shRegistersAddress,
+                registerCount,
+                expectedLo,
+                expectedHi,
+                out var loEntryAddress,
+                out var hiEntryAddress,
+                out var foundLo,
+                out var foundHi))
         {
-            TraceCreateShader(0, headerAddress, codeAddress, $"unexpected-registers type={shaderType} lo=0x{loRegister:X8} hi=0x{hiRegister:X8}");
+            TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
+            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
+            // omit PGM_LO/HI from the default table. Still succeed: the code VA
+            // lives at ShaderCodeOffset and later binder paths republish it.
+            if (shaderType == 5 && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs)
+            {
+                TraceCreateShader(
+                    0,
+                    headerAddress,
+                    codeAddress,
+                    $"skip-pgm-patch type=5 first_lo=0x{firstLo:X8}");
+                return true;
+            }
+
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
             return false;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
         var hiValue = (uint)((codeAddress >> 40) & 0xFFUL);
-        return TryWriteUInt32(ctx, shRegistersAddress + sizeof(uint), loValue) &&
-               TryWriteUInt32(ctx, shRegistersAddress + 8 + sizeof(uint), hiValue);
+        if (!TryWriteUInt32(ctx, loEntryAddress + sizeof(uint), loValue) ||
+            !TryWriteUInt32(ctx, hiEntryAddress + sizeof(uint), hiValue))
+        {
+            return false;
+        }
+
+        if (foundLo != expectedLo || foundHi != expectedHi)
+        {
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"patched-alt-registers type={shaderType} lo=0x{foundLo:X8} hi=0x{foundHi:X8}");
+        }
+
+        return true;
+    }
+
+    private static readonly (uint Lo, uint Hi)[] ShaderProgramRegisterPairs =
+    [
+        (ComputePgmLo, ComputePgmHi),
+        (SpiShaderPgmLoPs, SpiShaderPgmHiPs),
+        (SpiShaderPgmLoVs, SpiShaderPgmHiVs),
+        (SpiShaderPgmLoEs, SpiShaderPgmHiEs),
+        (SpiShaderPgmLoGs, SpiShaderPgmHiGs),
+        (SpiShaderPgmLoHs, SpiShaderPgmHiHs),
+        (SpiShaderPgmLoLs, SpiShaderPgmHiLs),
+    ];
+
+    private static bool TryFindShaderProgramRegisterPair(
+        CpuContext ctx,
+        ulong shRegistersAddress,
+        byte registerCount,
+        uint preferredLo,
+        uint preferredHi,
+        out ulong loEntryAddress,
+        out ulong hiEntryAddress,
+        out uint foundLo,
+        out uint foundHi)
+    {
+        loEntryAddress = 0;
+        hiEntryAddress = 0;
+        foundLo = 0;
+        foundHi = 0;
+
+        ulong preferredLoAddress = 0;
+        ulong preferredHiAddress = 0;
+        ulong fallbackLoAddress = 0;
+        ulong fallbackHiAddress = 0;
+        uint fallbackLo = 0;
+        uint fallbackHi = 0;
+
+        for (uint index = 0; index < registerCount; index++)
+        {
+            var entryAddress = shRegistersAddress + ((ulong)index * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var offset))
+            {
+                return false;
+            }
+
+            if (preferredLo != 0 && offset == preferredLo)
+            {
+                preferredLoAddress = entryAddress;
+            }
+            else if (preferredHi != 0 && offset == preferredHi)
+            {
+                preferredHiAddress = entryAddress;
+            }
+
+            if (fallbackLoAddress != 0)
+            {
+                continue;
+            }
+
+            foreach (var pair in ShaderProgramRegisterPairs)
+            {
+                if (offset != pair.Lo)
+                {
+                    continue;
+                }
+
+                // Prefer a contiguous LO/HI pair when present.
+                if (index + 1 < registerCount &&
+                    TryReadUInt32(ctx, entryAddress + 8, out var nextOffset) &&
+                    nextOffset == pair.Hi)
+                {
+                    fallbackLoAddress = entryAddress;
+                    fallbackHiAddress = entryAddress + 8;
+                    fallbackLo = pair.Lo;
+                    fallbackHi = pair.Hi;
+                    break;
+                }
+
+                for (uint hiIndex = 0; hiIndex < registerCount; hiIndex++)
+                {
+                    if (hiIndex == index)
+                    {
+                        continue;
+                    }
+
+                    var hiAddress = shRegistersAddress + ((ulong)hiIndex * 8);
+                    if (!TryReadUInt32(ctx, hiAddress, out var hiOffset) || hiOffset != pair.Hi)
+                    {
+                        continue;
+                    }
+
+                    fallbackLoAddress = entryAddress;
+                    fallbackHiAddress = hiAddress;
+                    fallbackLo = pair.Lo;
+                    fallbackHi = pair.Hi;
+                    break;
+                }
+
+                break;
+            }
+        }
+
+        if (preferredLoAddress != 0 && preferredHiAddress != 0)
+        {
+            loEntryAddress = preferredLoAddress;
+            hiEntryAddress = preferredHiAddress;
+            foundLo = preferredLo;
+            foundHi = preferredHi;
+            return true;
+        }
+
+        if (fallbackLoAddress != 0 && fallbackHiAddress != 0)
+        {
+            loEntryAddress = fallbackLoAddress;
+            hiEntryAddress = fallbackHiAddress;
+            foundLo = fallbackLo;
+            foundHi = fallbackHi;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
