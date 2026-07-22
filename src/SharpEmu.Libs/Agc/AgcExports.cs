@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Bink;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
@@ -48,6 +49,7 @@ public static partial class AgcExports
     private const uint ItWriteData = 0x37;
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
+    private const uint ItSetPredication = 0x20;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
     private const uint ItEventWrite = 0x46;
@@ -277,7 +279,7 @@ public static partial class AgcExports
     private static long _labelProducerSequence;
     private static readonly object _labelProducerGate = new();
     private static readonly List<LabelProducerTrace> _labelProducers = [];
-    private static readonly HashSet<(object Memory, ulong Address, ulong SubmissionId)>
+    private static readonly HashSet<(object Memory, ulong Address)>
         _tracedProducerlessWaits = new();
     private static long _shaderTranslationMissTraceCount;
     private static long _translatedDrawTraceCount;
@@ -543,6 +545,7 @@ public static partial class AgcExports
         public uint IndexSize { get; set; }
         public uint InstanceCount { get; set; } = 1;
         public uint DrawIndexOffset { get; set; }
+        public bool PredicateSkip { get; set; }
         public string QueueName { get; set; } = "graphics";
         public ulong ActiveSubmissionId { get; set; }
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
@@ -1183,12 +1186,12 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var packetDwords = size == 0 ? 6u : 9u;
+        var packetDwords = size == 0 ? 7u : 9u;
         var packetRegister = size == 0 ? RWaitMem32 : RWaitMem64;
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, packetRegister)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (uint)address) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, (uint)address & (size == 0 ? ~0x3u : ~0x7u)) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32) & 0x3FFFFu) ||
             !TryWriteUInt32(ctx, commandAddress + 12, (uint)mask))
         {
             return ReturnPointer(ctx, 0);
@@ -1196,8 +1199,9 @@ public static partial class AgcExports
 
         if (size == 0)
         {
-            if (!TryWriteUInt32(ctx, commandAddress + 16, compareFunction) ||
-                !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference))
+            if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)reference) ||
+                !TryWriteUInt32(ctx, commandAddress + 20, EncodeWaitRegMem32Control(compareFunction, 0, cachePolicy)) ||
+                !TryWriteUInt32(ctx, commandAddress + 24, EncodeWaitRegMemPoll(pollCycles)))
             {
                 return ReturnPointer(ctx, 0);
             }
@@ -1205,8 +1209,8 @@ public static partial class AgcExports
         else if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)(mask >> 32)) ||
                  !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference) ||
                  !TryWriteUInt32(ctx, commandAddress + 24, (uint)(reference >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 28, compareFunction) ||
-                 !TryWriteUInt32(ctx, commandAddress + 32, pollCycles / 40))
+                 !TryWriteUInt32(ctx, commandAddress + 28, EncodeWaitRegMem64Control(compareFunction, 0, cachePolicy)) ||
+                 !TryWriteUInt32(ctx, commandAddress + 32, EncodeWaitRegMemPoll(pollCycles)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -1826,38 +1830,21 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var standardWait = operation is 2 or 3;
-        var packetDwords = standardWait ? 7u : size == 0 ? 6u : 9u;
+        var packetDwords = size == 0 ? 7u : 9u;
         var packetRegister = size == 0 ? RWaitMem32 : RWaitMem64;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-
-        if (standardWait)
-        {
-            if (!TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItWaitRegMem, 0)) ||
-                !TryWriteUInt32(ctx, commandAddress + 4, compareFunction | ((operation & 1) << 8)) ||
-                !TryWriteUInt32(ctx, commandAddress + 8, (uint)address) ||
-                !TryWriteUInt32(ctx, commandAddress + 12, (uint)(address >> 32)) ||
-                !TryWriteUInt32(ctx, commandAddress + 16, (uint)reference) ||
-                !TryWriteUInt32(ctx, commandAddress + 20, (uint)mask) ||
-                !TryWriteUInt32(ctx, commandAddress + 24, pollCycles / 40))
-            {
-                return ReturnPointer(ctx, 0);
-            }
-        }
-        else if (!TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, packetRegister)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 4, (uint)address) ||
-                 !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32)) ||
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, packetRegister)) ||
+                 !TryWriteUInt32(ctx, commandAddress + 4, (uint)address & (size == 0 ? ~0x3u : ~0x7u)) ||
+                 !TryWriteUInt32(ctx, commandAddress + 8, (uint)(address >> 32) & 0x3FFFFu) ||
                  !TryWriteUInt32(ctx, commandAddress + 12, (uint)mask))
         {
             return ReturnPointer(ctx, 0);
         }
         else if (size == 0)
         {
-            if (!TryWriteUInt32(ctx, commandAddress + 16, compareFunction | (operation << 8)) ||
-                !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference))
+            if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)reference) ||
+                !TryWriteUInt32(ctx, commandAddress + 20, EncodeWaitRegMem32Control(compareFunction, operation, cachePolicy)) ||
+                !TryWriteUInt32(ctx, commandAddress + 24, EncodeWaitRegMemPoll(pollCycles)))
             {
                 return ReturnPointer(ctx, 0);
             }
@@ -1865,8 +1852,8 @@ public static partial class AgcExports
         else if (!TryWriteUInt32(ctx, commandAddress + 16, (uint)(mask >> 32)) ||
                  !TryWriteUInt32(ctx, commandAddress + 20, (uint)reference) ||
                  !TryWriteUInt32(ctx, commandAddress + 24, (uint)(reference >> 32)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 28, compareFunction | (operation << 8)) ||
-                 !TryWriteUInt32(ctx, commandAddress + 32, pollCycles / 40))
+                 !TryWriteUInt32(ctx, commandAddress + 28, EncodeWaitRegMem64Control(compareFunction, operation, cachePolicy)) ||
+                 !TryWriteUInt32(ctx, commandAddress + 32, EncodeWaitRegMemPoll(pollCycles)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -2305,7 +2292,14 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return ctx.TryWriteUInt64(commandAddress + fieldOffset, address)
+        var wrote = op == ItNop && register is RWaitMem32 or RWaitMem64
+            ? TryWriteUInt32(
+                  ctx,
+                  commandAddress + fieldOffset,
+                  (uint)address & (register == RWaitMem32 ? ~0x3u : ~0x7u)) &&
+              TryWriteUInt32(ctx, commandAddress + fieldOffset + 4, (uint)(address >> 32) & 0x3FFFFu)
+            : ctx.TryWriteUInt64(commandAddress + fieldOffset, address);
+        return wrote
             ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
             : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -2328,7 +2322,7 @@ public static partial class AgcExports
         var fieldOffset = op == ItWaitRegMem
             ? 4UL
             : op == ItNop && register == RWaitMem32
-                ? 16UL
+                ? 20UL
                 : op == ItNop && register == RWaitMem64
                     ? 28UL
                     : 0;
@@ -2357,7 +2351,7 @@ public static partial class AgcExports
         var wrote = op == ItWaitRegMem
             ? TryWriteUInt32(ctx, commandAddress + 16, (uint)reference)
             : op == ItNop && register == RWaitMem32
-                ? TryWriteUInt32(ctx, commandAddress + 20, (uint)reference)
+                ? TryWriteUInt32(ctx, commandAddress + 16, (uint)reference)
                 : op == ItNop && register == RWaitMem64 &&
                   ctx.TryWriteUInt64(commandAddress + 20, reference);
         return wrote
@@ -3105,6 +3099,26 @@ public static partial class AgcExports
                 CountSubmittedOpcode(op, register);
             }
 
+            if ((header & 1u) != 0 && state.PredicateSkip)
+            {
+                if (tracePackets)
+                {
+                    TraceAgc(
+                        $"agc.dcb.predicated_skip queue={state.QueueName} " +
+                        $"packet=0x{currentAddress:X16} op=0x{op:X2} len={length}");
+                }
+
+                offset += length;
+                continue;
+            }
+
+            if (op == ItSetPredication)
+            {
+                ApplySubmittedPredication(ctx, state, currentAddress, length, tracePackets);
+                offset += length;
+                continue;
+            }
+
             if (op == ItNop &&
                 register is RDrawReset or RAcbReset &&
                 length >= 2)
@@ -3823,7 +3837,7 @@ public static partial class AgcExports
 
             if (!stale && producer is null &&
                 !_tracedProducerlessWaits.Add(
-                    (memory, waiter.WaitAddress, waiter.SubmissionId)))
+                    (memory, waiter.WaitAddress)))
             {
                 return;
             }
@@ -4017,6 +4031,111 @@ public static partial class AgcExports
         state.IndexSize = 0;
         state.InstanceCount = 1;
         state.DrawIndexOffset = 0;
+    }
+
+    private static void ApplySubmittedPredication(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint packetLength,
+        bool tracePacket)
+    {
+        if (packetLength < 3 ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var first) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var second))
+        {
+            return;
+        }
+
+        const uint flagsMask = 0x0007_1100u;
+        uint flags;
+        ulong predicateAddress;
+        if (packetLength >= 4 &&
+            (first & ~flagsMask) == 0 &&
+            TryReadUInt32(ctx, packetAddress + 12, out var third) &&
+            third <= 0xFFFFu)
+        {
+            flags = first;
+            predicateAddress = ((ulong)third << 32) | (second & 0xFFFF_FFF0u);
+        }
+        else
+        {
+            flags = second;
+            predicateAddress = (first & 0xFFFF_FFF0u) | ((ulong)(second & 0xFFu) << 32);
+        }
+
+        var operation = (flags >> 16) & 0x7u;
+        if (operation == 0)
+        {
+            state.PredicateSkip = false;
+            return;
+        }
+
+        if (operation != 3)
+        {
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.predication_unsupported packet=0x{packetAddress:X16} " +
+                    $"op={operation} addr=0x{predicateAddress:X16}");
+            }
+
+            return;
+        }
+
+        var waitOperation = (flags >> 12) & 1u;
+        var value = 0UL;
+        var readSucceeded = false;
+        void ReadPredicate() =>
+            readSucceeded = ctx.TryReadUInt64(predicateAddress, out value);
+
+        if (waitOperation != 0)
+        {
+            var sequence = GuestGpu.Current.SubmitOrderedGuestAction(
+                ReadPredicate,
+                $"set_predication read 0x{predicateAddress:X16}");
+            if (sequence == 0)
+            {
+                ReadPredicate();
+            }
+            else if (!GuestGpu.Current.WaitForGuestWork(sequence))
+            {
+                if (tracePacket)
+                {
+                    TraceAgc(
+                        $"agc.dcb.predication_wait_failed packet=0x{packetAddress:X16} " +
+                        $"addr=0x{predicateAddress:X16} sequence={sequence}");
+                }
+
+                return;
+            }
+        }
+        else
+        {
+            ReadPredicate();
+        }
+
+        if (!readSucceeded)
+        {
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.predication_read_failed packet=0x{packetAddress:X16} " +
+                    $"addr=0x{predicateAddress:X16}");
+            }
+
+            return;
+        }
+
+        var condition = (flags >> 8) & 1u;
+        state.PredicateSkip = condition == 0 ? value != 0 : value == 0;
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dcb.predication packet=0x{packetAddress:X16} " +
+                $"addr=0x{predicateAddress:X16} value=0x{value:X16} " +
+                $"condition={condition} wait={waitOperation} skip={state.PredicateSkip}");
+        }
     }
 
     private static bool RangesOverlap(
@@ -4561,6 +4680,7 @@ public static partial class AgcExports
     private static bool TryParseSubmittedWait(
         CpuContext ctx,
         ulong packetAddress,
+        uint packetLength,
         bool is64Bit,
         bool isStandard,
         out ulong waitAddress,
@@ -4591,8 +4711,10 @@ public static partial class AgcExports
             return true;
         }
 
+        var legacyWait32 = !is64Bit && packetLength == 6;
+        var controlOffset = is64Bit ? 28u : legacyWait32 ? 16u : 20u;
         if (!TryReadUInt64(ctx, packetAddress + 4, out waitAddress) ||
-            !TryReadUInt32(ctx, packetAddress + (is64Bit ? 28u : 16u), out var control))
+            !TryReadUInt32(ctx, packetAddress + controlOffset, out var control))
         {
             return false;
         }
@@ -4605,8 +4727,9 @@ public static partial class AgcExports
                    TryReadUInt64(ctx, packetAddress + 20, out reference);
         }
 
+        var referenceOffset = legacyWait32 ? 20u : 16u;
         if (!TryReadUInt32(ctx, packetAddress + 12, out var mask32) ||
-            !TryReadUInt32(ctx, packetAddress + 20, out var reference32))
+            !TryReadUInt32(ctx, packetAddress + referenceOffset, out var reference32))
         {
             return false;
         }
@@ -4711,7 +4834,7 @@ public static partial class AgcExports
         bool tracePacket)
     {
         if (!TryParseSubmittedWait(
-                ctx, packetAddress, is64Bit, isStandard,
+                ctx, packetAddress, length, is64Bit, isStandard,
                 out var waitAddress, out var reference, out var mask, out var compareFunction,
                 out var controlValue))
         {
@@ -10910,6 +11033,23 @@ public static partial class AgcExports
         ((op & 0xFFu) << 8) |
         ((register & 0x3Fu) << 2);
 
+    private static uint EncodeWaitRegMemPoll(uint pollCycles) =>
+        Math.Min(pollCycles >> 4, 0xFFFFu);
+
+    private static uint EncodeWaitRegMem32Control(uint compareFunction, uint operation, uint cachePolicy) =>
+        0x10u |
+        (compareFunction & 0x7u) |
+        ((operation & 0x3u) << 8) |
+        ((operation & 0xCu) << 4) |
+        ((cachePolicy & 0x3u) << 25);
+
+    private static uint EncodeWaitRegMem64Control(uint compareFunction, uint operation, uint cachePolicy) =>
+        0x10u |
+        (compareFunction & 0x7u) |
+        ((operation & 0x1u) << 8) |
+        ((operation & 0x6u) << 5) |
+        ((cachePolicy & 0x3u) << 25);
+
     private static uint Pm4Length(uint header) =>
         ((header >> 16) & 0x3FFFu) + 2u;
 
@@ -11364,16 +11504,21 @@ public static partial class AgcExports
     public static int DcbSetPredication(CpuContext ctx)
     {
         var dcb = ctx[CpuRegister.Rdi];
-        var address = ctx[CpuRegister.Rsi];
+        var condition = (uint)(ctx[CpuRegister.Rsi] & 1u);
+        var operation = (uint)(ctx[CpuRegister.Rdx] & 0x7u);
+        var waitOperation = (uint)(ctx[CpuRegister.Rcx] & 1u);
+        var address = ctx[CpuRegister.R8];
         if (dcb == 0)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, dcb, 3, out var cmd) ||
-            !ctx.TryWriteUInt32(cmd, Pm4(3, ItNop, RZero)) ||
-            !ctx.TryWriteUInt32(cmd + 4, (uint)(address & 0xFFFF_FFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 8, (uint)(address >> 32)))
+        var flags = (condition << 8) | (waitOperation << 12) | (operation << 16);
+        if (!TryAllocateCommandDwords(ctx, dcb, 4, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(4, ItSetPredication, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, flags) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)address & 0xFFFF_FFF0u) ||
+            !ctx.TryWriteUInt32(cmd + 12, (uint)(address >> 32)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -11388,9 +11533,17 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int SetPacketPredication(CpuContext ctx)
     {
-        // Global predication toggle on a packet; a no-op is safe for rendering.
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var packetAddress = ctx[CpuRegister.Rdi];
+        var predication = ctx[CpuRegister.Rsi];
+        if (packetAddress == 0 || !TryReadUInt32(ctx, packetAddress, out var header))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        header = (header & ~1u) | (predication == 1 ? 1u : 0u);
+        return !ctx.TryWriteUInt32(packetAddress, header)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     // ABI (reversed from Quake): rdi = array of DCB base addresses (u64 each),
@@ -11565,7 +11718,7 @@ public static partial class AgcExports
         uint owner;
         lock (state.Gate)
         {
-            if (!state.ResourceRegistrationInitialized ||
+            if (state.ResourceRegistrationInitialized &&
                 state.ResourceRegistrationMaxOwners != 0 &&
                 state.ResourceOwners.Count >= state.ResourceRegistrationMaxOwners)
             {

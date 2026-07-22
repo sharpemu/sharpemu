@@ -37,8 +37,12 @@ public sealed class GnmTilingDetileTests
         return offset;
     }
 
-    [Fact]
-    public void TryDetile_ExactXorMode27_MatchesReferenceAddressEquation()
+    [Theory]
+    [InlineData(384, 200)]
+    [InlineData(768, 512)]
+    public void TryDetile_ExactXorMode27_MatchesReferenceAddressEquation(
+        int elementsWide,
+        int elementsHigh)
     {
         const uint swizzleMode = 27; // 64 KiB RB+ R_X
         const int bytesPerElement = 2;
@@ -46,8 +50,6 @@ public sealed class GnmTilingDetileTests
         // SquareBlockDimensions(32768 elements): 15 bits split 8/7, x favored.
         const int blockWidth = 256;
         const int blockHeight = 128;
-        const int elementsWide = 384; // spans two block columns and a partial third
-        const int elementsHigh = 200;
         var blocksPerRow = (elementsWide + blockWidth - 1) / blockWidth;
         var blocksPerColumn = (elementsHigh + blockHeight - 1) / blockHeight;
 

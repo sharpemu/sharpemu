@@ -1131,16 +1131,18 @@ public static class AvPlayerExports
         }
     }
 
-    private static string? FindFfmpeg() =>
+    internal static string? FindFfmpeg() =>
         FindFfmpeg(
             Environment.GetEnvironmentVariable("SHARPEMU_FFMPEG_PATH"),
             Environment.GetEnvironmentVariable("PATH"),
-            OperatingSystem.IsWindows());
+            OperatingSystem.IsWindows(),
+            AppContext.BaseDirectory);
 
     internal static string? FindFfmpeg(
         string? configured,
         string? searchPath,
-        bool isWindows)
+        bool isWindows,
+        string? baseDirectory = null)
     {
         if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
         {
@@ -1148,6 +1150,21 @@ public static class AvPlayerExports
         }
 
         var executable = isWindows ? "ffmpeg.exe" : "ffmpeg";
+        if (!string.IsNullOrWhiteSpace(baseDirectory))
+        {
+            foreach (var candidate in new[]
+                     {
+                         Path.Combine(baseDirectory, executable),
+                         Path.Combine(baseDirectory, "ffmpeg", executable),
+                     })
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
         foreach (var directory in (searchPath ?? string.Empty)
                      .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {

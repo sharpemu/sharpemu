@@ -87,4 +87,43 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </ItemGroup>
   </Target>
 
+  <!-- Building the Bink2 bridge (native/bink2-bridge/sharpemu_bink2_bridge.c)
+       requires cmake, ninja, and clang-cl (Windows) or a C compiler
+       (Linux/macOS); the same tools the CI runners already ship with. No
+       prebuilt/download fallback: anyone publishing SharpEmu is expected to
+       have the same toolchain, matching every other native dependency in
+       this repo. -->
+  <PropertyGroup>
+    <Bink2BridgeBuildDir>$(BaseIntermediateOutputPath)bink2-bridge/$(RuntimeIdentifier)</Bink2BridgeBuildDir>
+    <Bink2BridgeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">sharpemu_bink2_bridge.dll</Bink2BridgeFileName>
+    <Bink2BridgeFileName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libsharpemu_bink2_bridge.so</Bink2BridgeFileName>
+    <Bink2BridgeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libsharpemu_bink2_bridge.dylib</Bink2BridgeFileName>
+    <Bink2BridgeOutput>$(Bink2BridgeBuildDir)/out/$(Bink2BridgeFileName)</Bink2BridgeOutput>
+  </PropertyGroup>
+
+  <Target Name="BuildBink2Bridge"
+          BeforeTargets="ComputeResolvedFilesToPublishList"
+          Condition="'$(RuntimeIdentifier)' != '' And '$(Bink2BridgeFileName)' != ''">
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="cmake -S &quot;$(RepoRoot)native/bink2-bridge&quot; -B &quot;$(Bink2BridgeBuildDir)&quot; -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DSHARPEMU_TARGET_RID=$(RuntimeIdentifier)" />
+    <Exec Condition="!$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="cmake -S &quot;$(RepoRoot)native/bink2-bridge&quot; -B &quot;$(Bink2BridgeBuildDir)&quot; -DCMAKE_BUILD_TYPE=Release -DSHARPEMU_TARGET_RID=$(RuntimeIdentifier)" />
+    <Exec Command="cmake --build &quot;$(Bink2BridgeBuildDir)&quot; --config Release" />
+  </Target>
+
+  <!-- Embeds the bridge into the single-file bundle (self-extracted at first
+       load, see Bink2MovieBridge.NativeAdapter) instead of leaving it as a
+       loose file next to the executable, so a downloaded release needs no
+       setup: the DLL is already inside SharpEmu.exe. -->
+  <Target Name="EmbedBink2Bridge"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          DependsOnTargets="BuildBink2Bridge"
+          Condition="'$(RuntimeIdentifier)' != '' And Exists('$(Bink2BridgeOutput)')">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(Bink2BridgeOutput)">
+        <RelativePath>$(Bink2BridgeFileName)</RelativePath>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
 </Project>
