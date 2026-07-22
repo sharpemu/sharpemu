@@ -39,6 +39,11 @@ public sealed unsafe class StubManager : IDisposable
             _importHandlers[nid] = handlerPtr;
         }
 
+        if (_pltOffset + JitStubs.JmpWithIndex.Size > PltMemorySize)
+        {
+            throw new OutOfMemoryException("PLT stub region exhausted — too many import stubs.");
+        }
+
         var stubPtr = _pltMemory + _pltOffset;
         var stubIndex = (uint)(_stubAddresses.Count);
 
@@ -52,6 +57,11 @@ public sealed unsafe class StubManager : IDisposable
 
     public nint CreatePltEntry(uint index, nint gotAddress)
     {
+        if (_pltOffset + 22 > PltMemorySize)
+        {
+            throw new OutOfMemoryException("PLT stub region exhausted — too many PLT entries.");
+        }
+
         var pltPtr = _pltMemory + _pltOffset;
 
         var pltCode = new byte[]
@@ -76,6 +86,11 @@ public sealed unsafe class StubManager : IDisposable
 
     public nint CreateTlsHandler(delegate*<void> tlsGetAddrFunc)
     {
+        if (_pltOffset + JitStubs.Call9.Size > PltMemorySize)
+        {
+            throw new OutOfMemoryException("PLT stub region exhausted — too many TLS handlers.");
+        }
+
         var handlerPtr = _pltMemory + _pltOffset;
 
         JitStubs.CreateCall9(handlerPtr, (void*)tlsGetAddrFunc);
@@ -87,6 +102,11 @@ public sealed unsafe class StubManager : IDisposable
 
     public nint CreateSafeCallTrampoline(delegate*<void> func, byte* regSaveArea, byte* lockVar)
     {
+        if (_pltOffset + JitStubs.SafeCall.Template.Length > PltMemorySize)
+        {
+            throw new OutOfMemoryException("PLT stub region exhausted — too many safe-call trampolines.");
+        }
+
         var trampolinePtr = _pltMemory + _pltOffset;
 
         var template = JitStubs.SafeCall.Template;
@@ -125,9 +145,14 @@ public sealed unsafe class StubManager : IDisposable
 
     private nint CreateHandlerTrampoline(string nid, ImportHandler handler)
     {
+        // The trampoline size is estimated conservatively; the actual byte count
+        // is counted after assembly below.
+        if (_pltOffset + 80 > PltMemorySize)
+        {
+            throw new OutOfMemoryException("PLT stub region exhausted — too many handler trampolines.");
+        }
+
         var trampolinePtr = _pltMemory + _pltOffset;
-
-
 
         var code = new List<byte>();
 

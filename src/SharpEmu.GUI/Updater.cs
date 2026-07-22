@@ -26,10 +26,10 @@ public static class Updater
     public static async Task<UpdateInfo?> CheckAsync(string? currentSha, CancellationToken cancellationToken = default)
     {
         var platform = CurrentPlatform();
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(CheckTimeout);
+        using var timeout1 = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout1.CancelAfter(CheckTimeout);
 
-        using var response = await Http.GetAsync(LatestReleaseUrl, timeout.Token);
+        using var response = await Http.GetAsync(LatestReleaseUrl, timeout1.Token);
         response.EnsureSuccessStatusCode();
         var update = ParseRelease(
             await response.Content.ReadAsStringAsync(timeout.Token),
@@ -39,7 +39,7 @@ public static class Updater
         var currentVersion = Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         if (update is null || currentSha is null ||
-            string.Equals(update.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+            ShaEquals(update.Sha, currentSha))
         {
             return null;
         }
@@ -52,7 +52,9 @@ public static class Updater
             return null;
         }
 
-        var comparison = await CompareCommitsAsync(currentSha, update.Sha, timeout.Token);
+        using var timeout2 = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout2.CancelAfter(CheckTimeout);
+        var comparison = await CompareCommitsAsync(currentSha, update.Sha, timeout2.Token);
         return comparison.Status == "ahead" && comparison.ReleaseDate > comparison.CurrentDate
             ? update
             : null;
@@ -283,7 +285,7 @@ public static class Updater
         }
 
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
-        return latest is null || string.Equals(latest.Sha, currentSha, StringComparison.OrdinalIgnoreCase)
+        return latest is null || ShaEquals(latest.Sha, currentSha ?? "")
             ? null
             : latest;
     }
@@ -328,7 +330,24 @@ public static class Updater
         }
 
         var sha = match.Groups[1].Value;
-        return sha.Length > 7 ? sha[..7] : sha;
+        return sha;
+    }
+
+    /// <summary>
+    /// Compares two commit SHAs for equality, handling the case where one
+    /// may be a short (7-char) abbreviation of the other.
+    /// </summary>
+    private static bool ShaEquals(string left, string right)
+    {
+        if (string.Equals(left, right, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // If one SHA is a prefix of the other (short vs full), they match.
+        var shorter = left.Length < right.Length ? left : right;
+        var longer = left.Length < right.Length ? right : left;
+        return longer.StartsWith(shorter, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryParseVersion(string value, out ReleaseVersion version)

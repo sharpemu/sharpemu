@@ -163,7 +163,19 @@ internal sealed class EmulatorProcess : IDisposable
         process.EnableRaisingEvents = true;
         process.OutputDataReceived += (_, eventArgs) => ForwardOutput(eventArgs.Data, isError: false);
         process.ErrorDataReceived += (_, eventArgs) => ForwardOutput(eventArgs.Data, isError: true);
-        process.Exited += (_, _) => OnExited(process.ExitCode);
+        process.Exited += (_, _) =>
+        {
+            try { OnExited(process.ExitCode); }
+            catch (InvalidOperationException) { OnExited(-1); }
+        };
+
+        // If the process already exited before we wired up events, handle it now.
+        if (process.HasExited)
+        {
+            try { OnExited(process.ExitCode); }
+            catch (InvalidOperationException) { OnExited(-1); }
+            return;
+        }
 
         lock (_sync)
         {
@@ -387,7 +399,9 @@ internal sealed class EmulatorProcess : IDisposable
 
     private void ForwardOutput(string? line, bool isError)
     {
-        if (!string.IsNullOrEmpty(line))
+        // Allow blank lines through — log output relies on blank-line
+        // separators, and filtering them out breaks formatting.
+        if (line is not null)
         {
             OutputReceived?.Invoke(line, isError);
         }
@@ -405,15 +419,21 @@ internal sealed class EmulatorProcess : IDisposable
 
             exitCode = _stopRequested ? HostStopExitCode : nativeExitCode;
             _running = false;
-            if (_processHandle != 0)
+            // When Stop() is handling the shutdown, let it close the native handles
+            // instead of racing against it. OnExited only cleans up when the process
+            // exited on its own (or the fallback process path).
+            if (!_stopRequested)
             {
-                CloseHandle(_processHandle);
-                _processHandle = 0;
-            }
-            if (_jobHandle != 0)
-            {
-                CloseHandle(_jobHandle);
-                _jobHandle = 0;
+                if (_processHandle != 0)
+                {
+                    CloseHandle(_processHandle);
+                    _processHandle = 0;
+                }
+                if (_jobHandle != 0)
+                {
+                    CloseHandle(_jobHandle);
+                    _jobHandle = 0;
+                }
             }
 
             _fallbackProcess?.Dispose();

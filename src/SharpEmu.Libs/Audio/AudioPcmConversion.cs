@@ -68,7 +68,10 @@ internal static class AudioPcmConversion
 
         value = Math.Clamp(value, -1.0f, 1.0f);
         var scale = value < 0.0f ? 32768.0f : short.MaxValue;
-        return checked((short)MathF.Round(value * scale));
+        // Use Clamp instead of checked to handle floating-point edge cases
+        // where MathF.Round can produce values slightly outside short range
+        // due to precision (e.g. -1.0f * 32768.0f rounding to -32769).
+        return (short)Math.Clamp(MathF.Round(value * scale), short.MinValue, short.MaxValue);
     }
 
     // <paramref name="volume"/> is expected pre-clamped to [0, 1] by the caller.

@@ -238,8 +238,7 @@ public sealed class DiscordRichPresence : IDisposable
 
     private void ClosePipe()
     {
-        var pipe = _pipe;
-        _pipe = null;
+        var pipe = Interlocked.Exchange(ref _pipe, null);
         try
         {
             pipe?.Dispose();
