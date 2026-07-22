@@ -22,15 +22,12 @@ internal static class Bink2MovieBridge
     private const uint MaxHostVideoHeight = 1080;
 
     private static readonly object Gate = new();
-    private static NativeAdapter? _adapter;
     private static string? _activePath;
     private static Bink2MovieInfo _activeInfo;
     private static byte[]? _frameBuffer;
     private static bool _frameBufferPresented;
     private static BinkFramePlayback? _playback;
     private static long _frameSerial;
-    private static bool _loadAttempted;
-    private static bool _availabilityReported;
     private static uint _presentationWidth = MaxHostVideoWidth;
     private static uint _presentationHeight = MaxHostVideoHeight;
 
@@ -198,19 +195,9 @@ internal static class Bink2MovieBridge
 
     private static void AttachNativeMovieLocked(string hostPath)
     {
-        var adapter = GetAdapterLocked();
-        if (adapter is null)
-        {
-            return;
-        }
-
-        CloseActiveLocked();
-        if (!adapter.TryOpen(
-                hostPath,
-                _presentationWidth,
-                _presentationHeight,
-                out var movie,
-                out var info))
+        if (!FfmpegNativeBinkFrameSource.TryOpen(
+                hostPath, _presentationWidth, _presentationHeight, out var source) ||
+            source is null)
         {
             Console.Error.WriteLine(
                 "[LOADER][WARN] Bink2 bridge could not open movie '" +
@@ -218,19 +205,18 @@ internal static class Bink2MovieBridge
             return;
         }
 
+        var info = new Bink2MovieInfo(
+            source.Width, source.Height, source.FramesPerSecondNumerator, source.FramesPerSecondDenominator);
         if (!IsValid(info))
         {
-            adapter.Close(movie);
+            source.Dispose();
             Console.Error.WriteLine(
                 "[LOADER][WARN] Bink2 bridge rejected invalid movie dimensions for '" +
                 Path.GetFileName(hostPath) + "'.");
             return;
         }
 
-        AttachPlaybackLocked(
-            hostPath,
-            info,
-            new NativeFrameDecoder(adapter, movie, info));
+        AttachPlaybackLocked(hostPath, info, source);
         Console.Error.WriteLine(
             "[LOADER][INFO] Bink2 bridge attached: " + Path.GetFileName(hostPath) + " " +
             info.Width + "x" + info.Height + " @ " +
@@ -265,12 +251,11 @@ internal static class Bink2MovieBridge
             return MovieMode.Ffmpeg;
         }
 
-        // Native is the default: the bridge ships embedded in the published
-        // single-file executable (see SharpEmu.CLI.csproj), so it isn't a
-        // loose file next to the exe to probe for with File.Exists here.
-        // GetAdapterLocked() degrades gracefully (falls back to the guest's
-        // own decode, logging one informational line) if it's genuinely
-        // unavailable, so defaulting to Native unconditionally is safe.
+        // Native is the default: FfmpegNativeBinkFrameSource.TryOpen degrades
+        // gracefully (falls back to the guest's own decode, logging one
+        // informational line) if the FFmpeg libraries SharpEmu.CLI.csproj
+        // downloads next to the executable are genuinely unavailable, so
+        // defaulting to Native unconditionally is safe.
         return MovieMode.Native;
     }
 
@@ -377,83 +362,6 @@ internal static class Bink2MovieBridge
         }
     }
 
-    private static NativeAdapter? GetAdapterLocked()
-    {
-        if (_loadAttempted)
-        {
-            return _adapter;
-        }
-
-        _loadAttempted = true;
-
-        // Assembly-relative resolution participates in the single-file
-        // bundle's native-library extraction, so it finds the bridge whether
-        // it was embedded in the publish or sits as a loose file next to the
-        // executable, without us needing to know which. Skipped when the env
-        // override is set so that override still takes priority below.
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_BINK2_BRIDGE")) &&
-            NativeLibrary.TryLoad(
-                "sharpemu_bink2_bridge", typeof(Bink2MovieBridge).Assembly, null, out var bundledLibrary))
-        {
-            if (NativeAdapter.TryCreate(bundledLibrary, out var bundledAdapter))
-            {
-                _adapter = bundledAdapter;
-                Console.Error.WriteLine("[LOADER][INFO] Bink2 bridge loaded (bundled).");
-                return bundledAdapter;
-            }
-
-            NativeLibrary.Free(bundledLibrary);
-        }
-
-        foreach (var candidate in EnumerateAdapterCandidates())
-        {
-            if (!NativeLibrary.TryLoad(candidate, out var library))
-            {
-                continue;
-            }
-
-            if (NativeAdapter.TryCreate(library, out var adapter))
-            {
-                _adapter = adapter;
-                Console.Error.WriteLine("[LOADER][INFO] Bink2 bridge loaded: " + candidate);
-                return adapter;
-            }
-
-            NativeLibrary.Free(library);
-        }
-
-        if (!_availabilityReported)
-        {
-            _availabilityReported = true;
-            Console.Error.WriteLine(
-                "[LOADER][INFO] Bink2 bridge unavailable; install the licensed adapter and set SHARPEMU_BINK2_BRIDGE.");
-        }
-
-        return null;
-    }
-
-    private static IEnumerable<string> EnumerateAdapterCandidates()
-    {
-        var configured = Environment.GetEnvironmentVariable("SHARPEMU_BINK2_BRIDGE");
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            yield return configured;
-        }
-
-        var baseDirectory = AppContext.BaseDirectory;
-        if (OperatingSystem.IsMacOS())
-        {
-            yield return Path.Combine(baseDirectory, "libsharpemu_bink2_bridge.dylib");
-        }
-        else if (OperatingSystem.IsWindows())
-        {
-            yield return Path.Combine(baseDirectory, "sharpemu_bink2_bridge.dll");
-        }
-        else
-        {
-            yield return Path.Combine(baseDirectory, "libsharpemu_bink2_bridge.so");
-        }
-    }
 
     private static void CloseActiveLocked()
     {
@@ -497,147 +405,6 @@ internal static class Bink2MovieBridge
         Dummy,
         Native,
         Ffmpeg,
-    }
-
-    private sealed class NativeFrameDecoder : IBinkFrameDecoder
-    {
-        private readonly NativeAdapter _adapter;
-        private readonly IntPtr _movie;
-        private int _disposed;
-
-        internal NativeFrameDecoder(NativeAdapter adapter, IntPtr movie, Bink2MovieInfo info)
-        {
-            _adapter = adapter;
-            _movie = movie;
-            Width = info.Width;
-            Height = info.Height;
-            FramesPerSecondNumerator = info.FramesPerSecondNumerator;
-            FramesPerSecondDenominator = info.FramesPerSecondDenominator;
-        }
-
-        public uint Width { get; }
-
-        public uint Height { get; }
-
-        public uint FramesPerSecondNumerator { get; }
-
-        public uint FramesPerSecondDenominator { get; }
-
-        public unsafe bool TryDecodeNextFrame(Span<byte> destination)
-        {
-            fixed (byte* pointer = destination)
-            {
-                return _adapter.DecodeNextBgra(
-                    _movie,
-                    (IntPtr)pointer,
-                    Width * 4,
-                    checked((uint)destination.Length));
-            }
-        }
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                _adapter.Close(_movie);
-            }
-        }
-    }
-
-
-    private sealed class NativeAdapter
-    {
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int OpenUtf8Delegate(IntPtr pathUtf8, out IntPtr movie, out Bink2MovieInfo info);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int OpenScaledUtf8Delegate(
-            IntPtr pathUtf8,
-            uint maximumWidth,
-            uint maximumHeight,
-            out IntPtr movie,
-            out Bink2MovieInfo info);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int DecodeNextBgraDelegate(IntPtr movie, IntPtr destination, uint stride, uint destinationBytes);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate void CloseDelegate(IntPtr movie);
-
-        private readonly OpenUtf8Delegate _openUtf8;
-        private readonly OpenScaledUtf8Delegate? _openScaledUtf8;
-        private readonly DecodeNextBgraDelegate _decodeNextBgra;
-        private readonly CloseDelegate _close;
-
-        private NativeAdapter(
-            OpenUtf8Delegate openUtf8,
-            OpenScaledUtf8Delegate? openScaledUtf8,
-            DecodeNextBgraDelegate decodeNextBgra,
-            CloseDelegate close)
-        {
-            _openUtf8 = openUtf8;
-            _openScaledUtf8 = openScaledUtf8;
-            _decodeNextBgra = decodeNextBgra;
-            _close = close;
-        }
-
-        internal static bool TryCreate(IntPtr library, out NativeAdapter? adapter)
-        {
-            adapter = null;
-            if (!NativeLibrary.TryGetExport(library, "sharpemu_bink2_open_utf8", out var open) ||
-                !NativeLibrary.TryGetExport(library, "sharpemu_bink2_decode_next_bgra", out var decode) ||
-                !NativeLibrary.TryGetExport(library, "sharpemu_bink2_close", out var close))
-            {
-                return false;
-            }
-
-            OpenScaledUtf8Delegate? openScaled = null;
-            if (NativeLibrary.TryGetExport(
-                    library,
-                    "sharpemu_bink2_open_scaled_utf8",
-                    out var scaledOpen))
-            {
-                openScaled = Marshal.GetDelegateForFunctionPointer<OpenScaledUtf8Delegate>(scaledOpen);
-            }
-
-            adapter = new NativeAdapter(
-                Marshal.GetDelegateForFunctionPointer<OpenUtf8Delegate>(open),
-                openScaled,
-                Marshal.GetDelegateForFunctionPointer<DecodeNextBgraDelegate>(decode),
-                Marshal.GetDelegateForFunctionPointer<CloseDelegate>(close));
-            return true;
-        }
-
-        internal bool TryOpen(
-            string path,
-            uint maximumWidth,
-            uint maximumHeight,
-            out IntPtr movie,
-            out Bink2MovieInfo info)
-        {
-            var utf8 = Marshal.StringToCoTaskMemUTF8(path);
-            try
-            {
-                var result = _openScaledUtf8 is not null
-                    ? _openScaledUtf8(
-                        utf8,
-                        maximumWidth,
-                        maximumHeight,
-                        out movie,
-                        out info)
-                    : _openUtf8(utf8, out movie, out info);
-                return result != 0 && movie != IntPtr.Zero;
-            }
-            finally
-            {
-                Marshal.FreeCoTaskMem(utf8);
-            }
-        }
-
-        internal bool DecodeNextBgra(IntPtr movie, IntPtr destination, uint stride, uint destinationBytes) =>
-            _decodeNextBgra(movie, destination, stride, destinationBytes) != 0;
-
-        internal void Close(IntPtr movie) => _close(movie);
     }
 
     private static readonly Queue<string> PendingMoviePaths = new();

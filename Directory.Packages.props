@@ -11,6 +11,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageVersion Include="Avalonia.Desktop" Version="11.3.18" />
     <PackageVersion Include="Avalonia.Fonts.Inter" Version="11.3.18" />
     <PackageVersion Include="Avalonia.Themes.Fluent" Version="11.3.18" />
+    <PackageVersion Include="FFmpeg.AutoGen" Version="7.1.1" />
     <PackageVersion Include="Iced" Version="1.21.0" />
     <PackageVersion Include="Microsoft.Build.Framework" Version="17.14.8" />
     <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" />
