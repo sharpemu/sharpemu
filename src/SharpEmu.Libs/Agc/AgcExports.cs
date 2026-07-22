@@ -273,6 +273,8 @@ public static partial class AgcExports
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
     private static long _createShaderTraceCount;
+    private static long _prepareShaderWorkTraceCount;
+    private static long _bindShaderWorkTraceCount;
     private static long _packetPayloadTraceCount;
     private static bool _tracedMissingPixelShaderBindings;
     private static long _unsatisfiedWaitTraceCount;
@@ -737,6 +739,54 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // NID captured from shipped titles (not in the public catalog). Always
+    // paired with fd5Bp5tGTgo on the same CreateShader header.
+    //
+    // IMPORTANT: these must remain side-effect-free success stubs. Speculative
+    // guest writes through *[rdi] have smashed allocator / vtable state and
+    // triggered guest int 0x41. Unresolved imports previously returned rax=0
+    // with no writes and boot got further — match that until the real AGC ABI
+    // is known.
+    #pragma warning disable SHEM004, SHEM006
+    [SysAbiExport(
+        Nid = "dolOmWH+huQ",
+        ExportName = "sceAgcPrepareShaderWorkDescriptor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int PrepareShaderWorkDescriptor(CpuContext ctx)
+    {
+        if (_traceAgc && ShouldTraceHotPath(ref _prepareShaderWorkTraceCount))
+        {
+            TraceAgc(
+                $"agc.prepare_shader_work.nop rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
+                $"shader=0x{ctx[CpuRegister.Rsi]:X16} r8=0x{ctx[CpuRegister.R8]:X} r9=0x{ctx[CpuRegister.R9]:X}");
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+    #pragma warning restore SHEM004, SHEM006
+
+    #pragma warning disable SHEM004, SHEM006
+    [SysAbiExport(
+        Nid = "fd5Bp5tGTgo",
+        ExportName = "sceAgcBindShaderWorkInstance",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int BindShaderWorkInstance(CpuContext ctx)
+    {
+        if (_traceAgc && ShouldTraceHotPath(ref _bindShaderWorkTraceCount))
+        {
+            TraceAgc(
+                $"agc.bind_shader_work.nop inst=0x{ctx[CpuRegister.Rdi]:X16} " +
+                $"shader=0x{ctx[CpuRegister.Rsi]:X16} gpu=0x{ctx[CpuRegister.Rcx]:X16}");
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+    #pragma warning restore SHEM004, SHEM006
 
     [SysAbiExport(
         Nid = "vcmNN+AAXnY",
