@@ -19,6 +19,9 @@ public sealed partial class DirectExecutionBackend
 	private static int _lazyCommitTraceCount;
 	private static int _guestAllocatorHoleRecoveries;
 	private static int _auxiliaryThreadExecuteFaultRecoveries;
+	private static int _auxiliaryThreadExecuteFaultSkips;
+	private nint _workerAbortStack;
+	private const uint WorkerAbortStackSize = 0x10000u;
 
 	private unsafe void SetupExceptionHandler()
 	{
@@ -435,11 +438,36 @@ public sealed partial class DirectExecutionBackend
 		void* contextRecord,
 		ulong rip)
 	{
-		if (exceptionRecord->ExceptionCode != 3221225477u ||
-			rip >= 0x0000000800000000UL ||
-			_activeGuestThreadState is not { Name: "tbb_thead" } activeThread)
+		if (exceptionRecord->ExceptionCode != 3221225477u)
 		{
 			return false;
+		}
+
+		// Prefer ThreadStatic active state; fall back to host-thread name when
+		// concurrent TBB AVs race logging (tLT61: recover skipped, then Fatal).
+		GuestThreadState? activeThread = _activeGuestThreadState;
+		if (activeThread is null || activeThread.Name != "tbb_thead")
+		{
+			var hostName = Thread.CurrentThread.Name;
+			if (hostName is null ||
+				!hostName.StartsWith("SharpEmu-tbb_thead", StringComparison.Ordinal))
+			{
+				return false;
+			}
+
+			activeThread = FindGuestThreadStateByHostThreadId(unchecked((int)GetCurrentThreadId()));
+			if (activeThread is null || activeThread.Name != "tbb_thead")
+			{
+				var skip = Interlocked.Increment(ref _auxiliaryThreadExecuteFaultSkips);
+				if (skip <= 8 || skip % 64 == 0)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] tbb_recover skip #{skip}: rip=0x{rip:X16} " +
+						$"host='{hostName}' active={(activeThread?.Name ?? "null")}");
+					Console.Error.Flush();
+				}
+				return false;
+			}
 		}
 
 		var hostExit = ActiveEntryReturnSentinelRip;
@@ -447,6 +475,54 @@ public sealed partial class DirectExecutionBackend
 		{
 			hostExit = unchecked((ulong)_guestReturnStub);
 		}
+
+			// Prefer worker-abort (SetEvent + ExitThread) over host_exit→RunEpilogue:
+		// the latter FailFasts the process after TBB recover (tLT28/30 silent die).
+		// Do NOT abandon mutexes here — managed HLE from inside VEH can re-enter
+		// and Fatal (tLT73). NativeGuestExecutor.Run abandons after detecting abort.
+		var abortRip = unchecked((ulong)_workerAbortStub);
+		if (abortRip >= 0x10000)
+		{
+			// Do NOT SetEvent from managed VEH: that wakes the renter which may
+			// TerminateThread while this thread is still inside VEH return
+			// (tLTA2: recover logged, no respawning, process die). Abort stub
+			// SetEvent's only after CONTINUE_EXECUTION resumes at park.
+
+			// Prefer the entry-stub-saved host RSP (real CreateThread stack).
+			// Do not treat mid-range host stacks as guest — Astro worker stacks
+			// often sit in 0x02xxxxxx_xxxx and were wrongly replaced with a
+			// shared VirtualAlloc abort stack (concurrent TBB AV → die).
+			var hostRspSlot = TlsGetValue(_hostRspSlotTlsIndex);
+			ulong hostRsp = 0;
+			if (hostRspSlot != 0)
+			{
+				hostRsp = *(ulong*)hostRspSlot;
+			}
+
+			if (hostRsp < 0x10000)
+			{
+				hostRsp = EnsureWorkerAbortStackRsp();
+			}
+
+			if (hostRsp >= 0x10000)
+			{
+				WriteCtxU64(contextRecord, 152, hostRsp & ~0xFUL);
+			}
+
+			WriteCtxU64(contextRecord, 120, 0);
+			WriteCtxU64(contextRecord, 248, abortRip);
+			var recovery = Interlocked.Increment(ref _auxiliaryThreadExecuteFaultRecoveries);
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Recovered auxiliary TBB execute fault #{recovery}: " +
+				$"thread=0x{activeThread.ThreadHandle:X16} target=0x{rip:X16} " +
+				$"host_rsp=0x{hostRsp:X16} -> worker_abort=0x{abortRip:X16}");
+			Console.Error.WriteLine(
+				"[LOADER][INFO] tbb_recover: parking native worker (SetEvent+park); " +
+				"renter will TerminateThread+respawn — avoids ExitThread after VEH");
+			Console.Error.Flush();
+			return true;
+		}
+
 		if (hostExit < 0x10000)
 		{
 			Console.Error.WriteLine(
@@ -458,11 +534,55 @@ public sealed partial class DirectExecutionBackend
 		_ = TryPatchActiveGuestReturnSlot(hostExit);
 		WriteCtxU64(contextRecord, 120, 0);
 		WriteCtxU64(contextRecord, 248, hostExit);
-		var recovery = Interlocked.Increment(ref _auxiliaryThreadExecuteFaultRecoveries);
+		var recoveryFallback = Interlocked.Increment(ref _auxiliaryThreadExecuteFaultRecoveries);
 		Console.Error.WriteLine(
-			$"[LOADER][WARN] Recovered auxiliary TBB execute fault #{recovery}: " +
+			$"[LOADER][WARN] Recovered auxiliary TBB execute fault #{recoveryFallback}: " +
 			$"thread=0x{activeThread.ThreadHandle:X16} target=0x{rip:X16} -> host_exit=0x{hostExit:X16}");
+		Console.Error.WriteLine(
+			"[LOADER][INFO] tbb_recover: resumed at host_exit (abort stub unavailable); " +
+			"subsequent FastFail/CLR must not re-enter managed VEH " +
+			"(live trampoline pre-filters 0xC0000409 / 0xE0434352)");
+		Console.Error.Flush();
 		return true;
+	}
+
+	private GuestThreadState? FindGuestThreadStateByHostThreadId(int hostThreadId)
+	{
+		if (hostThreadId == 0)
+		{
+			return null;
+		}
+
+		try
+		{
+			foreach (var thread in SnapshotGuestThreads())
+			{
+				if (Volatile.Read(ref thread.HostThreadId) == hostThreadId)
+				{
+					return thread;
+				}
+			}
+		}
+		catch
+		{
+		}
+
+		return null;
+	}
+
+	private unsafe ulong EnsureWorkerAbortStackRsp()
+	{
+		if (_workerAbortStack == 0)
+		{
+			_workerAbortStack = (nint)VirtualAlloc(null, WorkerAbortStackSize, 12288u, 4u);
+			if (_workerAbortStack == 0)
+			{
+				return 0;
+			}
+		}
+
+		// Grow-down stack: hand out near the top with alignment headroom.
+		return (ulong)(_workerAbortStack + (nint)WorkerAbortStackSize - 0x100) & ~0xFUL;
 	}
 
 	private unsafe bool TryRecoverGuestInt41(uint exceptionCode, void* contextRecord, ulong rip)

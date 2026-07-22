@@ -49,6 +49,9 @@ public sealed partial class DirectExecutionBackend
 	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
 
+	[DllImport("kernel32.dll", SetLastError = true)]
+	private static extern bool TerminateThread(nint hThread, uint dwExitCode);
+
 	// Runs an emitted guest entry stub. Preferred path is a pooled native worker
 	// thread; falls back to the historical inline calli (guest frames above this
 	// thread's managed frames) when workers are disabled or unavailable.
@@ -56,17 +59,61 @@ public sealed partial class DirectExecutionBackend
 	// Callers set the Active* thread-statics before emitting the stub and read the
 	// yield/forced-exit flags right after this returns, so the worker outcome is
 	// copied back into this thread's statics before returning.
-	private unsafe int RunGuestEntryStub(void* entryStub, ulong hostRspSlot)
+	private unsafe int RunGuestEntryStub(void* entryStub, ulong hostRspSlot, bool requireNativeWorker = false)
 	{
-		var worker = RentNativeGuestExecutor();
+		NativeGuestExecutor? worker = null;
+		for (var attempt = 0; attempt < 48; attempt++)
+		{
+			worker = RentNativeGuestExecutor();
+			if (worker is not null)
+			{
+				break;
+			}
+
+			if (!requireNativeWorker)
+			{
+				break;
+			}
+
+			// TBB must not fall back to CallNativeEntry (managed VEH FailFast).
+			Thread.Sleep(1);
+		}
+
 		if (worker is null)
 		{
+			if (requireNativeWorker)
+			{
+				var n = Interlocked.Increment(ref _tbbNativeWorkerRefuseCount);
+				if (n <= 8 || n % 32 == 0)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] tbb_native_worker unavailable #{n}; " +
+						"refusing managed inline (would FailFast on execute AV)");
+					Console.Error.Flush();
+				}
+
+				throw new InvalidOperationException(
+					"Native guest worker unavailable for tbb_thead; refusing managed inline execution");
+			}
+
 			TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
 			return CallNativeEntry(entryStub);
 		}
+
 		try
 		{
 			var state = _activeGuestThreadState;
+			if (state is { Name: "tbb_thead" })
+			{
+				var n = Interlocked.Increment(ref _tbbNativeRunEnterCount);
+				if (n <= 12 || n % 64 == 0)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] tbb_run_enter #{n} native_tid_pending handle=0x{state.ThreadHandle:X16}");
+					Console.Error.Flush();
+				}
+			}
+
 			var nativeReturn = worker.Run(
 				_activeCpuContext!,
 				state,
@@ -88,6 +135,51 @@ public sealed partial class DirectExecutionBackend
 		{
 			ReturnNativeGuestExecutor(worker);
 		}
+	}
+
+	private static int _tbbNativeRunEnterCount;
+	private static int _tbbNativeWorkerRefuseCount;
+
+	private void PrewarmNativeGuestWorkers(int count)
+	{
+		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled || count <= 0)
+		{
+			return;
+		}
+
+		var warmed = new List<NativeGuestExecutor>(count);
+		for (var i = 0; i < count; i++)
+		{
+			var worker = NativeGuestExecutor.TryCreate(this);
+			if (worker is null)
+			{
+				break;
+			}
+
+			warmed.Add(worker);
+		}
+
+		lock (_nativeWorkerGate)
+		{
+			if (_nativeWorkersDisposed)
+			{
+				foreach (var worker in warmed)
+				{
+					worker.Dispose();
+				}
+				return;
+			}
+
+			foreach (var worker in warmed)
+			{
+				_allNativeWorkers.Add(worker);
+				_idleNativeWorkers.Push(worker);
+			}
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] Native guest workers prewarmed: {warmed.Count}/{count}");
+		Console.Error.Flush();
 	}
 
 	private NativeGuestExecutor? RentNativeGuestExecutor()
@@ -400,6 +492,22 @@ public sealed partial class DirectExecutionBackend
 				return false;
 			}
 			FlushInstructionCache(GetCurrentProcess(), _loopStub, LoopStubSize);
+			return StartWorkerThread();
+		}
+
+		private bool RestartWorkerThread()
+		{
+			if (_loopStub == null || _controlBlock == null)
+			{
+				return false;
+			}
+
+			*(int*)_controlBlock = 0;
+			return StartWorkerThread();
+		}
+
+		private bool StartWorkerThread()
+		{
 			_threadHandle = CreateThread(
 				0,
 				WorkerStackReservation,
@@ -445,6 +553,49 @@ public sealed partial class DirectExecutionBackend
 			_runForcedExit = false;
 			SignalWorkAvailable();
 			WaitWorkCompleted();
+
+			// Normal path: RunEpilogue/ExitRun clears _entered before SetEvent(done).
+			// TBB abort stub SetEvent's without ExitRun — _entered stays true.
+			if (_entered)
+			{
+				var waitRc = WaitForSingleObject(_threadHandle, 500u);
+				Console.Error.WriteLine(
+					$"[LOADER][WARN] Native guest worker tid={_nativeThreadId} aborted during run; " +
+					$"wait_rc=0x{waitRc:X8} respawning");
+				Console.Error.Flush();
+				if (_runState is { } abortedState)
+				{
+					_ = GuestThreadExecution.NotifyGuestThreadAbandoned(
+						abortedState.ThreadHandle,
+						"tbb_worker_abort");
+					Volatile.Write(ref abortedState.HostThreadId, _prevHostThreadId);
+				}
+				_entered = false;
+				if (_threadHandle != 0)
+				{
+					// Abort stub parks (no ExitThread). Force-kill the parked OS
+					// thread so we can recreate the loop without process teardown.
+					if (waitRc != 0u)
+					{
+						_ = TerminateThread(_threadHandle, unchecked((uint)(-1)));
+						_ = WaitForSingleObject(_threadHandle, 1000u);
+					}
+					CloseHandle(_threadHandle);
+					_threadHandle = 0;
+					_nativeThreadId = 0;
+				}
+				if (!RestartWorkerThread())
+				{
+					_runPrologueFailed = true;
+				}
+				else
+				{
+					_runPrologueFailed = false;
+					_runForcedExit = true;
+					_runNativeResult = 0;
+				}
+			}
+
 			_runContext = null;
 			_runState = null;
 			yieldRequested = _runYieldRequested;
@@ -546,6 +697,18 @@ public sealed partial class DirectExecutionBackend
 			_activeGuestThreadState = _runState;
 			backend.BindTlsBase(_runContext!);
 			TlsSetValue(backend._hostRspSlotTlsIndex, _runHostRspSlot);
+			if (backend._workerDoneEventTlsIndex != uint.MaxValue)
+			{
+				nint doneHandle = OperatingSystem.IsWindows()
+					? _workCompleted!.SafeWaitHandle.DangerousGetHandle()
+					: _doneSemaphore;
+				TlsSetValue(backend._workerDoneEventTlsIndex, doneHandle);
+			}
+			if (backend._tbbAbortEligibleTlsIndex != uint.MaxValue)
+			{
+				nint eligible = _runState is { Name: "tbb_thead" } ? 1 : 0;
+				TlsSetValue(backend._tbbAbortEligibleTlsIndex, eligible);
+			}
 			if (_runState is { } state)
 			{
 				_prevHostThreadId = Volatile.Read(ref state.HostThreadId);
@@ -580,6 +743,14 @@ public sealed partial class DirectExecutionBackend
 				Volatile.Write(ref state.HostThreadId, _prevHostThreadId);
 			}
 			TlsSetValue(_backend._hostRspSlotTlsIndex, _prevHostRspSlot);
+			if (_backend._workerDoneEventTlsIndex != uint.MaxValue)
+			{
+				TlsSetValue(_backend._workerDoneEventTlsIndex, 0);
+			}
+			if (_backend._tbbAbortEligibleTlsIndex != uint.MaxValue)
+			{
+				TlsSetValue(_backend._tbbAbortEligibleTlsIndex, 0);
+			}
 			GuestThreadExecution.RestoreGuestThread(_prevGuestThreadHandle);
 			_activeExecutionBackend = _prevBackend;
 			_activeCpuContext = _prevContext;
