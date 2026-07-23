@@ -228,9 +228,10 @@ public static class AudioOutExports
             if (_traceOutput)
             {
                 var n = Interlocked.Increment(ref _outputCount);
-                if (n <= 8 || n % 200 == 0)
+                var peak = PeakAmplitude(source, port.IsFloat, port.BytesPerSample);
+                // Always surface non-silent buffers; silence stays on the sparse cadence.
+                if (n <= 8 || n % 200 == 0 || peak > 0.0001f)
                 {
-                    var peak = PeakAmplitude(source, port.IsFloat, port.BytesPerSample);
                     Console.Error.WriteLine(
                         $"[LOADER][TRACE] audioout.output#{n} handle={handle} bytes={source.Length} ch={port.Channels} float={port.IsFloat} vol={port.Volume:F2} peak={peak:F4} backend={(port.Backend is null ? "none" : "coreaudio")}");
                 }

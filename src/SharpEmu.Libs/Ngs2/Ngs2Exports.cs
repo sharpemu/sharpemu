@@ -64,7 +64,46 @@ public static class Ngs2Exports
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
         public float Gain { get; set; } = 1f;
+        // Pitch ratio from sampler pitch param (1 = unity). Applied as a step scale.
+        public float PitchRatio { get; set; } = 1f;
+        // De-click envelopes (output frames at mix rate). Speaker "power-plug" pops
+        // come from hard starts/stops and discontinuous stream joins.
+        public int FadeInLeft { get; set; }
+        public int FadeOutLeft { get; set; }
+        public int FadeOutTotal { get; set; }
+
+        // Guest stream windows last seen on waveform-blocks params. Titles often
+        // rotate several ring halves; we re-pull on render when content changes.
+        public uint StreamFlags { get; set; }
+        public StreamWindow[] StreamWindows { get; } = new StreamWindow[8];
+        public int StreamWindowCount { get; set; }
+        // Coarse fingerprint of the last bed we mixed. Double-buffer rings often
+        // re-submit the same grain under a new address; re-arming that is the tick.
+        public long LastBedFingerprint { get; set; }
+        public int LastBedSampleCount { get; set; }
+        public int LastBedRate { get; set; }
+        public long LastBedArmTickMs { get; set; }
+
+        // Last OrbisNgs2WaveformFormat from a setup param (classic or custom sampler).
+        public Ngs2WaveformArmer.WaveformFormat Format { get; set; } =
+            new(Ngs2WaveformArmer.WaveformTypePcmI16, 1, 48000, 0, 0, 0);
     }
+
+    private struct StreamWindow
+    {
+        public ulong DataAddr;
+        public int ByteSize;
+        public long ContentKey;
+    }
+
+    private const int MixFadeInFrames = 96;   // ~2 ms @ 48 kHz
+    private const int MixFadeOutFrames = 128;
+    private const int StreamCrossfadeSamples = 384; // longer join = less tick
+    private const int DefaultStreamProbeBytes = 64 * 1024;
+    // Suppress re-firing the same short stream grain (menu double-beep). Real SFX
+    // usually differs in length/rate enough to pass this gate.
+    private const int BedRetriggerCooldownMs = 4000;
+    private const int BedLengthMatchSlack = 512;
 
     [SysAbiExport(
         Nid = "mPYgU4oYpuY",
@@ -274,10 +313,10 @@ public static class Ngs2Exports
         return SetReturn(ctx, 0);
     }
 
-    // Parse the SceNgs2VoiceParamHead command list (header = u32 size, u32 id;
-    // params are laid out contiguously) and apply the ones the mixer needs:
-    // the waveform-blocks param arms a voice with decoded PCM, and the port
-    // matrix param carries its output gain.
+    // Parse OrbisNgs2VoiceParamHeader list: u16 size, s16 next, u32 id.
+    // Classic sampler ids live in 0x1xxxxxxx; some titles (custom sampler racks)
+    // use the parallel 0x4xxxxxxx set with the same body layouts from the public
+    // OrbisNgs2SamplerVoice* structs. Both are handled generically.
     private static void HandleVoiceParams(CpuContext ctx, ulong voiceHandle, ulong paramList)
     {
         if (paramList == 0)
@@ -288,101 +327,607 @@ public static class Ngs2Exports
         var offset = paramList;
         for (var guard = 0; guard < 32; guard++)
         {
-            if (!ctx.TryReadUInt32(offset, out var size) ||
+            if (!ctx.TryReadUInt16(offset, out var size) ||
+                !ctx.TryReadUInt16(offset + 2, out var nextRaw) ||
                 !ctx.TryReadUInt32(offset + 4, out var id))
+            {
+                return;
+            }
+
+            if (size < 8 || size > 0x1000)
             {
                 return;
             }
 
             switch (id)
             {
+                case 0x10000000:
+                case 0x40010000:
+                    // OrbisNgs2SamplerVoiceSetupParam / custom equivalent.
+                    ApplySetupParam(ctx, voiceHandle, offset, size);
+                    break;
                 case 0x10000001:
-                    ApplyWaveformParam(ctx, voiceHandle, offset);
+                case 0x40010001:
+                    // OrbisNgs2SamplerVoiceWaveformBlocksParam / custom equivalent.
+                    ApplyWaveformBlocksParam(ctx, voiceHandle, offset, size);
+                    break;
+                case 0x10000002:
+                case 0x40010002:
+                    // Waveform address range (from/to) — arm from `from`.
+                    ApplyWaveformAddressParam(ctx, voiceHandle, offset, size);
+                    break;
+                case 0x10000004:
+                case 0x40010004:
+                case 0x10000005:
+                case 0x40010005:
+                    // Pitch ratio (float @ +8).
+                    ApplyPitchParam(ctx, voiceHandle, offset, size);
                     break;
                 case 0x20010001:
                     ApplyPortMatrixParam(ctx, voiceHandle, offset);
                     break;
+                case 0x40001300:
+                    // Continuous control blob; trailing finite floats often encode gain.
+                    ApplyContinuousControlParam(ctx, voiceHandle, offset, size);
+                    break;
+                case 0x7:
+                    // OrbisNgs2VoiceCallbackParam (handler + user data) — not sample data.
+                    break;
+                default:
+                    // Small volume-like params only; avoid treating junk ints as wave ptrs.
+                    if (size >= 16 && size <= 32)
+                    {
+                        ApplyPortMatrixParam(ctx, voiceHandle, offset);
+                    }
+
+                    break;
             }
 
-            // Advance to the next contiguous block; the game normally sends one
-            // param per call (size==whole block), so stop when size is degenerate.
-            if (size < 8 || size > 0x1000)
+            var next = unchecked((short)nextRaw);
+            if (next <= 0)
             {
                 return;
             }
 
-            offset += (size + 7) & ~7u;
+            offset += (ulong)next;
         }
     }
 
-    // Waveform-blocks param: the guest pointer at +8 references a "VAGp"
-    // (PS-ADPCM) container. Decode it once and arm the voice for playback.
-    private static void ApplyWaveformParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    // Setup: header + OrbisNgs2WaveformFormat {type, ch, rate, config, frameOffset, margin}.
+    private static void ApplySetupParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset, ushort size)
     {
-        if (!ctx.TryReadUInt64(paramOffset + 8, out var dataAddr) || dataAddr <= 0x10000)
+        if (size < 8 + 24)
+        {
+            return;
+        }
+
+        if (!Ngs2WaveformArmer.TryReadFormat(ctx.Memory, paramOffset + 8, out var format))
         {
             return;
         }
 
         lock (StateGate)
         {
-            if (Voices.TryGetValue(voiceHandle, out var existing) &&
-                existing.SourceAddr == dataAddr && existing.Pcm is not null)
+            if (Voices.TryGetValue(voiceHandle, out var voice))
             {
-                // Same waveform already armed — don't restart it every frame.
-                return;
+                voice.Format = format;
+                if (format.SampleRate > 0)
+                {
+                    voice.SourceRate = (int)format.SampleRate;
+                }
             }
         }
 
-        Span<byte> header = stackalloc byte[Ngs2VagDecoder.VagHeaderSize];
-        if (!ctx.Memory.TryRead(dataAddr, header) || !Ngs2VagDecoder.IsVag(header))
+        if (ShouldTrace() && Interlocked.Increment(ref _setupDumps) <= 8)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ngs2.setup voice=0x{voiceHandle:X16} type=0x{format.WaveformType:X} ch={format.NumChannels} rate={format.SampleRate} cfg=0x{format.ConfigData:X}");
+        }
+    }
+
+    // Max mono samples kept when appending stream chunks (~2s @ 48 kHz).
+    private const int MaxStreamQueueSamples = 96_000;
+
+    // Waveform blocks: header + data*, flags, numBlocks, aBlock*.
+    // Only OrbisNgs2WaveformBlock.numRepeats is treated as an explicit loop request;
+    // param flags are not guessed (0x11 appears on one-shots and streams alike and
+    // false-looping short chunks produces a menu tick).
+    private static void ApplyWaveformBlocksParam(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset, ushort size)
+    {
+        if (size < 32)
         {
             return;
         }
 
-        var declaredSize = (int)BinaryPrimitives.ReadUInt32BigEndian(header[0x0C..]);
-        var totalBytes = Ngs2VagDecoder.VagHeaderSize + Math.Clamp(declaredSize, 0, 8 * 1024 * 1024);
-        var raw = System.Buffers.ArrayPool<byte>.Shared.Rent(totalBytes);
-        try
+        if (!ctx.TryReadUInt64(paramOffset + 8, out var dataAddr))
         {
-            if (!ctx.Memory.TryRead(dataAddr, raw.AsSpan(0, totalBytes)) ||
-                !Ngs2VagDecoder.TryDecode(raw.AsSpan(0, totalBytes), out var waveform))
+            return;
+        }
+
+        // data == 0 stops the sampler — fade out instead of a hard cut (pop).
+        if (dataAddr == 0)
+        {
+            lock (StateGate)
+            {
+                if (Voices.TryGetValue(voiceHandle, out var voice))
+                {
+                    voice.StreamWindowCount = 0;
+                    if (voice.Playing && voice.Pcm is not null)
+                    {
+                        voice.FadeOutTotal = MixFadeOutFrames;
+                        voice.FadeOutLeft = MixFadeOutFrames;
+                    }
+                }
+            }
+
+            return;
+        }
+
+        if (dataAddr <= 0x10000)
+        {
+            return;
+        }
+
+        if (!ctx.TryReadUInt32(paramOffset + 16, out var flags) ||
+            !ctx.TryReadUInt32(paramOffset + 20, out var numBlocks) ||
+            !ctx.TryReadUInt64(paramOffset + 24, out var blockAddr))
+        {
+            return;
+        }
+
+        // Cap blocks so a corrupt numBlocks cannot allocate forever.
+        numBlocks = Math.Min(numBlocks, 16u);
+        var blocks = new Ngs2WaveformArmer.WaveformBlock[Math.Max(1, (int)numBlocks)];
+        var blockCount = 0;
+
+        if (numBlocks > 0 && blockAddr > 0x10000)
+        {
+            for (uint i = 0; i < numBlocks; i++)
+            {
+                var addr = blockAddr + (i * 32);
+                if (Ngs2WaveformArmer.TryReadBlock(ctx.Memory, addr, out var block))
+                {
+                    // Strip untrusted repeats — stack aBlock often carries junk
+                    // that false-loops short stream windows (menu speaker ticks).
+                    blocks[blockCount++] = block with { NumRepeats = 0 };
+                    continue;
+                }
+
+                // Block header readable but dataSize==0 is common for streaming
+                // fills: keep numSamples when present and synthesize a byte size
+                // from the voice format (PCM16 bytes-per-frame).
+                var rawBlock = new byte[32];
+                if (!ctx.Memory.TryRead(addr, rawBlock))
+                {
+                    continue;
+                }
+
+                var dataOffset = BinaryPrimitives.ReadUInt32LittleEndian(rawBlock.AsSpan(0, 4));
+                var dataSize = BinaryPrimitives.ReadUInt32LittleEndian(rawBlock.AsSpan(4, 4));
+                var numSamples = BinaryPrimitives.ReadUInt32LittleEndian(rawBlock.AsSpan(16, 4));
+                var userData = BinaryPrimitives.ReadUInt64LittleEndian(rawBlock.AsSpan(24, 8));
+
+                if (dataSize == 0 && numSamples > 0 && numSamples <= 8 * 1024 * 1024)
+                {
+                    var ch = 2u;
+                    lock (StateGate)
+                    {
+                        if (Voices.TryGetValue(voiceHandle, out var v) && v.Format.NumChannels is > 0 and <= 8)
+                        {
+                            ch = v.Format.NumChannels;
+                        }
+                    }
+
+                    // PCM16 bytes; AT9/VAG containers ignore this and use magic.
+                    dataSize = numSamples * ch * 2;
+                }
+
+                if (dataSize == 0 || dataSize > 8 * 1024 * 1024)
+                {
+                    // Probe window when the block omits size; decoder rejects silence.
+                    dataSize = 64 * 1024;
+                }
+
+                blocks[blockCount++] = new Ngs2WaveformArmer.WaveformBlock(
+                    dataOffset,
+                    dataSize,
+                    NumRepeats: 0,
+                    BinaryPrimitives.ReadUInt32LittleEndian(rawBlock.AsSpan(12, 4)),
+                    numSamples,
+                    userData);
+            }
+        }
+
+        // Some titles leave aBlock null and put a single implicit full buffer.
+        if (blockCount == 0)
+        {
+            blocks[0] = new Ngs2WaveformArmer.WaveformBlock(
+                DataOffset: 0,
+                DataSize: 64 * 1024,
+                NumRepeats: 0,
+                NumSkipSamples: 0,
+                NumSamples: 0,
+                UserData: 0);
+            blockCount = 1;
+        }
+
+        Ngs2WaveformArmer.WaveformFormat format;
+        var streamBytes = DefaultStreamProbeBytes;
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
             {
                 return;
             }
 
-            lock (StateGate)
+            format = voice.Format;
+            if (blockCount > 0 && blocks[0].DataSize is > 0 and <= 8 * 1024 * 1024)
             {
-                if (!Voices.TryGetValue(voiceHandle, out var voice))
-                {
-                    return;
-                }
-
-                voice.Pcm = waveform.Samples;
-                voice.SourceAddr = dataAddr;
-                voice.SourceRate = waveform.SampleRate;
-                voice.LoopStart = waveform.LoopStart;
-                voice.LoopEnd = waveform.LoopEnd > 0 ? waveform.LoopEnd : waveform.Samples.Length;
-                voice.Position = 0;
-                voice.Playing = true;
+                streamBytes = (int)blocks[0].DataSize;
             }
 
-            if (ShouldTrace())
-            {
-                var peak = 0;
-                for (var i = 0; i < waveform.Samples.Length; i++)
-                {
-                    peak = Math.Max(peak, Math.Abs((int)waveform.Samples[i]));
-                }
-
-                Console.Error.WriteLine(
-                    $"[LOADER][TRACE] ngs2.arm voice=0x{voiceHandle:X16} addr=0x{dataAddr:X} rate={waveform.SampleRate} samples={waveform.Samples.Length} loop={waveform.LoopStart} peak={peak}");
-            }
+            // Remember every ring half; SystemRender re-pulls when content changes.
+            // Never restart an identical snapshot after it ends (that re-ticks).
+            RememberStreamWindow(voice, dataAddr, streamBytes);
+            voice.StreamFlags = flags;
         }
-        finally
+
+        if (ShouldTrace() && Interlocked.Increment(ref _blockDumps) <= 16)
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(raw);
+            var b0 = blockCount > 0 ? blocks[0] : default;
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ngs2.blocks voice=0x{voiceHandle:X16} data=0x{dataAddr:X} flags=0x{flags:X} n={numBlocks} loop=False off={b0.DataOffset} size={b0.DataSize} samples={b0.NumSamples}");
         }
+
+        if (TryArmStreamWindow(ctx, voiceHandle, dataAddr, format, streamBytes, forceLog: true))
+        {
+            return;
+        }
+
+        if (ShouldTrace() && Interlocked.Increment(ref _missDumps) <= 24)
+        {
+            Span<byte> head = stackalloc byte[32];
+            var headHex = ctx.Memory.TryRead(dataAddr, head) ? Convert.ToHexString(head) : "unreadable";
+            var b0 = blockCount > 0 ? blocks[0] : default;
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ngs2.miss voice=0x{voiceHandle:X16} data=0x{dataAddr:X} off={b0.DataOffset} size={b0.DataSize} head={headHex}");
+        }
+    }
+
+    private static void RememberStreamWindow(VoiceState voice, ulong dataAddr, int byteSize)
+    {
+        for (var i = 0; i < voice.StreamWindowCount; i++)
+        {
+            if (voice.StreamWindows[i].DataAddr != dataAddr)
+            {
+                continue;
+            }
+
+            var existing = voice.StreamWindows[i];
+            existing.ByteSize = byteSize;
+            // Move to front (most recent).
+            for (var j = i; j > 0; j--)
+            {
+                voice.StreamWindows[j] = voice.StreamWindows[j - 1];
+            }
+
+            voice.StreamWindows[0] = existing;
+            return;
+        }
+
+        var count = Math.Min(voice.StreamWindowCount + 1, voice.StreamWindows.Length);
+        for (var i = count - 1; i > 0; i--)
+        {
+            voice.StreamWindows[i] = voice.StreamWindows[i - 1];
+        }
+
+        voice.StreamWindows[0] = new StreamWindow
+        {
+            DataAddr = dataAddr,
+            ByteSize = byteSize,
+            ContentKey = 0,
+        };
+        voice.StreamWindowCount = count;
+    }
+
+    // Decode a guest PCM/container window and arm only when content is NEW.
+    // Restarting the same snapshot after it ends is what reintroduced the tick.
+    private static bool TryArmStreamWindow(
+        CpuContext ctx,
+        ulong voiceHandle,
+        ulong dataAddr,
+        Ngs2WaveformArmer.WaveformFormat format,
+        int byteSize,
+        bool forceLog)
+    {
+        if (dataAddr <= 0x10000 || byteSize <= 0)
+        {
+            return false;
+        }
+
+        byteSize = Math.Clamp(byteSize, 256, 8 * 1024 * 1024);
+        var block = new Ngs2WaveformArmer.WaveformBlock(0, (uint)byteSize, 0, 0, 0, 0);
+        if (!Ngs2WaveformArmer.TryArmFromWaveformBlocks(
+                ctx.Memory,
+                dataAddr,
+                format,
+                new[] { block },
+                loop: false,
+                out var armed) &&
+            !Ngs2WaveformArmer.TryArmFromGuestAddress(ctx.Memory, dataAddr, out armed))
+        {
+            return false;
+        }
+
+        long key = armed.Samples.Length;
+        key = (key * 397) ^ armed.SampleRate;
+        var step = Math.Max(1, armed.Samples.Length / 32);
+        for (var i = 0; i < armed.Samples.Length; i += step)
+        {
+            key = (key * 31) ^ armed.Samples[i];
+        }
+
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return false;
+            }
+
+            // Update key for this window.
+            for (var i = 0; i < voice.StreamWindowCount; i++)
+            {
+                if (voice.StreamWindows[i].DataAddr != dataAddr)
+                {
+                    continue;
+                }
+
+                var window = voice.StreamWindows[i];
+                if (window.ContentKey == key)
+                {
+                    // Same snapshot already consumed — never restart it (tick).
+                    return voice.Playing;
+                }
+
+                window.ContentKey = key;
+                window.ByteSize = byteSize;
+                voice.StreamWindows[i] = window;
+                break;
+            }
+        }
+
+        ApplyArmedWaveform(voiceHandle, dataAddr, armed);
+        if (forceLog)
+        {
+            // ApplyArmedWaveform already logs on first arm path.
+        }
+
+        return true;
+    }
+
+    // Re-pull all remembered ring halves; only NEW content is appended/armed.
+    private static void PullPendingStreams(CpuContext ctx, ulong systemHandle)
+    {
+        if ((Interlocked.Increment(ref _streamPullCount) & 1) != 0)
+        {
+            return;
+        }
+
+        List<(ulong voice, ulong addr, int bytes, Ngs2WaveformArmer.WaveformFormat format)> pending;
+        lock (StateGate)
+        {
+            pending = new List<(ulong, ulong, int, Ngs2WaveformArmer.WaveformFormat)>();
+            foreach (var pair in Voices)
+            {
+                var voice = pair.Value;
+                if (voice.StreamWindowCount <= 0)
+                {
+                    continue;
+                }
+
+                if (!Racks.TryGetValue(voice.RackHandle, out var rack) ||
+                    rack.SystemHandle != systemHandle)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < voice.StreamWindowCount; i++)
+                {
+                    var w = voice.StreamWindows[i];
+                    if (w.DataAddr > 0x10000 && w.ByteSize > 0)
+                    {
+                        pending.Add((pair.Key, w.DataAddr, w.ByteSize, voice.Format));
+                    }
+                }
+            }
+        }
+
+        foreach (var item in pending)
+        {
+            TryArmStreamWindow(ctx, item.voice, item.addr, item.format, item.bytes, forceLog: false);
+        }
+    }
+
+    private static long _streamPullCount;
+
+    // Waveform address param: {from, to} — arm from `from` using the last format.
+    private static void ApplyWaveformAddressParam(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset, ushort size)
+    {
+        if (size < 24 ||
+            !ctx.TryReadUInt64(paramOffset + 8, out var from) ||
+            from <= 0x10000)
+        {
+            return;
+        }
+
+        Ngs2WaveformArmer.WaveformFormat format;
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            format = voice.Format;
+        }
+
+        var block = new Ngs2WaveformArmer.WaveformBlock(0, 64 * 1024, 0, 0, 0, 0);
+        if (Ngs2WaveformArmer.TryArmFromWaveformBlocks(
+                ctx.Memory, from, format, new[] { block }, loop: false, out var armed) ||
+            Ngs2WaveformArmer.TryArmFromGuestAddress(ctx.Memory, from, out armed))
+        {
+            ApplyArmedWaveform(voiceHandle, from, armed);
+        }
+    }
+
+    private static void ApplyPitchParam(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset, ushort size)
+    {
+        if (size < 12 || !ctx.TryReadUInt32(paramOffset + 8, out var bits))
+        {
+            return;
+        }
+
+        var ratio = BitConverter.UInt32BitsToSingle(bits);
+        if (!float.IsFinite(ratio) || ratio <= 0f || ratio > 8f)
+        {
+            return;
+        }
+
+        lock (StateGate)
+        {
+            if (Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                voice.PitchRatio = ratio;
+            }
+        }
+    }
+
+    private static long _missDumps;
+    private static long _setupDumps;
+    private static long _blockDumps;
+    private static long _streamAppendDumps;
+
+    private static void ApplyArmedWaveform(
+        ulong voiceHandle, ulong dataAddr, Ngs2WaveformArmer.ArmedWaveform armed)
+    {
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            // One-shot / stream-append only. Never loop a short ring snapshot.
+            // Double-buffer rings re-submit near-identical grains under new
+            // addresses — appending those is the remaining menu tick.
+            var samples = armed.Samples;
+            var rate = armed.SampleRate > 0 ? armed.SampleRate : 48000;
+            var fingerprint = BedFingerprint(samples, rate);
+            var nowMs = Environment.TickCount64;
+
+            // Same short stream grain re-submitted with slight peak drift → double beep.
+            if (IsRetriggerOfRecentBed(voice, samples.Length, rate, fingerprint, nowMs))
+            {
+                return;
+            }
+
+            // Already playing with enough buffer left — do not splice another grain.
+            if (voice.Playing &&
+                voice.Pcm is not null &&
+                voice.Position < voice.Pcm.Length * 0.85)
+            {
+                return;
+            }
+
+            // Fresh start only. No stream-append of ring halves (that stitched the
+            // beeps). Distinct SFX on other voices still arm independently.
+            voice.Pcm = samples;
+            voice.SourceAddr = dataAddr;
+            voice.SourceRate = rate;
+            voice.LoopStart = -1;
+            voice.LoopEnd = samples.Length;
+            voice.Position = 0;
+            voice.Playing = true;
+            voice.FadeOutLeft = 0;
+            voice.FadeInLeft = MixFadeInFrames;
+            voice.LastBedFingerprint = fingerprint;
+            voice.LastBedSampleCount = samples.Length;
+            voice.LastBedRate = rate;
+            voice.LastBedArmTickMs = nowMs;
+        }
+
+        if (ShouldTrace())
+        {
+            var peak = 0;
+            for (var i = 0; i < armed.Samples.Length; i++)
+            {
+                peak = Math.Max(peak, Math.Abs((int)armed.Samples[i]));
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ngs2.arm voice=0x{voiceHandle:X16} addr=0x{dataAddr:X} fmt={armed.Format} rate={armed.SampleRate} samples={armed.Samples.Length} loop=-1 peak={peak}");
+        }
+    }
+
+    // Very coarse bed identity. Peak is bucketed hard so slow peak climb on a
+    // streaming ring (20561→24007) does not look like a new sound.
+    private static long BedFingerprint(short[] samples, int rate)
+    {
+        if (samples.Length == 0)
+        {
+            return 0;
+        }
+
+        var peak = 0;
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var a = Math.Abs((int)samples[i]);
+            if (a > peak)
+            {
+                peak = a;
+            }
+        }
+
+        long key = (samples.Length / 256) * 1_000_003L;
+        key = (key * 397) ^ (rate / 1000);
+        key = (key * 397) ^ (peak / 4096);
+        return key;
+    }
+
+    private static bool IsRetriggerOfRecentBed(
+        VoiceState voice, int sampleCount, int rate, long fingerprint, long nowMs)
+    {
+        if (voice.LastBedArmTickMs == 0)
+        {
+            return false;
+        }
+
+        if (nowMs - voice.LastBedArmTickMs > BedRetriggerCooldownMs)
+        {
+            return false;
+        }
+
+        if (voice.LastBedRate != 0 && voice.LastBedRate != rate)
+        {
+            return false;
+        }
+
+        if (voice.LastBedFingerprint != 0 && voice.LastBedFingerprint == fingerprint)
+        {
+            return true;
+        }
+
+        // Same length class within slack — typical stream grain re-fire.
+        if (voice.LastBedSampleCount > 0 &&
+            Math.Abs(voice.LastBedSampleCount - sampleCount) <= BedLengthMatchSlack)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     // Port matrix param: the first float level is a reasonable proxy for the
@@ -395,7 +940,8 @@ public static class Ngs2Exports
         }
 
         var level = BitConverter.UInt32BitsToSingle(levelBits);
-        if (!float.IsFinite(level) || level < 0f || level > 8f)
+        // Same floor as continuous control: 0 must not mute an armed voice.
+        if (!float.IsFinite(level) || level < 0.01f || level > 8f)
         {
             return;
         }
@@ -405,6 +951,47 @@ public static class Ngs2Exports
             if (Voices.TryGetValue(voiceHandle, out var voice))
             {
                 voice.Gain = level;
+            }
+        }
+    }
+
+    // Continuous-control payloads often carry level floats. Dead Cells' 0x40001300
+    // body ends with padding zeros after a real level (~0.7–1.0). Treating 0 as a
+    // valid level muted every voice right after arm — "no audio, no glitches".
+    private static void ApplyContinuousControlParam(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset, uint size)
+    {
+        if (size < 12)
+        {
+            return;
+        }
+
+        float? gain = null;
+        for (var o = 8; o + 4 <= (int)size; o += 4)
+        {
+            if (!ctx.TryReadUInt32(paramOffset + (ulong)o, out var bits))
+            {
+                break;
+            }
+
+            var value = BitConverter.UInt32BitsToSingle(bits);
+            // Ignore 0 / denorms / junk ints that decode as tiny floats.
+            if (float.IsFinite(value) && value >= 0.01f && value <= 8f)
+            {
+                gain = value;
+            }
+        }
+
+        if (gain is null)
+        {
+            return;
+        }
+
+        lock (StateGate)
+        {
+            if (Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                voice.Gain = gain.Value;
             }
         }
     }
@@ -523,6 +1110,11 @@ public static class Ngs2Exports
                     channels = (int)declaredChannels;
                 }
 
+                // Titles often arm a stream pointer before the ring half is full.
+                // Re-pull remembered windows each render so BGM can start without
+                // false-looping an empty/short snapshot.
+                PullPendingStreams(ctx, systemHandle);
+
                 MixVoicesIntoGrain(ctx, systemHandle, bufferAddress, bufferSize, channels);
 
                 if (ShouldTrace() && Interlocked.Increment(ref _renderInfoDumps) <= 4)
@@ -574,6 +1166,9 @@ public static class Ngs2Exports
         try
         {
             Array.Clear(accum, 0, floatCount);
+            var skippedIdle = 0;
+            var skippedRack = 0;
+            var mixedVoices = 0;
             lock (StateGate)
             {
                 foreach (var pair in Voices)
@@ -581,23 +1176,55 @@ public static class Ngs2Exports
                     var voice = pair.Value;
                     if (!voice.Playing || voice.Pcm is null || voice.Pcm.Length == 0)
                     {
+                        if (voice.Pcm is not null)
+                        {
+                            skippedIdle++;
+                        }
+
                         continue;
                     }
 
                     if (!Racks.TryGetValue(voice.RackHandle, out var rack) ||
                         rack.SystemHandle != systemHandle)
                     {
+                        skippedRack++;
                         continue;
                     }
 
                     MixOneVoice(accum, capacityFrames, channels, voice);
                     mixedAnything = true;
+                    mixedVoices++;
                 }
             }
 
             if (mixedAnything)
             {
                 WriteGrain(ctx, bufferAddress, accum, floatCount);
+                if (ShouldTrace() && Interlocked.Increment(ref _mixPeakDumps) <= 8)
+                {
+                    var peak = 0f;
+                    for (var i = 0; i < floatCount; i++)
+                    {
+                        var a = Math.Abs(accum[i]);
+                        if (a > peak)
+                        {
+                            peak = a;
+                        }
+                    }
+
+                    if (peak > 0.0001f)
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] ngs2.mix peak={peak:F4} voices={mixedVoices} frames={capacityFrames} ch={channels}");
+                    }
+                }
+            }
+            else if (ShouldTrace() &&
+                     (skippedIdle > 0 || skippedRack > 0) &&
+                     Interlocked.Increment(ref _mixStatusDumps) <= 4)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.mixstat mixed=0 idle={skippedIdle} rackmiss={skippedRack}");
             }
         }
         finally
@@ -606,30 +1233,49 @@ public static class Ngs2Exports
         }
     }
 
+    private static long _mixPeakDumps;
+    private static long _mixStatusDumps;
+
     // Resample one voice from its source rate to 48 kHz (nearest-sample) and add
-    // it to the front stereo pair. Advances the voice cursor and handles loop /
-    // one-shot end. Must be called under StateGate.
+    // it to the front stereo pair. Advances the voice cursor; loops seamless beds
+    // or ends one-shots with an optional fade-out. Must be called under StateGate.
     private static void MixOneVoice(float[] accum, int frames, int channels, VoiceState voice)
     {
         var pcm = voice.Pcm!;
-        var loopEnd = voice.LoopEnd > 0 && voice.LoopEnd <= pcm.Length ? voice.LoopEnd : pcm.Length;
+        var end = voice.LoopEnd > 0 && voice.LoopEnd <= pcm.Length ? voice.LoopEnd : pcm.Length;
         var loopStart = voice.LoopStart;
-        var step = voice.SourceRate / OutputSampleRate;
-        var gain = voice.Gain / 32768f;
+        var pitch = voice.PitchRatio > 0f && float.IsFinite(voice.PitchRatio)
+            ? voice.PitchRatio
+            : 1f;
+        // Headroom so full-scale PCM16 stays audible without constant peak=1.0 ticks.
+        var step = (voice.SourceRate / OutputSampleRate) * pitch;
+        var baseGain = (voice.Gain * 0.8f) / 32768f;
         var pos = voice.Position;
         for (var f = 0; f < frames; f++)
         {
             var idx = (int)pos;
-            if (idx >= loopEnd)
+            if (idx >= end || idx < 0)
             {
-                if (loopStart >= 0 && loopStart < loopEnd)
+                if (loopStart >= 0 && loopStart < end)
                 {
-                    pos = loopStart;
-                    idx = loopStart;
+                    pos = loopStart + (pos - end);
+                    while (pos >= end)
+                    {
+                        pos = loopStart + (pos - end);
+                    }
+
+                    if (pos < loopStart)
+                    {
+                        pos = loopStart;
+                    }
+
+                    idx = (int)pos;
                 }
                 else
                 {
                     voice.Playing = false;
+                    voice.FadeInLeft = 0;
+                    voice.FadeOutLeft = 0;
                     break;
                 }
             }
@@ -640,7 +1286,29 @@ public static class Ngs2Exports
                 break;
             }
 
-            var sample = pcm[idx] * gain;
+            var env = 1f;
+            if (voice.FadeInLeft > 0)
+            {
+                var done = MixFadeInFrames - voice.FadeInLeft;
+                env *= (done + 1) / (float)MixFadeInFrames;
+                voice.FadeInLeft--;
+            }
+
+            if (voice.FadeOutLeft > 0 && voice.FadeOutTotal > 0)
+            {
+                env *= voice.FadeOutLeft / (float)voice.FadeOutTotal;
+                voice.FadeOutLeft--;
+                if (voice.FadeOutLeft <= 0)
+                {
+                    voice.Playing = false;
+                    voice.Pcm = null;
+                    voice.SourceAddr = 0;
+                    voice.Position = 0;
+                }
+            }
+
+            var sample = pcm[idx] * baseGain * env;
+            sample = SoftClip(sample);
             var baseIndex = f * channels;
             accum[baseIndex] += sample;
             if (channels > 1)
@@ -648,10 +1316,36 @@ public static class Ngs2Exports
                 accum[baseIndex + 1] += sample;
             }
 
+            if (!voice.Playing)
+            {
+                break;
+            }
+
             pos += step;
         }
 
         voice.Position = pos;
+    }
+
+    private static float SoftClip(float x)
+    {
+        // Soft knee from ~0.7 so we rarely hard-rail at ±1 (harsh ticks/crust).
+        const float knee = 0.7f;
+        var ax = Math.Abs(x);
+        if (ax <= knee)
+        {
+            return x;
+        }
+
+        // Asymptote toward ~0.95 instead of 1.0.
+        var t = ax - knee;
+        var y = knee + (t / (1f + t * 3f));
+        if (y > 0.95f)
+        {
+            y = 0.95f;
+        }
+
+        return x < 0 ? -y : y;
     }
 
     private static void WriteGrain(CpuContext ctx, ulong address, float[] accum, int count)
