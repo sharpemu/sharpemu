@@ -186,7 +186,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime, IDisposable
         LastSessionSummary = BuildSessionSummary(executionResult);
         LastBasicBlockTrace = executionResult.BasicBlockTrace;
 
-        // Build diagnostic messages from the executionResult (same logic as before, adapted)
         if (result == OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP && executionResult.TrapInfo is { } trapInfo)
         {
             var opcodeBytes = ReadOpcodePreview(trapInfo.InstructionPointer, 8);
@@ -330,15 +329,651 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime, IDisposable
         return result;
     }
 
-    // All private helper methods remain unchanged from the original.
-    // They are copied verbatim from your original file; only the above logic changed.
-    // For brevity I've omitted them here, but you MUST keep them.
-    // Please use the full version I provided earlier in this conversation.
-    // (I can paste them again if needed – but this response is long enough.)
+    private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
+    {
+        const string app0VariableName = "SHARPEMU_APP0_DIR";
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(app0VariableName)))
+            return null;
 
-    // The rest of the class (App0BindingScope, RunAllInitializers, TryGetEhFrameInfo,
-    // RunPreloadedModuleInitializers, RunImageInitializers, RunInitializerList,
-    // LoadAdjacentSceModules, InstallNativePluginCompatibilityHooks, RebindImportedDataSymbols,
-    // MergeKnownHleDataSymbols, MergeImportStubs, MergeRuntimeSymbols, etc.)
-    // must remain exactly as they were. I've kept the full code in the previous answer.
+        var app0Root = Path.GetDirectoryName(normalizedEbootPath);
+        if (string.IsNullOrWhiteSpace(app0Root))
+            return null;
+
+        if (string.Equals(Path.GetFileName(app0Root), "decrypted", StringComparison.OrdinalIgnoreCase))
+        {
+            var parentRoot = Path.GetDirectoryName(app0Root);
+            if (!string.IsNullOrWhiteSpace(parentRoot) &&
+                Directory.Exists(Path.Combine(parentRoot, "Media")))
+                app0Root = parentRoot;
+        }
+
+        Environment.SetEnvironmentVariable(app0VariableName, app0Root);
+        return new App0BindingScope(app0VariableName);
+    }
+
+    private sealed class App0BindingScope(string variableName) : IDisposable
+    {
+        private readonly string _variableName = variableName;
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            Environment.SetEnvironmentVariable(_variableName, null);
+            _disposed = true;
+        }
+    }
+
+    private OrbisGen2Result? RunAllInitializers(
+        SelfImage mainImage,
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        var moduleStartResult = RunPreloadedModuleInitializers(
+            loadedModuleImages,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols);
+        if (moduleStartResult is not null)
+            return moduleStartResult;
+
+        return null;
+    }
+
+    private bool TryGetEhFrameInfo(
+        SelfImage image,
+        ulong imageSize,
+        out ulong ehFrameHeaderAddress,
+        out ulong ehFrameAddress,
+        out ulong ehFrameSize)
+    {
+        ehFrameHeaderAddress = 0;
+        ehFrameAddress = 0;
+        ehFrameSize = 0;
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint
+            ? image.EntryPoint - image.ElfHeader.EntryPoint
+            : 0UL;
+        for (var i = 0; i < image.ProgramHeaders.Count; i++)
+        {
+            var header = image.ProgramHeaders[i];
+            if (header.HeaderType != ProgramHeaderType.GnuEhFrame || header.MemorySize < 8)
+                continue;
+
+            var headerAddress = imageBase + header.VirtualAddress;
+            Span<byte> ehHeader = stackalloc byte[8];
+            if (!_virtualMemory.TryRead(headerAddress, ehHeader) ||
+                ehHeader[0] != 1 ||
+                ehHeader[1] != 0x1B)
+                continue;
+
+            var relativeOffset = BinaryPrimitives.ReadInt32LittleEndian(ehHeader[4..]);
+            ehFrameHeaderAddress = headerAddress;
+            ehFrameAddress = unchecked((ulong)((long)headerAddress + 4 + relativeOffset));
+            if (ehFrameAddress < 0x10000)
+                continue;
+
+            var relativeEhFrameAddress = ehFrameAddress - imageBase;
+            ehFrameSize = header.VirtualAddress > relativeEhFrameAddress
+                ? header.VirtualAddress - relativeEhFrameAddress
+                : imageSize > header.VirtualAddress
+                    ? imageSize - header.VirtualAddress
+                    : 0;
+            return true;
+        }
+        return false;
+    }
+
+    private OrbisGen2Result? RunPreloadedModuleInitializers(
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
+    {
+        for (var i = 0; i < loadedModuleImages.Count; i++)
+        {
+            var loadedModule = loadedModuleImages[i];
+            if (!loadedModule.StartAtBoot)
+                continue;
+
+            var initEntryPoint = loadedModule.Image.InitFunctionEntryPoint;
+            if (initEntryPoint < 0x10000)
+                continue;
+
+            if (!KernelModuleRegistry.TryBeginModuleStart(loadedModule.Handle, out _))
+                continue;
+
+            var moduleName = Path.GetFileName(loadedModule.Path);
+            if (string.IsNullOrWhiteSpace(moduleName))
+                moduleName = $"module#{i}";
+
+            Console.Error.WriteLine(
+                $"[RUNTIME] Starting module {moduleName}: dt_init=0x{initEntryPoint:X16}");
+
+            var initResult = _cpuDispatcher.DispatchModuleInitializer(
+                initEntryPoint,
+                generation,
+                activeImportStubs,
+                activeRuntimeSymbols,
+                moduleName,
+                _cpuExecutionOptions);
+
+            KernelModuleRegistry.CompleteModuleStart(
+                loadedModule.Handle,
+                initResult.Result == OrbisGen2Result.ORBIS_GEN2_OK);
+            if (initResult.Result != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Module start failed: {moduleName} -> {initResult.Result}");
+                return initResult.Result;
+            }
+        }
+        return null;
+    }
+
+    private OrbisGen2Result? RunImageInitializers(
+        string label,
+        SelfImage image,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        if (image.PreInitializerFunctions.Count == 0 && image.InitializerFunctions.Count == 0)
+            return null;
+
+        Console.Error.WriteLine(
+            $"[RUNTIME] Running initializers for {label}: preinit={image.PreInitializerFunctions.Count}, init={image.InitializerFunctions.Count}");
+
+        var result = RunInitializerList(
+            $"{label}:preinit",
+            image.PreInitializerFunctions,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            processImageName);
+        if (result is not null)
+            return result;
+
+        return RunInitializerList(
+            $"{label}:init",
+            image.InitializerFunctions,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            processImageName);
+    }
+
+    private OrbisGen2Result? RunInitializerList(
+        string label,
+        IReadOnlyList<ulong> initializerFunctions,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        for (var i = 0; i < initializerFunctions.Count; i++)
+        {
+            var initializerAddress = initializerFunctions[i];
+            if (initializerAddress < 0x10000)
+                continue;
+
+            Console.Error.WriteLine(
+                $"[RUNTIME]   Initializer {label}[{i}] -> 0x{initializerAddress:X16}");
+
+            var initResult = _cpuDispatcher.DispatchEntry(
+                initializerAddress,
+                generation,
+                activeImportStubs,
+                activeRuntimeSymbols,
+                processImageName,
+                _cpuExecutionOptions);
+            if (initResult.Result != OrbisGen2Result.ORBIS_GEN2_OK)
+                return initResult.Result;
+        }
+        return null;
+    }
+
+    private List<LoadedModuleImage> LoadAdjacentSceModules(
+        string ebootPath,
+        IDictionary<ulong, string> importStubs,
+        IDictionary<string, ulong> runtimeSymbols)
+    {
+        var loadedImages = new List<LoadedModuleImage>();
+        var ebootDirectory = Path.GetDirectoryName(ebootPath);
+        if (string.IsNullOrWhiteSpace(ebootDirectory))
+            return loadedImages;
+
+        var moduleDirectories = new[]
+        {
+            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true),
+            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true),
+            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true),
+            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false),
+        }
+        .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.First())
+        .Where(entry => Directory.Exists(entry.Path))
+        .ToArray();
+
+        if (moduleDirectories.Length == 0)
+            return loadedImages;
+
+        var allModulePaths = moduleDirectories
+            .SelectMany(directory => Directory
+                .EnumerateFiles(directory.Path)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .Select(path => (Path: path, directory.StartAtBoot)))
+            .Where(entry =>
+            {
+                var extension = Path.GetExtension(entry.Path);
+                return string.Equals(extension, ".prx", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(extension, ".sprx", StringComparison.OrdinalIgnoreCase);
+            })
+            .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+
+        var modulePaths = allModulePaths
+            .Where(entry => ShouldPreloadModule(entry.Path))
+            .ToArray();
+        var skippedModules = allModulePaths
+            .Where(entry => !ShouldPreloadModule(entry.Path))
+            .Select(entry => Path.GetFileName(entry.Path))
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+        if (skippedModules.Length > 0)
+            Console.Error.WriteLine($"[RUNTIME] Skipping {skippedModules.Length} core module(s): {string.Join(", ", skippedModules)}");
+
+        if (modulePaths.Length == 0)
+            return loadedImages;
+
+        Console.Error.WriteLine($"[RUNTIME] Module search directories: {string.Join(", ", moduleDirectories.Select(entry => entry.Path))}");
+        Console.Error.WriteLine($"[RUNTIME] Loading {modulePaths.Length} module(s)...");
+        var loadedModules = 0;
+        var failedModules = 0;
+        var mergedImportCount = 0;
+        var mergedSymbolCount = 0;
+        foreach (var moduleEntry in modulePaths)
+        {
+            var modulePath = moduleEntry.Path;
+            try
+            {
+                var fileInfo = new FileInfo(modulePath);
+                if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
+                {
+                    failedModules++;
+                    continue;
+                }
+
+                var moduleBytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
+                using (var stream = File.OpenRead(modulePath))
+                    stream.ReadExactly(moduleBytes);
+
+                var moduleImage = _selfLoader.LoadAdditional(
+                    moduleBytes.AsSpan(),
+                    _virtualMemory,
+                    _moduleManager,
+                    _fileSystem,
+                    Path.GetDirectoryName(modulePath));
+
+                mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
+                mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
+                InstallNativePluginCompatibilityHooks(importStubs, moduleImage, modulePath);
+                var moduleHandle = RegisterLoadedModule(modulePath, moduleImage, isMain: false, isSystemModule: false);
+                var moduleName = Path.GetFileName(modulePath);
+                var startAtBoot = moduleEntry.StartAtBoot ||
+                    string.Equals(moduleName, "libfmod.prx", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(moduleName, "libfmodstudio.prx", StringComparison.OrdinalIgnoreCase);
+                loadedImages.Add(new LoadedModuleImage(modulePath, moduleImage, moduleHandle, startAtBoot));
+                loadedModules++;
+
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Loaded module {Path.GetFileName(modulePath)}: entry=0x{moduleImage.EntryPoint:X16}, imports={moduleImage.ImportStubs.Count}, symbols={moduleImage.RuntimeSymbols.Count}");
+            }
+            catch (Exception ex)
+            {
+                failedModules++;
+                Console.Error.WriteLine($"[RUNTIME] Module load failed: {modulePath} ({ex.GetType().Name}: {ex.Message})");
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
+        return loadedImages;
+    }
+
+    private static void InstallNativePluginCompatibilityHooks(
+        IDictionary<ulong, string> importStubs,
+        SelfImage moduleImage,
+        string modulePath)
+    {
+        if (!string.Equals(Path.GetFileName(modulePath), "libfmod.prx", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        ReadOnlySpan<string> compatibilityNids = ["uPLTdl3psGk"];
+        foreach (var nid in compatibilityNids)
+        {
+            if (moduleImage.RuntimeSymbols.TryGetValue(nid, out var address) && address >= 0x10000)
+            {
+                importStubs[address] = nid;
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Installed FMOD compatibility hook: {nid} -> 0x{address:X16}");
+            }
+        }
+    }
+
+    private void RebindImportedDataSymbols(
+        SelfImage mainImage,
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols)
+    {
+        var rebound = 0;
+        var unresolved = 0;
+
+        rebound += RebindImportedDataSymbols(mainImage, runtimeSymbols, ref unresolved);
+        for (var i = 0; i < loadedModuleImages.Count; i++)
+            rebound += RebindImportedDataSymbols(loadedModuleImages[i].Image, runtimeSymbols, ref unresolved);
+
+        if (rebound != 0 || unresolved != 0)
+            Console.Error.WriteLine(
+                $"[RUNTIME] Imported data rebind: rebound={rebound}, unresolved={unresolved}");
+    }
+
+    private int RebindImportedDataSymbols(
+        SelfImage image,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols,
+        ref int unresolved)
+    {
+        if (image.ImportedRelocations.Count == 0)
+            return 0;
+
+        var rebound = 0;
+        var logRebind = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_DATA_REBIND"),
+            "1",
+            StringComparison.Ordinal);
+        for (var i = 0; i < image.ImportedRelocations.Count; i++)
+        {
+            var relocation = image.ImportedRelocations[i];
+            if (!relocation.IsData)
+                continue;
+
+            if (!runtimeSymbols.TryGetValue(relocation.Nid, out var symbolAddress) ||
+                !IsUsableRuntimeSymbolAddress(symbolAddress))
+            {
+                if (logRebind)
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16}");
+                unresolved++;
+                continue;
+            }
+
+            var reboundValue = AddSigned(symbolAddress, relocation.Addend);
+            if (!TryWriteUInt64(_virtualMemory, relocation.TargetAddress, reboundValue))
+            {
+                if (logRebind)
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+                unresolved++;
+                continue;
+            }
+
+            if (logRebind)
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Imported data rebound: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+            rebound++;
+        }
+        return rebound;
+    }
+
+    private static void MergeKnownHleDataSymbols(IDictionary<string, ulong> runtimeSymbols)
+    {
+        foreach (var nid in HleDataSymbols.EnumerateKnownNids())
+        {
+            if (runtimeSymbols.ContainsKey(nid) ||
+                !HleDataSymbols.TryGetAddress(nid, out var symbolAddress) ||
+                !IsUsableRuntimeSymbolAddress(symbolAddress))
+                continue;
+
+            runtimeSymbols[nid] = symbolAddress;
+        }
+    }
+
+    private static int MergeImportStubs(
+        IDictionary<ulong, string> destination,
+        IReadOnlyDictionary<ulong, string> source,
+        string modulePath)
+    {
+        var added = 0;
+        foreach (var (address, nid) in source)
+        {
+            if (destination.TryGetValue(address, out var existingNid))
+            {
+                if (!string.Equals(existingNid, nid, StringComparison.Ordinal))
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Import stub conflict at 0x{address:X16}: keep={existingNid}, skip={nid} ({Path.GetFileName(modulePath)})");
+                continue;
+            }
+            destination[address] = nid;
+            added++;
+        }
+        return added;
+    }
+
+    private static int MergeRuntimeSymbols(
+        IDictionary<string, ulong> destination,
+        IReadOnlyDictionary<string, ulong> source)
+    {
+        var added = 0;
+        foreach (var (name, address) in source)
+        {
+            if (string.IsNullOrWhiteSpace(name) || !IsUsableRuntimeSymbolAddress(address))
+                continue;
+
+            if (destination.TryGetValue(name, out var existingAddress))
+            {
+                if (IsPreferredRuntimeSymbolAddress(existingAddress, address))
+                {
+                    destination[name] = address;
+                    added++;
+                }
+                continue;
+            }
+            destination[name] = address;
+            added++;
+        }
+        return added;
+    }
+
+    private static bool IsPreferredRuntimeSymbolAddress(ulong existingAddress, ulong candidateAddress)
+        => !IsUsableRuntimeSymbolAddress(existingAddress) && IsUsableRuntimeSymbolAddress(candidateAddress);
+
+    private static bool IsUsableRuntimeSymbolAddress(ulong address)
+        => address >= 0x10000 && !IsUnresolvedRuntimeSentinel(address);
+
+    private static bool TryWriteUInt64(IVirtualMemory virtualMemory, ulong address, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        return virtualMemory.TryWrite(address, bytes);
+    }
+
+    private static ulong AddSigned(ulong value, long addend)
+    {
+        if (addend >= 0)
+            return unchecked(value + (ulong)addend);
+        var magnitude = unchecked((ulong)(-(addend + 1))) + 1;
+        return unchecked(value - magnitude);
+    }
+
+    private static bool IsUnresolvedRuntimeSentinel(ulong value)
+        => value == 0xFFFEUL ||
+           value == 0xFFFFFFFEUL ||
+           value == 0xFFFFFFFFFFFFFFFEUL;
+
+    private static bool ShouldPreloadModule(string modulePath)
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_PRELOAD_ALL_SCE_MODULES"), "1", StringComparison.Ordinal))
+            return true;
+
+        var fileName = Path.GetFileName(modulePath);
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+
+        return !PreloadSkipModules.Contains(fileName);
+    }
+
+    private int RegisterLoadedModule(string modulePath, SelfImage image, bool isMain, bool isSystemModule)
+    {
+        if (!TryComputeImageRange(image, out var baseAddress, out var size))
+        {
+            baseAddress = 0;
+            size = 0;
+        }
+
+        _ = TryGetEhFrameInfo(
+            image,
+            size,
+            out var ehFrameHeaderAddress,
+            out var ehFrameAddress,
+            out var ehFrameSize);
+        var handle = KernelModuleRegistry.RegisterModule(
+            modulePath,
+            baseAddress,
+            size,
+            image.EntryPoint,
+            image.InitFunctionEntryPoint,
+            ehFrameHeaderAddress,
+            ehFrameAddress,
+            ehFrameSize,
+            isMain,
+            isSystemModule);
+        KernelModuleRegistry.RegisterModuleSymbols(handle, image.RuntimeSymbols);
+        Console.Error.WriteLine(
+            $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
+        return handle;
+    }
+
+    private static bool TryComputeImageRange(SelfImage image, out ulong baseAddress, out ulong size)
+    {
+        baseAddress = 0;
+        size = 0;
+        if (image.ProgramHeaders.Count == 0)
+            return false;
+
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint
+            ? image.EntryPoint - image.ElfHeader.EntryPoint
+            : 0UL;
+        var found = false;
+        ulong minAddress = ulong.MaxValue;
+        ulong maxAddress = 0;
+        for (var i = 0; i < image.ProgramHeaders.Count; i++)
+        {
+            var header = image.ProgramHeaders[i];
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+                continue;
+
+            var segmentStart = unchecked(imageBase + header.VirtualAddress);
+            var segmentEnd = unchecked(segmentStart + header.MemorySize);
+            if (!found || segmentStart < minAddress)
+                minAddress = segmentStart;
+            if (!found || segmentEnd > maxAddress)
+                maxAddress = segmentEnd;
+            found = true;
+        }
+
+        if (!found || maxAddress <= minAddress)
+            return false;
+
+        baseAddress = minAddress;
+        size = maxAddress - minAddress;
+        return true;
+    }
+
+    private static string BuildSessionSummary(CpuExecutionResult result)
+    {
+        var resultText = result.Result == OrbisGen2Result.ORBIS_GEN2_OK ? "OK" : result.Result.ToString();
+        var exitText = result.ExitCode.HasValue ? result.ExitCode.Value.ToString() : "?";
+        return
+            $"Summary: result={resultText} reason={result.ExitReason} exit={exitText} last_guest_rip=0x{result.LastGuestRip:X16} last_stub_rip=0x{result.LastStubRip:X16} instr={result.TotalInstructions} imports={result.ImportsHit} unique_nids={result.UniqueNidsHit}";
+    }
+
+    private string ReadOpcodePreview(ulong instructionPointer, int maxBytes)
+    {
+        if (maxBytes <= 0)
+            return "??";
+
+        Span<byte> oneByte = stackalloc byte[1];
+        var parts = new string[maxBytes];
+        var count = 0;
+        for (var i = 0; i < maxBytes; i++)
+        {
+            if (!_virtualMemory.TryRead(instructionPointer + (ulong)i, oneByte))
+                break;
+            parts[count] = oneByte[0].ToString("X2");
+            count++;
+        }
+        return count == 0 ? "??" : string.Join(' ', parts, 0, count);
+    }
+
+    private bool TryReadUInt64At(ulong address, out ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
+        if (!_virtualMemory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+        value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
+        return true;
+    }
+
+    private bool TryDecodeInstructionAt(ulong instructionPointer, out DecodedInst decodedInstruction)
+    {
+        if (!IcedDecoder.TryReadGuestBytes(_virtualMemory, instructionPointer, maxLen: 15, out var instructionBytes))
+        {
+            decodedInstruction = default;
+            return false;
+        }
+        return IcedDecoder.TryDecode(instructionPointer, instructionBytes, out decodedInstruction);
+    }
+
+    private static bool IsInvalidLongModeOpcode(byte opcode)
+    {
+        return opcode is
+            0x06 or 0x07 or 0x0E or 0x16 or 0x17 or 0x1E or 0x1F or
+            0x27 or 0x2F or 0x37 or 0x3F or 0x60 or 0x61 or 0xD4 or 0xD5;
+    }
+
+    private static string BuildDecodedInstructionFields(in DecodedInst instruction, string fieldPrefix = "inst")
+    {
+        var text = $", {fieldPrefix}={instruction.Text}, {fieldPrefix}_len={instruction.Length}, {fieldPrefix}_mnemonic={instruction.Mnemonic}, {fieldPrefix}_flow={instruction.FlowControl}";
+        if (instruction.NearBranchTarget is { } target)
+            text += $", {fieldPrefix}_target=0x{target:X16}";
+        if (instruction.MemoryAddress is { } memoryAddress)
+            text += $", {fieldPrefix}_mem=0x{memoryAddress:X16}";
+        if (instruction.Bytes.Length > 0)
+            text += $", {fieldPrefix}_bytes={IcedDecoder.FormatBytes(instruction.Bytes)}";
+        return text;
+    }
+
+    public OrbisGen2Result DispatchHleCall(string nid, CpuContext context)
+    {
+        return _moduleManager.Dispatch(nid, context);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (_cpuDispatcher is IDisposable disposableDispatcher)
+            disposableDispatcher.Dispose();
+
+        if (_virtualMemory is IDisposable disposableMemory)
+            disposableMemory.Dispose();
+    }
 }
