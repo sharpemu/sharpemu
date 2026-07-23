@@ -55,6 +55,8 @@ public static partial class AgcExports
     private const uint ItEventWrite = 0x46;
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
+    // Prospero IT_REWIND — 2-dword packet; body dword bit 31 carries RewindState.
+    private const uint ItRewind = 0x59;
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
@@ -3198,6 +3200,52 @@ public static partial class AgcExports
                 continue;
             }
 
+            // IT_REWIND: valid bit (body dword bit 31) means subsequent packets
+            // are ready. Hardware polls until SetRewindState patches it; we
+            // suspend the DCB on the same wait registry used by WAIT_REG_MEM.
+            if (op == ItRewind && length >= 2)
+            {
+                if (HandleSubmittedRewind(
+                        ctx,
+                        state,
+                        commandAddress,
+                        currentAddress,
+                        offset,
+                        length,
+                        dwordCount,
+                        tracePackets))
+                {
+                    return true;
+                }
+
+                offset += length;
+                continue;
+            }
+
+            // IT_INDIRECT_BUFFER (4-dword jump): run the nested buffer, then
+            // resume. 14-dword conditional branch form is not implemented yet.
+            if (op == ItIndirectBuffer && length == 4)
+            {
+                if (!TryRunSubmittedIndirectBuffer(
+                        ctx,
+                        gpuState,
+                        state,
+                        currentAddress,
+                        tracePackets,
+                        out var nestedSuspended))
+                {
+                    return false;
+                }
+
+                if (nestedSuspended)
+                {
+                    return true;
+                }
+
+                offset += length;
+                continue;
+            }
+
             if (op == ItNop &&
                 register is RDrawReset or RAcbReset &&
                 length >= 2)
@@ -4895,6 +4943,148 @@ public static partial class AgcExports
             TraceAgc(
                 $"agc.dispatch_indirect_wait dims=0x{dimsAddress:X16} " +
                 $"packet=0x{packetAddress:X16} queue={state.QueueName}");
+        }
+
+        return true;
+    }
+
+    // Returns true when the DCB should suspend until the rewind valid bit is set.
+    private static bool HandleSubmittedRewind(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        ulong packetAddress,
+        uint offset,
+        uint length,
+        uint dwordCount,
+        bool tracePacket)
+    {
+        var bodyAddress = packetAddress + sizeof(uint);
+        if (!TryReadUInt32(ctx, bodyAddress, out var body))
+        {
+            return false;
+        }
+
+        const uint validMask = 1u << 31;
+        if ((body & validMask) != 0)
+        {
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.rewind queue={state.QueueName} " +
+                    $"packet=0x{packetAddress:X16} valid=1");
+            }
+
+            return false;
+        }
+
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dcb.rewind_wait queue={state.QueueName} " +
+                $"packet=0x{packetAddress:X16} body=0x{bodyAddress:X16}");
+        }
+
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            CommandBufferAddress = commandAddress,
+            ResumeAddress = packetAddress + ((ulong)length * sizeof(uint)),
+            TotalDwords = dwordCount,
+            ResumeOffset = offset + length,
+            ReferenceValue = validMask,
+            Mask = validMask,
+            CompareFunction = 3, // equal
+            ControlValue = 0,
+            Is64Bit = false,
+            IsStandard = false,
+            WaitAddress = bodyAddress,
+            Memory = ctx.Memory,
+            QueueName = state.QueueName,
+            SubmissionId = state.ActiveSubmissionId,
+            RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            State = state,
+        };
+
+        if (!_gpuWaitSuspendEnabled)
+        {
+            // Force-open: treat as valid so parsing continues. Titles that rely
+            // on patch-before-execute still get a correct packet from the HLE
+            // writers; only the wait-for-valid race is skipped.
+            return false;
+        }
+
+        GpuWaitRegistry.Register(bodyAddress, waiter);
+        var gpuState = _submittedGpuStates.GetValue(
+            ctx.Memory,
+            static _ => new SubmittedGpuState());
+        EnsureGpuWaitMonitor(ctx, gpuState);
+        return true;
+    }
+
+    private static bool TryRunSubmittedIndirectBuffer(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        bool tracePackets,
+        out bool suspended)
+    {
+        suspended = false;
+        if (!TryReadUInt32(ctx, packetAddress + 4, out var addressLo) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var addressHi) ||
+            !TryReadUInt32(ctx, packetAddress + 12, out var control))
+        {
+            TracePacketParseFailure(state, packetAddress, 0, 0, "indirect-buffer-read");
+            return false;
+        }
+
+        var nestedAddress = ((ulong)addressHi << 32) | (addressLo & ~0x3u);
+        var nestedDwords = control & 0xF_FFFFu;
+        if (nestedDwords == 0 || nestedAddress == 0)
+        {
+            if (tracePackets)
+            {
+                TraceAgc(
+                    $"agc.dcb.indirect_buffer queue={state.QueueName} " +
+                    $"packet=0x{packetAddress:X16} empty " +
+                    $"control=0x{control:X8}");
+            }
+
+            return true;
+        }
+
+        if (tracePackets)
+        {
+            TraceAgc(
+                $"agc.dcb.indirect_buffer queue={state.QueueName} " +
+                $"packet=0x{packetAddress:X16} " +
+                $"target=0x{nestedAddress:X16} dwords={nestedDwords} " +
+                $"control=0x{control:X8}");
+        }
+
+        // Nested reads are outside the parent DCB window — clear it so
+        // TryRead* falls through to guest memory for the jump target.
+        var savedWindow = _dcbWindowBuffer;
+        var savedStart = _dcbWindowStart;
+        var savedLength = _dcbWindowByteLength;
+        _dcbWindowBuffer = null;
+        _dcbWindowByteLength = 0;
+        try
+        {
+            // Nested jump shares queue state with the parent buffer.
+            suspended = ParseSubmittedDcbCore(
+                ctx,
+                gpuState,
+                state,
+                nestedAddress,
+                nestedDwords,
+                tracePackets);
+        }
+        finally
+        {
+            _dcbWindowBuffer = savedWindow;
+            _dcbWindowStart = savedStart;
+            _dcbWindowByteLength = savedLength;
         }
 
         return true;
@@ -11880,9 +12070,8 @@ public static partial class AgcExports
             $"[LOADER][TRACE] agc.create_shader dst=0x{destinationAddress:X16} header=0x{headerAddress:X16} code=0x{codeAddress:X16} {detail}");
     }
 
-    // Hardware REWIND is a fixed 2-dword header + valid-bit packet (same floor
-    // as CbNopGetSize). No Rewind writer is implemented yet; size-only is enough
-    // for callers that allocate the packet before filling it.
+    // Hardware REWIND is a fixed 2-dword IT_REWIND packet. Body dword bit 31
+    // holds RewindState (patched later via sceAgcRewindPatchSetRewindState).
     [SysAbiExport(
         Nid = "QIXCsbipds0",
         ExportName = "sceAgcDcbRewindGetSize",
@@ -11894,7 +12083,96 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
-    // Matches the 4-dword INDIRECT_BUFFER packet DcbJump writes below.
+    [SysAbiExport(
+        Nid = "0ZOG0jc9nRg",
+        ExportName = "sceAgcAcbRewindGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbRewindGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
+        Nid = "zfcxg-ewMK8",
+        ExportName = "sceAgcDcbRewind",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbRewind(CpuContext ctx) =>
+        WriteRewindPacket(ctx, ctx[CpuRegister.Rdi], (uint)ctx[CpuRegister.Rsi]);
+
+    [SysAbiExport(
+        Nid = "DwICrVxerkY",
+        ExportName = "sceAgcAcbRewind",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbRewind(CpuContext ctx) =>
+        WriteRewindPacket(ctx, ctx[CpuRegister.Rdi], (uint)ctx[CpuRegister.Rsi]);
+
+    private static int WriteRewindPacket(CpuContext ctx, ulong commandBufferAddress, uint initialState)
+    {
+        if (commandBufferAddress == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(2, ItRewind, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (initialState & 1u) << 31))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
+    // Patches dword 1 of an IT_REWIND packet previously returned by DcbRewind /
+    // AcbRewind. Leaving this unresolved returned NOT_FOUND which titles then
+    // treated as a packet pointer (write AV on Subrender).
+    [SysAbiExport(
+        Nid = "ziVA3whp3p4",
+        ExportName = "sceAgcRewindPatchSetRewindState",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int RewindPatchSetRewindState(CpuContext ctx) =>
+        SetRewindPacketState(ctx, ctx[CpuRegister.Rdi], (uint)ctx[CpuRegister.Rsi]);
+
+    [SysAbiExport(
+        Nid = "eWaWyFegzgQ",
+        ExportName = "sceAgcAsyncRewindPatchSetRewindState",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AsyncRewindPatchSetRewindState(CpuContext ctx) =>
+        SetRewindPacketState(ctx, ctx[CpuRegister.Rdi], (uint)ctx[CpuRegister.Rsi]);
+
+    private static int SetRewindPacketState(CpuContext ctx, ulong packetAddress, uint state)
+    {
+        if (packetAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var bodyAddress = packetAddress + sizeof(uint);
+        if (!TryReadUInt32(ctx, bodyAddress, out var body))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        body = (body & ~(1u << 31)) | ((state & 1u) << 31);
+        if (!ctx.TryWriteUInt32(bodyAddress, body))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // Latch any DCB suspended on this rewind valid bit (registered when
+        // the parser hit IT_REWIND with valid=0). The GPU wait monitor drains
+        // latched waiters on the next CollectSatisfied pass.
+        GpuWaitRegistry.RecordProduced(ctx.Memory, bodyAddress, body);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // Matches the 4-dword INDIRECT_BUFFER packet DcbJump / AcbJump write.
     // Returning NOT_FOUND here left callers with a null packet pointer and an
     // immediate write AV on RenderThread.
     [SysAbiExport(
@@ -11909,25 +12187,75 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "b-oySn+G2tE",
+        ExportName = "sceAgcAcbJumpGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbJumpGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 4u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // sceAgcDcbJump(CommandBuffer* buf, uint8_t mode, uint8_t cachePolicy,
+    //               const uint32_t* target, uint32_t sizeInDwords)
+    [SysAbiExport(
         Nid = "xSAR0LTcRKM",
         ExportName = "sceAgcDcbJump",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbJump(CpuContext ctx)
+    public static int DcbJump(CpuContext ctx) =>
+        WriteIndirectBufferJump(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            (uint)(ctx[CpuRegister.Rsi] & 0xFFu),
+            (uint)(ctx[CpuRegister.Rdx] & 0xFFu),
+            ctx[CpuRegister.Rcx],
+            (uint)ctx[CpuRegister.R8]);
+
+    [SysAbiExport(
+        Nid = "e1DFTg+Sd8U",
+        ExportName = "sceAgcAcbJump",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbJump(CpuContext ctx) =>
+        WriteIndirectBufferJump(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            (uint)(ctx[CpuRegister.Rsi] & 0xFFu),
+            (uint)(ctx[CpuRegister.Rdx] & 0xFFu),
+            ctx[CpuRegister.Rcx],
+            (uint)ctx[CpuRegister.R8]);
+
+    private static int WriteIndirectBufferJump(
+        CpuContext ctx,
+        ulong commandBufferAddress,
+        uint mode,
+        uint cachePolicy,
+        ulong target,
+        uint sizeDwords)
     {
-        var dcb = ctx[CpuRegister.Rdi];
-        var target = ctx[CpuRegister.Rsi];
-        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
-        if (dcb == 0)
+        if (commandBufferAddress == 0)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, dcb, 4, out var cmd) ||
+        // Prospero INDIRECT_BUFFER control dword layout:
+        //   bits[19:0]  = size in dwords
+        //   bit 20      = mode
+        //   bits[29:28] = cache policy
+        //   remaining high bits use the 0x0F200000 base flags
+        var control =
+            0x0F20_0000u |
+            ((cachePolicy & 0x3u) << 28) |
+            ((mode & 0x1u) << 20) |
+            (sizeDwords & 0xF_FFFFu);
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var cmd) ||
             !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
-            !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 12, sizeDwords & 0xFFFFF))
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(target & ~0x3UL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)(target >> 32)) ||
+            !ctx.TryWriteUInt32(cmd + 12, control))
         {
             return ReturnPointer(ctx, 0);
         }
