@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -1581,6 +1582,25 @@ internal static partial class MetalVideoPresenter
             // start), so skip the redundant texture creation and upload.
             ownedByCaller = false;
             return cached;
+        }
+
+        // Default-on GPU detile packages the tiled source + resolved DetileParams
+        // with empty RgbaPixels so a backend can deswizzle on the GPU. The Metal
+        // GPU compute pass (MetalDetilePass / detile_compute.msl) is the intended
+        // equivalent of VulkanDetilePass, but it is Mac-untested, so the active
+        // Metal path CPU-detiles here via GnmTiling.DetileWithParams — the exact
+        // same DetileParams addressing the kernel runs — restoring the linear-upload
+        // behavior Metal had before GPU detile existed, with no regression.
+        if (texture.RgbaPixels.Length == 0 &&
+            texture.TiledSource is { } tiledSource &&
+            texture.Detile is { } detileParameters)
+        {
+            var linear = new byte[
+                detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement];
+            if (GnmTiling.DetileWithParams(detileParameters, tiledSource, linear))
+            {
+                texture = texture with { RgbaPixels = linear };
+            }
         }
 
         // AGC ships the raw (detiled) source texels; create the texture in the
