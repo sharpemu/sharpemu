@@ -192,7 +192,8 @@ public sealed record Gen5GlobalMemoryControl(
     uint ScalarAddress,
     int OffsetBytes,
     bool Glc,
-    bool Slc) : Gen5InstructionControl;
+    bool Slc,
+    bool UsesFlatAddress = false) : Gen5InstructionControl;
 
 public sealed record Gen5BufferMemoryControl(
     uint DwordCount,
