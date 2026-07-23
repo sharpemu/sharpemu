@@ -39,7 +39,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         public const int MaxRetryAttempts = 32;
     }
 
-    // Stub arrays – allocate full size and fill the first few bytes.
     private static readonly byte[] BootstrapStubBytes = CreateStub(0xCC, 0xC3);
     private static readonly byte[] DynlibFallbackStubBytes = CreateStub(0x31, 0xC0, 0xC3);
     private static readonly byte[] ReturnToHostStubBytes = CreateStub(0xF4, 0xCC);
