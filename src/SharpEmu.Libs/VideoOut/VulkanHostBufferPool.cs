@@ -108,9 +108,10 @@ internal sealed class VulkanHostBufferPool : IDisposable
         // grab device-level locks, and holding _gate while doing so risks
         // a lock-ordering deadlock with a thread that holds the device lock
         // and is waiting on _gate.
-        if (toDestroy.HasValue)
-        {
-            _destroy(toDestroy.Value);
+if (toDestroy is { } td)
+{
+    _destroy(td);
+
         }
 
         return true;
