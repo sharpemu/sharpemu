@@ -21,6 +21,28 @@ public static class AudioOut2Exports
     private static long _nextUserHandle = 1;
     private static int _nextPortId;
     private static long _pushTraceCount;
+    private static long _queueCallerTraceCount;
+
+    // Ghost of Yōtei's NCA pump gates all audio production on the second
+    // GetQueueLevel output ("free grain slots"): its submit routine clamps the
+    // grain count to that value and never calls ContextPush when it is zero.
+    // With the synchronous paced Push below, the host queue is drained by
+    // construction, so level=0/available=depth is the true queue state rather
+    // than a fabricated success value. Opt-in until validated on more titles.
+    private static int _queueDepth = ParseQueueDepth(
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_QUEUE_DEPTH"));
+
+    private static int ParseQueueDepth(string? raw)
+    {
+        // Depth is grains of readahead the guest may queue; keep it small so a
+        // misconfigured value cannot let the producer run far ahead of pacing.
+        const int maxDepth = 64;
+        return int.TryParse(raw, out var depth) && depth is > 0 and <= maxDepth
+            ? depth
+            : 0;
+    }
+
+    internal static void SetQueueDepthForTests(int depth) => _queueDepth = depth;
 
     // Per-context audio parameters captured at ContextCreate so ContextAdvance
     // can pace to the real playback cadence (grain samples at the sample rate).
@@ -41,6 +63,41 @@ public static class AudioOut2Exports
         public uint Frequency { get; }
         public uint Channels { get; }
         public uint GrainSamples { get; }
+
+        private int _queuedGrains;
+
+        public int QueuedGrains => Volatile.Read(ref _queuedGrains);
+
+        // The queued count is transient: a grain is "queued" only while its
+        // paced Push is in flight, so pollers on other threads observe a
+        // momentarily busy queue instead of one that can never fill or drain.
+        public void BeginQueuedGrain(int depth)
+        {
+            int observed;
+            do
+            {
+                observed = Volatile.Read(ref _queuedGrains);
+                if (observed >= depth)
+                {
+                    return;
+                }
+            }
+            while (Interlocked.CompareExchange(ref _queuedGrains, observed + 1, observed) != observed);
+        }
+
+        public void EndQueuedGrain()
+        {
+            int observed;
+            do
+            {
+                observed = Volatile.Read(ref _queuedGrains);
+                if (observed <= 0)
+                {
+                    return;
+                }
+            }
+            while (Interlocked.CompareExchange(ref _queuedGrains, observed - 1, observed) != observed);
+        }
 
         // Blocks the advancing thread until one grain worth of wall-clock time
         // has elapsed since the previous advance, matching hardware timing so
@@ -77,6 +134,30 @@ public static class AudioOut2Exports
     {
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "XHl38ZNknbs",
+        ExportName = "sceAudioOut2MasteringInit",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2MasteringInit(CpuContext ctx)
+    {
+        // Mastering is host-owned here. The guest only needs the service
+        // initialization call to complete before constructing its audio graph.
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "TViD1EZXkNI",
+        ExportName = "sceAudioOut2Set3DLatency",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2Set3DLatency(CpuContext ctx)
+    {
+        // The software path is paced by ContextPush/ContextAdvance, so no
+        // separate host latency profile is needed.
+        return SetReturn(ctx, 0);
     }
 
     [SysAbiExport(
@@ -210,7 +291,17 @@ public static class AudioOut2Exports
             // FMOD's PS5 output path uses ContextPush as the submission clock
             // and does not call ContextAdvance. Pace pushes to one hardware
             // grain so the feeder cannot outrun playback and starve the game.
+            var depth = _queueDepth;
+            if (depth > 0)
+            {
+                context.BeginQueuedGrain(depth);
+            }
+
             context.PaceAdvance();
+            if (depth > 0)
+            {
+                context.EndQueuedGrain();
+            }
         }
 
         return SetReturn(ctx, 0);
@@ -234,6 +325,13 @@ public static class AudioOut2Exports
     }
 
     [SysAbiExport(
+        Nid = "4dq2rblWlg0",
+        ExportName = "sceAudioOut2ContextSetAttributes",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2ContextSetAttributes(CpuContext ctx) => SetReturn(ctx, 0);
+
+    [SysAbiExport(
         Nid = "R7d0F1g2qsU",
         ExportName = "sceAudioOut2ContextGetQueueLevel",
         Target = Generation.Gen5,
@@ -241,13 +339,42 @@ public static class AudioOut2Exports
     public static int AudioOut2ContextGetQueueLevel(CpuContext ctx)
     {
         // The advance path paces synchronously, so the queue is always drained.
+        // Both ABI outputs are 32-bit values. A previous 64-bit write at the
+        // first pointer overwrote the adjacent guest stack field/canary.
         var levelAddress = ctx[CpuRegister.Rsi];
-        if (levelAddress != 0)
+        var availableAddress = ctx[CpuRegister.Rdx];
+        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_AUDIO_QUEUE_CALLER"), "1", StringComparison.Ordinal) &&
+            Interlocked.Increment(ref _queueCallerTraceCount) <= 128)
         {
-            _ = TryWriteUInt64(ctx, levelAddress, 0);
+            var rbp = ctx[CpuRegister.Rbp];
+            ulong callerRip = 0;
+            var callerKnown = rbp <= ulong.MaxValue - sizeof(ulong) &&
+                ctx.TryReadUInt64(rbp + sizeof(ulong), out callerRip);
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] audio_out2.queue-caller#{_queueCallerTraceCount} " +
+                $"rbp=0x{rbp:X16} caller={(callerKnown ? $"0x{callerRip:X16}" : "?")} " +
+                $"rsp=0x{ctx[CpuRegister.Rsp]:X16} rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
+                $"rsi=0x{levelAddress:X16} rdx=0x{availableAddress:X16}");
+        }
+        if (levelAddress == 0 || availableAddress == 0)
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return SetReturn(ctx, 0);
+        uint level = 0;
+        uint available = 0;
+        var depth = _queueDepth;
+        if (depth > 0 && Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var context))
+        {
+            var queued = Math.Clamp(context.QueuedGrains, 0, depth);
+            level = (uint)queued;
+            available = (uint)(depth - queued);
+        }
+
+        return ctx.TryWriteUInt32(levelAddress, level) &&
+               ctx.TryWriteUInt32(availableAddress, available)
+            ? SetReturn(ctx, 0)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -257,17 +384,28 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2PortCreate(CpuContext ctx)
     {
-        var type = unchecked((int)ctx[CpuRegister.Rdi]);
+        var contextHandle = ctx[CpuRegister.Rdi];
         var paramAddress = ctx[CpuRegister.Rsi];
         var outPortAddress = ctx[CpuRegister.Rdx];
-        var contextAddress = ctx[CpuRegister.Rcx];
-        if (type < 0 || type > 255 || paramAddress == 0 || outPortAddress == 0 || contextAddress == 0)
+        if (!Contexts.ContainsKey(contextHandle) || paramAddress == 0 || outPortAddress == 0)
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        Span<byte> param = stackalloc byte[0x20];
+        if (!ctx.Memory.TryRead(paramAddress, param))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var type = BinaryPrimitives.ReadUInt32LittleEndian(param);
+        if (type > byte.MaxValue)
+        {
+            type = 0;
+        }
+
         var portId = unchecked((uint)Interlocked.Increment(ref _nextPortId)) & 0xFF;
-        var handle = 0x2000_0000UL | ((ulong)(uint)type << 16) | portId;
+        var handle = 0x2000_0000UL | ((ulong)type << 16) | portId;
         return TryWriteUInt64(ctx, outPortAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
