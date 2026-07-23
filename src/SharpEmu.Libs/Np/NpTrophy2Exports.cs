@@ -8,6 +8,8 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpTrophy2Exports
 {
+    private const int TrophyDataSize = 0x20;
+    private const int MaxTrophyCount = 128;
     private static int _nextContext = 1;
     private static int _nextHandle = 1;
 
@@ -79,6 +81,81 @@ public static class NpTrophy2Exports
         Target = Generation.Gen5,
         LibraryName = "libSceNpTrophy2")]
     public static int NpTrophy2ShowTrophyList(CpuContext ctx) => ReturnOk(ctx);
+
+    /// <summary>
+    /// Supplies the data-only form used by the Gen5 startup probe. The full
+    /// details structure is intentionally left unsupported; callers receive a
+    /// deterministic empty/locked-compatible record set instead of an
+    /// unresolved import that leaves the output count uninitialized.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "y3zHpdZO6ME",
+        ExportName = "sceNpTrophy2GetTrophyInfoArray",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpTrophy2")]
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx)
+    {
+        var stackAddress = ctx[CpuRegister.Rsp];
+        if (stackAddress > ulong.MaxValue - sizeof(ulong) ||
+            !ctx.TryReadUInt64(stackAddress + sizeof(ulong), out var outCountAddress))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (outCountAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // The caller reads this value even when the optional details form is
+        // unavailable, so always establish a safe count before validation.
+        if (!ctx.TryWriteUInt32(outCountAddress, 0))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var capacity = ctx[CpuRegister.Rcx];
+        if (capacity > MaxTrophyCount)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // R8 points at the richer details structure, whose exact layout is not
+        // yet modelled. Keep this path explicit rather than writing guessed data.
+        if (ctx[CpuRegister.R8] != 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
+        }
+
+        if (capacity == 0)
+        {
+            return ReturnOk(ctx);
+        }
+
+        var dataAddress = ctx[CpuRegister.R9];
+        if (dataAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var count = checked((int)capacity);
+        Span<byte> data = stackalloc byte[count * TrophyDataSize];
+        data.Clear();
+        for (var trophyId = 0; trophyId < count; trophyId++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                data.Slice(trophyId * TrophyDataSize, sizeof(uint)),
+                (uint)trophyId);
+        }
+
+        if (!ctx.Memory.TryWrite(dataAddress, data) ||
+            !ctx.TryWriteUInt32(outCountAddress, (uint)count))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ReturnOk(ctx);
+    }
 
     /// <summary>
     /// Gen5 ABI: context, handle, trophy id, then SceNpTrophy2Details and

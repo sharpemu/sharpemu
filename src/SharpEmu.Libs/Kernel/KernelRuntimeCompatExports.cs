@@ -1523,6 +1523,37 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "DLORcroUqbc",
+        ExportName = "sceKernelGetOpenPsId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetOpenPsId(CpuContext ctx)
+    {
+        var idAddress = ctx[CpuRegister.Rdi];
+        if (idAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> id = stackalloc byte[16];
+        "SharpEmuOpenPsId"u8.CopyTo(id);
+        return ctx.Memory.TryWrite(idAddress, id)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "tU5e3f9gSiU",
+        ExportName = "sceKernelIsTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsTrinityMode(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "Xjoosiw+XPI",
         ExportName = "sceKernelUuidCreate",
         Target = Generation.Gen4 | Generation.Gen5,

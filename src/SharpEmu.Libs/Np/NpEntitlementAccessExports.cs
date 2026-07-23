@@ -7,6 +7,8 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpEntitlementAccessExports
 {
+    private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
+    private const uint NpEntitlementAccessSkuFlagFull = 3;
     private const int BootParamClearSize = 0x20;
     private const int EmptyAddcontInfoListSize = 0x10;
 
@@ -86,6 +88,24 @@ public static class NpEntitlementAccessExports
             $"get_addcont_info service=0x{ctx[CpuRegister.Rdi]:X16} label=0x{ctx[CpuRegister.Rsi]:X16} " +
             $"info=0x{infoAddress:X16} -> empty");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "lPDO62PpJIA",
+        ExportName = "sceNpEntitlementAccessGetSkuFlag",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGetSkuFlag(CpuContext ctx)
+    {
+        var flagAddress = ctx[CpuRegister.Rdi];
+        if (flagAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        return ctx.TryWriteUInt32(flagAddress, NpEntitlementAccessSkuFlagFull)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     private static void TraceNpEntitlementAccess(string message)
