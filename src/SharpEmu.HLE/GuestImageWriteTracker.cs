@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 
@@ -81,7 +80,7 @@ public static unsafe class GuestImageWriteTracker
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
 
-    private static readonly bool _enabled =
+    private static readonly bool _enabled = !OperatingSystem.IsWindows() &&
         Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
@@ -96,35 +95,11 @@ public static unsafe class GuestImageWriteTracker
         _enabled && _lifetimeTraceEnabled ? GetMonotonicNanoseconds() : 0;
     private static long _lifetimeTraceSequence;
 
-    private const uint PageReadonly = 0x02;
-    private const uint PageReadWrite = 0x04;
-
     [DllImport("libc", EntryPoint = "mprotect", SetLastError = true)]
     private static extern int Mprotect(nint address, nuint length, int protection);
 
     [DllImport("libc", EntryPoint = "clock_gettime", SetLastError = false)]
     private static extern int ClockGetTime(int clockId, Timespec* time);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern int VirtualProtect(
-        nint lpAddress,
-        nuint dwSize,
-        uint flNewProtect,
-        out uint lpflOldProtect);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint VirtualAlloc(
-        nint lpAddress,
-        nuint dwSize,
-        uint flAllocationType,
-        uint flProtect);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern int VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
-
-    private const uint MemCommit = 0x1000;
-    private const uint MemReserve = 0x2000;
-    private const uint MemRelease = 0x8000;
 
     public static bool Enabled => _enabled;
 
@@ -140,17 +115,7 @@ public static unsafe class GuestImageWriteTracker
             return;
         }
 
-        // VirtualProtect only belongs on VirtualAlloc/mmap pages. Warming on
-        // CRT heap memory makes neighbouring heap metadata read-only and
-        // crashes the process on Windows.
-        var scratch = OperatingSystem.IsWindows()
-            ? VirtualAlloc(0, 4096, MemCommit | MemReserve, PageReadWrite)
-            : (nint)NativeMemory.AllocZeroed(4096);
-        if (scratch == 0)
-        {
-            return;
-        }
-
+        var scratch = NativeMemory.AllocZeroed(4096);
         try
         {
             // Warm the timestamp P/Invoke used by the signal-safe scalar
@@ -164,14 +129,7 @@ public static unsafe class GuestImageWriteTracker
         }
         finally
         {
-            if (OperatingSystem.IsWindows())
-            {
-                _ = VirtualFree(scratch, 0, MemRelease);
-            }
-            else
-            {
-                NativeMemory.Free((void*)scratch);
-            }
+            NativeMemory.Free(scratch);
         }
     }
 
@@ -487,7 +445,10 @@ public static unsafe class GuestImageWriteTracker
         }
 
         if (needsUnprotect &&
-            !TrySetProtection(writableStart, writableEnd - writableStart, writable: true))
+            Mprotect(
+                (nint)writableStart,
+                (nuint)(writableEnd - writableStart),
+                ProtRead | ProtWrite) != 0)
         {
             return false;
         }
@@ -536,7 +497,10 @@ public static unsafe class GuestImageWriteTracker
 
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
-        var failed = !TrySetProtection(range.Start, range.End - range.Start, writable: false);
+        var failed = Mprotect(
+            (nint)range.Start,
+            (nuint)(range.End - range.Start),
+            ProtRead) != 0;
         if (failed)
         {
             Volatile.Write(ref range.Armed, 0);
@@ -556,7 +520,10 @@ public static unsafe class GuestImageWriteTracker
         var wasArmed = Interlocked.Exchange(ref range.Armed, 0) == 1;
         if (wasArmed)
         {
-            _ = TrySetProtection(range.Start, range.End - range.Start, writable: true);
+            _ = Mprotect(
+                (nint)range.Start,
+                (nuint)(range.End - range.Start),
+                ProtRead | ProtWrite);
         }
 
         if (range.TraceLifetime)
@@ -712,35 +679,8 @@ public static unsafe class GuestImageWriteTracker
             $"fault=0x{faultAddress:X16} page=0x{faultPage:X16}");
     }
 
-    private static bool TrySetProtection(ulong start, ulong length, bool writable)
-    {
-        if (length == 0)
-        {
-            return true;
-        }
-
-        if (OperatingSystem.IsWindows())
-        {
-            return VirtualProtect(
-                (nint)start,
-                (nuint)length,
-                writable ? PageReadWrite : PageReadonly,
-                out _) != 0;
-        }
-
-        return Mprotect(
-            (nint)start,
-            (nuint)length,
-            writable ? ProtRead | ProtWrite : ProtRead) == 0;
-    }
-
     private static long GetMonotonicNanoseconds()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency;
-        }
-
         Timespec time;
         return ClockGetTime(ClockMonotonicRaw, &time) == 0
             ? unchecked((time.Seconds * 1_000_000_000L) + time.Nanoseconds)

@@ -1225,11 +1225,8 @@ internal static partial class MetalVideoPresenter
                 ? vertexBuffer.Stride
                 : Math.Max(vertexBuffer.ComponentCount, 1) * 4;
             MetalNative.Send(layout, MetalNative.Selector("setStride:"), (nint)stride);
-            // MTLVertexStepFunction: PerVertex = 1, PerInstance = 2.
-            MetalNative.Send(
-                layout,
-                MetalNative.Selector("setStepFunction:"),
-                vertexBuffer.PerInstance ? 2 : 1);
+            // MTLVertexStepFunction.PerVertex = 1.
+            MetalNative.Send(layout, MetalNative.Selector("setStepFunction:"), 1);
         }
 
         return descriptor;

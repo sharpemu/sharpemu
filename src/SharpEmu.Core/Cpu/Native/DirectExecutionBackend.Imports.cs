@@ -69,15 +69,6 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
-		EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-		if (exceptionRecord->ExceptionCode == 3221225477u &&
-			exceptionRecord->NumberParameters >= 2 &&
-			SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
-				exceptionRecord->ExceptionInformation[1]))
-		{
-			return -1;
-		}
-
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
 	}
 
@@ -2033,94 +2024,36 @@ public sealed partial class DirectExecutionBackend
 		{
 			return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
 		}
-
-		NormalizeKernelDynlibDlsymArguments(cpuContext, out var symbolNameAddress, out var outputAddress);
-		try
+		ulong symbolNameAddress = cpuContext[CpuRegister.Rsi];
+		ulong outputAddress = cpuContext[CpuRegister.Rdx];
+		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
 		{
-			if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName))
-			{
-				return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
-			}
-
-			var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rdi]);
-			if (!TryResolveModuleSymbolAddress(moduleHandle, symbolName, out var resolvedAddress) &&
-				!TryResolveRuntimeSymbolAddress(symbolName, out resolvedAddress) &&
-				!TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out resolvedAddress) &&
-				!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress))
-			{
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] sceKernelDlsym failed: handle=0x{cpuContext[CpuRegister.Rdi]:X} symbol='{symbolName}'");
-				return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
-			}
-
-			if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
-			{
-				Console.Error.WriteLine(
-					$"[LOADER][TRACE] sceKernelDlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{resolvedAddress:X16}");
-			}
-
-			if (outputAddress == 0L || !TryWriteUInt64Compat(outputAddress, resolvedAddress))
-			{
-				return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
-			}
+			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
+			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
-		catch
+		var moduleHandle = unchecked((int)cpuContext[CpuRegister.Rdi]);
+		if (!TryResolveModuleSymbolAddress(moduleHandle, symbolName, out var resolvedAddress) &&
+			!TryResolveRuntimeSymbolAddress(symbolName, out resolvedAddress) &&
+			!TryResolveRuntimeSymbolAddress(ComputePsNid(symbolName), out resolvedAddress) &&
+			!TryResolveRuntimeSymbolAlias(symbolName, out resolvedAddress))
 		{
-			return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] sceKernelDlsym failed: handle=0x{cpuContext[CpuRegister.Rdi]:X} symbol='{symbolName}'");
+			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
+			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
-
+		if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DLSYM"), "1", StringComparison.Ordinal))
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][TRACE] sceKernelDlsym: handle=0x{moduleHandle:X} symbol='{symbolName}' -> 0x{resolvedAddress:X16}");
+		}
+		if (outputAddress == 0L || !TryWriteUInt64Compat(outputAddress, resolvedAddress))
+		{
+			cpuContext[CpuRegister.Rax] = 18446744073709551615uL;
+			return OrbisGen2Result.ORBIS_GEN2_OK;
+		}
 		cpuContext[CpuRegister.Rax] = 0uL;
 		return OrbisGen2Result.ORBIS_GEN2_OK;
-	}
-
-	private static void NormalizeKernelDynlibDlsymArguments(
-		CpuContext cpuContext,
-		out ulong symbolNameAddress,
-		out ulong outputAddress)
-	{
-		var handle = cpuContext[CpuRegister.Rdi];
-		symbolNameAddress = cpuContext[CpuRegister.Rsi];
-		outputAddress = cpuContext[CpuRegister.Rdx];
-
-		// Standalone bootstrap loaders sometimes call through the bridge with
-		// (symbol_ptr, handle, out) while sceKernelDlsym is (handle, symbol_ptr, out).
-		// Heuristic only: valid when RSI looks like a small handle and RDI is a guest pointer.
-		if (symbolNameAddress < 0x10000 &&
-			IsPlausibleDynlibSymbolPointer(handle))
-		{
-			symbolNameAddress = handle;
-			handle = cpuContext[CpuRegister.Rsi];
-			cpuContext[CpuRegister.Rdi] = handle;
-			cpuContext[CpuRegister.Rsi] = symbolNameAddress;
-		}
-	}
-
-	private static bool IsPlausibleDynlibSymbolPointer(ulong address)
-	{
-		return address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
-	}
-
-	private OrbisGen2Result CompleteKernelDynlibDlsymFailure(CpuContext cpuContext, ulong outputAddress)
-	{
-		if (outputAddress != 0)
-		{
-			_ = TryWriteUInt64Compat(outputAddress, 0);
-		}
-
-		cpuContext[CpuRegister.Rax] = ulong.MaxValue;
-		return OrbisGen2Result.ORBIS_GEN2_OK;
-	}
-
-	private void ResetLazyDlsymStubState()
-	{
-		lock (_lazyDlsymStubGate)
-		{
-			_lazyDlsymStubCache.Clear();
-			_lazyImportStubPoolMapped = false;
-			_lazyImportStubPoolBase = 0;
-			_lazyImportStubNextSlot = 0;
-			_lazyImportStubPoolLimit = 0;
-		}
 	}
 
 	private static bool TryResolveModuleSymbolAddress(int moduleHandle, string symbolName, out ulong address)
@@ -2177,18 +2110,25 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		var symbolNameAddress = cpuContext[CpuRegister.Rdi];
+		var outputAddress = cpuContext[CpuRegister.Rsi];
 		if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
-			!TryResolveIl2CppApiAddress(symbolName, out var resolvedAddress))
+			outputAddress == 0 ||
+			!TryResolveIl2CppApiAddress(symbolName, out var resolvedAddress) ||
+			!TryWriteUInt64Compat(outputAddress, resolvedAddress))
 		{
 			Console.Error.WriteLine(
-				$"[LOADER][WARN] il2cpp_api_lookup_symbol failed: name='{symbolName}'");
-			// il2cpp_api_lookup_symbol is a normal one-argument pointer-returning
-			// function. In particular, RSI is not an output pointer; the title's
-			// caller leaves it live from an earlier call. Do not write through it.
-			return Il2CppApiLookupAbi.SetResult(cpuContext, resolved: false, address: 0);
+				$"[LOADER][WARN] il2cpp_api_lookup_symbol failed: name='{symbolName}' out=0x{outputAddress:X16}");
+			if (outputAddress != 0)
+			{
+				_ = TryWriteUInt64Compat(outputAddress, 0);
+			}
+
+			cpuContext[CpuRegister.Rax] = ulong.MaxValue;
+			return OrbisGen2Result.ORBIS_GEN2_OK;
 		}
 
-		return Il2CppApiLookupAbi.SetResult(cpuContext, resolved: true, resolvedAddress);
+		cpuContext[CpuRegister.Rax] = 0;
+		return OrbisGen2Result.ORBIS_GEN2_OK;
 	}
 
 	private bool TryResolveIl2CppApiAddress(string symbolName, out ulong address)
@@ -2198,23 +2138,8 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		if (Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
-			TryResolveRuntimeSymbolAddress(symbol.Nid, out address))
-		{
-			return true;
-		}
-
-		// Unity's IL2CPP API table is populated through this resolver, then the
-		// returned pointers are called directly by the title. Use the callable
-		// zero-return stub for missing APIs rather than a non-callable sentinel.
-		if (symbolName.StartsWith("il2cpp_", StringComparison.Ordinal) &&
-			_unresolvedReturnStub != 0)
-		{
-			address = (ulong)_unresolvedReturnStub;
-			return true;
-		}
-
-		return false;
+		return Aerolib.Instance.TryGetByExportName(symbolName, out var symbol) &&
+			TryResolveRuntimeSymbolAddress(symbol.Nid, out address);
 	}
 
 	private OrbisGen2Result DispatchBootstrapBridge()

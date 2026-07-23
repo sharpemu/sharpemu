@@ -387,7 +387,7 @@ internal sealed class EmulatorProcess : IDisposable
 
     private void ForwardOutput(string? line, bool isError)
     {
-        if (line is not null)
+        if (!string.IsNullOrEmpty(line))
         {
             OutputReceived?.Invoke(line, isError);
         }

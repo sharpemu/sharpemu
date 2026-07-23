@@ -76,8 +76,7 @@ internal sealed record GuestVertexBuffer(
     uint OffsetBytes,
     byte[] Data,
     int Length,
-    bool Pooled,
-    bool PerInstance = false);
+    bool Pooled);
 
 internal sealed record GuestIndexBuffer(
     byte[] Data,

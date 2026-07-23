@@ -3170,7 +3170,6 @@ internal static unsafe class VulkanVideoPresenter
             public uint NumberFormat;
             public uint Stride;
             public uint OffsetBytes;
-            public bool PerInstance;
         }
 
         private const Format DepthFormat = Format.D32Sfloat;
@@ -6659,46 +6658,32 @@ internal static unsafe class VulkanVideoPresenter
                     PName = entryPoint,
                 };
 
-                // One Vulkan binding per unique host buffer and input rate
-                // (fetch_index). Attributes share that binding with
-                // Offset = OffsetBytes.
-                var bindingByBuffer = new Dictionary<(ulong Handle, bool PerInstance), uint>();
-                var vertexBindingList = new List<VertexInputBindingDescription>();
+                var vertexBindingDescriptions =
+                    new VertexInputBindingDescription[resources.VertexBuffers.Length];
                 var vertexAttributeDescriptions =
                     new VertexInputAttributeDescription[resources.VertexBuffers.Length];
                 for (var index = 0; index < resources.VertexBuffers.Length; index++)
                 {
                     var vertexBuffer = resources.VertexBuffers[index];
-                    var bufferKey = (vertexBuffer.Buffer.Handle, vertexBuffer.PerInstance);
-                    if (!bindingByBuffer.TryGetValue(bufferKey, out var bindingIndex))
+                    vertexBindingDescriptions[index] = new VertexInputBindingDescription
                     {
-                        bindingIndex = (uint)vertexBindingList.Count;
-                        bindingByBuffer[bufferKey] = bindingIndex;
-                        vertexBindingList.Add(new VertexInputBindingDescription
-                        {
-                            Binding = bindingIndex,
-                            Stride = vertexBuffer.Stride == 0
-                                ? Math.Max(vertexBuffer.ComponentCount, 1) * sizeof(float)
-                                : vertexBuffer.Stride,
-                            InputRate = vertexBuffer.PerInstance
-                                ? VertexInputRate.Instance
-                                : VertexInputRate.Vertex,
-                        });
-                    }
-
+                        Binding = (uint)index,
+                        Stride = vertexBuffer.Stride == 0
+                            ? Math.Max(vertexBuffer.ComponentCount, 1) * sizeof(float)
+                            : vertexBuffer.Stride,
+                        InputRate = VertexInputRate.Vertex,
+                    };
                     vertexAttributeDescriptions[index] = new VertexInputAttributeDescription
                     {
                         Location = vertexBuffer.Location,
-                        Binding = bindingIndex,
+                        Binding = (uint)index,
                         Format = ToVkVertexFormat(
                             vertexBuffer.DataFormat,
                             vertexBuffer.NumberFormat,
                             vertexBuffer.ComponentCount),
-                        Offset = vertexBuffer.OffsetBytes,
+                        Offset = 0,
                     };
                 }
-
-                var vertexBindingDescriptions = vertexBindingList.ToArray();
 
                 fixed (VertexInputBindingDescription* vertexBindingPointerBase = vertexBindingDescriptions)
                 fixed (VertexInputAttributeDescription* vertexAttributePointerBase = vertexAttributeDescriptions)
@@ -9295,7 +9280,6 @@ internal static unsafe class VulkanVideoPresenter
                 NumberFormat = guestBuffer.NumberFormat,
                 Stride = guestBuffer.Stride,
                 OffsetBytes = guestBuffer.OffsetBytes,
-                PerInstance = guestBuffer.PerInstance,
             };
         }
 
@@ -9313,7 +9297,6 @@ internal static unsafe class VulkanVideoPresenter
             NumberFormat = guestBuffer.NumberFormat,
             Stride = guestBuffer.Stride,
             OffsetBytes = guestBuffer.OffsetBytes,
-            PerInstance = guestBuffer.PerInstance,
         };
 
         private VkBuffer CreateHostBuffer(
@@ -9415,28 +9398,21 @@ internal static unsafe class VulkanVideoPresenter
         private static Format ToVkVertexFormat(
             uint dataFormat,
             uint numberFormat,
-            uint componentCount)
-        {
-            var format = (dataFormat, numberFormat) switch
+            uint componentCount) =>
+            (dataFormat, numberFormat) switch
             {
                 (1, 0) => Format.R8Unorm,
                 (1, 1) => Format.R8SNorm,
-                (1, 2) => Format.R8Uscaled,
-                (1, 3) => Format.R8Sscaled,
                 (1, 4) => Format.R8Uint,
                 (1, 5) => Format.R8Sint,
                 (1, 9) => Format.R8Srgb,
                 (2, 0) => Format.R16Unorm,
                 (2, 1) => Format.R16SNorm,
-                (2, 2) => Format.R16Uscaled,
-                (2, 3) => Format.R16Sscaled,
                 (2, 4) => Format.R16Uint,
                 (2, 5) => Format.R16Sint,
                 (2, 7) => Format.R16Sfloat,
                 (3, 0) => Format.R8G8Unorm,
                 (3, 1) => Format.R8G8SNorm,
-                (3, 2) => Format.R8G8Uscaled,
-                (3, 3) => Format.R8G8Sscaled,
                 (3, 4) => Format.R8G8Uint,
                 (3, 5) => Format.R8G8Sint,
                 (3, 9) => Format.R8G8Srgb,
@@ -9491,47 +9467,12 @@ internal static unsafe class VulkanVideoPresenter
                 (14, 4) => Format.R32G32B32A32Uint,
                 (14, 5) => Format.R32G32B32A32Sint,
                 (14, 7) => Format.R32G32B32A32Sfloat,
-                // Prospero VertexAttribFormat quirks also seen as buffer formats.
-                (113, _) => Format.R32G32B32A32Sfloat,
-                (121, _) => Format.R16G16Sfloat,
                 (16, 0) => Format.B5G6R5UnormPack16,
                 (17, 0) => Format.R5G5B5A1UnormPack16,
                 (19, 0) => Format.R4G4B4A4UnormPack16,
                 (34, 7) => Format.E5B9G9R9UfloatPack32,
                 _ => ToVkFloatVertexFormat(componentCount),
             };
-
-            return NarrowVkVertexFormat(format, componentCount);
-        }
-
-        /// <summary>
-        /// Narrow a sharp's full VkFormat to the component count the VS fetch
-        /// actually consumes.
-        /// </summary>
-        private static Format NarrowVkVertexFormat(Format format, uint usedComponents)
-        {
-            if (usedComponents == 0)
-            {
-                return format;
-            }
-
-            return (format, usedComponents) switch
-            {
-                (Format.R32G32B32A32Sfloat, 1) => Format.R32Sfloat,
-                (Format.R32G32B32A32Sfloat, 2) => Format.R32G32Sfloat,
-                (Format.R32G32B32A32Sfloat, 3) => Format.R32G32B32Sfloat,
-                (Format.R32G32B32Sfloat, 1) => Format.R32Sfloat,
-                (Format.R32G32B32Sfloat, 2) => Format.R32G32Sfloat,
-                (Format.R16G16B16A16Sfloat, 1) => Format.R16Sfloat,
-                (Format.R16G16B16A16Sfloat, 2) => Format.R16G16Sfloat,
-                (Format.R8G8B8A8Unorm, 1) => Format.R8Unorm,
-                (Format.R8G8B8A8Unorm, 2) => Format.R8G8Unorm,
-                (Format.R8G8B8A8SNorm, 2) => Format.R8G8SNorm,
-                (Format.R8G8B8A8Uint, 1) => Format.R8Uint,
-                (Format.R8G8B8A8Uint, 2) => Format.R8G8Uint,
-                _ => format,
-            };
-        }
 
         private static Format ToVkFloatVertexFormat(uint componentCount) =>
             componentCount switch

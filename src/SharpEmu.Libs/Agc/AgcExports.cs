@@ -80,13 +80,8 @@ public static partial class AgcExports
     private const uint RIndexCount = 0x1C;
     private const uint SpiShaderPgmLoPs = 0x8;
     private const uint SpiShaderPgmHiPs = 0x9;
-    private const uint SpiShaderPgmLoVs = 0x48;
-    private const uint SpiShaderPgmHiVs = 0x49;
     private const uint SpiShaderPgmLoEs = 0xC8;
     private const uint SpiShaderPgmHiEs = 0xC9;
-    private const uint SpiShaderPgmLoHs = 0x108;
-    private const uint SpiShaderPgmHiHs = 0x109;
-    private const uint SpiShaderPgmRsrc1Hs = 0x10A;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
     private const uint SpiShaderPgmLoGs = 0x8A;
@@ -280,7 +275,6 @@ public static partial class AgcExports
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
     private static long _createShaderTraceCount;
-    private static long _cbMetadataSkipTraceCount;
     private static long _packetPayloadTraceCount;
     private static bool _tracedMissingPixelShaderBindings;
     private static long _unsatisfiedWaitTraceCount;
@@ -2971,38 +2965,6 @@ public static partial class AgcExports
             $"arg1=0x{ctx[CpuRegister.Rsi]:X16} arg2=0x{ctx[CpuRegister.Rdx]:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
-
-    // Synthetic labels for uncatalogued AGC helper NIDs; the NID is authoritative.
-    #pragma warning disable SHEM006
-    [SysAbiExport(
-        Nid = "zlqfTyrQSPk",
-        ExportName = "sceAgcUnknownZlqfTyrQSPk",
-        Target = Generation.Gen5,
-        LibraryName = "libSceAgc")]
-    public static int UnknownZlqfTyrQSPk(CpuContext ctx)
-    {
-        TraceAgc(
-            $"agc.unknown_zlqf rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
-            $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "dZGYu5wObJs",
-        ExportName = "sceAgcUnknownDZGYu5wObJs",
-        Target = Generation.Gen5,
-        LibraryName = "libSceAgc")]
-    public static int UnknownDZGYu5wObJs(CpuContext ctx)
-    {
-        TraceAgc(
-            $"agc.unknown_dzgy rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
-            $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
     #pragma warning restore SHEM006
 
     private static void EnqueueSubmittedDcb(
@@ -5684,25 +5646,6 @@ public static partial class AgcExports
         }
         state.TranslatedDraw = null;
         state.GuestDrawKind = GuestDrawKind.None;
-
-        // CB modes EliminateFastClear / FmaskDecompress / DccDecompress run
-        // colour-buffer metadata ops. The bound shader is only a vehicle and
-        // must not be applied as a normal colour draw.
-        if (TryGetCbColorControlMode(state.CxRegisters, out var cbMode) &&
-            IsCbMetadataColorMode(cbMode))
-        {
-            if (_traceAgcShader || ShouldTraceHotPath(ref _cbMetadataSkipTraceCount))
-            {
-                TraceAgcShader(
-                    $"agc.cb_metadata_skip seq={drawSequence} mode={cbMode} " +
-                    $"es=0x{(hasExportShader ? exportShaderAddress : 0):X16} " +
-                    $"ps=0x{(hasPixelShader ? pixelShaderAddress : 0):X16} " +
-                    $"vertices={vertexCount}");
-            }
-
-            return;
-        }
-
         foreach (var target in renderTargets)
         {
             state.KnownRenderTargets[target.Address] = target;
@@ -6488,32 +6431,6 @@ public static partial class AgcExports
             TraceAstroTitlePixelGlobalProbe(pixelEvaluation);
         }
 
-        // Patch BufferFormat from the attrib table onto the V# before host
-        // vertex input. IR discovery often keeps a stale float format from the
-        // unpatched sharp — that turns UI glyphs into gradient triangles.
-        // Match by stride+offset (not bare base address) so interleaved streams
-        // keep loading-video bindings intact.
-        if (exportEvaluation.VertexInputs is { Count: > 0 } discoveredInputs &&
-            AgcVertexMetadata.TryGetVertexTableRegisters(
-                ctx,
-                exportShaderAddress,
-                exportShaderHeader,
-                out var vertexTables))
-        {
-            var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
-                ctx,
-                exportEvaluation.ScalarRegisters,
-                vertexTables,
-                discoveredInputs);
-            if (!ReferenceEquals(merged, discoveredInputs))
-            {
-                TraceAgcShader(
-                    $"agc.vertex_metadata_format es=0x{exportShaderAddress:X16} " +
-                    $"count={merged.Count}");
-                exportEvaluation = exportEvaluation with { VertexInputs = merged };
-            }
-        }
-
         // Every bound color target the shader exports to. Deferred renderers
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
@@ -7295,7 +7212,6 @@ public static partial class AgcExports
                 Mix(input.NumberFormat);
                 Mix(input.Stride);
                 Mix(input.OffsetBytes);
-                Mix(input.PerInstance ? 1u : 0u);
             }
         }
 
@@ -7341,35 +7257,6 @@ public static partial class AgcExports
         return hash;
     }
 
-    private enum CbColorMode : byte
-    {
-        Disable = 0,
-        Normal = 1,
-        EliminateFastClear = 2,
-        Resolve = 3,
-        FmaskDecompress = 5,
-        DccDecompress = 6,
-    }
-
-    private static bool TryGetCbColorControlMode(
-        IReadOnlyDictionary<uint, uint> registers,
-        out uint mode)
-    {
-        mode = 0;
-        if (!registers.TryGetValue(CbColorControl, out var colorControl))
-        {
-            return false;
-        }
-
-        mode = (colorControl >> 4) & 0x7u;
-        return true;
-    }
-
-    private static bool IsCbMetadataColorMode(uint mode) =>
-        mode is (uint)CbColorMode.EliminateFastClear or
-            (uint)CbColorMode.FmaskDecompress or
-            (uint)CbColorMode.DccDecompress;
-
     private static bool TryGetHardwareColorResolveTargets(
         IReadOnlyDictionary<uint, uint> registers,
         out RenderTargetDescriptor source,
@@ -7377,8 +7264,8 @@ public static partial class AgcExports
     {
         source = default;
         destination = default;
-        if (!TryGetCbColorControlMode(registers, out var mode) ||
-            mode != (uint)CbColorMode.Resolve)
+        if (!registers.TryGetValue(CbColorControl, out var colorControl) ||
+            ((colorControl >> 4) & 0x7u) != 3u)
         {
             return false;
         }
@@ -8304,8 +8191,7 @@ public static partial class AgcExports
                 binding.OffsetBytes,
                 binding.Data,
                 binding.DataLength,
-                binding.DataPooled,
-                binding.PerInstance);
+                binding.DataPooled);
         }
 
         return buffers;
@@ -11102,14 +10988,18 @@ public static partial class AgcExports
             return false;
         }
 
+        if (!TryReadUInt32(ctx, shRegistersAddress, out var loRegister) ||
+            !TryReadUInt32(ctx, shRegistersAddress + 8, out var hiRegister))
+        {
+            return false;
+        }
+
         var expectedLo = shaderType switch
         {
             0 => ComputePgmLo,
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
-            3 => SpiShaderPgmLoVs,
             4 => SpiShaderPgmLoGs,
-            5 => SpiShaderPgmLoHs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -11118,187 +11008,20 @@ public static partial class AgcExports
             0 => ComputePgmHi,
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
-            3 => SpiShaderPgmHiVs,
             4 => SpiShaderPgmHiGs,
-            5 => SpiShaderPgmHiHs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
-
-        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
-        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
-        // filled later via SetShRegisterDirect).
-        if (!TryFindShaderProgramRegisterPair(
-                ctx,
-                shRegistersAddress,
-                registerCount,
-                expectedLo,
-                expectedHi,
-                out var loEntryAddress,
-                out var hiEntryAddress,
-                out var foundLo,
-                out var foundHi))
+        if (expectedLo == 0 || loRegister != expectedLo || hiRegister != expectedHi)
         {
-            TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
-            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
-            // omit PGM_LO/HI from the default table. Still succeed: the code VA
-            // lives at ShaderCodeOffset and later binder paths republish it.
-            if (shaderType == 5 && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs)
-            {
-                TraceCreateShader(
-                    0,
-                    headerAddress,
-                    codeAddress,
-                    $"skip-pgm-patch type=5 first_lo=0x{firstLo:X8}");
-                return true;
-            }
-
-            TraceCreateShader(
-                0,
-                headerAddress,
-                codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
+            TraceCreateShader(0, headerAddress, codeAddress, $"unexpected-registers type={shaderType} lo=0x{loRegister:X8} hi=0x{hiRegister:X8}");
             return false;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
         var hiValue = (uint)((codeAddress >> 40) & 0xFFUL);
-        if (!TryWriteUInt32(ctx, loEntryAddress + sizeof(uint), loValue) ||
-            !TryWriteUInt32(ctx, hiEntryAddress + sizeof(uint), hiValue))
-        {
-            return false;
-        }
-
-        if (foundLo != expectedLo || foundHi != expectedHi)
-        {
-            TraceCreateShader(
-                0,
-                headerAddress,
-                codeAddress,
-                $"patched-alt-registers type={shaderType} lo=0x{foundLo:X8} hi=0x{foundHi:X8}");
-        }
-
-        return true;
-    }
-
-    private static readonly (uint Lo, uint Hi)[] ShaderProgramRegisterPairs =
-    [
-        (ComputePgmLo, ComputePgmHi),
-        (SpiShaderPgmLoPs, SpiShaderPgmHiPs),
-        (SpiShaderPgmLoVs, SpiShaderPgmHiVs),
-        (SpiShaderPgmLoEs, SpiShaderPgmHiEs),
-        (SpiShaderPgmLoGs, SpiShaderPgmHiGs),
-        (SpiShaderPgmLoHs, SpiShaderPgmHiHs),
-        (SpiShaderPgmLoLs, SpiShaderPgmHiLs),
-    ];
-
-    private static bool TryFindShaderProgramRegisterPair(
-        CpuContext ctx,
-        ulong shRegistersAddress,
-        byte registerCount,
-        uint preferredLo,
-        uint preferredHi,
-        out ulong loEntryAddress,
-        out ulong hiEntryAddress,
-        out uint foundLo,
-        out uint foundHi)
-    {
-        loEntryAddress = 0;
-        hiEntryAddress = 0;
-        foundLo = 0;
-        foundHi = 0;
-
-        ulong preferredLoAddress = 0;
-        ulong preferredHiAddress = 0;
-        ulong fallbackLoAddress = 0;
-        ulong fallbackHiAddress = 0;
-        uint fallbackLo = 0;
-        uint fallbackHi = 0;
-
-        for (uint index = 0; index < registerCount; index++)
-        {
-            var entryAddress = shRegistersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var offset))
-            {
-                return false;
-            }
-
-            if (preferredLo != 0 && offset == preferredLo)
-            {
-                preferredLoAddress = entryAddress;
-            }
-            else if (preferredHi != 0 && offset == preferredHi)
-            {
-                preferredHiAddress = entryAddress;
-            }
-
-            if (fallbackLoAddress != 0)
-            {
-                continue;
-            }
-
-            foreach (var pair in ShaderProgramRegisterPairs)
-            {
-                if (offset != pair.Lo)
-                {
-                    continue;
-                }
-
-                // Prefer a contiguous LO/HI pair when present.
-                if (index + 1 < registerCount &&
-                    TryReadUInt32(ctx, entryAddress + 8, out var nextOffset) &&
-                    nextOffset == pair.Hi)
-                {
-                    fallbackLoAddress = entryAddress;
-                    fallbackHiAddress = entryAddress + 8;
-                    fallbackLo = pair.Lo;
-                    fallbackHi = pair.Hi;
-                    break;
-                }
-
-                for (uint hiIndex = 0; hiIndex < registerCount; hiIndex++)
-                {
-                    if (hiIndex == index)
-                    {
-                        continue;
-                    }
-
-                    var hiAddress = shRegistersAddress + ((ulong)hiIndex * 8);
-                    if (!TryReadUInt32(ctx, hiAddress, out var hiOffset) || hiOffset != pair.Hi)
-                    {
-                        continue;
-                    }
-
-                    fallbackLoAddress = entryAddress;
-                    fallbackHiAddress = hiAddress;
-                    fallbackLo = pair.Lo;
-                    fallbackHi = pair.Hi;
-                    break;
-                }
-
-                break;
-            }
-        }
-
-        if (preferredLoAddress != 0 && preferredHiAddress != 0)
-        {
-            loEntryAddress = preferredLoAddress;
-            hiEntryAddress = preferredHiAddress;
-            foundLo = preferredLo;
-            foundHi = preferredHi;
-            return true;
-        }
-
-        if (fallbackLoAddress != 0 && fallbackHiAddress != 0)
-        {
-            loEntryAddress = fallbackLoAddress;
-            hiEntryAddress = fallbackHiAddress;
-            foundLo = fallbackLo;
-            foundHi = fallbackHi;
-            return true;
-        }
-
-        return false;
+        return TryWriteUInt32(ctx, shRegistersAddress + sizeof(uint), loValue) &&
+               TryWriteUInt32(ctx, shRegistersAddress + 8 + sizeof(uint), hiValue);
     }
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>

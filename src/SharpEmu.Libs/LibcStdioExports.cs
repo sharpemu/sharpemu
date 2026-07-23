@@ -45,11 +45,7 @@ public static class LibcStdioExports
     private const ushort CtypeBlank = 0x400; // _XB  ' ' and '\t'
 
     private static readonly object _ctypeTableGate = new();
-    private static readonly object _ctypeLowerTableGate = new();
-    private static readonly object _ctypeUpperTableGate = new();
     private static nint _ctypeTableBase;
-    private static nint _ctypeLowerTableBase;
-    private static nint _ctypeUpperTableBase;
 
     [SysAbiExport(
         Nid = "xeYO4u7uyJ0",
@@ -720,28 +716,6 @@ public static class LibcStdioExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    [SysAbiExport(
-        Nid = "1uJgoVq3bQU",
-        ExportName = "_Getptolower",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int GetPtolower(CpuContext ctx)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)EnsureCtypeLowerTable());
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    [SysAbiExport(
-        Nid = "rcQCUr0EaRU",
-        ExportName = "_Getptoupper",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libc")]
-    public static int GetPtoupper(CpuContext ctx)
-    {
-        ctx[CpuRegister.Rax] = unchecked((ulong)EnsureCtypeUpperTable());
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
     private static unsafe nint EnsureCtypeTable()
     {
         lock (_ctypeTableGate)
@@ -763,58 +737,6 @@ public static class LibcStdioExports
             // guest must point at the c == 0 entry, not the start of the allocation.
             _ctypeTableBase = storage - (CtypeTableLowerBound * sizeof(ushort));
             return _ctypeTableBase;
-        }
-    }
-
-    private static unsafe nint EnsureCtypeLowerTable()
-    {
-        lock (_ctypeLowerTableGate)
-        {
-            if (_ctypeLowerTableBase != 0)
-            {
-                return _ctypeLowerTableBase;
-            }
-
-            var storage = Marshal.AllocHGlobal(CtypeTableEntryCount * sizeof(ushort));
-            var entries = new Span<ushort>((void*)storage, CtypeTableEntryCount);
-            for (var i = 0; i < CtypeTableEntryCount; i++)
-            {
-                var c = i + CtypeTableLowerBound;
-                entries[i] = c == -1
-                    ? ushort.MaxValue
-                    : c is >= 0 and <= 0x7F
-                        ? (ushort)char.ToLowerInvariant((char)c)
-                        : (ushort)(c & 0xFF);
-            }
-
-            _ctypeLowerTableBase = storage - (CtypeTableLowerBound * sizeof(ushort));
-            return _ctypeLowerTableBase;
-        }
-    }
-
-    private static unsafe nint EnsureCtypeUpperTable()
-    {
-        lock (_ctypeUpperTableGate)
-        {
-            if (_ctypeUpperTableBase != 0)
-            {
-                return _ctypeUpperTableBase;
-            }
-
-            var storage = Marshal.AllocHGlobal(CtypeTableEntryCount * sizeof(ushort));
-            var entries = new Span<ushort>((void*)storage, CtypeTableEntryCount);
-            for (var i = 0; i < CtypeTableEntryCount; i++)
-            {
-                var c = i + CtypeTableLowerBound;
-                entries[i] = c == -1
-                    ? ushort.MaxValue
-                    : c is >= 0 and <= 0x7F
-                        ? (ushort)char.ToUpperInvariant((char)c)
-                        : (ushort)(c & 0xFF);
-            }
-
-            _ctypeUpperTableBase = storage - (CtypeTableLowerBound * sizeof(ushort));
-            return _ctypeUpperTableBase;
         }
     }
 

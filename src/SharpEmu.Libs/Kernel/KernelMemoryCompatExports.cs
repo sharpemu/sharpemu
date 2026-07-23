@@ -1558,7 +1558,7 @@ public static partial class KernelMemoryCompatExports
         {
             LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
             return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
     }
@@ -1771,113 +1771,6 @@ public static partial class KernelMemoryCompatExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    // WithPrefix sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
-    // Resource streamers resolve relative asset paths against a shared directory
-    // prefix. Without HLE, every call returned the generic NOT_FOUND sentinel
-    // and no asset received a real file id/size. Signature inferred from
-    // observed guest registers (rdi=prefix, rsi=path list, rdx=count, rcx=ids,
-    // r8=sizes, r9=error index): the no-prefix sibling's args shifted right by
-    // one with a leading `const char* prefix`.
-    [SysAbiExport(
-        Nid = "w5fcCG+t31g",
-        ExportName = "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(CpuContext ctx)
-    {
-        var prefixAddress = ctx[CpuRegister.Rdi];
-        var pathListAddress = ctx[CpuRegister.Rsi];
-        var count = ctx[CpuRegister.Rdx];
-        var idsAddress = ctx[CpuRegister.Rcx];
-        var sizesAddress = ctx[CpuRegister.R8];
-        var errorIndexAddress = ctx[CpuRegister.R9];
-        if (pathListAddress == 0 || count == 0 || sizesAddress == 0 || count > 1024)
-        {
-            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        var prefix = string.Empty;
-        if (prefixAddress != 0)
-        {
-            _ = TryReadNullTerminatedUtf8(ctx, prefixAddress, MaxGuestStringLength, out prefix);
-        }
-
-        for (ulong i = 0; i < count; i++)
-        {
-            if (idsAddress != 0 &&
-                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
-            {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (!TryResolveAprFilepath(ctx, pathListAddress, i, out var relativePath))
-            {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            var guestPath = CombineAprPrefixedPath(prefix, relativePath);
-            var hostPath = ResolveGuestPath(guestPath);
-            if (!TryGetAprFileSize(hostPath, out var fileSize))
-            {
-                LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
-                if (sizesAddress != 0 &&
-                    !TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), 0))
-                {
-                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
-
-                if (errorIndexAddress != 0 &&
-                    !TryWriteUInt32Compat(ctx, errorIndexAddress, (uint)i))
-                {
-                    KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
-
-                KernelRuntimeCompatExports.TrySetErrno(ctx, 2); // ENOENT
-                ctx[CpuRegister.Rax] = ulong.MaxValue;
-                return -1;
-            }
-
-            var fileId = AmprFileRegistry.Register(guestPath, hostPath);
-            LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
-
-            if (idsAddress != 0 &&
-                !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
-            {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-
-            if (!TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), fileSize))
-            {
-                KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-            }
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static string CombineAprPrefixedPath(string prefix, string relative)
-    {
-        if (string.IsNullOrEmpty(prefix))
-        {
-            return relative;
-        }
-
-        if (string.IsNullOrEmpty(relative))
-        {
-            return prefix;
-        }
-
-        return $"{prefix.TrimEnd('/')}/{relative.TrimStart('/')}";
     }
 
     // The IDs-only sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
@@ -2335,7 +2228,8 @@ public static partial class KernelMemoryCompatExports
 
         if (result != OrbisGen2Result.ORBIS_GEN2_OK)
         {
-            return PosixFailure(ctx, (int)result, notFoundErrno: Ebadf);
+            ctx[CpuRegister.Rax] = ulong.MaxValue;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         ctx[CpuRegister.Rax] = unchecked((ulong)position);
@@ -5855,7 +5749,7 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
-        if (!TryReadTrackedLibcHeap(address, destination) && !TryReadHostMemory(address, destination))
+        if (!TryReadHostMemory(address, destination))
         {
             return false;
         }
@@ -5921,7 +5815,7 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
-        if (!TryWriteTrackedLibcHeap(address, source) && !TryWriteHostMemory(address, source))
+        if (!TryWriteHostMemory(address, source))
         {
             return false;
         }
@@ -6663,7 +6557,7 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    internal static unsafe bool TryReadTrackedLibcHeap(
+    internal static bool TryReadTrackedLibcHeap(
         ulong address,
         Span<byte> destination)
     {
@@ -6687,54 +6581,7 @@ public static partial class KernelMemoryCompatExports
                     continue;
                 }
 
-                try
-                {
-                    // Marshal.AllocHGlobal allocations are not present in the
-                    // emulator's POSIX HostMemory map, so TryReadHostMemory
-                    // would reject this already-bounds-checked range.
-                    new ReadOnlySpan<byte>((void*)address, destination.Length).CopyTo(destination);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static unsafe bool TryWriteTrackedLibcHeap(ulong address, ReadOnlySpan<byte> source)
-    {
-        if (source.IsEmpty)
-        {
-            return true;
-        }
-
-        var length = (ulong)source.Length;
-        lock (_libcAllocGate)
-        {
-            foreach (var (allocationAddress, allocation) in _libcAllocations)
-            {
-                var allocationSize = (ulong)allocation.Size;
-                var offset = address >= allocationAddress
-                    ? address - allocationAddress
-                    : ulong.MaxValue;
-                if (offset > allocationSize || length > allocationSize - offset)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    source.CopyTo(new Span<byte>((void*)address, source.Length));
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
+                return TryReadHostMemory(address, destination);
             }
         }
 
@@ -7335,41 +7182,28 @@ public static partial class KernelMemoryCompatExports
     {
         if (fd < 0 || bufferAddress == 0 || requested < 512)
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         OpenDirectory? directory;
-        bool isOpenFile;
         lock (_fdGate)
         {
             _openDirectories.TryGetValue(fd, out directory);
-            isOpenFile = directory is null && _openFiles.ContainsKey(fd);
         }
 
         if (directory is null)
         {
-            // A regular file fd used with getdents must not look like EOF (rax=0);
-            // that path has caused GTA's fiWriteAsyncDataWorker to treat the fd
-            // integer as a pointer and AV at address 0xB1.
-            var error = isOpenFile
-                ? OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
-                : OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            LogIoTrace("getdents", $"fd:{fd}", $"result={(isOpenFile ? "not_directory" : "badfd")}");
-            ctx[CpuRegister.Rax] = unchecked((ulong)(int)error);
-            return (int)error;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         var currentIndex = directory.NextIndex;
         if (basePointerAddress != 0 && !TryWriteUInt64Compat(ctx, basePointerAddress, (ulong)currentIndex))
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         if (currentIndex >= directory.Entries.Length)
         {
-            LogIoTrace("getdents", directory.Path, $"fd={fd} result=eof entries={directory.Entries.Length}");
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -7400,16 +7234,11 @@ public static partial class KernelMemoryCompatExports
 
     private static string[] EnumerateDirectoryEntries(string hostPath)
     {
-        // Real getdents always yields "." / ".." before other names. An empty
-        // host dir previously returned EOF on the first call (rax=0), which
-        // sent GTA's fiWriteAsyncDataWorker down a path that treated the fd as
-        // a pointer (AV at 0xB1 on /download0/cloudcache/).
-        var children = Directory.EnumerateFileSystemEntries(hostPath)
+        return Directory.EnumerateFileSystemEntries(hostPath)
             .Select(Path.GetFileName)
             .Where(static name => !string.IsNullOrEmpty(name))
-            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase);
-
-        return new[] { ".", ".." }.Concat(children).ToArray()!;
+            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray()!;
     }
 
     private static uint ComputeDirectoryEntryHash(ReadOnlySpan<byte> utf8Name)

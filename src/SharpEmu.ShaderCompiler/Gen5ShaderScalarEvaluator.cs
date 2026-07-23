@@ -883,11 +883,8 @@ public static class Gen5ShaderScalarEvaluator
         Gen5ShaderInstruction instruction,
         Gen5BufferMemoryControl control,
         BufferDescriptor descriptor) =>
-        // AGC embedded fetch is BufferLoadFormat/TBufferLoadFormat with idxen.
-        // offen is allowed: the constant/scalar offset folds into OffsetBytes
-        // (UI glyph shaders use this shape). Rejecting offen left those loads
-        // as live SSBOs and dropped vertex attributes.
         control.IndexEnabled &&
+        !control.OffsetEnabled &&
         control.DwordCount is >= 1 and <= 4 &&
         descriptor.BaseAddress != 0 &&
         descriptor.Stride != 0 &&
