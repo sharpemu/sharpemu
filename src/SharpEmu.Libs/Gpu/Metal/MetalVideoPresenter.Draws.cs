@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -464,6 +465,20 @@ internal static partial class MetalVideoPresenter
         {
             ReturnPooledGuestData(draw);
             return;
+        }
+
+        // Integer RTs cannot blend; match Vulkan so pipeline keys and enable
+        // bits agree with the guest constraint
+        var normalizedBlends = GuestBlendStateNormalizer.NormalizeIntegerAttachments(
+            draw.RenderState.Blends,
+            targetFormats.Select(static format => IsIntegerFormat(format.OutputKind)).ToArray(),
+            out var normalizedBlendCount);
+        if (normalizedBlendCount != 0)
+        {
+            draw = draw with
+            {
+                RenderState = draw.RenderState with { Blends = normalizedBlends },
+            };
         }
 
         // Resolve color targets: published guest images by address, transient
