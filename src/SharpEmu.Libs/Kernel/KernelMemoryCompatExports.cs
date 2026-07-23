@@ -1640,13 +1640,12 @@ public static partial class KernelMemoryCompatExports
 
     // Translates a failed raw Orbis kernel result into the libc/POSIX ABI:
     // return -1 with errno set. The raw sceKernel* implementations report the
-    // 0x8002xxxx sentinel through the return value, but the POSIX-named exports
-    // (open/fstat/close/read/write/stat) are called by libc code that expects a
-    // negative result on failure. Leaking the raw sentinel makes callers store
-    // it as a "valid" fd or handle and later dereference it - the null-pointer
-    // access violation seen when Unity's IL2CPP file layer probes an absent
-    // il2cpp.usym. fd-based calls pass notFoundErrno=Ebadf; path-based calls
-    // leave the Enoent default.
+    // 0x8002xxxx sentinel through the return value, but POSIX-named exports are
+    // called by libc code that expects a negative result on failure. Leaking the
+    // raw sentinel makes callers store it as a "valid" fd or handle and later
+    // dereference it - the null-pointer access violation seen when Unity's
+    // IL2CPP file layer probes an absent il2cpp.usym. fd-based calls pass
+    // notFoundErrno=Ebadf; path-based calls leave the Enoent default.
     private static int PosixFailure(CpuContext ctx, int orbisResult, int notFoundErrno = Enoent)
     {
         var errno = orbisResult switch
