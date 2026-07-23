@@ -991,6 +991,50 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
             }
+            else
+            {
+                // A mapped range may span several adjacent metadata regions
+                // (for example, separately protected ELF segments). Validate
+                // the complete range before touching the caller's buffer.
+                var segments = new List<RangeSegment>();
+                if (!TryCollectRangeSegments(virtualAddress, (ulong)destination.Length, segments))
+                {
+                    return false;
+                }
+
+                if (destination.IsEmpty)
+                {
+                    return true;
+                }
+
+                foreach (var segment in segments)
+                {
+                    if (segment.Region.IsReservedOnly &&
+                        !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region))
+                    {
+                        return false;
+                    }
+
+                    if (!CanReadWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                    {
+                        requiresExclusiveAccess = true;
+                    }
+                }
+
+                if (!requiresExclusiveAccess)
+                {
+                    fixed (byte* destPtr = destination)
+                    {
+                        Buffer.MemoryCopy(
+                            (void*)virtualAddress,
+                            destPtr,
+                            (nuint)destination.Length,
+                            (nuint)destination.Length);
+                    }
+
+                    return true;
+                }
+            }
         }
         finally
         {
@@ -1019,12 +1063,35 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(virtualAddress, (ulong)expected.Length);
-            if (region is null ||
-                !TryResolveRegionOffset(
+            if (region is not null &&
+                TryResolveRegionOffset(
                     virtualAddress,
                     (ulong)expected.Length,
                     region,
                     out var offset))
+            {
+                if (expected.IsEmpty)
+                {
+                    return true;
+                }
+
+                var srcPtr = (void*)(region.VirtualAddress + offset);
+                if (region.IsReservedOnly &&
+                    !EnsureRangeCommitted((ulong)srcPtr, (ulong)expected.Length, region))
+                {
+                    return false;
+                }
+
+                if (!CanReadWithoutProtectionChange((ulong)srcPtr, (ulong)expected.Length, region))
+                {
+                    return false;
+                }
+
+                return new ReadOnlySpan<byte>(srcPtr, expected.Length).SequenceEqual(expected);
+            }
+
+            var segments = new List<RangeSegment>();
+            if (!TryCollectRangeSegments(virtualAddress, (ulong)expected.Length, segments))
             {
                 return false;
             }
@@ -1034,19 +1101,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return true;
             }
 
-            var srcPtr = (void*)(region.VirtualAddress + offset);
-            if (region.IsReservedOnly &&
-                !EnsureRangeCommitted((ulong)srcPtr, (ulong)expected.Length, region))
+            foreach (var segment in segments)
             {
-                return false;
+                if ((segment.Region.IsReservedOnly &&
+                     !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region)) ||
+                    !CanReadWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                {
+                    return false;
+                }
             }
 
-            if (!CanReadWithoutProtectionChange((ulong)srcPtr, (ulong)expected.Length, region))
-            {
-                return false;
-            }
-
-            return new ReadOnlySpan<byte>(srcPtr, expected.Length).SequenceEqual(expected);
+            return new ReadOnlySpan<byte>((void*)virtualAddress, expected.Length).SequenceEqual(expected);
         }
         finally
         {
@@ -1106,6 +1171,50 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
             }
+            else
+            {
+                // Validate every adjacent region before copying so a gap or a
+                // read-only tail cannot leave a partially written prefix.
+                var segments = new List<RangeSegment>();
+                if (!TryCollectRangeSegments(virtualAddress, (ulong)source.Length, segments))
+                {
+                    return false;
+                }
+
+                if (source.IsEmpty)
+                {
+                    return true;
+                }
+
+                foreach (var segment in segments)
+                {
+                    if (segment.Region.IsReservedOnly &&
+                        !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region))
+                    {
+                        return false;
+                    }
+
+                    if (!CanWriteWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                    {
+                        requiresExclusiveAccess = true;
+                    }
+                }
+
+                if (!requiresExclusiveAccess)
+                {
+                    fixed (byte* srcPtr = source)
+                    {
+                        Buffer.MemoryCopy(
+                            srcPtr,
+                            (void*)virtualAddress,
+                            (nuint)source.Length,
+                            (nuint)source.Length);
+                    }
+
+                    NotifyGuestWriteWatch(virtualAddress, source);
+                    return true;
+                }
+            }
         }
         finally
         {
@@ -1156,32 +1265,69 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             var sourceRegion = FindRegion(sourceAddress, length);
             var destinationRegion = FindRegion(destinationAddress, length);
-            if (sourceRegion is null || destinationRegion is null ||
-                !TryResolveRegionOffset(sourceAddress, length, sourceRegion, out var sourceOffset) ||
-                !TryResolveRegionOffset(destinationAddress, length, destinationRegion, out var destinationOffset))
+            if (sourceRegion is not null &&
+                destinationRegion is not null &&
+                TryResolveRegionOffset(sourceAddress, length, sourceRegion, out var sourceOffset) &&
+                TryResolveRegionOffset(destinationAddress, length, destinationRegion, out var destinationOffset))
+            {
+                var sourcePointer = sourceRegion.VirtualAddress + sourceOffset;
+                var destinationPointer = destinationRegion.VirtualAddress + destinationOffset;
+                if ((sourceRegion.IsReservedOnly &&
+                     !EnsureRangeCommitted(sourcePointer, length, sourceRegion)) ||
+                    (destinationRegion.IsReservedOnly &&
+                     !EnsureRangeCommitted(destinationPointer, length, destinationRegion)) ||
+                    !CanReadWithoutProtectionChange(sourcePointer, length, sourceRegion) ||
+                    !CanWriteWithoutProtectionChange(destinationPointer, length, destinationRegion))
+                {
+                    return false;
+                }
+
+                // Span.CopyTo has memmove overlap semantics, so this allocation-free
+                // path safely serves both libc memcpy and libc memmove.
+                new ReadOnlySpan<byte>((void*)sourcePointer, checked((int)length)).CopyTo(
+                    new Span<byte>((void*)destinationPointer, checked((int)length)));
+                NotifyGuestWriteWatch(
+                    destinationAddress,
+                    new ReadOnlySpan<byte>((void*)destinationPointer, checked((int)length)));
+                return true;
+            }
+
+            var sourceSegments = new List<RangeSegment>();
+            var destinationSegments = new List<RangeSegment>();
+            if (!TryCollectRangeSegments(sourceAddress, length, sourceSegments) ||
+                !TryCollectRangeSegments(destinationAddress, length, destinationSegments))
             {
                 return false;
             }
 
-            var sourcePointer = sourceRegion.VirtualAddress + sourceOffset;
-            var destinationPointer = destinationRegion.VirtualAddress + destinationOffset;
-            if ((sourceRegion.IsReservedOnly &&
-                 !EnsureRangeCommitted(sourcePointer, length, sourceRegion)) ||
-                (destinationRegion.IsReservedOnly &&
-                 !EnsureRangeCommitted(destinationPointer, length, destinationRegion)) ||
-                !CanReadWithoutProtectionChange(sourcePointer, length, sourceRegion) ||
-                !CanWriteWithoutProtectionChange(destinationPointer, length, destinationRegion))
+            foreach (var segment in sourceSegments)
             {
-                return false;
+                if ((segment.Region.IsReservedOnly &&
+                     !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region)) ||
+                    !CanReadWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                {
+                    return false;
+                }
             }
 
-            // Span.CopyTo has memmove overlap semantics, so this allocation-free
-            // path safely serves both libc memcpy and libc memmove.
-            new ReadOnlySpan<byte>((void*)sourcePointer, checked((int)length)).CopyTo(
-                new Span<byte>((void*)destinationPointer, checked((int)length)));
+            foreach (var segment in destinationSegments)
+            {
+                if ((segment.Region.IsReservedOnly &&
+                     !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region)) ||
+                    !CanWriteWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                {
+                    return false;
+                }
+            }
+
+            // The collector guarantees that every page in each range is mapped
+            // and adjacent, so the identity-mapped host addresses form a single
+            // contiguous span even when the metadata is split into regions.
+            new ReadOnlySpan<byte>((void*)sourceAddress, checked((int)length)).CopyTo(
+                new Span<byte>((void*)destinationAddress, checked((int)length)));
             NotifyGuestWriteWatch(
                 destinationAddress,
-                new ReadOnlySpan<byte>((void*)destinationPointer, checked((int)length)));
+                new ReadOnlySpan<byte>((void*)destinationAddress, checked((int)length)));
             return true;
         }
         finally
@@ -1236,7 +1382,73 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return true;
         }
 
-        return false;
+        var segments = new List<RangeSegment>();
+        return TryReadExclusiveSegments(virtualAddress, destination, segments);
+    }
+
+    /// <summary>
+    /// Read a range that spans multiple metadata regions while temporarily
+    /// opening only the pages whose guest protection denies reads. All mapping,
+    /// commit, and protection checks complete before the destination is touched,
+    /// preserving the all-or-nothing behavior of the single-region path.
+    /// The caller holds the VM write lock.
+    /// </summary>
+    private bool TryReadExclusiveSegments(
+        ulong virtualAddress,
+        Span<byte> destination,
+        List<RangeSegment> segments)
+    {
+        if (!TryCollectRangeSegments(virtualAddress, (ulong)destination.Length, segments))
+        {
+            return false;
+        }
+
+        if (destination.IsEmpty)
+        {
+            return true;
+        }
+
+        var touchedPages = new List<(ulong Address, uint Protection)>();
+        try
+        {
+            foreach (var segment in segments)
+            {
+                if (segment.Region.IsReservedOnly &&
+                    !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region))
+                {
+                    return false;
+                }
+
+                if (!CanReadWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                {
+                    if (!TryTemporarilyProtectForRead(
+                            segment.Address,
+                            segment.Length,
+                            segment.Region,
+                            out var segmentPages))
+                    {
+                        return false;
+                    }
+
+                    touchedPages.AddRange(segmentPages);
+                }
+            }
+
+            fixed (byte* destPtr = destination)
+            {
+                Buffer.MemoryCopy(
+                    (void*)virtualAddress,
+                    destPtr,
+                    (nuint)destination.Length,
+                    (nuint)destination.Length);
+            }
+
+            return true;
+        }
+        finally
+        {
+            RestorePageProtections(touchedPages);
+        }
     }
 
     private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source)
@@ -1291,7 +1503,73 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return true;
         }
 
-        return false;
+        var segments = new List<RangeSegment>();
+        return TryWriteExclusiveSegments(virtualAddress, source, segments);
+    }
+
+    /// <summary>
+    /// Write a range that spans multiple metadata regions. Every segment is
+    /// validated and, when necessary, temporarily made writable before the
+    /// source is copied, so a later gap/protection failure cannot leave an
+    /// earlier segment partially modified. The caller holds the VM write lock.
+    /// </summary>
+    private bool TryWriteExclusiveSegments(
+        ulong virtualAddress,
+        ReadOnlySpan<byte> source,
+        List<RangeSegment> segments)
+    {
+        if (!TryCollectRangeSegments(virtualAddress, (ulong)source.Length, segments))
+        {
+            return false;
+        }
+
+        if (source.IsEmpty)
+        {
+            return true;
+        }
+
+        var touchedPages = new List<(ulong Address, uint Protection)>();
+        try
+        {
+            foreach (var segment in segments)
+            {
+                if (segment.Region.IsReservedOnly &&
+                    !EnsureRangeCommitted(segment.Address, segment.Length, segment.Region))
+                {
+                    return false;
+                }
+
+                if (!CanWriteWithoutProtectionChange(segment.Address, segment.Length, segment.Region))
+                {
+                    if (!TryTemporarilyProtectForWrite(
+                            segment.Address,
+                            segment.Length,
+                            segment.Region,
+                            out var segmentPages))
+                    {
+                        return false;
+                    }
+
+                    touchedPages.AddRange(segmentPages);
+                }
+            }
+
+            fixed (byte* srcPtr = source)
+            {
+                Buffer.MemoryCopy(
+                    srcPtr,
+                    (void*)virtualAddress,
+                    (nuint)source.Length,
+                    (nuint)source.Length);
+            }
+
+            NotifyGuestWriteWatch(virtualAddress, source);
+            return true;
+        }
+        finally
+        {
+            RestorePageProtections(touchedPages, flushInstructionCache: true);
+        }
     }
 
     public bool TryWriteUInt64(ulong virtualAddress, ulong value)
@@ -1326,7 +1604,15 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            return FindRegion(virtualAddress, size) is not null;
+            if (FindRegion(virtualAddress, size) is not null)
+            {
+                return true;
+            }
+
+            return TryCollectRangeSegments(
+                virtualAddress,
+                size,
+                new List<RangeSegment>());
         }
         finally
         {
@@ -1336,16 +1622,109 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private MemoryRegion? FindRegion(ulong address, ulong size)
     {
+        var candidateIndex = FindRegionIndexAtOrBefore(address);
+        if (candidateIndex < 0)
+        {
+            return null;
+        }
+
+        var candidate = _regions[candidateIndex];
+        return TryResolveRegionOffset(address, size, candidate, out _)
+            ? candidate
+            : null;
+    }
+
+    /// <summary>
+    /// Collects every region touched by a guest range, requiring the regions to
+    /// be exactly adjacent. The caller must hold at least the VM read lock.
+    /// Keeping this separate from <see cref="FindRegion"/> preserves the hot
+    /// single-region path while allowing ELF segments and fixed mappings to be
+    /// represented by multiple adjacent metadata regions.
+    /// </summary>
+    private bool TryCollectRangeSegments(
+        ulong address,
+        ulong size,
+        List<RangeSegment> segments)
+    {
+        segments.Clear();
+
+        if (size == 0)
+        {
+            return FindRegion(address, 0) is not null;
+        }
+
+        if (ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var endAddress = address + size;
+        var regionIndex = FindRegionIndexAtOrBefore(address);
+        if (regionIndex < 0)
+        {
+            return false;
+        }
+
+        // An address at the exact start of a region is selected by the binary
+        // search above. An address in a region selects that containing region;
+        // an address in a gap fails the adjacency check below.
+        var cursor = address;
+        while (cursor < endAddress)
+        {
+            if ((uint)regionIndex >= (uint)_regions.Count)
+            {
+                segments.Clear();
+                return false;
+            }
+
+            var region = _regions[regionIndex];
+            if (!TryResolveRegionOffset(cursor, 1, region, out _))
+            {
+                // The only valid transition into a new region is at its exact
+                // start. Any other position is an unmapped gap (or an overlap,
+                // which is intentionally rejected as ambiguous).
+                segments.Clear();
+                return false;
+            }
+
+            var regionEnd = checked(region.VirtualAddress + region.Size);
+            var segmentEnd = Math.Min(endAddress, regionEnd);
+            if (segmentEnd <= cursor)
+            {
+                segments.Clear();
+                return false;
+            }
+
+            segments.Add(new RangeSegment(region, cursor, segmentEnd - cursor));
+            cursor = segmentEnd;
+            if (cursor == endAddress)
+            {
+                return true;
+            }
+
+            regionIndex++;
+            if ((uint)regionIndex >= (uint)_regions.Count ||
+                _regions[regionIndex].VirtualAddress != cursor)
+            {
+                segments.Clear();
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private int FindRegionIndexAtOrBefore(ulong address)
+    {
         var low = 0;
         var high = _regions.Count - 1;
-        MemoryRegion? candidate = null;
+        var candidate = -1;
         while (low <= high)
         {
             var middle = low + ((high - low) >> 1);
-            var region = _regions[middle];
-            if (region.VirtualAddress <= address)
+            if (_regions[middle].VirtualAddress <= address)
             {
-                candidate = region;
+                candidate = middle;
                 low = middle + 1;
             }
             else
@@ -1354,10 +1733,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
         }
 
-        return candidate is not null &&
-            TryResolveRegionOffset(address, size, candidate, out _)
-                ? candidate
-                : null;
+        return candidate;
     }
 
     private void InsertRegionSorted(MemoryRegion region)
@@ -1597,11 +1973,37 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         MemoryRegion region,
         out List<(ulong Address, uint Protection)> touchedPages)
     {
+        var temporaryProtection = region.IsExecutable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
+        return TryTemporarilyProtect(
+            address,
+            size,
+            temporaryProtection,
+            out touchedPages);
+    }
+
+    private bool TryTemporarilyProtectForWrite(
+        ulong address,
+        ulong size,
+        MemoryRegion region,
+        out List<(ulong Address, uint Protection)> touchedPages)
+    {
+        return TryTemporarilyProtect(
+            address,
+            size,
+            HostPageProtection.ReadWriteExecute,
+            out touchedPages);
+    }
+
+    private bool TryTemporarilyProtect(
+        ulong address,
+        ulong size,
+        HostPageProtection temporaryProtection,
+        out List<(ulong Address, uint Protection)> touchedPages)
+    {
         touchedPages = new List<(ulong Address, uint Protection)>();
 
         var startPage = AlignDown(address, PageSize);
         var endPage = AlignUp(address + size, PageSize);
-        var temporaryProtection = region.IsExecutable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
 
         for (var pageAddress = startPage; pageAddress < endPage; pageAddress += PageSize)
         {
@@ -1618,11 +2020,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return true;
     }
 
-    private void RestorePageProtections(List<(ulong Address, uint Protection)> touchedPages)
+    private void RestorePageProtections(
+        List<(ulong Address, uint Protection)> touchedPages,
+        bool flushInstructionCache = false)
     {
         foreach (var (pageAddress, protection) in touchedPages)
         {
             _hostMemory.ProtectRaw(pageAddress, PageSize, protection, out _);
+            if (flushInstructionCache && IsExecutableProtection(protection))
+            {
+                _hostMemory.FlushInstructionCache(pageAddress, PageSize);
+            }
         }
     }
 
@@ -1669,6 +2077,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _disposed = true;
         }
     }
+
+    private readonly record struct RangeSegment(MemoryRegion Region, ulong Address, ulong Length);
 
     private class MemoryRegion
     {
