@@ -153,6 +153,64 @@ public static class KernelPthreadCompatExports
     static KernelPthreadCompatExports()
     {
         RunSynchronizationSelfChecks();
+        GuestThreadExecution.GuestThreadAbandoned += AbandonMutexesOwnedByThread;
+    }
+
+    /// <summary>
+    /// Force-release mutexes still owned by a guest thread that is being torn
+    /// down without a clean unlock (TBB worker_abort, abrupt exit). Otherwise
+    /// waiters can spin forever and block splash→first GPU submit.
+    /// </summary>
+    public static int AbandonMutexesOwnedByThread(ulong threadId, string reason)
+    {
+        if (threadId == 0)
+        {
+            return 0;
+        }
+
+        var released = 0;
+        var wakeKeys = new List<string>();
+        foreach (var pair in _mutexStates)
+        {
+            var state = pair.Value;
+            string? wakeKey = null;
+            lock (state)
+            {
+                if (state.OwnerThreadId != threadId || state.RecursionCount <= 0)
+                {
+                    continue;
+                }
+
+                state.OwnerThreadId = 0;
+                state.RecursionCount = 0;
+                wakeKey = state.Waiters.First?.Value.Cooperative == true
+                    ? state.Waiters.First.Value.WakeKey
+                    : null;
+                Monitor.PulseAll(state);
+                released++;
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
+                    $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
+                    $"reason={reason} waiters={state.Waiters.Count}");
+            }
+
+            if (wakeKey is not null)
+            {
+                wakeKeys.Add(wakeKey);
+            }
+        }
+
+        foreach (var wakeKey in wakeKeys)
+        {
+            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+        }
+
+        if (released > 0)
+        {
+            Console.Error.Flush();
+        }
+
+        return released;
     }
 
     [SysAbiExport(

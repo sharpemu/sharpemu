@@ -83,7 +83,9 @@ public sealed class BinkFramePlaybackTests
 
         public uint Height => 1;
 
-        public uint FramesPerSecondNumerator => 20;
+        // Keep frame boundaries far enough apart that a loaded CI runner cannot
+        // skip an expected frame between polling iterations.
+        public uint FramesPerSecondNumerator => 2;
 
         public uint FramesPerSecondDenominator => 1;
 

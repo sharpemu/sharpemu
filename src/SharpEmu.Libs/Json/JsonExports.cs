@@ -81,6 +81,18 @@ public static class JsonExports
     }
 
     [SysAbiExport(
+        Nid = "PR5k1penBLM",
+        ExportName = "_ZN3sce4Json11Initializer9terminateEv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitializerTerminate(CpuContext ctx)
+    {
+        TraceJson("Initializer.terminate", ctx[CpuRegister.Rdi], 0);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "Cxwy7wHq4J0",
         ExportName = "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE",
         Target = Generation.Gen4 | Generation.Gen5,

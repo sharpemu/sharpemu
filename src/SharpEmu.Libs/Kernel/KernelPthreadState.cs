@@ -27,8 +27,12 @@ internal static class KernelPthreadState
     internal static ulong GetCurrentThreadHandle()
     {
         var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
-        if (guestThreadHandle != 0 && TryGetThreadIdentity(guestThreadHandle, out _))
+        // Prefer the bound guest handle even when it is not yet in Threads.
+        // Falling through to a synthetic ThreadStatic handle while a guest
+        // thread is bound causes mutex owner mismatches (unlock PERM → hang).
+        if (guestThreadHandle != 0)
         {
+            EnsureGuestThreadIdentity(guestThreadHandle);
             return guestThreadHandle;
         }
 
@@ -39,13 +43,25 @@ internal static class KernelPthreadState
     internal static ulong GetCurrentThreadUniqueId()
     {
         var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
-        if (guestThreadHandle != 0 && TryGetThreadIdentity(guestThreadHandle, out var identity))
+        if (guestThreadHandle != 0)
         {
-            return identity.UniqueId;
+            return EnsureGuestThreadIdentity(guestThreadHandle).UniqueId;
         }
 
         EnsureCurrentThreadRegistered();
         return _currentThreadUniqueId;
+    }
+
+    internal static string DescribeThreadHandle(ulong threadHandle)
+    {
+        if (threadHandle == 0)
+        {
+            return "none";
+        }
+
+        return TryGetThreadIdentity(threadHandle, out var identity)
+            ? $"0x{threadHandle:X16}('{identity.Name}')"
+            : $"0x{threadHandle:X16}";
     }
 
     internal static ulong CreateThreadHandle(string name)
@@ -57,6 +73,18 @@ internal static class KernelPthreadState
     internal static bool TryGetThreadIdentity(ulong threadHandle, out ThreadIdentity identity)
     {
         return Threads.TryGetValue(threadHandle, out identity);
+    }
+
+    private static ThreadIdentity EnsureGuestThreadIdentity(ulong guestThreadHandle)
+    {
+        if (Threads.TryGetValue(guestThreadHandle, out var existing))
+        {
+            return existing;
+        }
+
+        var uniqueId = unchecked((ulong)Interlocked.Increment(ref _nextUniqueThreadId));
+        var identity = new ThreadIdentity(uniqueId, $"Guest-0x{guestThreadHandle:X}");
+        return Threads.GetOrAdd(guestThreadHandle, identity);
     }
 
     private static void EnsureCurrentThreadRegistered()

@@ -221,6 +221,29 @@ public static class GuestThreadExecution
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
+    /// <summary>
+    /// Fired when a guest thread is torn down without a clean pthread_exit
+    /// (e.g. TBB execute-AV → worker_abort). Libs use this to abandon mutexes.
+    /// </summary>
+    public static event Func<ulong, string, int>? GuestThreadAbandoned;
+
+    public static int NotifyGuestThreadAbandoned(ulong threadHandle, string reason)
+    {
+        if (threadHandle == 0 || GuestThreadAbandoned is null)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return GuestThreadAbandoned.Invoke(threadHandle, reason);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
