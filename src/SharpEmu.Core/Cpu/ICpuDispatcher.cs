@@ -7,27 +7,7 @@ namespace SharpEmu.Core.Cpu;
 
 public interface ICpuDispatcher
 {
-    CpuTrapInfo? LastTrapInfo { get; }
-
-    CpuMemoryFaultInfo? LastMemoryFaultInfo { get; }
-
-    CpuControlTransferInfo? LastControlTransferInfo { get; }
-
-    CpuNotImplementedInfo? LastNotImplementedInfo { get; }
-
-    string? LastImportResolutionTrace { get; }
-
-    string? LastBasicBlockTrace { get; }
-
-    string? LastMilestoneLog { get; }
-
-    string? LastRecentInstructionWindow { get; }
-
-    string? LastRecentControlTransferTrace { get; }
-
-    CpuSessionSummary LastSessionSummary { get; }
-
-    OrbisGen2Result DispatchEntry(
+    CpuExecutionResult DispatchEntry(
         ulong entryPoint,
         Generation generation,
         IReadOnlyDictionary<ulong, string>? importStubs = null,
@@ -35,7 +15,7 @@ public interface ICpuDispatcher
         string processImageName = "eboot.bin",
         CpuExecutionOptions executionOptions = default);
 
-    OrbisGen2Result DispatchModuleInitializer(
+    CpuExecutionResult DispatchModuleInitializer(
         ulong entryPoint,
         Generation generation,
         IReadOnlyDictionary<ulong, string>? importStubs = null,
