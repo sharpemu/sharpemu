@@ -171,6 +171,27 @@ public static class CxaGuardExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "f1zwJ3jAI2k",
+        ExportName = "_Unwind_Resume",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int UnwindResume(CpuContext ctx)
+    {
+        var exceptionPtr = ctx[CpuRegister.Rdi];
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_LOG_UNWIND"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] _Unwind_Resume called with exception=0x{exceptionPtr:X16}");
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static bool TryReadGuardState(CpuContext ctx, ulong guardPtr, out ulong word, out bool initialized, out bool inProgress)
     {
         word = 0;

@@ -1176,6 +1176,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			CreateTlsHandler();
 			PatchTlsPatterns();
+			PatchUnwindResume(context);
 			return ExecuteEntry(context, entryPoint, out result);
 		}
 		catch (Exception ex)
@@ -2540,6 +2541,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		memory = ptr;
 		return true;
+	}
+
+	private void PatchUnwindResume(CpuContext context)
+	{
+		const string unwindResumeNid = "f1zwJ3jAI2k";
+		if (!_runtimeSymbolsByName.TryGetValue(unwindResumeNid, out var address) || address == 0)
+		{
+			return;
+		}
+
+		Span<byte> ret = stackalloc byte[1] { 0xC3 };
+		if (context.Memory.TryWrite(address, ret))
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Patched _Unwind_Resume (NID={unwindResumeNid}) at 0x{address:X16} -> RET");
+		}
+		else
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Failed to patch _Unwind_Resume at 0x{address:X16}");
+		}
 	}
 
 	private unsafe void PatchTlsPatterns()
