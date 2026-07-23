@@ -86,6 +86,25 @@ public static class NpManagerExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    /// <summary>
+    /// Accepts the premium-event callback and never invokes it. Offline sessions
+    /// have no PS Plus / premium transitions to deliver, and leaving this NID
+    /// unresolved returns NOT_FOUND which soft-locks titles that register it
+    /// during settings / store probes (GTA V Enhanced).
+    /// </summary>
+    [SysAbiExport(
+        Nid = "+yqjab2fUJA",
+        ExportName = "sceNpRegisterPremiumEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpRegisterPremiumEventCallback(CpuContext ctx)
+    {
+        TraceNp(
+            $"register_premium_event_callback cb=0x{ctx[CpuRegister.Rdi]:X16} " +
+            $"userdata=0x{ctx[CpuRegister.Rsi]:X16}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     [SysAbiExport(
         Nid = "qQJfO8HAiaY",
         ExportName = "sceNpRegisterStateCallbackA",
