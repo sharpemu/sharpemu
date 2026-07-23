@@ -6308,6 +6308,32 @@ public static partial class AgcExports
             TraceAstroTitlePixelGlobalProbe(pixelEvaluation);
         }
 
+        // Patch BufferFormat from the attrib table onto the V# before host
+        // vertex input. IR discovery often keeps a stale float format from the
+        // unpatched sharp — that turns UI glyphs into gradient triangles.
+        // Match by stride+offset (not bare base address) so interleaved streams
+        // keep loading-video bindings intact.
+        if (exportEvaluation.VertexInputs is { Count: > 0 } discoveredInputs &&
+            AgcVertexMetadata.TryGetVertexTableRegisters(
+                ctx,
+                exportShaderAddress,
+                exportShaderHeader,
+                out var vertexTables))
+        {
+            var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+                ctx,
+                exportEvaluation.ScalarRegisters,
+                vertexTables,
+                discoveredInputs);
+            if (!ReferenceEquals(merged, discoveredInputs))
+            {
+                TraceAgcShader(
+                    $"agc.vertex_metadata_format es=0x{exportShaderAddress:X16} " +
+                    $"count={merged.Count}");
+                exportEvaluation = exportEvaluation with { VertexInputs = merged };
+            }
+        }
+
         // Every bound color target the shader exports to. Deferred renderers
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
@@ -6908,6 +6934,7 @@ public static partial class AgcExports
                 Mix(input.NumberFormat);
                 Mix(input.Stride);
                 Mix(input.OffsetBytes);
+                Mix(input.PerInstance ? 1u : 0u);
             }
         }
 
@@ -7887,7 +7914,8 @@ public static partial class AgcExports
                 binding.OffsetBytes,
                 binding.Data,
                 binding.DataLength,
-                binding.DataPooled);
+                binding.DataPooled,
+                binding.PerInstance);
         }
 
         return buffers;
