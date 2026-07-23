@@ -260,6 +260,31 @@ internal static unsafe class PosixHostStubs
         Marshal.FreeHGlobal(threadHandle);
     }
 
+    /// <summary>
+    /// Reaps a worker thread that is known to have reached its exit path (its
+    /// done-event is already signalled), then frees the handle. A plain
+    /// pthread_join reaps a returned-but-unjoined thread immediately, whereas
+    /// pthread_kill(thread, 0) keeps reporting such a thread as live until it
+    /// is joined, so this must only be called once the caller has confirmed the
+    /// worker left its run loop.
+    /// </summary>
+    public static void JoinWorkerThread(nint threadHandle)
+    {
+        var holder = (nint*)threadHandle;
+        if (holder == null)
+        {
+            return;
+        }
+
+        if (holder[1] == 0)
+        {
+            _ = pthread_join(holder[0], null);
+            holder[1] = 1;
+        }
+
+        Marshal.FreeHGlobal(threadHandle);
+    }
+
     /// <summary>Allocates a pthread TLS key, mirroring kernel32!TlsAlloc.</summary>
     public static uint TlsAlloc()
     {
