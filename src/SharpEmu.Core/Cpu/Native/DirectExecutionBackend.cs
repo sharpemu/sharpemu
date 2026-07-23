@@ -3137,7 +3137,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
         const ulong MaxScanBytes = 134217728uL;
 		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
+		// The entry point can sit well after the start of the mapped exec segment
+		// (e.g. The Last of Us Part I has a raw FS:[0] load below its entry point,
+		// in early-init/PLT code). Widen the scan to the true mapping base so that
+		// code below the entry point still gets its TLS loads rewritten.
+		if (VirtualQuery((void*)_entryPoint, out var entryRegion, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0
+			&& entryRegion.AllocationBase != 0
+			&& entryRegion.AllocationBase < num)
+		{
+			num = entryRegion.AllocationBase;
+		}
+		ulong num2 = _entryPoint + MaxScanBytes;
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
