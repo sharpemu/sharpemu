@@ -312,7 +312,8 @@ public sealed record Gen5VertexInputBinding(
     uint OffsetBytes,
     byte[] Data,
     int DataLength,
-    bool DataPooled);
+    bool DataPooled,
+    bool PerInstance = false);
 
 public sealed record Gen5ShaderEvaluation(
     IReadOnlyList<uint> InitialScalarRegisters,
