@@ -91,6 +91,71 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	private void RecordDeferredBootstrapTrace(
+		long dispatchIndex,
+		ulong op,
+		ulong symbolPointer,
+		ulong outputPointer,
+		ulong returnRip)
+	{
+		lock (_deferredBootstrapTraceGate)
+		{
+			_deferredBootstrapTrace[_deferredBootstrapTraceWriteIndex] = new DeferredBootstrapTraceEntry(
+				dispatchIndex,
+				op,
+				symbolPointer,
+				outputPointer,
+				returnRip);
+			_deferredBootstrapTraceWriteIndex =
+				(_deferredBootstrapTraceWriteIndex + 1) % _deferredBootstrapTrace.Length;
+			if (_deferredBootstrapTraceCount < _deferredBootstrapTrace.Length)
+			{
+				_deferredBootstrapTraceCount++;
+			}
+		}
+	}
+
+	private void DrainDeferredBootstrapTraces()
+	{
+		if (!_logBootstrap)
+		{
+			return;
+		}
+
+		DeferredBootstrapTraceEntry[] pending;
+		lock (_deferredBootstrapTraceGate)
+		{
+			if (_deferredBootstrapTraceCount == 0)
+			{
+				return;
+			}
+
+			pending = new DeferredBootstrapTraceEntry[_deferredBootstrapTraceCount];
+			var readIndex = (_deferredBootstrapTraceWriteIndex - _deferredBootstrapTraceCount +
+				_deferredBootstrapTrace.Length) % _deferredBootstrapTrace.Length;
+			for (var i = 0; i < _deferredBootstrapTraceCount; i++)
+			{
+				pending[i] = _deferredBootstrapTrace[(readIndex + i) % _deferredBootstrapTrace.Length];
+			}
+
+			_deferredBootstrapTraceCount = 0;
+		}
+
+		foreach (var entry in pending)
+		{
+			var symbolText = "<unreadable>";
+			if (TryReadAsciiZ(entry.SymbolPointer, 256, out var sym))
+			{
+				symbolText = sym;
+			}
+
+			Console.Error.WriteLine(
+				$"[LOADER][TRACE] bootstrap_call#{entry.DispatchIndex}: op=0x{entry.Op:X16} " +
+				$"sym_ptr=0x{entry.SymbolPointer:X16} sym='{symbolText}' " +
+				$"out_ptr=0x{entry.OutputPointer:X16} ret=0x{entry.ReturnRip:X16}");
+		}
+	}
+
 	private void DumpRecentImportTrace()
 	{
 		var trace = _recentImportTrace;
@@ -268,14 +333,15 @@ public sealed partial class DirectExecutionBackend
 			ulong callRip = returnRip + (ulong)i;
 			ulong target = unchecked((ulong)((long)(callRip + 5) + rel32));
 			Log.Debug($"Import#{dispatchIndex} near-call @{callRip:X16}: target=0x{target:X16}");
-			for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
+			var importEntries = _importEntries;
+			for (int importIndex = 0; importIndex < importEntries.Length; importIndex++)
 			{
-				if (_importEntries[importIndex].Address != target)
+				if (importEntries[importIndex].Address != target)
 				{
 					continue;
 				}
 
-				string nid = _importEntries[importIndex].Nid;
+				string nid = importEntries[importIndex].Nid;
 				if (_moduleManager.TryGetExport(nid, out var export))
 				{
 					Log.Debug(
@@ -302,14 +368,14 @@ public sealed partial class DirectExecutionBackend
 					{
 						Log.Debug(
 							$"Import#{dispatchIndex} near-call PLT slot: [0x{slot:X16}] = 0x{slotTarget:X16}");
-						for (int importIndex = 0; importIndex < _importEntries.Length; importIndex++)
+						for (int importIndex = 0; importIndex < importEntries.Length; importIndex++)
 						{
-							if (_importEntries[importIndex].Address != slotTarget)
+							if (importEntries[importIndex].Address != slotTarget)
 							{
 								continue;
 							}
 
-							string nid = _importEntries[importIndex].Nid;
+							string nid = importEntries[importIndex].Nid;
 							if (_moduleManager.TryGetExport(nid, out var export))
 							{
 								Log.Debug(
