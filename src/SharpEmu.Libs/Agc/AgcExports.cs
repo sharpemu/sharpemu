@@ -3030,15 +3030,12 @@ public static partial class AgcExports
         state.CompletionEventNotifiedSubmissionId = submissionId;
         void TriggerCompletionEvents()
         {
-            var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                ident: 0,
-                KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                data: 0);
-            if (_compatibilitySubmitCompletionEvent)
-            {
-                triggered += KernelEventQueueCompatExports.TriggerRegisteredEventsDistinct(
-                    KernelEventQueueCompatExports.KernelEventFilterGraphics);
-            }
+            // Broadcast to ALL registered graphics events regardless of the
+            // eventId the game used (e.g. 0x20 for Poppy Playtime).  The
+            // ident=0 narrow match only wakes listeners registered with
+            // eventId=0, which misses every real title.
+            var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsDistinct(
+                KernelEventQueueCompatExports.KernelEventFilterGraphics);
             TraceAgc(
                 $"agc.driver_submit_dcb completion submission={submissionId} " +
                 $"queues={triggered}");
