@@ -1,4 +1,4 @@
-﻿<!--
+<!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <PackageReference Include="Iced" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
