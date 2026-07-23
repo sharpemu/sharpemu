@@ -5735,23 +5735,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ActiveGuestThreadYieldReason = null;
 			try
 			{
-				// TBB execute-AV recover needs native-worker TLS (eligible/done).
-				// Other guests stay on CallNativeEntry — full native-worker migration
-				// increased splash hangs / UnmanagedCallersOnly (tLTN/tLTO).
-				int nativeReturn;
-				if (name == "tbb_thead")
-				{
-					nativeReturn = RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true);
-				}
-				else
-				{
-					if (!TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot))
-					{
-						reason = "failed to bind host-RSP storage for guest thread stub";
-						return GuestNativeCallExitReason.Exception;
-					}
-					nativeReturn = CallNativeEntry(ptr);
-				}
+				// Prefer pooled native OS workers so guest stubs do not sit above
+				// CLR-managed frames (UnmanagedCallersOnly FailFast on GTA and
+				// similar titles). tbb_thead still requires a worker — never fall
+				// back to managed inline during the Astro spawn storm.
+				var nativeReturn = name == "tbb_thead"
+					? RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true)
+					: RunGuestEntryStub(ptr, hostRspSlot);
 				if (ActiveGuestThreadYieldRequested)
 				{
 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
@@ -5901,20 +5891,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ActiveGuestThreadYieldReason = null;
 			try
 			{
-				int nativeReturn;
-				if (name == "tbb_thead")
-				{
-					nativeReturn = RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true);
-				}
-				else
-				{
-					if (!TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot))
-					{
-						reason = "failed to bind host-RSP storage for guest continuation stub";
-						return GuestNativeCallExitReason.Exception;
-					}
-					nativeReturn = CallNativeEntry(ptr);
-				}
+				// Same routing as thread entry: prefer native workers for all
+				// continuations; require them for tbb_thead.
+				var nativeReturn = name == "tbb_thead"
+					? RunGuestEntryStub(ptr, hostRspSlot, requireNativeWorker: true)
+					: RunGuestEntryStub(ptr, hostRspSlot);
 				if (ActiveGuestThreadYieldRequested)
 				{
 					reason = ActiveGuestThreadYieldReason ?? "guest thread blocked";
@@ -6244,7 +6225,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			int num6 = -1;
 			try
 			{
-				num6 = CallNativeEntry(ptr);
+				// Main entry also prefers a native worker so the guest process
+				// does not begin above CLR-managed frames on this thread.
+				num6 = RunGuestEntryStub(ptr, num2);
 				Console.Error.WriteLine($"[LOADER][INFO] Guest returned: {num6}");
 				// A host stop has already invalidated the session. Draining guest
 				// continuations here can re-enter a blocked HLE call after its owner
