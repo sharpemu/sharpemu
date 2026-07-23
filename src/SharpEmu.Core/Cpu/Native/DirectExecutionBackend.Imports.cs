@@ -533,7 +533,7 @@ public sealed partial class DirectExecutionBackend
 			DeliverPendingGuestExceptionAtSafePoint(
 					cpuContext,
 					CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
-			StoreImportVectorReturn(cpuContext, argPackPtr);
+		StoreImportVectorReturn(cpuContext, argPackPtr);
 			if (dispatchResolved &&
 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
 				string.Equals(importStubEntry.Nid, "BohYr-F7-is", StringComparison.Ordinal))
