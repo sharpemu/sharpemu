@@ -204,6 +204,55 @@ public static class AjmExports
     }
 
     [SysAbiExport(
+        Nid = "bkRHEYG6lEM",
+        ExportName = "sceAjmMemoryRegister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryRegister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        var pageCount = ctx[CpuRegister.Rdx];
+        if (!Contexts.ContainsKey(contextId))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0 || pageCount == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        // Guest memory is already directly visible to the software AJM path;
+        // registration records no additional host mapping.
+        Trace($"memory_register context={contextId} address=0x{address:X} pages={pageCount}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "pIpGiaYkHkM",
+        ExportName = "sceAjmMemoryUnregister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryUnregister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        if (!Contexts.ContainsKey(contextId))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Trace($"memory_unregister context={contextId} address=0x{address:X}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "Wi7DtlLV+KI",
         ExportName = "sceAjmModuleUnregister",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -335,6 +384,37 @@ public static class AjmExports
             $"batch_wait context={unchecked((uint)ctx[CpuRegister.Rdi])} " +
             $"batch={unchecked((uint)ctx[CpuRegister.Rsi])} " +
             $"timeout={unchecked((uint)ctx[CpuRegister.Rdx])}");
+        return ctx.SetReturn(0);
+    }
+
+    /// <summary>
+    /// Ghost of Yōtei's FMOD-side pump calls this with an output slot in RDI
+    /// and, ignoring the return register, submits a new AJM batch only when the
+    /// written value is nonzero. All host batches complete synchronously, so
+    /// zero ("no pending work") is the truthful report and quietly idles that
+    /// producer instead of feeding it stale statistics.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "3cAg7xN995U",
+        ExportName = "sceAjmBatchJobGetStatistics",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobGetStatistics(CpuContext ctx)
+    {
+        var outAddress = ctx[CpuRegister.Rdi];
+        if (outAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Span<byte> pending = stackalloc byte[sizeof(ulong)];
+        pending.Clear();
+        if (!ctx.Memory.TryWrite(outAddress, pending))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Trace($"batch_job_get_statistics out=0x{outAddress:X16} job=0x{ctx[CpuRegister.Rsi]:X16}");
         return ctx.SetReturn(0);
     }
 

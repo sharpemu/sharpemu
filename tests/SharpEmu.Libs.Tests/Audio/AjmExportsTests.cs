@@ -94,6 +94,45 @@ public sealed class AjmExportsTests : IDisposable
     }
 
     [Fact]
+    public void MemoryRegisterAndUnregister_AcceptLiveContextAndPageRange()
+    {
+        var contextId = Initialize();
+        const ulong address = MemoryBase + 0x400;
+
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = address;
+        _ctx[CpuRegister.Rdx] = 5;
+        Assert.Equal(0, AjmExports.AjmMemoryRegister(_ctx));
+
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(0, AjmExports.AjmMemoryUnregister(_ctx));
+    }
+
+    [Fact]
+    public void MemoryRegisterAndUnregister_RejectInvalidContextOrRange()
+    {
+        _ctx[CpuRegister.Rdi] = uint.MaxValue;
+        _ctx[CpuRegister.Rsi] = MemoryBase + 0x400;
+        _ctx[CpuRegister.Rdx] = 1;
+        Assert.Equal(InvalidContext, AjmExports.AjmMemoryRegister(_ctx));
+        Assert.Equal(InvalidContext, AjmExports.AjmMemoryUnregister(_ctx));
+
+        var contextId = Initialize();
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 1;
+        Assert.Equal(InvalidParameter, AjmExports.AjmMemoryRegister(_ctx));
+
+        _ctx[CpuRegister.Rsi] = MemoryBase + 0x400;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(InvalidParameter, AjmExports.AjmMemoryRegister(_ctx));
+
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(InvalidParameter, AjmExports.AjmMemoryUnregister(_ctx));
+    }
+
+    [Fact]
     public void InstanceDestroy_RejectsUnknownContextAndSlot()
     {
         var contextId = Initialize();
@@ -158,6 +197,21 @@ public sealed class AjmExportsTests : IDisposable
         }
     }
 
+    [Fact]
+    public void MemoryRegistrationExports_RegisterForBothGenerations()
+    {
+        foreach (var generation in new[] { Generation.Gen4, Generation.Gen5 })
+        {
+            var manager = new ModuleManager();
+            manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+
+            Assert.True(manager.TryGetExport("bkRHEYG6lEM", out var register));
+            Assert.Equal("sceAjmMemoryRegister", register.Name);
+            Assert.True(manager.TryGetExport("pIpGiaYkHkM", out var unregister));
+            Assert.Equal("sceAjmMemoryUnregister", unregister.Name);
+        }
+    }
+
     public void Dispose()
     {
         AjmExports.ResetForTests();
@@ -177,6 +231,33 @@ public sealed class AjmExportsTests : IDisposable
         _ctx[CpuRegister.Rsi] = codecType;
         _ctx[CpuRegister.Rdx] = 0;
         return AjmExports.AjmModuleRegister(_ctx);
+    }
+
+    [Fact]
+    public void BatchJobGetStatistics_WritesZeroPendingWorkMarker()
+    {
+        const ulong OutAddress = MemoryBase + 0x700;
+        Span<byte> sentinel = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(sentinel, 0xDEADBEEFDEADBEEF);
+        Assert.True(_memory.TryWrite(OutAddress, sentinel));
+
+        _ctx[CpuRegister.Rdi] = OutAddress;
+        _ctx[CpuRegister.Rsi] = MemoryBase + 0x780;
+        _ctx[CpuRegister.Rdx] = OutAddress;
+
+        Assert.Equal(0, AjmExports.AjmBatchJobGetStatistics(_ctx));
+
+        Span<byte> value = stackalloc byte[sizeof(ulong)];
+        Assert.True(_memory.TryRead(OutAddress, value));
+        Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(value));
+    }
+
+    [Fact]
+    public void BatchJobGetStatistics_RejectsNullOutput()
+    {
+        _ctx[CpuRegister.Rdi] = 0;
+
+        Assert.NotEqual(0, AjmExports.AjmBatchJobGetStatistics(_ctx));
     }
 
     private int CreateInstance(uint contextId, uint codecType, ulong flags, ulong outputAddress)
