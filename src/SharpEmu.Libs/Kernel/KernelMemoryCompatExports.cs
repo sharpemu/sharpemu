@@ -1558,7 +1558,7 @@ public static partial class KernelMemoryCompatExports
         {
             LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
             return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
     }
@@ -2228,8 +2228,7 @@ public static partial class KernelMemoryCompatExports
 
         if (result != OrbisGen2Result.ORBIS_GEN2_OK)
         {
-            ctx[CpuRegister.Rax] = ulong.MaxValue;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            return PosixFailure(ctx, (int)result, notFoundErrno: Ebadf);
         }
 
         ctx[CpuRegister.Rax] = unchecked((ulong)position);
