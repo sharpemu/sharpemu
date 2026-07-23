@@ -37,14 +37,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         public const ulong BootstrapStatusOffset = 0x100UL;
         public const ulong InitialRflags = 0x202;
         public const int MaxRetryAttempts = 32;
-
-        // Offsets within the TLS block (FreeBSD amd64 variant II layout)
-        public const ulong TlsOffsetSelf = 0x00;
-        public const ulong TlsOffsetStackGuard = 0x28;
-        public const ulong TlsOffsetTCB = 0x60;
-        public const ulong TlsOffsetDtv = 0x10;
-        public const ulong TlsOffsetTlsBase = 0x00;
-        public const ulong TlsOffsetElfTls = 0xF0; // negative offset from TCB
     }
 
     private static readonly byte[] BootstrapStubBytes = new byte[CpuLayout.BootstrapRegionSize] { 0xCC, 0xC3 };
@@ -395,13 +387,15 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 
     private bool InitializeTls(CpuContext context, ulong tlsBase)
     {
-        if (!context.TryWriteUInt64(tlsBase - CpuLayout.TlsOffsetElfTls, 0) ||
-            !context.TryWriteUInt64(tlsBase + CpuLayout.TlsOffsetSelf, tlsBase) ||
-            !context.TryWriteUInt64(tlsBase + CpuLayout.TlsOffsetDtv, tlsBase) ||
-            !context.TryWriteUInt64(tlsBase + CpuLayout.TlsOffsetStackGuard, 0xC0DEC0DECAFEBA00UL) ||
-            !context.TryWriteUInt64(tlsBase + CpuLayout.TlsOffsetTCB, tlsBase))
+        // TLS initialisation with hardcoded offsets (original behaviour)
+        if (!context.TryWriteUInt64(tlsBase - 0xF0, 0) ||
+            !context.TryWriteUInt64(tlsBase + 0x00, tlsBase) ||
+            !context.TryWriteUInt64(tlsBase + 0x10, tlsBase) ||
+            !context.TryWriteUInt64(tlsBase + 0x28, 0xC0DEC0DECAFEBA00UL) ||
+            !context.TryWriteUInt64(tlsBase + 0x60, tlsBase))
             return false;
 
+        // Seed the static TLS block below the thread pointer
         SharpEmu.HLE.GuestTlsTemplate.SeedThreadBlock(context, tlsBase);
         return true;
     }
@@ -416,7 +410,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         var configuredArguments = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_ARGS");
         if (!string.IsNullOrWhiteSpace(configuredArguments))
         {
-            // Simple split – consider using a proper parser in production.
             var compatArgs = configuredArguments.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             arguments.AddRange(compatArgs.Take(2));
         }
