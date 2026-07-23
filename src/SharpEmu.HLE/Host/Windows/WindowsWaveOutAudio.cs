@@ -17,7 +17,9 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         private const uint CallbackEvent = 0x0005_0000;
         private const ushort WaveFormatPcm = 1;
         private const uint WaveHeaderDone = 0x0000_0001;
-        private const int MaximumQueuedPcmBytes = 32 * 1024;
+        // Deeper than the old 32KB (~170ms) queue: FMOD's bursty AudioOut2 Push
+        // pattern underran a shallow buffer and crackled even at stable FPS.
+        private const int MaximumQueuedPcmBytes = 128 * 1024;
 
         private readonly object _gate = new();
         private readonly AutoResetEvent _completion = new(false);

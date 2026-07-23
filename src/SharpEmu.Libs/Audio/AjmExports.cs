@@ -23,13 +23,32 @@ public static class AjmExports
     private static int _nextContextId;
     private static int _nextBatchId;
 
+    private const uint AjmCodecMp3 = 0;
+
+    private sealed class AjmInstanceState
+    {
+        public required uint Codec { get; init; }
+        public required ulong Flags { get; init; }
+        public AjmMp3Decoder? Mp3 { get; init; }
+
+        public bool PreferPcm16
+        {
+            get
+            {
+                // AjmInstanceFlags: version:3, channels:4, format:3
+                var encoding = (Flags >> 7) & 0x7;
+                return encoding is 0 or 1; // S16 / S32 — we emit S16 for both
+            }
+        }
+    }
+
     private sealed class AjmContextState
     {
         public object Gate { get; } = new();
 
         public HashSet<uint> RegisteredCodecs { get; } = new();
 
-        public Dictionary<uint, uint> InstancesBySlot { get; } = new();
+        public Dictionary<uint, AjmInstanceState> InstancesBySlot { get; } = new();
 
         public int NextInstanceIndex { get; set; }
     }
@@ -169,7 +188,14 @@ public static class AjmExports
             }
 
             state.NextInstanceIndex = nextInstanceIndex;
-            state.InstancesBySlot.Add(instanceSlot, instanceId);
+            state.InstancesBySlot.Add(
+                instanceSlot,
+                new AjmInstanceState
+                {
+                    Codec = codecType,
+                    Flags = flags,
+                    Mp3 = codecType == AjmCodecMp3 ? new AjmMp3Decoder() : null,
+                });
         }
 
         Trace($"instance_create context={contextId} codec={codecType} flags=0x{flags:X} instance=0x{instanceId:X8}");
@@ -229,11 +255,9 @@ public static class AjmExports
     }
 
     /// <summary>
-    /// Enqueues a decode job on a batch. Titles call this on the Bink/AJM hot
-    /// path; leaving it unresolved floods Import WARN spam. This is a silence
-    /// stub, not a codec: advance the batch cursor and report the input as
-    /// consumed with silence produced so the title does not spin on the same
-    /// packet.
+    /// Enqueues a decode job on a batch. GTA V Enhanced streams menu music
+    /// through AJM MP3 (codec 0); we decode eagerly here so BatchStart/Wait
+    /// stay synchronous no-ops.
     /// </summary>
     [SysAbiExport(
         Nid = "39WxhR-ePew",
@@ -255,37 +279,120 @@ public static class AjmExports
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
 
-        // Best-effort: bump the batch cursor when the guest filled AjmBatchInfo.
-        // Still succeed without it — the unresolved stub returned 0 and titles
-        // keep calling; failing here would reintroduce hot-path spam via retries.
         _ = TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize);
 
-        // Silence: clear PCM out and claim full input consumed so the guest
-        // advances its bitstream cursor instead of re-submitting forever.
-        if (outputAddress != 0 && outputSize != 0 && outputSize <= MaxSilentPcmBytes)
+        var inputConsumed = 0;
+        var outputWritten = 0;
+        ulong totalSamples = 0;
+        var frames = 0u;
+        var decoded = false;
+
+        if (TryGetInstance(instanceId, out var instance) &&
+            instance.Mp3 is not null &&
+            inputAddress != 0 &&
+            inputSize is > 0 and <= MaxSilentPcmBytes &&
+            outputAddress != 0 &&
+            outputSize is > 0 and <= MaxSilentPcmBytes)
         {
-            ClearGuestMemory(ctx, outputAddress, outputSize);
+            var input = new byte[inputSize];
+            var output = new byte[outputSize];
+            if (ctx.Memory.TryRead(inputAddress, input))
+            {
+                var result = instance.Mp3.Decode(input, output, pcm16: instance.PreferPcm16);
+                if (result.OutputWritten > 0)
+                {
+                    if (!ctx.Memory.TryWrite(outputAddress, output.AsSpan(0, result.OutputWritten)))
+                    {
+                        return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+                    }
+
+                    // Zero any remainder so stale PCM does not leak into FMOD.
+                    if ((ulong)result.OutputWritten < outputSize)
+                    {
+                        ClearGuestMemory(
+                            ctx,
+                            outputAddress + (ulong)result.OutputWritten,
+                            outputSize - (ulong)result.OutputWritten);
+                    }
+
+                    decoded = true;
+                    inputConsumed = result.InputConsumed;
+                    outputWritten = result.OutputWritten;
+                    frames = result.Frames;
+                    totalSamples = instance.Mp3.TotalDecodedSamples;
+                }
+                else
+                {
+                    inputConsumed = result.InputConsumed;
+                    totalSamples = instance.Mp3.TotalDecodedSamples;
+                }
+            }
+        }
+
+        if (!decoded)
+        {
+            // Fallback: silence + consume input so the guest does not spin.
+            if (outputAddress != 0 && outputSize != 0 && outputSize <= MaxSilentPcmBytes)
+            {
+                ClearGuestMemory(ctx, outputAddress, outputSize);
+            }
+
+            if (inputConsumed == 0)
+            {
+                inputConsumed = inputSize > int.MaxValue ? int.MaxValue : (int)inputSize;
+            }
+
+            if (frames == 0 && (inputSize != 0 || outputSize != 0))
+            {
+                frames = 1;
+            }
         }
 
         WriteDecodeStreamResult(
             ctx,
             resultAddress,
-            inputConsumed: inputSize > int.MaxValue ? int.MaxValue : (int)inputSize,
-            outputWritten: 0,
-            totalDecodedSamples: 0,
-            frames: inputSize != 0 || outputSize != 0 ? 1u : 0u);
+            inputConsumed,
+            outputWritten,
+            totalSamples,
+            frames);
 
         Trace(
             $"batch_job_decode info=0x{infoAddress:X16} instance=0x{instanceId:X8} " +
             $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
-            $"result=0x{resultAddress:X16}");
+            $"written={outputWritten} frames={frames} result=0x{resultAddress:X16}");
         return ctx.SetReturn(0);
     }
 
+    private static bool TryGetInstance(uint instanceId, out AjmInstanceState instance)
+    {
+        instance = null!;
+        var codec = instanceId >> 14;
+        var slot = instanceId & 0x3FFF;
+        if (slot == 0)
+        {
+            return false;
+        }
+
+        foreach (var context in Contexts.Values)
+        {
+            lock (context.Gate)
+            {
+                if (context.InstancesBySlot.TryGetValue(slot, out var found) &&
+                    found.Codec == codec)
+                {
+                    instance = found;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
-    /// Submits a built batch. Instant-complete silence stub: publish a batch id
-    /// and clear any error out. Decode sidebands were already filled at
-    /// job-enqueue time.
+    /// Submits a built batch. Hot path after BatchJobDecode; unresolved WARNs
+    /// dominate the log. Instant-complete: publish a batch id and clear any
+    /// error out. Decode sidebands were already filled at job-enqueue time.
     /// </summary>
     [SysAbiExport(
         Nid = "5tOfnaClcqM",
@@ -363,6 +470,7 @@ public static class AjmExports
     private const ulong AjmBatchInfoSizeField = 16;
     private const ulong AjmBatchInfoLastGoodJobField = 24;
     private const ulong AjmJobRunSize = 64;
+    private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
     private const ulong MaxSilentPcmBytes = 1 << 20;
     // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).
     private const int DecodeSidebandBytes = 32;
