@@ -46,6 +46,7 @@ public static partial class AgcExports
     private const uint ItNumInstances = 0x2F;
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
+    private const uint ItCondExec = 0x22;
     private const uint ItWriteData = 0x37;
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
@@ -84,6 +85,11 @@ public static partial class AgcExports
     private const uint SpiShaderPgmHiEs = 0xC9;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
+    // Hull/tessellation stage slot, calibrated against the observed Ghost of
+    // Yōtei type-5 shader headers (lo=0x10A hi=0x10B) and this table's Gs
+    // (0x8A/0x8B) and Ls (0x148/0x149) numbering.
+    private const uint SpiShaderPgmLoHs = 0x10A;
+    private const uint SpiShaderPgmHiHs = 0x10B;
     private const uint SpiShaderPgmLoGs = 0x8A;
     private const uint SpiShaderPgmHiGs = 0x8B;
     private const uint SpiPsInputEna = 0x1B3;
@@ -806,7 +812,12 @@ public static partial class AgcExports
         var geometryShaderAddress = ctx[CpuRegister.Rcx];
         var primitiveType = (uint)ctx[CpuRegister.R8];
 
-        if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || hullShaderAddress != 0 || geometryShaderAddress == 0)
+        // The hull argument is optional: Ghost of Yōtei's tessellation
+        // pipelines pass their hull-state block here (0x8009F926D) and the
+        // geometry-derived cx/uc register writes below stay the same. The
+        // hull stage's own registers are not modelled yet, so it is only
+        // recorded in the trace.
+        if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || geometryShaderAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -828,7 +839,7 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
+        TraceAgc($"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2927,6 +2938,44 @@ public static partial class AgcExports
             $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
             $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
 
+        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+    #pragma warning restore SHEM006
+
+    // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
+    // Ghost of Yōtei calls this while building a graphics pipeline: inputs are
+    // two shader objects (byte +0x5A types 2 and 1, either may be null) and the
+    // output is a register-pair table the title submits to its register-shadow
+    // writer with count 0x20 — 32 {offset,value} pairs (0x100 bytes), the
+    // SPI_PS_INPUT_CNTL-sized interpolant mapping. A short fill leaves the
+    // tail as uninitialized stack, and the shadow writer then indexes its
+    // shadow table with the garbage offsets and faults (observed SIGSEGV at
+    // guest 0x801610CC4). All-zero pairs are the deterministic neutral
+    // encoding until the real layout is captured.
+    #pragma warning disable SHEM006
+    [SysAbiExport(
+        Nid = "dbOlWdppb4o",
+        ExportName = "sceAgcUnknownDbOlWdppb4o",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int UnknownDbOlWdppb4o(CpuContext ctx)
+    {
+        var outputAddress = ctx[CpuRegister.Rdi];
+        if (outputAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> blob = stackalloc byte[0x100];
+        blob.Clear();
+        if (!ctx.Memory.TryWrite(outputAddress, blob))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc(
+            $"agc.unknown_dbol out=0x{outputAddress:X16} shader_a=0x{ctx[CpuRegister.Rsi]:X16} " +
+            $"shader_b=0x{ctx[CpuRegister.Rdx]:X16}");
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
     #pragma warning restore SHEM006
@@ -11000,6 +11049,7 @@ public static partial class AgcExports
             1 => SpiShaderPgmLoPs,
             2 or 6 => SpiShaderPgmLoEs,
             4 => SpiShaderPgmLoGs,
+            5 => SpiShaderPgmLoHs,
             7 => SpiShaderPgmLoLs,
             _ => 0u,
         };
@@ -11009,6 +11059,7 @@ public static partial class AgcExports
             1 => SpiShaderPgmHiPs,
             2 or 6 => SpiShaderPgmHiEs,
             4 => SpiShaderPgmHiGs,
+            5 => SpiShaderPgmHiHs,
             7 => SpiShaderPgmHiLs,
             _ => 0u,
         };
@@ -11958,6 +12009,40 @@ public static partial class AgcExports
             !ctx.TryWriteUInt32(cmd + 4, flags) ||
             !ctx.TryWriteUInt32(cmd + 8, (uint)address & 0xFFFF_FFF0u) ||
             !ctx.TryWriteUInt32(cmd + 12, (uint)(address >> 32)))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
+    /// <summary>
+    /// Emits a PM4 COND_EXEC packet: the GPU skips the following
+    /// <c>execCount</c> command dwords unless the 64-bit predicate at
+    /// <c>address</c> is nonzero. Observed from Ghost of Yōtei's render setup
+    /// as (dcb, predicateAddress, execCountDwords, ...).
+    /// </summary>
+    [SysAbiExport(
+        Nid = "BIPexNBSGog",
+        ExportName = "sceAgcDcbCondExec",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbCondExec(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var execCount = (uint)ctx[CpuRegister.Rdx] & 0x3FFFu;
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 5, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(5, ItCondExec, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)address & 0xFFFF_FFFCu) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)(address >> 32)) ||
+            !ctx.TryWriteUInt32(cmd + 12, 0) ||
+            !ctx.TryWriteUInt32(cmd + 16, execCount))
         {
             return ReturnPointer(ctx, 0);
         }
