@@ -59,4 +59,65 @@ public static class GameServiceStubs
     public static int NpUniversalDataSystemCreateEvent(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpUniversalDataSystemPostEvent(CpuContext ctx) => Ok(ctx);
     public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "47UAEuQl+iI", ExportName = "sceNpUniversalDataSystemTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
+    public static int NpUniversalDataSystemTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "0HBYxYAjmf0", ExportName = "sceNpGameIntentTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceNpGameIntent")]
+    public static int NpGameIntentTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "jqb7HntFQFc", ExportName = "sceWebBrowserDialogInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceWebBrowserDialog")]
+    public static int WebBrowserDialogInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "ocHtyBwHfys", ExportName = "sceWebBrowserDialogTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceWebBrowserDialog")]
+    public static int WebBrowserDialogTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "kvYEw2lBndk", ExportName = "sceGameLiveStreamingInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceGameLiveStreaming")]
+    public static int GameLiveStreamingInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "isruqthpYcw", ExportName = "sceSharePlayInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceSharePlay")]
+    public static int SharePlayInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "0IL1keINExQ", ExportName = "sceShareTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+    public static int ShareTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "YBiIdcDPrxs", ExportName = "sceShareFeaturePermit",
+        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+    public static int ShareFeaturePermit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "9TrhuGzberQ", ExportName = "sceVoiceInit",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceInit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "clyKUyi3RYU", ExportName = "sceVoiceSetThreadsParams",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceSetThreadsParams(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "dPj4ZtRcIWk", ExportName = "sceContentSearchInit",
+        Target = Generation.Gen5, LibraryName = "libSceContentSearch")]
+    public static int ContentSearchInit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "zoxb0wEChEM", ExportName = "sceContentDeleteInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceContentDelete")]
+    public static int ContentDeleteInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Fc8qxlKINYQ", ExportName = "sceVideoRecordingSetInfo",
+        Target = Generation.Gen5, LibraryName = "libSceVideoRecording")]
+    public static int VideoRecordingSetInfo(CpuContext ctx) => Ok(ctx);
+
+    // Captured from GTA V Enhanced (PPSA04264); not in the public NID catalog.
+    // Side-effect-free success — same as unresolved stub behavior that kept boot
+    // moving; reverse the ABI before writing guest memory.
+    #pragma warning disable SHEM006
+    [SysAbiExport(Nid = "Ikfdt-rIqCE", ExportName = "sceUnknownIkfdt",
+        Target = Generation.Gen5, LibraryName = "libKernel")]
+    public static int UnknownIkfdt(CpuContext ctx) => Ok(ctx);
+    #pragma warning restore SHEM006
 }

@@ -755,6 +755,52 @@ public static class NetExports
         return true;
     }
 
+    [SysAbiExport(
+        Nid = "8Kcp5d-q1Uo",
+        ExportName = "sceNetInetPton",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetInetPton(CpuContext ctx)
+    {
+        var addressFamily = unchecked((int)ctx[CpuRegister.Rdi]);
+        var sourceAddress = ctx[CpuRegister.Rsi];
+        var destinationAddress = ctx[CpuRegister.Rdx];
+        if (sourceAddress == 0 || destinationAddress == 0)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if (!TryReadUtf8Z(ctx, sourceAddress, MaxNameLength, out var source))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        var family = addressFamily switch
+        {
+            2 => AddressFamily.InterNetwork,      // AF_INET
+            28 => AddressFamily.InterNetworkV6,   // AF_INET6
+            _ => AddressFamily.Unknown,
+        };
+        if (family == AddressFamily.Unknown ||
+            !IPAddress.TryParse(source, out var parsed) ||
+            parsed.AddressFamily != family)
+        {
+            // Match BSD inet_pton: return 0 for a parseable-family miss.
+            ctx[CpuRegister.Rax] = 0;
+            return 0;
+        }
+
+        var bytes = parsed.GetAddressBytes();
+        if (!ctx.Memory.TryWrite(destinationAddress, bytes))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        TraceNet("inet_pton", addressFamily, sourceAddress, destinationAddress, (ulong)bytes.Length);
+        ctx[CpuRegister.Rax] = 1;
+        return 1;
+    }
+
     private static void TraceNet(string operation, int id, ulong arg0, ulong arg1, ulong arg2)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_NET"), "1", StringComparison.Ordinal))
