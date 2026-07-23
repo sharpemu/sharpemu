@@ -195,6 +195,11 @@ public sealed class SelfLoader : ISelfLoader
 
         if (virtualMemory is PhysicalVirtualMemory physicalVm)
         {
+            // Give back the startup-time pre-reservation (see #235) right before the
+            // real fixed-address allocation needs the window; harmless no-op if it was
+            // never claimed (non-Windows, or it lost the race to something else).
+            GuestAddressSpaceReservation.Release();
+
             if (clearVirtualMemory)
             {
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
