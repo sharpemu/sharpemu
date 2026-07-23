@@ -19,6 +19,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.SourceGenerators/SharpEmu.SourceGenerators.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/SharpEmu.Debugger.Tests/SharpEmu.Debugger.Tests.csproj" />
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
     <Project Path="tests/SharpEmu.ShaderCompiler.Metal.Tests/SharpEmu.ShaderCompiler.Metal.Tests.csproj" />
     <Project Path="tests/SharpEmu.SourceGenerators.Tests/SharpEmu.SourceGenerators.Tests.csproj" />
