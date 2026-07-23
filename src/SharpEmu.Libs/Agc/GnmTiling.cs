@@ -6,6 +6,55 @@ using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Agc;
 
+/// <summary>Which in-block address equation a <see cref="DetileParams"/> carries.</summary>
+internal enum DetileEquation
+{
+    /// <summary>Unsupported mode/format; caller must use the CPU path or raw upload.</summary>
+    None,
+
+    /// <summary>Exact AddrLib XOR equation (RDNA2 modes 5/9/24/27): factored X/Y terms.</summary>
+    ExactXor,
+
+    /// <summary>Other modes: a precomputed in-block Morton/standard element-offset table.</summary>
+    BlockTable,
+}
+
+/// <summary>
+/// Backend-agnostic description of how to deswizzle one surface, produced by
+/// <see cref="GnmTiling.GetDetileParams"/>. Holds only plain integers and small
+/// int[] tables — no host graphics-API types — so it can cross the guest-GPU
+/// backend seam and drive a Vulkan (SPIR-V) or Metal (MSL) detile compute kernel
+/// identically to the CPU <see cref="GnmTiling.TryDetile"/> fallback. The single
+/// shared addressing formula both consume is:
+/// <code>
+///   inBlockByte = Equation == ExactXor
+///       ? XByteTerm[x &amp; XMask] ^ YByteTerm[y &amp; YMask]
+///       : BlockTable[(y % BlockHeight) * BlockWidth + (x % BlockWidth)] * BytesPerElement;
+///   srcByte = ((y / BlockHeight) * BlocksPerRow + (x / BlockWidth)) * BlockBytes + inBlockByte;
+/// </code>
+/// </summary>
+internal readonly record struct DetileParams(
+    DetileEquation Equation,
+    int ElementsWide,
+    int ElementsHigh,
+    int BytesPerElement,
+    int BlockWidth,
+    int BlockHeight,
+    int BlockElements,
+    int BlockBytes,
+    int BlocksPerRow,
+    // ExactXor: within-block BYTE offset = XByteTerm[x & XMask] ^ YByteTerm[y & YMask].
+    int[] XByteTerm,
+    int XMask,
+    int[] YByteTerm,
+    int YMask,
+    // BlockTable: within-block ELEMENT offset = BlockTable[inBlockY * BlockWidth + inBlockX].
+    int[] BlockTable)
+{
+    /// <summary>False when the mode/format is not GPU-portable (Equation == None).</summary>
+    public bool IsSupported => Equation != DetileEquation.None;
+}
+
 /// <summary>
 /// Deswizzles RDNA2 (GFX10) tiled texture surfaces into linear layout so they
 /// can be uploaded to Vulkan. PS5 stores most textures in a swizzled layout
@@ -495,6 +544,141 @@ internal static unsafe class GnmTiling
                 {
                     detileRow(y);
                 }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Computes the detile parameters for a surface without performing the copy,
+    /// so a GPU compute kernel can run the deswizzle instead of the CPU. Returns
+    /// <see cref="DetileParams.IsSupported"/> == false (Equation == None) when the
+    /// mode/format is not GPU-portable, so the caller keeps the CPU
+    /// <see cref="TryDetile"/> path or a raw upload. Reuses the same helpers and
+    /// caches as <see cref="TryDetile"/>, so the two never disagree on addressing.
+    /// </summary>
+    public static DetileParams GetDetileParams(
+        uint swizzleMode,
+        int bytesPerElement,
+        int elementsWide,
+        int elementsHigh)
+    {
+        if (!ShouldDetile(swizzleMode) ||
+            bytesPerElement <= 0 ||
+            elementsWide <= 0 ||
+            elementsHigh <= 0 ||
+            !TryGetSwizzleKind(swizzleMode, out var kind, out var blockBytes))
+        {
+            return default;
+        }
+
+        var bppLog2 = BitLog2((uint)bytesPerElement);
+        if (bppLog2 < 0)
+        {
+            return default;
+        }
+
+        var blockElements = blockBytes >> bppLog2;
+        var (blockWidth, blockHeight) = SquareBlockDimensions(blockElements);
+        if (blockWidth == 0 || blockHeight == 0)
+        {
+            return default;
+        }
+
+        var blocksPerRow = (elementsWide + blockWidth - 1) / blockWidth;
+
+        if (TryGetExactXorPattern(swizzleMode, bppLog2, out var pattern))
+        {
+            var terms = _patternTermCache.GetOrAdd(
+                (swizzleMode, bppLog2),
+                _ => CreatePatternTerms(pattern));
+            return new DetileParams(
+                DetileEquation.ExactXor,
+                elementsWide,
+                elementsHigh,
+                bytesPerElement,
+                blockWidth,
+                blockHeight,
+                blockElements,
+                blockBytes,
+                blocksPerRow,
+                terms.X,
+                terms.XMask,
+                terms.Y,
+                terms.YMask,
+                []);
+        }
+
+        var blockTable = _blockTableCache.GetOrAdd(
+            (kind, blockWidth, blockHeight),
+            static key => CreateBlockTable(key.Kind, key.Width, key.Height));
+        return new DetileParams(
+            DetileEquation.BlockTable,
+            elementsWide,
+            elementsHigh,
+            bytesPerElement,
+            blockWidth,
+            blockHeight,
+            blockElements,
+            blockBytes,
+            blocksPerRow,
+            [],
+            0,
+            [],
+            0,
+            blockTable);
+    }
+
+    /// <summary>
+    /// CPU deswizzle driven entirely by a resolved <see cref="DetileParams"/> — the
+    /// exact addressing the Vulkan/Metal compute kernel runs per texel, so a
+    /// backend that packaged <paramref name="parameters"/> for the GPU path can
+    /// fall back to this without re-deriving the swizzle. Copies
+    /// <c>ElementsWide * ElementsHigh</c> elements from <paramref name="tiled"/>
+    /// into <paramref name="linear"/>; returns false when unsupported or the output
+    /// span is too small. Out-of-range source elements are left zero (matching the
+    /// reference), so a truncated <paramref name="tiled"/> degrades gracefully.
+    /// </summary>
+    public static bool DetileWithParams(
+        in DetileParams parameters,
+        ReadOnlySpan<byte> tiled,
+        Span<byte> linear)
+    {
+        if (!parameters.IsSupported)
+        {
+            return false;
+        }
+
+        var width = parameters.ElementsWide;
+        var height = parameters.ElementsHigh;
+        var bpp = parameters.BytesPerElement;
+        var requiredLinear = (long)width * height * bpp;
+        if (width <= 0 || height <= 0 || bpp <= 0 || linear.Length < requiredLinear)
+        {
+            return false;
+        }
+
+        var isExactXor = parameters.Equation == DetileEquation.ExactXor;
+        for (var y = 0; y < height; y++)
+        {
+            var blockY = y / parameters.BlockHeight;
+            var inY = y % parameters.BlockHeight;
+            var yTerm = isExactXor ? parameters.YByteTerm[y & parameters.YMask] : 0;
+            for (var x = 0; x < width; x++)
+            {
+                var blockX = x / parameters.BlockWidth;
+                var inBlockByte = isExactXor
+                    ? parameters.XByteTerm[x & parameters.XMask] ^ yTerm
+                    : parameters.BlockTable[inY * parameters.BlockWidth + (x % parameters.BlockWidth)] * bpp;
+                var srcByte = ((long)blockY * parameters.BlocksPerRow + blockX) * parameters.BlockBytes + inBlockByte;
+                var dstByte = ((long)y * width + x) * bpp;
+                if (srcByte < 0 || srcByte + bpp > tiled.Length)
+                {
+                    continue;
+                }
+
+                tiled.Slice((int)srcByte, bpp).CopyTo(linear.Slice((int)dstByte, bpp));
             }
         }
 

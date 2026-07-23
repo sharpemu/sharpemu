@@ -1,0 +1,44 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+// GPU deswizzle for RDNA2 exact-XOR tiled surfaces (swizzle modes 5/9/24/27) at
+// 4 bytes/element — the MSL twin of SpirvFixedShaders.CreateDetileCompute and a
+// direct mirror of GnmTiling.GetDetileParams' ExactXor addressing:
+//   src = (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
+//         + (xTerm[x & xMask] ^ yTerm[y & yMask]);
+//   out[y * width + x] = tiled[src];
+// The x/y term tables are ELEMENT offsets (the host pre-shifts the byte-unit
+// GetDetileParams terms right by log2(bytesPerElement); for 4bpp that shift is
+// exact). One thread per texel; the caller copies the linear output buffer into
+// the sampled texture.
+struct DetileParams
+{
+    uint width;
+    uint height;
+    uint blockWidth;
+    uint blockHeight;
+    uint blockElements;
+    uint blocksPerRow;
+    uint xMask;
+    uint yMask;
+};
+
+kernel void detile_cs(
+    device const uint* tiled      [[buffer(0)]],
+    device const uint* xTerm      [[buffer(1)]],
+    device const uint* yTerm      [[buffer(2)]],
+    device uint* outLinear        [[buffer(3)]],
+    constant DetileParams& params [[buffer(4)]],
+    uint2 gid                     [[thread_position_in_grid]])
+{
+    if (gid.x >= params.width || gid.y >= params.height)
+    {
+        return;
+    }
+
+    uint blockIndex = (gid.y / params.blockHeight) * params.blocksPerRow + (gid.x / params.blockWidth);
+    uint off = xTerm[gid.x & params.xMask] ^ yTerm[gid.y & params.yMask];
+    uint src = blockIndex * params.blockElements + off;
+    outLinear[gid.y * params.width + gid.x] = tiled[src];
+}
