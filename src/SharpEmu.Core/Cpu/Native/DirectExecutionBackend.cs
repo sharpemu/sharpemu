@@ -3907,6 +3907,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return wakeCount;
 	}
 
+	public int WakeAllBlockedThreads()
+	{
+		var wakeCount = 0;
+		using (LockGate("WakeAllBlockedThreads"))
+		{
+			foreach (var thread in _guestThreads.Values)
+			{
+				if (thread.State != GuestThreadRunState.Blocked ||
+					!thread.HasBlockedContinuation)
+				{
+					continue;
+				}
+
+				// Force-wake regardless of TryWake predicate: the caller
+				// (sceKernelSuspendScheduler) needs every blocked thread to
+				// return from its wait so the guest can check a GC suspend
+				// flag and signal SuspendSemaphore.
+				thread.State = GuestThreadRunState.Ready;
+				thread.BlockReason = null;
+				thread.BlockDeadlineTimestamp = 0;
+				_readyGuestThreads.Enqueue(thread);
+				Interlocked.Increment(ref _readyGuestThreadCount);
+				wakeCount++;
+			}
+		}
+
+		if (wakeCount != 0)
+		{
+			if (_logGuestThreads)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][INFO] guest_threads.wake-all count={wakeCount}");
+			}
+
+			if (_cpuContext is { } wakeContext)
+			{
+				Pump(wakeContext, "wake-all");
+			}
+		}
+
+		return wakeCount;
+	}
+
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
 	{
 		using (LockGate("SnapshotThreads"))

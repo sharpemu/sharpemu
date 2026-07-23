@@ -62,6 +62,14 @@ public interface IGuestThreadScheduler
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
 
     /// <summary>
+    /// Force-wakes every blocked guest thread regardless of its wake key,
+    /// bypassing per-waiter TryWake predicates. Used by sceKernelSuspendScheduler
+    /// so IL2CPP stop-the-world GC can interrupt cooperative semaphore waits and
+    /// collect suspend acknowledgements without a circular deadlock.
+    /// </summary>
+    int WakeAllBlockedThreads();
+
+    /// <summary>
     /// Applies a new guest scheduling priority to a live thread, mapping it
     /// onto the host thread if one is running. Returns false when the thread
     /// handle is unknown.

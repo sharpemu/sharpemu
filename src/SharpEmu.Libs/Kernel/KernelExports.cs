@@ -466,4 +466,33 @@ public static class KernelExports
         ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "gLfPqLad6JA",
+        ExportName = "sceKernelSuspendScheduler",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelSuspendScheduler(CpuContext ctx)
+    {
+        // Force-wake every blocked guest thread so IL2CPP stop-the-world GC
+        // can collect suspend acknowledgements without a circular deadlock.
+        // Threads that were parked in sceKernelWaitSema see a timeout and
+        // re-check the GC suspend flag before re-blocking.
+        _ = GuestThreadExecution.Scheduler?.WakeAllBlockedThreads();
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "FO5wK+5KPjo",
+        ExportName = "sceKernelResumeScheduler",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelResumeScheduler(CpuContext ctx)
+    {
+        // Threads reschedule naturally after the suspend broadcast; no
+        // explicit resume action is needed in cooperative scheduling.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
