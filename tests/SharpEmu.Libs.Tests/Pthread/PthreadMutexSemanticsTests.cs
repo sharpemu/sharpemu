@@ -77,6 +77,104 @@ public sealed class PthreadMutexSemanticsTests
     }
 
     [Fact]
+    public void Mutex_SharedObjectPointerAcrossDifferentSlotsIsOneMutex()
+    {
+        const ulong memoryBase = 0x1_0010_0000;
+        const ulong slotA = memoryBase + 0x200;
+        const ulong slotB = memoryBase + 0x300;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = slotA;
+        context[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+
+        // The guest copies the ScePthreadMutex pointer value into another
+        // variable; both slots must resolve to the same mutex.
+        Assert.True(context.TryReadUInt64(slotA, out var objectPointer));
+        Assert.True(context.TryWriteUInt64(slotB, objectPointer));
+
+        context[CpuRegister.Rdi] = slotA;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        // Held through A: a trylock through B must see the same held mutex.
+        context[CpuRegister.Rdi] = slotB;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY,
+            KernelPthreadCompatExports.PthreadMutexTrylock(context));
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+        context[CpuRegister.Rdi] = slotA;
+        Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
+    [Fact]
+    public void Mutex_ReusedSlotHoldingDifferentMutexPointerIsRevalidated()
+    {
+        const ulong memoryBase = 0x1_0011_0000;
+        const ulong slotS = memoryBase + 0x200;
+        const ulong slotT = memoryBase + 0x300;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = slotS;
+        context[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+        context[CpuRegister.Rdi] = slotT;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+
+        // Prime the slot-keyed alias for S, as any lock/unlock does.
+        context[CpuRegister.Rdi] = slotS;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        // The guest reuses S (a stack temporary) for the mutex that lives in T.
+        Assert.True(context.TryReadUInt64(slotT, out var mutexYPointer));
+        Assert.True(context.TryWriteUInt64(slotS, mutexYPointer));
+
+        context[CpuRegister.Rdi] = slotS;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        // Y must now be held: a trylock through its home slot reports BUSY.
+        context[CpuRegister.Rdi] = slotT;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY,
+            KernelPthreadCompatExports.PthreadMutexTrylock(context));
+
+        context[CpuRegister.Rdi] = slotS;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
+    [Fact]
+    public void Mutex_ForeignObjectPointerSharesStateAcrossSlots()
+    {
+        const ulong memoryBase = 0x1_0012_0000;
+        const ulong slotA = memoryBase + 0x200;
+        const ulong slotB = memoryBase + 0x300;
+        const ulong foreignObject = memoryBase + 0x800;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        // A mutex object initialized by guest runtime code SharpEmu never saw:
+        // both slots store the same object pointer.
+        Assert.True(context.TryWriteUInt64(slotA, foreignObject));
+        Assert.True(context.TryWriteUInt64(slotB, foreignObject));
+
+        context[CpuRegister.Rdi] = slotA;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        context[CpuRegister.Rdi] = slotB;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY,
+            KernelPthreadCompatExports.PthreadMutexTrylock(context));
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        context[CpuRegister.Rdi] = slotA;
+        Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
+    [Fact]
     public async Task ContendedMutex_HandsOffOneHostWaiterAtATime()
     {
         const ulong memoryBase = 0x2_0000_0000;

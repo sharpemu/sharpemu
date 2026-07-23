@@ -61,6 +61,11 @@ public static class KernelPthreadCompatExports
         public int QueuedWaiterCount => Volatile.Read(ref _queuedWaiterCount);
         public int Type { get; set; } = MutexTypeErrorCheck;
         public int Protocol { get; set; }
+
+        // Canonical identity: the guest address of the mutex object this state
+        // represents (the value stored in ScePthreadMutex pointer slots). Slot
+        // addresses are only revocable aliases of this key.
+        public ulong HandleAddress { get; set; }
         public LinkedList<PthreadMutexWaiter> Waiters { get; } = new();
 
         public bool TryAcquireUncontended(ulong threadId, bool allowWaiterBarge)
@@ -755,6 +760,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        state.HandleAddress = handle;
         _mutexStates[mutexAddress] = state;
         _mutexStates[handle] = state;
 
@@ -1187,17 +1193,21 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        if (_mutexStates.ContainsKey(mutexAddress))
-        {
-            return mutexAddress;
-        }
-
+        // Prefer the stored object pointer for the same reason as
+        // TryResolveMutexState: slot-keyed entries can be stale aliases of a
+        // reused pointer variable, and destroy must target the mutex the slot
+        // points at now, not whichever one once lived behind that address.
         if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) && pointedHandle != 0)
         {
             if (_mutexStates.ContainsKey(pointedHandle))
             {
                 return pointedHandle;
             }
+        }
+
+        if (_mutexStates.ContainsKey(mutexAddress))
+        {
+            return mutexAddress;
         }
 
         return mutexAddress;
@@ -1212,13 +1222,36 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
-        if (_mutexStates.TryGetValue(mutexAddress, out state))
+        var slotReadable = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle);
+        if (_mutexStates.TryGetValue(mutexAddress, out var direct))
         {
-            resolvedAddress = mutexAddress;
-            return true;
+            // A direct hit is valid when the caller passed the mutex object
+            // itself, or a pointer slot that still stores this state's object.
+            // Sony's ScePthreadMutex argument is the address of a pointer
+            // variable — often a stack temporary — so a reused slot may now
+            // hold a different mutex; trusting the stale alias would splinter
+            // or hijack identities. Revalidate against the stored pointer.
+            if (direct.HandleAddress == mutexAddress ||
+                !slotReadable ||
+                pointedHandle == direct.HandleAddress)
+            {
+                resolvedAddress = direct.HandleAddress == mutexAddress
+                    ? mutexAddress
+                    : direct.HandleAddress;
+                if (resolvedAddress == 0)
+                {
+                    // States created before HandleAddress tracking existed.
+                    resolvedAddress = mutexAddress;
+                }
+
+                state = direct;
+                return true;
+            }
+
+            _mutexStates.TryRemove(mutexAddress, out _);
         }
 
-        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle))
+        if (!slotReadable)
         {
             return false;
         }
@@ -1237,8 +1270,7 @@ public static class KernelPthreadCompatExports
                 return true;
             }
 
-            resolvedAddress = pointedHandle;
-            return false;
+            return CreateForeignMutexState(mutexAddress, pointedHandle, out resolvedAddress, out state);
         }
 
         if (!createIfZero)
@@ -1248,6 +1280,37 @@ public static class KernelPthreadCompatExports
         }
 
         return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeErrorCheck, out resolvedAddress, out state);
+    }
+
+    /// <summary>
+    /// Tracks a mutex object the guest runtime initialized without
+    /// scePthreadMutexInit (observed with SCREAM's global locks in Gen5
+    /// titles). The state is keyed by the pointed-to object so every slot
+    /// holding the same pointer resolves to one mutex; the guest's object
+    /// memory is never written. NORMAL type keeps the established
+    /// self-relock compatibility path instead of manufacturing EDEADLK
+    /// failures the real kernel object would not produce.
+    /// </summary>
+    private static bool CreateForeignMutexState(ulong mutexAddress, ulong objectAddress, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadMutexState? state)
+    {
+        var createdState = new PthreadMutexState
+        {
+            Type = MutexTypeNormal,
+            HandleAddress = objectAddress,
+        };
+
+        lock (_stateGate)
+        {
+            if (!_mutexStates.TryGetValue(objectAddress, out state))
+            {
+                _mutexStates[objectAddress] = createdState;
+                state = createdState;
+            }
+        }
+
+        _mutexStates.TryAdd(mutexAddress, state);
+        resolvedAddress = objectAddress;
+        return true;
     }
 
     private static ulong ResolveMutexAttrHandle(CpuContext ctx, ulong attrAddress)
@@ -2090,6 +2153,7 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+        createdState.HandleAddress = handle;
         lock (_stateGate)
         {
             if (_mutexStates.TryGetValue(mutexAddress, out state))
