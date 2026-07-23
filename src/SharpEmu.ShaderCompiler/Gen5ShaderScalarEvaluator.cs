@@ -358,7 +358,10 @@ public static class Gen5ShaderScalarEvaluator
                 if (globalMemory.ScalarAddress >= ScalarRegisterCount - 1)
                 {
                     error =
-                        $"global-address-register-range pc=0x{instruction.Pc:X} " +
+                        $"{(globalMemory.UsesFlatAddress
+                            ? "flat-address-base-unresolved"
+                            : "global-address-register-range")} " +
+                        $"pc=0x{instruction.Pc:X} " +
                         $"s{globalMemory.ScalarAddress}";
                     return false;
                 }
@@ -373,11 +376,18 @@ public static class Gen5ShaderScalarEvaluator
                 }
 
                 var key = (globalMemory.ScalarAddress, baseAddress);
-                var writable = instruction.Opcode.StartsWith(
+                var writable =
+                    instruction.Opcode.StartsWith(
                         "GlobalStore",
                         StringComparison.Ordinal) ||
                     instruction.Opcode.StartsWith(
                         "GlobalAtomic",
+                        StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith(
+                        "FlatStore",
+                        StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith(
+                        "FlatAtomic",
                         StringComparison.Ordinal);
                 if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
                 {
