@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
+using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -86,7 +88,8 @@ internal static partial class MetalVideoPresenter
         uint InstanceCount,
         uint PrimitiveType,
         GuestIndexBuffer? IndexBuffer,
-        GuestRenderState RenderState);
+        GuestRenderState RenderState,
+        int BaseVertex = 0);
 
     private sealed record OffscreenGuestDraw(
         TranslatedGuestDraw Draw,
@@ -244,7 +247,8 @@ internal static partial class MetalVideoPresenter
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers,
         GuestRenderState? renderState,
         GuestDepthTarget? depthTarget,
-        ulong shaderAddress)
+        ulong shaderAddress,
+        int baseVertex = 0)
     {
         if (targets.Count == 0)
         {
@@ -292,7 +296,8 @@ internal static partial class MetalVideoPresenter
                         instanceCount,
                         primitiveType,
                         indexBuffer,
-                        effectiveRenderState),
+                        effectiveRenderState,
+                        baseVertex),
                     ToArray(targets),
                     depthTarget,
                     PublishTarget: true,
@@ -320,7 +325,8 @@ internal static partial class MetalVideoPresenter
         GuestIndexBuffer? indexBuffer,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers,
         GuestRenderState? renderState,
-        ulong shaderAddress)
+        ulong shaderAddress,
+        int baseVertex = 0)
     {
         if (depthTarget.Address == 0 || depthTarget.Width == 0 || depthTarget.Height == 0)
         {
@@ -347,7 +353,8 @@ internal static partial class MetalVideoPresenter
                         instanceCount,
                         primitiveType,
                         indexBuffer,
-                        renderState ?? GuestRenderState.Default),
+                        renderState ?? GuestRenderState.Default,
+                        baseVertex),
                     [new GuestRenderTarget(Address: 0, depthTarget.Width, depthTarget.Height, Format: 10, NumberType: 0)],
                     depthTarget,
                     PublishTarget: false,
@@ -980,17 +987,38 @@ internal static partial class MetalVideoPresenter
 
     private static void EncodeDrawCall(nint encoder, TranslatedGuestDraw draw)
     {
-        var primitive = GetPrimitiveType(draw.PrimitiveType);
-        var vertexCount = draw.PrimitiveType == 0x11 && draw.IndexBuffer is null
-            ? 4u
-            : draw.VertexCount;
+        var indexed = draw.IndexBuffer is not null;
+        var hasVertexBuffers = draw.VertexBuffers.Length > 0;
+        var primitive = GetPrimitiveType(
+            draw.PrimitiveType,
+            indexed,
+            draw.VertexCount,
+            hasVertexBuffers);
+        var vertexCount = AgcPrimitiveHelpers.GetRectListDrawVertexCount(
+            draw.PrimitiveType,
+            draw.VertexCount,
+            indexed,
+            hasVertexBuffers);
+        var baseVertex = (nuint)Math.Max(draw.BaseVertex, 0);
         if (draw.IndexBuffer is { } indexBuffer)
         {
             var device = MetalNative.Send(encoder, MetalNative.Selector("device"));
             var slice = AllocateUpload(
                 device, Math.Max(indexBuffer.Length, 1), out var buffer, out var offset);
-            indexBuffer.Data.AsSpan(0, Math.Min(indexBuffer.Length, indexBuffer.Data.Length))
-                .CopyTo(slice);
+            var source = indexBuffer.Data.AsSpan(
+                0,
+                Math.Min(indexBuffer.Length, indexBuffer.Data.Length));
+            // Metal drawIndexed without baseVertex: bake GE_INDX_OFFSET into
+            // the uploaded indices so glyph batches still hit the right verts.
+            if (draw.BaseVertex != 0)
+            {
+                BakeBaseVertexIntoIndices(source, slice, indexBuffer.Is32Bit, draw.BaseVertex);
+            }
+            else
+            {
+                source.CopyTo(slice);
+            }
+
             MetalNative.SendDrawIndexedPrimitives(
                 encoder,
                 MetalNative.Selector("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:instanceCount:"),
@@ -1011,9 +1039,43 @@ internal static partial class MetalVideoPresenter
                 encoder,
                 MetalNative.Selector("drawPrimitives:vertexStart:vertexCount:instanceCount:"),
                 primitive,
-                0,
+                baseVertex,
                 vertexCount,
                 Math.Max(draw.InstanceCount, 1));
+        }
+    }
+
+    private static void BakeBaseVertexIntoIndices(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        bool is32Bit,
+        int baseVertex)
+    {
+        if (is32Bit)
+        {
+            var count = source.Length / sizeof(uint);
+            for (var index = 0; index < count; index++)
+            {
+                var value = BinaryPrimitives.ReadUInt32LittleEndian(
+                    source.Slice(index * sizeof(uint), sizeof(uint)));
+                var adjusted = unchecked((uint)(value + baseVertex));
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    destination.Slice(index * sizeof(uint), sizeof(uint)),
+                    adjusted);
+            }
+
+            return;
+        }
+
+        var shortCount = source.Length / sizeof(ushort);
+        for (var index = 0; index < shortCount; index++)
+        {
+            var value = BinaryPrimitives.ReadUInt16LittleEndian(
+                source.Slice(index * sizeof(ushort), sizeof(ushort)));
+            var adjusted = unchecked((ushort)(value + baseVertex));
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                destination.Slice(index * sizeof(ushort), sizeof(ushort)),
+                adjusted);
         }
     }
 
@@ -2019,11 +2081,28 @@ internal static partial class MetalVideoPresenter
 
                 return 3;
             case 6:
-            case 0x11:
                 return 4;
             default:
                 return 3;
         }
+    }
+
+    private static nuint GetPrimitiveType(
+        uint guestPrimitiveType,
+        bool indexed,
+        uint vertexCount,
+        bool hasVertexBuffers)
+    {
+        if (AgcPrimitiveHelpers.ShouldDrawRectListAsTriangleStrip(
+                guestPrimitiveType,
+                indexed,
+                vertexCount,
+                hasVertexBuffers))
+        {
+            return 4; // MTLPrimitiveTypeTriangleStrip
+        }
+
+        return GetPrimitiveType(guestPrimitiveType);
     }
 
     private static bool IsIntegerFormat(Gen5PixelOutputKind kind) =>

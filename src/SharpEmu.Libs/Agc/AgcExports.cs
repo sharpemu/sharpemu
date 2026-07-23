@@ -99,6 +99,10 @@ public static partial class AgcExports
     private const uint ComputeNumThreadZ = 0x209;
     private const uint SpiPsInputCntl0 = 0x191;
     private const uint VgtPrimitiveType = 0x242;
+    private const uint VgtIndexType = 0x243;
+    // GE_INDX_OFFSET — base vertex for DrawIndexed / firstVertex for
+    // DrawIndexAuto. Glyph meshes and UI icon batches rely on this.
+    private const uint GeIndxOffset = 0x24A;
     private const uint PaScScreenScissorTl = 0x0C;
     private const uint PaScScreenScissorBr = 0x0D;
     private const uint CbTargetMask = 0x8E;
@@ -428,6 +432,7 @@ public static partial class AgcExports
         uint AttributeCount,
         uint VertexCount,
         uint InstanceCount,
+        int BaseVertex,
         GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
@@ -3505,7 +3510,8 @@ public static partial class AgcExports
                         vertexBuffers,
                         pendingComposite.RenderState,
                         pendingComposite.DepthTarget,
-                        pendingComposite.PixelShaderAddress);
+                        pendingComposite.PixelShaderAddress,
+                        pendingComposite.BaseVertex);
                     TraceAgcShader(
                         $"agc.deferred_composite ps=0x{pendingComposite.PixelShaderAddress:X16} " +
                         $"src=0x{pendingComposite.Textures.FirstOrDefault()?.Descriptor.Address ?? 0:X16} " +
@@ -5528,6 +5534,10 @@ public static partial class AgcExports
                 }
 
                 directDestination[startRegister + index] = value;
+                if (op == ItSetUconfigReg)
+                {
+                    ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
+                }
             }
 
             return;
@@ -5562,6 +5572,25 @@ public static partial class AgcExports
             // Dropping it leaves stale depth/render-control state active in
             // later passes.
             destination[registerOffset] = value;
+            if (register == RUcRegsIndirect)
+            {
+                ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// GraphicsDcbSetIndexSize writes VGT_INDEX_TYPE via SET_UCONFIG_REG.
+    /// Mirror that into <see cref="SubmittedDcbState.IndexSize"/>.
+    /// </summary>
+    private static void ApplyUcIndexTypeIfNeeded(
+        SubmittedDcbState state,
+        uint registerOffset,
+        uint value)
+    {
+        if (registerOffset == VgtIndexType)
+        {
+            state.IndexSize = value & 0x3;
         }
     }
 
@@ -5739,7 +5768,8 @@ public static partial class AgcExports
                 depthOnlyDraw.IndexBuffer,
                 vertexBuffers,
                 renderState,
-                depthOnlyDraw.PixelShaderAddress);
+                depthOnlyDraw.PixelShaderAddress,
+                depthOnlyDraw.BaseVertex);
 
             if (_traceAgcShader)
             {
@@ -5896,7 +5926,8 @@ public static partial class AgcExports
                         sharedVertexBuffers,
                         translatedDraw.RenderState,
                         translatedDraw.DepthTarget,
-                        translatedDraw.PixelShaderAddress);
+                        translatedDraw.PixelShaderAddress,
+                        translatedDraw.BaseVertex);
                 }
             }
             else
@@ -5938,7 +5969,8 @@ public static partial class AgcExports
                         translatedDraw.IndexBuffer,
                         vertexBuffers,
                         renderState,
-                        translatedDraw.PixelShaderAddress);
+                        translatedDraw.PixelShaderAddress,
+                        translatedDraw.BaseVertex);
                 }
                 else
                 {
@@ -6241,6 +6273,7 @@ public static partial class AgcExports
             AttributeCount: 0,
             vertexCount,
             state.InstanceCount,
+            GetBaseVertex(state),
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
@@ -6429,6 +6462,22 @@ public static partial class AgcExports
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_GLOBALS_LIVE") == "1")
         {
             TraceAstroTitlePixelGlobalProbe(pixelEvaluation);
+        }
+
+        state.UcRegisters.TryGetValue(VgtPrimitiveType, out var earlyPrimitiveType);
+        if (IsRectListPrimitive(earlyPrimitiveType) &&
+            (exportEvaluation.VertexInputs is null || exportEvaluation.VertexInputs.Count == 0) &&
+            !VertexProgramExportsParameters(exportState.Program) &&
+            GetInterpolatedAttributeCount(pixelState) != 0)
+        {
+            ReturnPooledEvaluationArrays(exportEvaluation);
+            ReturnPooledEvaluationArrays(pixelEvaluation);
+            error =
+                $"rect-list-no-param-exports ps_inputs={GetInterpolatedAttributeCount(pixelState)}";
+            TraceAgcShader(
+                $"agc.rect_list_skip es=0x{exportShaderAddress:X16} " +
+                $"ps=0x{pixelShaderAddress:X16} {error}");
+            return false;
         }
 
         // Every bound color target the shader exports to. Deferred renderers
@@ -6716,6 +6765,7 @@ public static partial class AgcExports
             GetInterpolatedAttributeCount(pixelState),
             vertexCount,
             state.InstanceCount,
+            GetBaseVertex(state),
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
@@ -7027,6 +7077,22 @@ public static partial class AgcExports
             ColorFunc: 0,
         };
 
+    private static AgcIndexHelpers.ProsperoIndexType GetProsperoIndexType(SubmittedDcbState state) =>
+        // IndexSize is latched from ItIndexType and from UC VGT_INDEX_TYPE
+        // writes. Do not fall back to a stale UC value when IndexSize is 0 —
+        // that mis-classified 16-bit draws as index8 and blanked meshes.
+        AgcIndexHelpers.Decode(state.IndexSize);
+
+    /// <summary>
+    /// ResolveVertexOffset for the common UC path: GE_INDX_OFFSET is the
+    /// DrawIndexed vertexOffset / DrawAuto firstVertex. Embedded-fetch SGPR
+    /// fallback is not required when the game latches this register (GTA UI).
+    /// </summary>
+    private static int GetBaseVertex(SubmittedDcbState state) =>
+        state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
+            ? unchecked((int)indexOffset)
+            : 0;
+
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
         SubmittedDcbState state,
@@ -7037,17 +7103,40 @@ public static partial class AgcExports
             return null;
         }
 
-        var is32Bit = state.IndexSize != 0;
-        var bytesPerIndex = is32Bit ? sizeof(uint) : sizeof(ushort);
-        var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
-        var byteCount = checked((int)(indexCount * (uint)bytesPerIndex));
-        var data = GuestDataPool.Shared.Rent(byteCount);
-        var span = data.AsSpan(0, byteCount);
+        var indexType = GetProsperoIndexType(state);
+        var guestBytesPerIndex = AgcIndexHelpers.GetGuestStrideBytes(indexType);
+        var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)guestBytesPerIndex);
+        var guestByteCount = checked((int)(indexCount * (uint)guestBytesPerIndex));
         var address = state.IndexBufferAddress + byteOffset;
+
+        // Host backends only bind u16/u32. Expand kIndex8 -> u16.
+        if (indexType == AgcIndexHelpers.ProsperoIndexType.Index8)
+        {
+            var guestData = GuestDataPool.Shared.Rent(guestByteCount);
+            var guestSpan = guestData.AsSpan(0, guestByteCount);
+            if (!ctx.Memory.TryRead(address, guestSpan) &&
+                !KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, guestSpan))
+            {
+                GuestDataPool.Shared.Return(guestData);
+                return null;
+            }
+
+            var hostByteCount = checked((int)(indexCount * sizeof(ushort)));
+            var hostData = GuestDataPool.Shared.Rent(hostByteCount);
+            AgcIndexHelpers.ExpandIndex8ToU16(
+                guestSpan,
+                hostData.AsSpan(0, hostByteCount));
+            GuestDataPool.Shared.Return(guestData);
+            return new GuestIndexBuffer(hostData, hostByteCount, Is32Bit: false, Pooled: true);
+        }
+
+        var is32Bit = indexType == AgcIndexHelpers.ProsperoIndexType.Index32;
+        var data = GuestDataPool.Shared.Rent(guestByteCount);
+        var span = data.AsSpan(0, guestByteCount);
         if (ctx.Memory.TryRead(address, span) ||
             KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, span))
         {
-            return new GuestIndexBuffer(data, byteCount, is32Bit, Pooled: true);
+            return new GuestIndexBuffer(data, guestByteCount, is32Bit, Pooled: true);
         }
 
         GuestDataPool.Shared.Return(data);
@@ -7061,7 +7150,10 @@ public static partial class AgcExports
         bool indexed,
         out uint recordCount)
     {
-        recordCount = Math.Max(drawCount, Math.Max(state.InstanceCount, 1u));
+        var baseVertex = (uint)Math.Max(GetBaseVertex(state), 0);
+        recordCount = Math.Max(
+            baseVertex + drawCount,
+            Math.Max(state.InstanceCount, 1u));
         if (!indexed)
         {
             return true;
@@ -7072,8 +7164,8 @@ public static partial class AgcExports
             return false;
         }
 
-        var is32Bit = state.IndexSize != 0;
-        var bytesPerIndex = is32Bit ? sizeof(uint) : sizeof(ushort);
+        var indexType = GetProsperoIndexType(state);
+        var bytesPerIndex = AgcIndexHelpers.GetGuestStrideBytes(indexType);
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
         var address = state.IndexBufferAddress + byteOffset;
         const int chunkBytes = 64 * 1024;
@@ -7098,12 +7190,22 @@ public static partial class AgcExports
 
                 for (var index = 0; index < chunkIndices; index++)
                 {
-                    var value = is32Bit
-                        ? BinaryPrimitives.ReadUInt32LittleEndian(
-                            span.Slice(index * sizeof(uint), sizeof(uint)))
-                        : BinaryPrimitives.ReadUInt16LittleEndian(
-                            span.Slice(index * sizeof(ushort), sizeof(ushort)));
-                    if (value == (is32Bit ? uint.MaxValue : ushort.MaxValue))
+                    uint value = indexType switch
+                    {
+                        AgcIndexHelpers.ProsperoIndexType.Index32 =>
+                            BinaryPrimitives.ReadUInt32LittleEndian(
+                                span.Slice(index * sizeof(uint), sizeof(uint))),
+                        AgcIndexHelpers.ProsperoIndexType.Index8 => span[index],
+                        _ => BinaryPrimitives.ReadUInt16LittleEndian(
+                            span.Slice(index * sizeof(ushort), sizeof(ushort))),
+                    };
+                    var restart = indexType switch
+                    {
+                        AgcIndexHelpers.ProsperoIndexType.Index32 => uint.MaxValue,
+                        AgcIndexHelpers.ProsperoIndexType.Index8 => 0xFFu,
+                        _ => ushort.MaxValue,
+                    };
+                    if (value == restart)
                     {
                         // Primitive-restart markers do not address vertex data.
                         continue;
@@ -7123,17 +7225,24 @@ public static partial class AgcExports
         }
 
         var indexedRecords = sawIndex && maxIndex != uint.MaxValue
-            ? maxIndex + 1
-            : 1u;
+            ? baseVertex + maxIndex + 1
+            : Math.Max(baseVertex + 1, 1u);
         recordCount = Math.Max(indexedRecords, Math.Max(state.InstanceCount, 1u));
         if (_traceVertexRanges &&
             Interlocked.Increment(ref _tracedVertexRangeCount) <= 512)
         {
+            var indexBits = indexType switch
+            {
+                AgcIndexHelpers.ProsperoIndexType.Index32 => 32,
+                AgcIndexHelpers.ProsperoIndexType.Index8 => 8,
+                _ => 16,
+            };
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] agc.vertex_range indexed=1 draw_count={drawCount} " +
-                $"max_index={(sawIndex ? maxIndex : 0)} records={recordCount} " +
-                $"instances={state.InstanceCount} index_size={(is32Bit ? 32 : 16)} " +
-                $"index_addr=0x{state.IndexBufferAddress:X16} offset={state.DrawIndexOffset}");
+                $"max_index={(sawIndex ? maxIndex : 0)} base_vertex={baseVertex} " +
+                $"records={recordCount} instances={state.InstanceCount} " +
+                $"index_size={indexBits} index_addr=0x{state.IndexBufferAddress:X16} " +
+                $"offset={state.DrawIndexOffset}");
         }
         return true;
     }
@@ -7142,6 +7251,20 @@ public static partial class AgcExports
         target < ColorTargetCount
             ? (packedMasks >> (int)(target * 4)) & 0xFu
             : 0;
+
+    private static bool VertexProgramExportsParameters(Gen5ShaderProgram program)
+    {
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Control is Gen5ExportControl export &&
+                export.Target is >= 32 and < 64)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
@@ -7847,10 +7970,15 @@ public static partial class AgcExports
                     ? $"{entry.Name}=0x{value:X8}"
                     : $"{entry.Name}=missing"));
         var blend = draw.RenderState.Blend;
+        var rectExpanded = AgcPrimitiveHelpers.GetRectListDrawVertexCount(
+            draw.PrimitiveType,
+            draw.VertexCount,
+            indexed: draw.IndexBuffer is not null,
+            hasVertexBuffers: draw.VertexInputs.Count > 0);
         TraceAgcShader(
             $"agc.shader_draw es=0x{draw.ExportShaderAddress:X16} " +
             $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelShader.Payload.Length} " +
-            $"primitive=0x{draw.PrimitiveType:X} " +
+            $"primitive=0x{draw.PrimitiveType:X} verts={draw.VertexCount}->{rectExpanded} " +
             $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc} " +
             $"write_mask=0x{blend.WriteMask:X} scissor={scissor} viewport={viewport} " +
             $"raster=[{raster}] " +
@@ -8919,36 +9047,51 @@ public static partial class AgcExports
         TranslatedGuestDraw draw,
         IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
-        if (draw.PrimitiveType != 0x11 ||
-            draw.IndexBuffer is not null ||
-            vertexBuffers.Count == 0 ||
-            _rectListTraceCount >= 8 ||
-            Interlocked.Increment(ref _rectListTraceCount) > 8)
+        if (!AgcPrimitiveHelpers.IsRectListPrimitive(draw.PrimitiveType) ||
+            _rectListTraceCount >= 16 ||
+            Interlocked.Increment(ref _rectListTraceCount) > 16)
         {
             return;
         }
 
-        var buffer = vertexBuffers[0];
-        var stride = Math.Max(buffer.Stride, 4u);
+        var expanded = AgcPrimitiveHelpers.GetRectListDrawVertexCount(
+            draw.PrimitiveType,
+            draw.VertexCount,
+            indexed: draw.IndexBuffer is not null,
+            hasVertexBuffers: vertexBuffers.Count > 0);
         var text = new System.Text.StringBuilder();
-        for (var vertex = 0; vertex < 3; vertex++)
-        {
-            var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
-            if (baseOffset + 16 > buffer.Length)
-            {
-                break;
-            }
+        text.Append(
+            $"agc.rectlist prim=0x{draw.PrimitiveType:X} verts={draw.VertexCount}->{expanded} " +
+            $"indexed={(draw.IndexBuffer is not null ? 1 : 0)} vb={vertexBuffers.Count}");
 
-            var x = BitConverter.ToSingle(buffer.Data, baseOffset);
-            var y = BitConverter.ToSingle(buffer.Data, baseOffset + 4);
-            var z = BitConverter.ToSingle(buffer.Data, baseOffset + 8);
-            var w = BitConverter.ToSingle(buffer.Data, baseOffset + 12);
-            text.Append($" v{vertex}=({x:0.###},{y:0.###},{z:0.###},{w:0.###})");
+        if (vertexBuffers.Count > 0)
+        {
+            var buffer = vertexBuffers[0];
+            var stride = Math.Max(buffer.Stride, 4u);
+            text.Append(
+                $" stride={buffer.Stride} " +
+                $"fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount}");
+            for (var vertex = 0; vertex < 3; vertex++)
+            {
+                var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
+                if (baseOffset + 16 > buffer.Length)
+                {
+                    break;
+                }
+
+                var x = BitConverter.ToSingle(buffer.Data, baseOffset);
+                var y = BitConverter.ToSingle(buffer.Data, baseOffset + 4);
+                var z = BitConverter.ToSingle(buffer.Data, baseOffset + 8);
+                var w = BitConverter.ToSingle(buffer.Data, baseOffset + 12);
+                text.Append($" v{vertex}=({x:0.###},{y:0.###},{z:0.###},{w:0.###})");
+            }
+        }
+        else
+        {
+            text.Append(" procedural=1");
         }
 
-        TraceAgcShader(
-            $"agc.rectlist verts={draw.VertexCount} stride={buffer.Stride} " +
-            $"fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount}{text}");
+        TraceAgcShader(text.ToString());
     }
 
     private static int _textureDumpCount;
@@ -11026,6 +11169,9 @@ public static partial class AgcExports
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
         shaderType is 2 or 6;
+
+    private static bool IsRectListPrimitive(uint primitiveType) =>
+        AgcPrimitiveHelpers.IsRectListPrimitive(primitiveType);
 
     private static int SetIndirectPatchAddress(CpuContext ctx, string registerSpace)
     {
