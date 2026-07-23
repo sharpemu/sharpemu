@@ -271,6 +271,25 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_NO_TEXTURE_SKIP"),
         "1",
         StringComparison.Ordinal);
+
+    // GPU deswizzle: ship raw tiled bytes + params to the backend instead of
+    // detiling on the CPU. On by default; SHARPEMU_GPU_DETILE=0 forces the CPU
+    // path. Backend-agnostic here (only inspects DetileParams); the Vulkan/Metal
+    // backends detile on the GPU, others fall back to the CPU path.
+    private static readonly bool _gpuDetileEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_DETILE"),
+        "0",
+        StringComparison.Ordinal);
+
+    // Diagnostics (SHARPEMU_LOG_GPU_DETILE=1): one line per distinct texture tile
+    // mode and per-gate decision, so we can see which swizzle modes/formats a
+    // title uses and whether each takes the GPU or CPU path.
+    private static readonly bool _gpuDetileLog = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_DETILE"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly HashSet<uint> _seenTextureTileModes = new();
+    private static readonly HashSet<uint> _gpuDetileGateDiag = new();
     private static long _dcbWriteDataTraceCount;
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
@@ -8385,6 +8404,20 @@ public static partial class AgcExports
             return true;
         }
 
+        if (_gpuDetileLog)
+        {
+            lock (_seenTextureTileModes)
+            {
+                if (_seenTextureTileModes.Add(descriptor.TileMode))
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU-DETILE] texture tile_mode={descriptor.TileMode} fmt={descriptor.Format} " +
+                        $"{descriptor.Width}x{descriptor.Height} " +
+                        $"(0=linear; GPU covers exact-XOR 5/9/24/27 @ 4bpp).");
+                }
+            }
+        }
+
         var sourceWidth = descriptor.TileMode == 0
             ? GetLinearTexturePitch(
                 Math.Max(descriptor.Width, descriptor.Pitch),
@@ -8731,6 +8764,60 @@ public static partial class AgcExports
                 $"bytes={source.Length} logical_bytes={sourceByteCount} nonzero64={nonZero}");
         }
         DumpTextureSourceIfRequested(descriptor, sourceWidth, source);
+
+        if (_gpuDetileLog && descriptor.TileMode != 0)
+        {
+            lock (_gpuDetileGateDiag)
+            {
+                if (_gpuDetileGateDiag.Add(descriptor.TileMode))
+                {
+                    var eq = hasElementLayout
+                        ? GnmTiling.GetDetileParams(
+                            descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh).Equation
+                        : DetileEquation.None;
+                    Console.Error.WriteLine(
+                        $"[GPU-DETILE] gate mode={descriptor.TileMode} fmt={descriptor.Format} " +
+                        $"bpp={bytesPerElement} hasLayout={hasElementLayout} mipTail={baseMipInTail} " +
+                        $"storage={isStorage} arrayed={isArrayed} eq={eq} -> " +
+                        $"{(hasElementLayout && !baseMipInTail && bytesPerElement == 4 && eq == DetileEquation.ExactXor ? "GPU" : "CPU")}");
+                }
+            }
+        }
+
+        // GPU detile: for the exact-XOR 4-bytes/element base-mip case the backend
+        // can deswizzle on the GPU, so ship the raw tiled bytes + params rather
+        // than paying the CPU detile. Everything else keeps the CPU path below.
+        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4)
+        {
+            var gpuDetileParams = GnmTiling.GetDetileParams(
+                descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);
+            if (gpuDetileParams.Equation == DetileEquation.ExactXor &&
+                (long)elementsWide * elementsHigh * bytesPerElement <= source.Length)
+            {
+                texture = new GuestDrawTexture(
+                    descriptor.Address,
+                    descriptor.Width,
+                    descriptor.Height,
+                    descriptor.Format,
+                    descriptor.NumberType,
+                    [],
+                    IsFallback: false,
+                    IsStorage: isStorage,
+                    MipLevels: descriptor.MipLevels,
+                    MipLevel: mipLevel,
+                    BaseMipLevel: descriptor.ViewBaseLevel,
+                    ResourceMipLevels: descriptor.ResourceMipLevels,
+                    Pitch: sourceWidth,
+                    TileMode: descriptor.TileMode,
+                    DstSelect: descriptor.DstSelect,
+                    Sampler: ToGuestSampler(samplerDescriptor),
+                    WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
+                    ArrayedView: isArrayed,
+                    TiledSource: source,
+                    Detile: gpuDetileParams);
+                return true;
+            }
+        }
 
         var rgba = TryDetileTextureSource(
             descriptor,

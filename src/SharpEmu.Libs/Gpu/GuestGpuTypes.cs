@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Agc;
+
 namespace SharpEmu.Libs.Gpu;
 
 // The types that cross the guest-GPU backend seam. Every field is either a neutral
@@ -32,7 +34,13 @@ internal sealed record GuestDrawTexture(
     // from; -1 when the range is untracked or the pixels were not read here.
     long WriteGeneration = -1,
     bool ArrayedView = false,
-    uint ArrayLayers = 1);
+    uint ArrayLayers = 1,
+    // GPU-detile opt-in (SHARPEMU_GPU_DETILE): when Detile is non-null the AGC
+    // layer skipped the CPU deswizzle and shipped the raw TILED bytes here in
+    // TiledSource; the Vulkan backend detiles them on the GPU. RgbaPixels is
+    // empty in that case. Both are neutral (no host graphics-API values).
+    byte[]? TiledSource = null,
+    DetileParams? Detile = null);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(

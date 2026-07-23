@@ -2833,6 +2833,14 @@ internal static unsafe class VulkanVideoPresenter
         private long _lastPipelineCacheSaveTick;
         private Queue _queue;
         private uint _queueFamilyIndex;
+        // GPU deswizzle (default on; SHARPEMU_GPU_DETILE=0 forces the CPU path).
+        // Lazily built on the first tiled texture; disposed with the presenter.
+        private static readonly bool _gpuDetileEnabled = !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_DETILE"), "0", StringComparison.Ordinal);
+        private static readonly bool _gpuDetileLog = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_DETILE"), "1", StringComparison.Ordinal);
+        private VulkanDetilePass? _detilePass;
+        private long _gpuDetileCount;
         private SwapchainKHR _swapchain;
         private Image[] _swapchainImages = [];
         private ImageView[] _swapchainImageViews = [];
@@ -2879,6 +2887,9 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Stack<Fence> _recycledGuestFences = new();
         private readonly Stack<CommandBuffer> _recycledGuestCommandBuffers = new();
         private readonly List<(VkBuffer Buffer, DeviceMemory Memory)> _batchRetireBuffers = new();
+        // Descriptor pools from GPU-detile passes recorded into the batch; retired
+        // with the batch's fence, alongside _batchRetireBuffers.
+        private readonly List<DescriptorPool> _batchRetireDescriptorPools = new();
         private const int MaxRecycledGuestFences = 32;
         private const int MaxRecycledGuestCommandBuffers = 32;
         private VkBuffer _stagingBuffer;
@@ -3242,6 +3253,7 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> Resources,
             IReadOnlyList<GuestImageResource> TraceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers,
+            IReadOnlyList<DescriptorPool> RetirePools,
             ulong Timeline,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
@@ -4206,6 +4218,7 @@ internal static unsafe class VulkanVideoPresenter
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
             LoadDebugUtilsCommands();
+            VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
             {
                 throw new InvalidOperationException("VK_KHR_swapchain is unavailable.");
@@ -4914,7 +4927,10 @@ internal static unsafe class VulkanVideoPresenter
                     _batchCommandBuffer,
                     _batchResources.ToArray(),
                     _batchTraceImages.ToArray(),
-                    _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : []);
+                    _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : [],
+                    retirePools: _batchRetireDescriptorPools.Count > 0
+                        ? _batchRetireDescriptorPools.ToArray()
+                        : []);
             }
             catch
             {
@@ -4932,6 +4948,11 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.FreeMemory(_device, memory, null);
                 }
 
+                foreach (var pool in _batchRetireDescriptorPools)
+                {
+                    _vk.DestroyDescriptorPool(_device, pool, null);
+                }
+
                 ReleaseGuestCommandBuffer(_batchCommandBuffer);
                 throw;
             }
@@ -4940,6 +4961,7 @@ internal static unsafe class VulkanVideoPresenter
                 _batchResources.Clear();
                 _batchTraceImages.Clear();
                 _batchRetireBuffers.Clear();
+                _batchRetireDescriptorPools.Clear();
                 _batchCommandBuffer = default;
             }
         }
@@ -4949,7 +4971,8 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> resources,
             IReadOnlyList<GuestImageResource> traceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)>? retireBuffers = null,
-            IReadOnlyList<TranslatedDrawResources>? referencedResources = null)
+            IReadOnlyList<TranslatedDrawResources>? referencedResources = null,
+            IReadOnlyList<DescriptorPool>? retirePools = null)
         {
             var fence = AcquireGuestFence();
             try
@@ -5007,6 +5030,7 @@ internal static unsafe class VulkanVideoPresenter
                     resources,
                     traceImages,
                     retireBuffers ?? [],
+                    retirePools ?? [],
                     _submitTimeline,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
@@ -5176,6 +5200,11 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _vk.DestroyBuffer(_device, buffer, null);
                     _vk.FreeMemory(_device, memory, null);
+                }
+
+                foreach (var pool in submission.RetirePools)
+                {
+                    _vk.DestroyDescriptorPool(_device, pool, null);
                 }
 
                 ReleaseGuestCommandBuffer(submission.CommandBuffer);
@@ -7790,7 +7819,7 @@ internal static unsafe class VulkanVideoPresenter
                 MarkTextureContentCached(key);
                 SharpEmu.HLE.GuestImageWriteTracker.Track(
                     texture.Address,
-                    (ulong)texture.RgbaPixels.Length,
+                    (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length),
                     CurrentGuestWorkSequenceForDiagnostics,
                     "vulkan.texture-cache");
             }
@@ -8142,6 +8171,10 @@ internal static unsafe class VulkanVideoPresenter
             return (uint)selectedMipLevel;
         }
 
+        private VulkanDetilePass EnsureDetilePass() =>
+            _detilePass ??= new VulkanDetilePass(
+                _vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
+
         private TextureResource CreateTextureResource(GuestDrawTexture texture)
         {
             var width = Math.Max(texture.Width, 1);
@@ -8163,31 +8196,56 @@ internal static unsafe class VulkanVideoPresenter
                     $"layers={layers} dst=0x{texture.DstSelect:X3} " +
                     $"bytes={texture.RgbaPixels.Length} expected={expectedSize}");
             }
-            var pixels = texture.RgbaPixels.Length == (int)(expectedSize * layers)
-                ? texture.RgbaPixels
-                : CreateFallbackTexturePixels(texture.Format, rowLength, height, expectedSize);
-            if (!ReferenceEquals(pixels, texture.RgbaPixels))
+            DetileParams? gpuDetileParams = null;
+            byte[]? gpuTiledSource = null;
+            if (_gpuDetileEnabled &&
+                layers == 1 &&
+                !texture.ArrayedView &&
+                texture.Detile is { } detileCandidate &&
+                texture.TiledSource is { Length: > 0 } tiledCandidate &&
+                VulkanDetilePass.Supports(detileCandidate) &&
+                (uint)detileCandidate.ElementsWide == width &&
+                (uint)detileCandidate.ElementsHigh == height)
             {
-                layers = 1;
+                gpuDetileParams = detileCandidate;
+                gpuTiledSource = tiledCandidate;
             }
-            if (AddressListContains("SHARPEMU_FORCE_WHITE_TEXTURE_TARGETS", texture.Address))
-            {
-                pixels = pixels.ToArray();
-                pixels.AsSpan().Fill(0xFF);
-                Console.Error.WriteLine(
-                    $"[LOADER][TRACE] vk.texture_force_white addr=0x{texture.Address:X16} " +
-                    $"size={width}x{height} bytes={pixels.Length}");
-            }
-            DumpTextureUpload(texture, pixels, rowLength, width, height);
-            TraceTextureUploadContents(texture, pixels, rowLength, width, height, vkFormat);
-            var uploadPixels = texture.Format == 13
-                ? ExpandRgb32Pixels(pixels)
-                : pixels;
-            var contentFingerprint = ComputeTextureContentFingerprint(pixels);
 
-            var (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
-                uploadPixels,
-                $"{TextureDebugName(texture, vkFormat)} staging");
+            VkBuffer stagingBuffer = default;
+            DeviceMemory stagingMemory = default;
+            ulong contentFingerprint;
+            if (gpuTiledSource is { } gpuSource)
+            {
+                // GPU detile: no CPU staging; the compute pass writes the image directly.
+                contentFingerprint = ComputeTextureContentFingerprint(gpuSource);
+            }
+            else
+            {
+                var pixels = texture.RgbaPixels.Length == (int)(expectedSize * layers)
+                    ? texture.RgbaPixels
+                    : CreateFallbackTexturePixels(texture.Format, rowLength, height, expectedSize);
+                if (!ReferenceEquals(pixels, texture.RgbaPixels))
+                {
+                    layers = 1;
+                }
+                if (AddressListContains("SHARPEMU_FORCE_WHITE_TEXTURE_TARGETS", texture.Address))
+                {
+                    pixels = pixels.ToArray();
+                    pixels.AsSpan().Fill(0xFF);
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.texture_force_white addr=0x{texture.Address:X16} " +
+                        $"size={width}x{height} bytes={pixels.Length}");
+                }
+                DumpTextureUpload(texture, pixels, rowLength, width, height);
+                TraceTextureUploadContents(texture, pixels, rowLength, width, height, vkFormat);
+                var uploadPixels = texture.Format == 13
+                    ? ExpandRgb32Pixels(pixels)
+                    : pixels;
+                contentFingerprint = ComputeTextureContentFingerprint(pixels);
+                (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
+                    uploadPixels,
+                    $"{TextureDebugName(texture, vkFormat)} staging");
+            }
 
             var supportsAttachmentUsage = !IsBlockCompressedFormat(vkFormat);
             var supportsStorageUsage = supportsAttachmentUsage &&
@@ -8243,6 +8301,65 @@ internal static unsafe class VulkanVideoPresenter
             var debugName = TextureDebugName(texture, vkFormat);
             SetDebugName(ObjectType.Image, image.Handle, $"{debugName} image");
             SetDebugName(ObjectType.ImageView, view.Handle, $"{debugName} view");
+
+            // GPU detile: record the deswizzle into the shared batch command buffer
+            // (async — never a blocking submit on the render thread), leaving the
+            // image ShaderReadOnly before the draw that samples it. The transient
+            // buffers + descriptor pool retire with the batch fence. On any failure
+            // fall back to a CPU detile + normal staged upload.
+            var gpuDetiled = false;
+            if (gpuTiledSource is { } detileSource && gpuDetileParams is { } detileParameters)
+            {
+                try
+                {
+                    var detileCommandBuffer = BeginBatchedGuestCommands();
+                    CloseOpenTranslatedRenderPass();
+                    if (EnsureDetilePass().RecordDetile(
+                            detileCommandBuffer,
+                            image,
+                            ImageLayout.Undefined,
+                            width,
+                            height,
+                            detileSource,
+                            detileParameters,
+                            out var detileTransients))
+                    {
+                        _batchRetireBuffers.AddRange(detileTransients.Buffers);
+                        _batchRetireDescriptorPools.Add(detileTransients.DescriptorPool);
+                        gpuDetiled = true;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] GPU detile failed for addr=0x{texture.Address:X16}, " +
+                        $"falling back to CPU: {exception.Message}");
+                    gpuDetiled = false;
+                }
+
+                if (!gpuDetiled)
+                {
+                    var linear = new byte[expectedSize];
+                    if (GnmTiling.TryDetile(
+                            detileSource,
+                            linear,
+                            texture.TileMode,
+                            (int)width,
+                            (int)height,
+                            detileParameters.BytesPerElement))
+                    {
+                        (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
+                            linear, $"{TextureDebugName(texture, vkFormat)} staging(cpu-fallback)");
+                    }
+                }
+                else if (_gpuDetileLog && Interlocked.Increment(ref _gpuDetileCount) is 1 or 100 or 1000 or 10000)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU-DETILE] active: {_gpuDetileCount} texture(s) detiled on GPU " +
+                        $"(latest {width}x{height} mode {texture.TileMode}).");
+                }
+            }
+
             var resource = new TextureResource
             {
                 Address = texture.Address,
@@ -8256,7 +8373,7 @@ internal static unsafe class VulkanVideoPresenter
                 RowLength = rowLength,
                 DstSelect = texture.DstSelect,
                 Layers = layers,
-                NeedsUpload = true,
+                NeedsUpload = !gpuDetiled,
                 OwnsStorage = true,
                 SamplerState = texture.Sampler,
                 CpuContentFingerprint = contentFingerprint,
@@ -8267,6 +8384,7 @@ internal static unsafe class VulkanVideoPresenter
             if (texture.Address != 0 &&
                 !texture.ArrayedView &&
                 layers == 1 &&
+                !gpuDetiled &&
                 !_guestImages.ContainsKey(texture.Address))
             {
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
@@ -16465,6 +16583,8 @@ internal static unsafe class VulkanVideoPresenter
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
+            _detilePass?.Dispose();
+            _detilePass = null;
             if (_device.Handle != 0)
             {
                 if (_pipelineCache.Handle != 0)

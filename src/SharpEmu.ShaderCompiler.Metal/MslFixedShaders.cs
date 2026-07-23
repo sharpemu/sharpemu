@@ -76,6 +76,14 @@ public static class MslFixedShaders
     /// </summary>
     public static string CreateDepthOnlyFragment() => MslTemplates.Render("depth_only_fragment");
 
+    /// <summary>
+    /// Compute kernel that deswizzles one RDNA2 exact-XOR tiled surface (swizzle
+    /// modes 5/9/24/27) at 4 bytes/element into a linear output buffer — the MSL
+    /// twin of <c>SpirvFixedShaders.CreateDetileCompute</c>. Entry point
+    /// "detile_cs"; buffers 0=tiled, 1=xTerm, 2=yTerm, 3=out, 4=DetileParams.
+    /// </summary>
+    public static string CreateDetileCompute() => MslTemplates.Render("detile_compute");
+
     private static string Format(float value) =>
         value.ToString("0.0######", CultureInfo.InvariantCulture) + "f";
 }
