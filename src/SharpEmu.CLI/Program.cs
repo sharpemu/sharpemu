@@ -285,6 +285,9 @@ internal static partial class Program
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
 
+        // Release the early address space reservation before the loader needs it.
+        GuestAddressSpaceReservation.ReleaseReservation();
+
         try
         {
             if (hostSurface is not null && !VulkanVideoHost.TryAttachSurface(hostSurface))
