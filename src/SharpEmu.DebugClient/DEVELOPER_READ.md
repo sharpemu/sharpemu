@@ -68,6 +68,7 @@ dotnet build src/SharpEmu.DebugClient/SharpEmu.DebugClient.csproj
    break 0x00000008801234a0
    continue
    mem 0x00000008802000000 64
+   disasm 0x00000008802000000 20
    ```
 
 ## Invocation
@@ -102,6 +103,7 @@ commands only succeed while the target is **paused**.
 | `setreg <reg> <value>` | `set-register` | Set `rip`, `rflags`, or a GP register. |
 | `mem <addr> <len>` \| `read <addr> <len>` | `read-memory` | Read guest memory as hex. |
 | `write <addr> <hex>` | `write-memory` | Write guest memory from a hex string. |
+| `disasm <addr> [count]` \| `u …` | `disassemble` | Disassemble up to `count` (default 10, max 512) instructions from `addr`. |
 | `break <addr> [kind] [len]` \| `b …` | `add-breakpoint` | Add a breakpoint. `kind`: `execute` (default), `readwatch`, `writewatch`, `accesswatch`. |
 | `bp` \| `breakpoints` | `list-breakpoints` | List breakpoints. |
 | `del <id>` \| `rm <id>` | `remove-breakpoint` | Remove a breakpoint. |
