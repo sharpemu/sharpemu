@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Gpu.Metal;
@@ -385,9 +386,37 @@ internal static partial class MetalNative
         nuint vertexStart,
         nuint vertexCount);
 
-    public static nint Class(string name) => objc_getClass(name);
+    // objc selector and class pointers are registered once and stay valid for
+    // the whole process, but sel_registerName/objc_getClass still marshal the
+    // name string and hash it in the runtime on every call. The Metal draw path
+    // resolves the same handful of selectors hundreds of times per frame, so
+    // memoize both — a repeat resolve becomes a dictionary hit instead of a
+    // managed→native round trip. Both runtime calls are idempotent and
+    // thread-safe, so a concurrent cache needs no extra locking.
+    private static readonly ConcurrentDictionary<string, nint> _classCache = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, nint> _selectorCache = new(StringComparer.Ordinal);
 
-    public static nint Selector(string name) => sel_registerName(name);
+    public static nint Class(string name)
+    {
+        if (_classCache.TryGetValue(name, out var cached))
+        {
+            return cached;
+        }
+
+        // objc_getClass returns 0 for a class whose framework has not been
+        // loaded yet. Never cache that: a lookup before EnsureFrameworksLoaded
+        // would otherwise pin 0 permanently and break every later resolve.
+        var handle = objc_getClass(name);
+        if (handle != 0)
+        {
+            _classCache[name] = handle;
+        }
+
+        return handle;
+    }
+
+    public static nint Selector(string name) =>
+        _selectorCache.GetOrAdd(name, static n => sel_registerName(n));
 
     /// <summary>Autoreleased NSString — only valid inside an autorelease pool
     /// unless the caller retains it.</summary>
