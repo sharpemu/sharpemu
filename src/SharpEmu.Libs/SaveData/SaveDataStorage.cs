@@ -51,7 +51,8 @@ public static class SaveDataStorage
     /// <summary>
     /// Replaces characters that are invalid in a host path segment. Empty or
     /// all-invalid input collapses to "default" so a bad guest name can never
-    /// escape the save root or produce an empty segment.
+    /// escape the save root or produce an empty segment. Dot segments are
+    /// spelled out to remain ordinary directory names.
     /// </summary>
     public static string Sanitize(string value)
     {
@@ -69,7 +70,12 @@ public static class SaveDataStorage
         }
 
         var sanitized = new string(buffer).Trim();
-        return string.IsNullOrWhiteSpace(sanitized) ? "default" : sanitized;
+        return sanitized switch
+        {
+            "." => "_dot_",
+            ".." => "_dotdot_",
+            _ => string.IsNullOrWhiteSpace(sanitized) ? "default" : sanitized,
+        };
     }
 
     /// <summary>Reads a slot's metadata, or defaults if none has been written.</summary>

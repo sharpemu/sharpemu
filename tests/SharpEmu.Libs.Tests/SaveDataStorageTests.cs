@@ -43,6 +43,10 @@ public sealed class SaveDataStorageTests
     [InlineData("a/b", "a_b")]
     [InlineData("", "default")]
     [InlineData("   ", "default")]
+    [InlineData(".", "_dot_")]
+    [InlineData("..", "_dotdot_")]
+    [InlineData(" . ", "_dot_")]
+    [InlineData(" .. ", "_dotdot_")]
     public void SanitizeNeutralizesPathSeparatorsAndEmpties(string input, string expected)
     {
         Assert.Equal(expected, SaveDataStorage.Sanitize(input));
@@ -57,6 +61,23 @@ public sealed class SaveDataStorageTests
         var slot = SaveDataStorage.SlotDir(titleRoot, "../escape");
         Assert.Equal(titleRoot, Path.GetDirectoryName(slot));
         Assert.DoesNotContain(Path.DirectorySeparatorChar, Path.GetFileName(slot));
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(" . ")]
+    [InlineData(" .. ")]
+    public void DotSegmentsRemainContainedAndDoNotAliasParents(string segment)
+    {
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "sharpemu-saves"));
+        var titleRoot = Path.GetFullPath(SaveDataStorage.TitleRoot(root, segment));
+        var slot = Path.GetFullPath(SaveDataStorage.SlotDir(titleRoot, segment));
+
+        Assert.Equal(root, Path.GetDirectoryName(titleRoot));
+        Assert.NotEqual(root, titleRoot);
+        Assert.Equal(titleRoot, Path.GetDirectoryName(slot));
+        Assert.NotEqual(titleRoot, slot);
     }
 
     [Fact]
