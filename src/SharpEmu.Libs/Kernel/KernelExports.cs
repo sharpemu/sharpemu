@@ -466,4 +466,44 @@ public static class KernelExports
         ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    /// <summary>
+    /// IL2CPP calls this before a stop-the-world GC to halt every managed
+    /// thread. On real hardware the kernel delivers a suspend signal to each
+    /// running thread and blocks until every one acknowledges. We return
+    /// immediate success instead: guest memory is always consistent from the
+    /// host's viewpoint, so the IL2CPP collector can safely traverse guest
+    /// stacks without actual suspension.
+    /// <para>
+    /// Skipping the real suspend also avoids the circular deadlock that
+    /// occurs when IL2CPP falls back to manual semaphore-based suspension
+    /// (coordinator waits on SuspendSemaphore while workers are parked on
+    /// work semaphores waiting for the coordinator).
+    /// </para>
+    /// </summary>
+    [SysAbiExport(
+        Nid = "gLfPqLad6JA",
+        ExportName = "sceKernelSuspendScheduler",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelSuspendScheduler(CpuContext ctx)
+    {
+        _ = ctx;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// IL2CPP calls this after GC to let threads continue. Since we never
+    /// actually suspend guest threads, this is a no-op.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "FO5wK+5KPjo",
+        ExportName = "sceKernelResumeScheduler",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelResumeScheduler(CpuContext ctx)
+    {
+        _ = ctx;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
