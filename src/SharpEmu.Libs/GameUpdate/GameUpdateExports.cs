@@ -18,7 +18,20 @@ public static class GameUpdateExports
     public static int GameUpdateInitialize(CpuContext ctx)
     {
         Interlocked.Exchange(ref _initialized, 1);
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // sceGameUpdateTerminate tears down the update-check subsystem. Titles
+    // call this at shutdown; the emulator has no pending update state to
+    // release, so this is a no-op success.
+    [SysAbiExport(
+        Nid = "NSH-C-OmoNI",
+        ExportName = "sceGameUpdateTerminate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceGameUpdate")]
+    public static int GameUpdateTerminate(CpuContext ctx)
+    {
+        Interlocked.Exchange(ref _initialized, 0);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

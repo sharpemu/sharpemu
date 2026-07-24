@@ -16,8 +16,20 @@ public static class NpCppWebApiExports
         LibraryName = "libSceNpCppWebApi")]
     public static int CppWebApiCommonInitialize(CpuContext ctx)
     {
-        // int Common::initialize(const InitParams&, LibContext&) — 0 on success.
         TraceCppWebApi("common_initialize", ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]);
+        return ctx.SetReturn(0);
+    }
+
+    // sceNpCppWebApiTerminate shuts down the C++ Web API runtime. Titles call
+    // this during shutdown; the emulator has no live state to release.
+    [SysAbiExport(
+        Nid = "drO+SgRRdN4",
+        ExportName = "sceNpCppWebApiTerminate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpCppWebApi")]
+    public static int CppWebApiTerminate(CpuContext ctx)
+    {
+        _ = ctx;
         return ctx.SetReturn(0);
     }
 
