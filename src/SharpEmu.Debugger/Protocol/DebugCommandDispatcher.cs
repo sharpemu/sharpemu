@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Debugger.Breakpoints;
 using SharpEmu.Debugger.Session;
 using SharpEmu.HLE;
@@ -37,6 +38,7 @@ public sealed class DebugCommandDispatcher
             "set-register" or "set-reg" => SetRegister(request),
             "read-memory" or "read-mem" => ReadMemory(request),
             "write-memory" or "write-mem" => WriteMemory(request),
+            "disassemble" or "disasm" or "u" => Disassemble(request),
             "list-breakpoints" or "breakpoints" => ListBreakpoints(request),
             "add-breakpoint" or "break" => AddBreakpoint(request),
             "remove-breakpoint" or "delete-breakpoint" => RemoveBreakpoint(request),
@@ -156,6 +158,83 @@ public sealed class DebugCommandDispatcher
         return _session.TryWriteMemory(address, data)
             ? DebugResponse.Success(request.Command, new Dictionary<string, object?> { ["written"] = data.Length })
             : DebugResponse.Failure(request.Command, "Memory is unwritable or target is not paused.");
+    }
+
+    private DebugResponse Disassemble(DebugRequest request)
+    {
+        if (!request.TryGetUInt64("address", out var address))
+        {
+            return DebugResponse.Failure(request.Command, "Expected an 'address'.");
+        }
+
+        var count = DefaultDisassembleCount;
+        if (request.TryGetInt32("count", out var requestedCount))
+        {
+            if (requestedCount <= 0 || requestedCount > MaxDisassembleInstructions)
+            {
+                return DebugResponse.Failure(
+                    request.Command,
+                    $"Expected a 'count' between 1 and {MaxDisassembleInstructions}.");
+            }
+
+            count = requestedCount;
+        }
+
+        var instructions = new List<Dictionary<string, object?>>(count);
+        var cursor = address;
+        for (var i = 0; i < count; i++)
+        {
+            if (!TryReadInstructionBytes(cursor, out var bytes) ||
+                !IcedDecoder.TryDecode(cursor, bytes, out var inst))
+            {
+                break;
+            }
+
+            instructions.Add(new Dictionary<string, object?>
+            {
+                ["address"] = FormatAddress(inst.Rip),
+                ["length"] = inst.Length,
+                ["bytes"] = Convert.ToHexString(inst.Bytes),
+                ["text"] = inst.Text,
+                ["mnemonic"] = inst.Mnemonic,
+            });
+
+            cursor += (ulong)inst.Length;
+        }
+
+        if (instructions.Count == 0)
+        {
+            return DebugResponse.Failure(request.Command, "Memory is unreadable or target is not paused.");
+        }
+
+        return DebugResponse.Success(request.Command, new Dictionary<string, object?>
+        {
+            ["address"] = FormatAddress(address),
+            ["instructions"] = instructions,
+        });
+    }
+
+    // Mirrors IcedDecoder.TryReadGuestBytes: reads up to a full x86 instruction
+    // byte-by-byte so a run stops cleanly at an unmapped page instead of
+    // failing the whole request the way a fixed-size ReadMemory would.
+    private bool TryReadInstructionBytes(ulong address, out byte[] bytes)
+    {
+        Span<byte> buffer = stackalloc byte[MaxInstructionBytes];
+        Span<byte> oneByte = stackalloc byte[1];
+        var readCount = 0;
+        for (var i = 0; i < MaxInstructionBytes; i++)
+        {
+            if (!_session.TryReadMemory(address + (ulong)i, oneByte))
+            {
+                break;
+            }
+
+            buffer[i] = oneByte[0];
+            readCount++;
+        }
+
+        bytes = buffer[..readCount].ToArray();
+        return readCount > 0;
     }
 
     private DebugResponse ListBreakpoints(DebugRequest request)
@@ -337,4 +416,7 @@ public sealed class DebugCommandDispatcher
         => Enum.TryParse(text.Trim(), ignoreCase: true, out kind) && Enum.IsDefined(kind);
 
     private const int MaxMemoryChunk = 64 * 1024;
+    private const int MaxInstructionBytes = 15;
+    private const int DefaultDisassembleCount = 10;
+    private const int MaxDisassembleInstructions = 512;
 }
