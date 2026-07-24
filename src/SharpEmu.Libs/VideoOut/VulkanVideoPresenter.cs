@@ -2863,6 +2863,13 @@ internal static unsafe class VulkanVideoPresenter
         private TranslatedDrawResources?[] _frameTranslatedResources = [];
         private GuestImageResource?[] _frameGuestImageVersions = [];
         private int _currentFrameSlot;
+        // Wall-clock diagnostics for a frame slot whose fence stays unsignaled
+        // across consecutive Render() calls. A short streak is a normal GPU
+        // backlog; a long one means the present path is wedged (e.g. a frame
+        // submitted against an acquire semaphore whose drawable never arrived),
+        // which otherwise freezes the window silently forever.
+        private long _frameSlotStuckSinceTicks;
+        private long _frameSlotStuckLastWarnTicks;
         // Monotonic submission/completion counters across every queue submit
         // (guest batches, compute chunks and presents). Fences on a single
         // queue signal in submission order, so "timeline <= completed" means
@@ -5734,6 +5741,180 @@ internal static unsafe class VulkanVideoPresenter
             {
                 WaitFrameSlot(slot);
             }
+        }
+
+        // A healthy GPU backlog clears a frame-slot fence within a frame or
+        // two; a streak this long means the present path is not progressing at
+        // all and the window is silently frozen on the last presented image.
+        private const double FrameSlotStuckWarnMs = 2000;
+        private const double FrameSlotStuckRewarnMs = 10000;
+        // A frame fence that stays unsignaled this long is unrecoverable by
+        // waiting: on MoltenVK it means a submitted frame waits on an acquire
+        // semaphore whose drawable never arrived (e.g. the window was occluded
+        // and its presented-drawable callbacks stopped), and the only path
+        // that could unblock it — a fresh acquire/present cycle — is itself
+        // gated behind this fence. Recovery destroys the swapchain (aborting
+        // the pending drawable chain), then rebuilds presentation resources.
+        // SHARPEMU_FRAME_STUCK_RECOVERY_MS overrides; default 8000; 0 disables.
+        private static readonly double _frameStuckRecoveryMs =
+            double.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_FRAME_STUCK_RECOVERY_MS"),
+                out var recoveryMs)
+                ? recoveryMs
+                : 8000;
+        private const double FrameStuckRecoveryRetryMs = 30000;
+        private long _presentationRecoveryLastAttemptTicks;
+
+        private void ReportFrameSlotStuck(int frameSlot)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_frameSlotStuckSinceTicks == 0)
+            {
+                _frameSlotStuckSinceTicks = now;
+                return;
+            }
+
+            var stuckMs = (now - _frameSlotStuckSinceTicks)
+                * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (stuckMs < FrameSlotStuckWarnMs)
+            {
+                return;
+            }
+
+            var sinceWarnMs = (now - _frameSlotStuckLastWarnTicks)
+                * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (_frameSlotStuckLastWarnTicks == 0 || sinceWarnMs >= FrameSlotStuckRewarnMs)
+            {
+                _frameSlotStuckLastWarnTicks = now;
+                var fenceStates = new System.Text.StringBuilder();
+                for (var slot = 0; slot < _frameFencePending.Length; slot++)
+                {
+                    if (slot > 0)
+                    {
+                        fenceStates.Append(',');
+                    }
+
+                    fenceStates.Append(slot);
+                    fenceStates.Append(
+                        !_frameFencePending[slot] ? ":idle"
+                        : _vk.GetFenceStatus(_device, _frameFences[slot]) == Result.Success
+                            ? ":signaled"
+                            : ":pending");
+                }
+
+                int pendingWork;
+                lock (_gate)
+                {
+                    pendingWork = _pendingGuestWorkCount;
+                }
+
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] vk.frame_slot_stuck slot={frameSlot} " +
+                    $"stuck_ms={stuckMs:F0} fences=[{fenceStates}] " +
+                    $"timeline={_frameTimelines[frameSlot]} completed={_completedTimeline} " +
+                    $"in_flight={_pendingGuestSubmissions.Count} queued={pendingWork}");
+            }
+
+            if (_frameStuckRecoveryMs <= 0 || stuckMs < _frameStuckRecoveryMs)
+            {
+                return;
+            }
+
+            var sinceAttemptMs = (now - _presentationRecoveryLastAttemptTicks)
+                * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (_presentationRecoveryLastAttemptTicks != 0 &&
+                sinceAttemptMs < FrameStuckRecoveryRetryMs)
+            {
+                return;
+            }
+
+            _presentationRecoveryLastAttemptTicks = now;
+            RecoverStuckPresentation(frameSlot, stuckMs);
+        }
+
+        private void RecoverStuckPresentation(int frameSlot, double stuckMs)
+        {
+            // Rebuilding needs a usable surface; if the window is currently
+            // zero-sized (miniaturized), retry on a later Render() instead of
+            // tearing presentation down into a state we cannot rebuild from.
+            var framebufferSize = _window.FramebufferSize;
+            if (framebufferSize.X <= 1 || framebufferSize.Y <= 1)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] vk.frame_stuck_recovery_deferred " +
+                    $"surface={framebufferSize.X}x{framebufferSize.Y}");
+                _presentationRecoveryLastAttemptTicks = 0;
+                return;
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] vk.frame_stuck_recovery_begin slot={frameSlot} " +
+                $"stuck_ms={stuckMs:F0} in_flight={_pendingGuestSubmissions.Count}");
+
+            // Destroying the swapchain first aborts MoltenVK's pending
+            // drawable acquisitions and presents, which is what lets the
+            // blocked frame submissions retire and their fences signal.
+            if (_swapchain.Handle != 0)
+            {
+                _swapchainApi.DestroySwapchain(_device, _swapchain, null);
+                _swapchain = default;
+            }
+
+            const ulong recoveryFenceWaitNs = 2_000_000_000;
+            var unblocked = true;
+            for (var slot = 0; slot < _frameFencePending.Length; slot++)
+            {
+                if (!_frameFencePending[slot])
+                {
+                    continue;
+                }
+
+                var fence = _frameFences[slot];
+                var waitResult = _vk.WaitForFences(_device, 1, &fence, true, recoveryFenceWaitNs);
+                if (waitResult != Result.Success)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][ERROR] vk.frame_stuck_recovery_fence slot={slot} " +
+                        $"result={waitResult}");
+                    unblocked = false;
+                }
+            }
+
+            var submissionDeadline = System.Diagnostics.Stopwatch.GetTimestamp()
+                + 2 * System.Diagnostics.Stopwatch.Frequency;
+            while (_pendingGuestSubmissions.Count > 0 &&
+                   System.Diagnostics.Stopwatch.GetTimestamp() < submissionDeadline)
+            {
+                CollectCompletedGuestSubmissions(waitForOldest: false);
+                if (_pendingGuestSubmissions.Count > 0)
+                {
+                    Thread.Sleep(20);
+                }
+            }
+
+            if (!unblocked || _pendingGuestSubmissions.Count > 0)
+            {
+                // The queue did not drain even with the swapchain gone; there
+                // is no safe way to reuse its resources. Fall back to the
+                // device-lost path so the guest keeps running.
+                Console.Error.WriteLine(
+                    $"[LOADER][ERROR] vk.frame_stuck_recovery_failed " +
+                    $"in_flight={_pendingGuestSubmissions.Count}; " +
+                    "marking presentation device-lost");
+                _deviceLost = true;
+                return;
+            }
+
+            DrainFrameSlots();
+            DestroySwapchainResources();
+            CreateSwapchain();
+            CreateCommandResources();
+            CreateGuestDrawResources();
+            _frameSlotStuckSinceTicks = 0;
+            _frameSlotStuckLastWarnTicks = 0;
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] vk.frame_stuck_recovery_complete " +
+                $"{_extent.Width}x{_extent.Height}");
         }
 
         private void CollectAbandonedGuestImageVersions()
@@ -13124,7 +13305,23 @@ internal static unsafe class VulkanVideoPresenter
                 // to the Cocoa event pump so the window keeps handling input
                 // (F1 overlay, drag, close) and redrawing. The frame is retried
                 // next Render(); the fence signals once the GPU catches up.
+                ReportFrameSlotStuck(frameSlot);
                 return;
+            }
+
+            if (_frameSlotStuckSinceTicks != 0)
+            {
+                var stuckMs = (System.Diagnostics.Stopwatch.GetTimestamp() - _frameSlotStuckSinceTicks)
+                    * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                if (stuckMs >= FrameSlotStuckWarnMs)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.frame_slot_recovered slot={frameSlot} " +
+                        $"stuck_ms={stuckMs:F0}");
+                }
+
+                _frameSlotStuckSinceTicks = 0;
+                _frameSlotStuckLastWarnTicks = 0;
             }
 
             _presentationCommandBuffer = _frameCommandBuffers[frameSlot];
