@@ -18,6 +18,7 @@ public sealed partial class DirectExecutionBackend
 	private const ulong LazyCommitWindowBytes = 0x0200_0000UL;
 	private static int _lazyCommitTraceCount;
 	private static int _guestAllocatorHoleRecoveries;
+	private static int _guestTlsLoadRecoveries;
 	private static int _auxiliaryThreadExecuteFaultRecoveries;
 	private static int _auxiliaryThreadExecuteFaultSkips;
 	private nint _workerAbortStack;
@@ -117,6 +118,10 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (TryRecoverGuestTlsLoad(exceptionRecord, exceptionCode, contextRecord, rip))
+			{
+				return -1;
+			}
 			if (TryRecoverAuxiliaryThreadExecuteFault(exceptionRecord, contextRecord, rip))
 			{
 				return -1;
@@ -148,6 +153,12 @@ public sealed partial class DirectExecutionBackend
 			if (exceptionCode == MSVC_CPP_EXCEPTION)
 			{
 				return 0;
+			}
+			if (exceptionCode == 0x80000003u)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO] BREAKPOINT at rip=0x{rip:X16} rsp=0x{rsp:X16} (was int 0x29 __fastfail; continuing)");
+				Console.Error.Flush();
+				return -1;
 			}
 
 			switch (exceptionCode)
@@ -604,6 +615,111 @@ public sealed partial class DirectExecutionBackend
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] Ignored guest int 0x41 trap #{count} at 0x{rip:X16} (default-on; set SHARPEMU_IGNORE_INT41=0 to disable)");
+			Console.Error.Flush();
+		}
+		return true;
+	}
+
+	private unsafe bool TryRecoverGuestTlsLoad(EXCEPTION_RECORD* exceptionRecord, uint exceptionCode, void* contextRecord, ulong rip)
+	{
+		if (exceptionCode != 3221225477u || rip < 0x10000 || exceptionRecord->NumberParameters < 2 ||
+			exceptionRecord->ExceptionInformation[0] != 0)
+		{
+			return false;
+		}
+
+		byte[] code = new byte[15];
+		if (!TryReadHostBytes(rip, code))
+			return false;
+
+		int offset = 0;
+		while (offset < 15 && code[offset] == 0x66) offset++;
+		if (offset + 11 >= 15 || code[offset] != 0x64)
+			return false;
+		offset++;
+
+		byte rex = 0;
+		if (code[offset] >= 0x40 && code[offset] <= 0x4F)
+		{
+			rex = code[offset];
+			offset++;
+		}
+
+		if (code[offset] != 0x8B)
+			return false;
+
+		byte modRm = code[offset + 1];
+		byte sib = code[offset + 2];
+		int displacement = BitConverter.ToInt32(code, offset + 3);
+
+		if ((modRm >> 6) != 0 || (modRm & 7) != 4 || sib != 0x25)
+			return false;
+
+		int destReg = ((modRm >> 3) & 7) | (((rex & 4) != 0) ? 8 : 0);
+		int instructionLength = offset + 7;
+
+		nint tlsBase = TlsGetValue(_guestTlsBaseTlsIndex);
+		if (tlsBase == 0)
+			tlsBase = _tlsBaseAddress;
+		if (tlsBase == 0)
+			return false;
+
+		ulong value;
+		if (displacement == 0)
+		{
+			value = (ulong)tlsBase;
+		}
+		else
+		{
+			ulong addr = (ulong)tlsBase + unchecked((ulong)(long)displacement);
+			if (!TryReadHostQword(addr, out value))
+				return false;
+		}
+
+		int[] regOffsets = new int[] { CTX_RAX, CTX_RCX, CTX_RDX, CTX_RBX, CTX_RSP, CTX_RBP, CTX_RSI, CTX_RDI,
+			CTX_R8, CTX_R9, CTX_R10, CTX_R11, CTX_R12, CTX_R13, CTX_R14, CTX_R15 };
+		if (destReg < 0 || destReg >= regOffsets.Length)
+			return false;
+
+		WriteCtxU64(contextRecord, regOffsets[destReg], value);
+		WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instructionLength);
+
+		// Detect TLS init function (starts with mov reg, fs:[0]; next is lea rdx, [rip+disp32])
+		// and skip its body to prevent global data corruption from the vmovups zeroing.
+		if (displacement == 0)
+		{
+			byte[] tlsInitPattern = new byte[7];
+			if (TryReadHostBytes(rip + (ulong)instructionLength, tlsInitPattern) &&
+				tlsInitPattern[0] == 0x48 && tlsInitPattern[1] == 0x8D && tlsInitPattern[2] == 0x15)
+			{
+				ulong currentRsp = ReadCtxU64(contextRecord, CTX_RSP);
+				// Function may have push rbp prologue; scan stack for return address.
+				if (TryGetPlausibleReturnFromStack(currentRsp, out ulong returnAddress, out ulong adjustedRsp))
+				{
+					WriteCtxU64(contextRecord, CTX_RIP, returnAddress);
+					WriteCtxU64(contextRecord, CTX_RSP, adjustedRsp);
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Skipped TLS init function body at 0x{rip:X16} " +
+						$"(detected lea rdx, [rip+disp32] pattern); returning to 0x{returnAddress:X16} " +
+						$"rsp=0x{currentRsp:X16}->0x{adjustedRsp:X16}");
+					Console.Error.Flush();
+					Interlocked.Increment(ref _guestTlsLoadRecoveries);
+					return true;
+				}
+			}
+		}
+
+		var count = Interlocked.Increment(ref _guestTlsLoadRecoveries);
+		if (count <= 16 || (count & (count - 1)) == 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Recovered guest TLS load #{count} at 0x{rip:X16}: reg=r{destReg}_base=0x{value:X16} ip->0x{rip + (ulong)instructionLength:X16} disp=0x{(ulong)(int)displacement:X}");
+			Console.Error.Flush();
+		}
+		var nextBytes = new byte[256];
+		if (TryReadHostBytes(rip + (ulong)instructionLength, nextBytes))
+		{
+			Console.Error.WriteLine($"[LOADER][WARN] Next code: {BitConverter.ToString(nextBytes).Replace("-", " ")}");
 			Console.Error.Flush();
 		}
 		return true;
