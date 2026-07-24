@@ -64,10 +64,6 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
     public static int NpUniversalDataSystemTerminate(CpuContext ctx) => Ok(ctx);
 
-    [SysAbiExport(Nid = "0HBYxYAjmf0", ExportName = "sceNpGameIntentTerminate",
-        Target = Generation.Gen5, LibraryName = "libSceNpGameIntent")]
-    public static int NpGameIntentTerminate(CpuContext ctx) => Ok(ctx);
-
     [SysAbiExport(Nid = "jqb7HntFQFc", ExportName = "sceWebBrowserDialogInitialize",
         Target = Generation.Gen5, LibraryName = "libSceWebBrowserDialog")]
     public static int WebBrowserDialogInitialize(CpuContext ctx) => Ok(ctx);

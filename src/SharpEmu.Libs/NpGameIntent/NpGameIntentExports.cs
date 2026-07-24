@@ -18,7 +18,20 @@ public static class NpGameIntentExports
     public static int NpGameIntentInitialize(CpuContext ctx)
     {
         Interlocked.Exchange(ref _initialized, 1);
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // sceNpGameIntentTerminate tears down the game-intent transaction subsystem.
+    // Titles call this during shutdown or when leaving multiplayer; the emulator
+    // has no persistent intent state to release, so this is a no-op success.
+    [SysAbiExport(
+        Nid = "0HBYxYAjmf0",
+        ExportName = "sceNpGameIntentTerminate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpGameIntent")]
+    public static int NpGameIntentTerminate(CpuContext ctx)
+    {
+        Interlocked.Exchange(ref _initialized, 0);
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

@@ -14,7 +14,19 @@ public static class NpSessionSignalingExports
         LibraryName = "libSceNpSessionSignaling")]
     public static int NpSessionSignalingInitialize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // sceNpSessionSignalingTerminate shuts down the PSN session-signaling
+    // subsystem. The emulator does not maintain a real signaling session, so
+    // this is a no-op success that lets the caller's teardown sequence complete.
+    [SysAbiExport(
+        Nid = "CqJuNXo5yiM",
+        ExportName = "sceNpSessionSignalingTerminate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingTerminate(CpuContext ctx)
+    {
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }
