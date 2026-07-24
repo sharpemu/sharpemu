@@ -240,6 +240,98 @@ public static class SystemServiceExports
         LibraryName = "libSceSystemService")]
     public static int SystemServiceReportAbnormalTermination(CpuContext ctx) => ctx.SetReturn(0);
 
+    // ---- launch / event shell functions ----
+
+    // sceSystemServiceLaunchApp is the final handoff from the system shell to
+    // the title. The emulator has already loaded and prepared the image by the
+    // time this is called, so report immediate success.
+    [SysAbiExport(
+        Nid = "l4FB3wNa-Ac",
+        ExportName = "sceSystemServiceLaunchApp",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceLaunchApp(CpuContext ctx) => ctx.SetReturn(0);
+
+    // sceSystemServiceReceiveEvent blocks until a system event (sleep, sign-out,
+    // app suspension) arrives and writes it to the output buffer. The emulator
+    // does not simulate these events, but titles that poll this at boot will
+    // stall if it returns an error. Return success with a zeroed event so the
+    // caller proceeds — the fields that indicate the event type stay zero
+    // (no event pending).
+    [SysAbiExport(
+        Nid = "656LMQSrg6U",
+        ExportName = "sceSystemServiceReceiveEvent",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceReceiveEvent(CpuContext ctx)
+    {
+        var eventAddress = ctx[CpuRegister.Rdi];
+        if (eventAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        // SceSystemServiceEvent is 0x20 bytes; zero-fill so the event type
+        // field reads as no-event-pending.
+        Span<byte> eventBuffer = stackalloc byte[0x20];
+        eventBuffer.Clear();
+        return ctx.Memory.TryWrite(eventAddress, eventBuffer)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // sceSystemServiceGetAppIdOfBigApp reports the title ID of the "big"
+    // application (the currently running game). This is the same value
+    // returned by GetMainAppTitleId for the emulator's single-app model.
+    [SysAbiExport(
+        Nid = "f4oDTxAJCHE",
+        ExportName = "sceSystemServiceGetAppIdOfBigApp",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceGetAppIdOfBigApp(CpuContext ctx)
+    {
+        var titleIdAddress = ctx[CpuRegister.Rdi];
+        if (titleIdAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        var titleId = _mainAppTitleId ?? "PPSA00000";
+        var length = Math.Min(titleId.Length, TitleIdFieldSize - 1);
+        Span<byte> titleIdBytes = stackalloc byte[TitleIdFieldSize];
+        titleIdBytes.Clear();
+        System.Text.Encoding.ASCII.GetBytes(titleId.AsSpan(0, length), titleIdBytes);
+        return ctx.Memory.TryWrite(titleIdAddress, titleIdBytes[..(length + 1)])
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // sceSystemServiceLaunchEventDetails populates an output structure with
+    // the arguments and reason the title was launched. Return success with a
+    // zero-filled struct (no launch args, normal boot) so callers proceed.
+    [SysAbiExport(
+        Nid = "wX9wVFaegaM",
+        ExportName = "sceSystemServiceLaunchEventDetails",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceLaunchEventDetails(CpuContext ctx)
+    {
+        var detailsAddress = ctx[CpuRegister.Rdi];
+        if (detailsAddress == 0)
+        {
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        }
+
+        // SceSystemServiceLaunchEventDetails is 0x40 bytes; fill with zeros
+        // (reason=normal, no args) so titles that gate on this struct do not
+        // misinterpret uninitialized guest memory.
+        Span<byte> details = stackalloc byte[0x40];
+        details.Clear();
+        return ctx.Memory.TryWrite(detailsAddress, details)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
     internal static void ResetForTests() =>
         Volatile.Write(ref _noticeScreenSkipFlag, 0);
 }
