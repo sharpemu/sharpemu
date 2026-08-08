@@ -95,6 +95,25 @@ public sealed class PhysicalVirtualMemoryTests
     }
 
     [Fact]
+    public void TryCompareDistinguishesMismatchFromAccessFailure()
+    {
+        using var host = new ReadableHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+        var address = memory.AllocateAt(0, 0x1000, executable: false);
+        Assert.NotEqual(0UL, address);
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4 }));
+
+        Assert.True(memory.TryCompare(address, new byte[] { 1, 2, 3, 4 }, out var equal));
+        Assert.True(equal);
+
+        Assert.True(memory.TryCompare(address, new byte[] { 1, 2, 3, 5 }, out equal));
+        Assert.False(equal);
+
+        Assert.False(memory.TryCompare(ulong.MaxValue - 0x1000, new byte[4], out equal));
+        Assert.False(equal);
+    }
+
+    [Fact]
     public void RepeatedTryCopyKeepsSourceAndDestinationCommitRangesCached()
     {
         using var host = new LazyZeroedHostMemory();
@@ -275,6 +294,75 @@ public sealed class PhysicalVirtualMemoryTests
                 _freed = true;
             }
         }
+    }
+
+    private sealed unsafe class ReadableHostMemory : IHostMemory, IDisposable
+    {
+        private readonly void* _allocation;
+        private readonly ulong _address;
+
+        public ReadableHostMemory()
+        {
+            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x2000);
+            _address = ((ulong)_allocation + 0xFFF) & ~0xFFFUL;
+        }
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            _address;
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            _address;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(
+            ulong address,
+            ulong size,
+            HostPageProtection protection,
+            out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool ProtectRaw(
+            ulong address,
+            ulong size,
+            uint rawProtection,
+            out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (address >= _address && address < _address + 0x1000)
+            {
+                info = new HostRegionInfo(
+                    _address,
+                    _address,
+                    0x1000,
+                    HostRegionState.Committed,
+                    RawState: 0x1000,
+                    HostPageProtection.ReadWrite,
+                    RawProtection: 0x04,
+                    RawAllocationProtection: 0x04);
+                return true;
+            }
+
+            info = default;
+            return false;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose() =>
+            System.Runtime.InteropServices.NativeMemory.Free(_allocation);
     }
 
     // Minimal host memory for free-list tests: Allocate honours the desired

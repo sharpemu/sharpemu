@@ -40,6 +40,12 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
         return result;
     }
 
+    public bool TryCompare(
+        ulong virtualAddress,
+        ReadOnlySpan<byte> expected,
+        out bool equal) =>
+        _inner.TryCompare(virtualAddress, expected, out equal);
+
     public bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) =>
         _inner.TryCopy(destinationAddress, sourceAddress, length);
 

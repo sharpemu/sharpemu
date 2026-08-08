@@ -9,7 +9,17 @@ public interface ICpuMemory
 
     bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source);
 
-    bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected) => false;
+    bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected) =>
+        TryCompare(virtualAddress, expected, out var equal) && equal;
+
+    bool TryCompare(
+        ulong virtualAddress,
+        ReadOnlySpan<byte> expected,
+        out bool equal)
+    {
+        equal = false;
+        return false;
+    }
 
     bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) => false;
 }

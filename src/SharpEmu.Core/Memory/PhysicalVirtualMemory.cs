@@ -1280,8 +1280,15 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
-    public bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected)
+    public bool TryCompare(ulong virtualAddress, ReadOnlySpan<byte> expected) =>
+        TryCompare(virtualAddress, expected, out var equal) && equal;
+
+    public bool TryCompare(
+        ulong virtualAddress,
+        ReadOnlySpan<byte> expected,
+        out bool equal)
     {
+        equal = false;
         _gate.EnterReadLock();
         try
         {
@@ -1298,6 +1305,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             if (expected.IsEmpty)
             {
+                equal = true;
                 return true;
             }
 
@@ -1313,7 +1321,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
-            return new ReadOnlySpan<byte>(srcPtr, expected.Length).SequenceEqual(expected);
+            equal = new ReadOnlySpan<byte>(srcPtr, expected.Length).SequenceEqual(expected);
+            return true;
         }
         finally
         {
