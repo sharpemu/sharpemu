@@ -139,4 +139,30 @@ public sealed class Gen5ReachingDefinitionTests
         Assert.Equal(IrScalarState.Unknown, ssa.GetScalarAt(16, 16).State);
         Assert.Equal(IrReachingState.Multiple, ssa.GetReachingDefinitionAt(16, 16).State);
     }
+
+    [Fact]
+    public void VopcWithExplicitScalarDestinationDoesNotOverwriteVcc()
+    {
+        var compare = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Vopc,
+            "VCmpLeF32",
+            [0u, 0u],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            [Gen5Operand.Scalar(14)],
+            null);
+        List<Gen5ShaderInstruction> program = [compare, Nop(8)];
+
+        var ssa = Gen5ScalarSsa.Build(program, userData: []);
+
+        Assert.Equal(
+            IrReachingState.Single,
+            ssa.GetReachingDefinitionAt(8, 14).State);
+        Assert.Equal(
+            IrReachingState.None,
+            ssa.GetReachingDefinitionAt(8, Gen5ScalarSsa.VccLo).State);
+        Assert.Equal(
+            IrReachingState.None,
+            ssa.GetReachingDefinitionAt(8, Gen5ScalarSsa.VccHi).State);
+    }
 }

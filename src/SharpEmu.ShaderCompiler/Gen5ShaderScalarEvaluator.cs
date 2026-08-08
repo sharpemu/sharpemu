@@ -209,6 +209,8 @@ public static class Gen5ShaderScalarEvaluator
     private readonly record struct ScalarPathState(
         uint StartPc,
         uint[] ScalarRegisters,
+        Dictionary<uint, Dictionary<uint, uint>> VectorLaneValues,
+        HashSet<uint> LaneRestoredScalarRegisters,
         ulong ExecMask,
         bool ScalarConditionCode,
         bool Supplemental);
@@ -217,6 +219,8 @@ public static class Gen5ShaderScalarEvaluator
 
     private static ulong ComputeScalarStateHash(
         IReadOnlyList<uint> registers,
+        IReadOnlyDictionary<uint, Dictionary<uint, uint>> vectorLaneValues,
+        IReadOnlySet<uint> laneRestoredScalarRegisters,
         ulong execMask,
         bool scalarConditionCode)
     {
@@ -225,6 +229,21 @@ public static class Gen5ShaderScalarEvaluator
         foreach (var value in registers)
         {
             hash = (hash ^ value) * prime;
+        }
+
+        foreach (var registerLanes in vectorLaneValues.OrderBy(static pair => pair.Key))
+        {
+            hash = (hash ^ registerLanes.Key) * prime;
+            foreach (var laneValue in registerLanes.Value.OrderBy(static pair => pair.Key))
+            {
+                hash = (hash ^ laneValue.Key) * prime;
+                hash = (hash ^ laneValue.Value) * prime;
+            }
+        }
+
+        foreach (var register in laneRestoredScalarRegisters.Order())
+        {
+            hash = (hash ^ register) * prime;
         }
 
         hash = (hash ^ execMask) * prime;
@@ -240,6 +259,9 @@ public static class Gen5ShaderScalarEvaluator
         if (TryEvaluate(ctx, state, out var evaluation, out error))
         {
             bindings = evaluation.ImageBindings;
+            ReturnPooledEvaluationData(
+                evaluation.GlobalMemoryBindings,
+                evaluation.VertexInputs);
             return true;
         }
 
@@ -296,22 +318,34 @@ public static class Gen5ShaderScalarEvaluator
         var finalScalarRegisters = (uint[])scalarRegisters.Clone();
         var pendingPaths = new Stack<ScalarPathState>();
         var visitedPaths = new HashSet<ScalarPathKey>();
+        using var pooledData = new PooledEvaluationDataScope(
+            globalMemoryBindings,
+            vertexInputBindings);
 
         void QueuePath(
             uint pc,
             uint[] registers,
+            Dictionary<uint, Dictionary<uint, uint>> vectorLaneValues,
+            HashSet<uint> laneRestoredScalarRegisters,
             ulong pathExecMask,
             bool pathScc,
             bool supplemental)
         {
             var key = new ScalarPathKey(
                 pc,
-                ComputeScalarStateHash(registers, pathExecMask, pathScc));
+                ComputeScalarStateHash(
+                    registers,
+                    vectorLaneValues,
+                    laneRestoredScalarRegisters,
+                    pathExecMask,
+                    pathScc));
             if (visitedPaths.Add(key))
             {
                 pendingPaths.Push(new ScalarPathState(
                     pc,
                     registers,
+                    vectorLaneValues,
+                    laneRestoredScalarRegisters,
                     pathExecMask,
                     pathScc,
                     supplemental));
@@ -323,6 +357,8 @@ public static class Gen5ShaderScalarEvaluator
             QueuePath(
                 state.Program.Instructions[0].Pc,
                 (uint[])scalarRegisters.Clone(),
+                [],
+                [],
                 execMask,
                 pathScc: false,
                 supplemental: false);
@@ -332,6 +368,8 @@ public static class Gen5ShaderScalarEvaluator
         {
             var path = pendingPaths.Pop();
             scalarRegisters = path.ScalarRegisters;
+            var vectorLaneValues = path.VectorLaneValues;
+            var laneRestoredScalarRegisters = path.LaneRestoredScalarRegisters;
             execMask = path.ExecMask;
             var scalarConditionCode = path.ScalarConditionCode;
             uint? skipUntilPc = path.StartPc;
@@ -374,6 +412,8 @@ public static class Gen5ShaderScalarEvaluator
                             QueuePath(
                                 fallthroughPc,
                                 (uint[])scalarRegisters.Clone(),
+                                CloneVectorLaneValues(vectorLaneValues),
+                                new HashSet<uint>(laneRestoredScalarRegisters),
                                 execMask,
                                 scalarConditionCode,
                                 supplemental: true);
@@ -393,6 +433,21 @@ public static class Gen5ShaderScalarEvaluator
                         break;
                     }
                 }
+
+                if (instruction.Encoding == Gen5ShaderEncoding.Vop3 &&
+                    TryExecuteVectorLaneTransfer(
+                        instruction,
+                        scalarRegisters,
+                        vectorLaneValues,
+                        laneRestoredScalarRegisters))
+                {
+                    continue;
+                }
+
+                InvalidateTrackedVectorLanes(instruction, vectorLaneValues);
+                InvalidateLaneRestoredScalarRegisters(
+                    instruction,
+                    laneRestoredScalarRegisters);
 
                 if (instruction.Encoding == Gen5ShaderEncoding.Sopc)
                 {
@@ -455,7 +510,18 @@ public static class Gen5ShaderScalarEvaluator
                 var recordBinding =
                     !path.Supplemental ||
                     !HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc);
-                if (!TryExecuteScalarLoad(ctx, state, instruction, scalarMemory, scalarRegisters, globalMemoryBindings, globalMemoryByAddress, runtimeScalarRegisters, recordBinding, out error))
+                if (!TryExecuteScalarLoad(
+                        ctx,
+                        state,
+                        instruction,
+                        scalarMemory,
+                        scalarRegisters,
+                        globalMemoryBindings,
+                        globalMemoryByAddress,
+                        runtimeScalarRegisters,
+                        laneRestoredScalarRegisters,
+                        recordBinding,
+                        out error))
                 {
                     return false;
                 }
@@ -877,7 +943,55 @@ public static class Gen5ShaderScalarEvaluator
             state.ComputeSystemRegisters,
             runtimeScalarRegisters,
             vertexInputBindings);
+        pooledData.TransferOwnership();
         return true;
+    }
+
+    private sealed class PooledEvaluationDataScope(
+        IReadOnlyList<Gen5GlobalMemoryBinding> globalMemoryBindings,
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputBindings) : IDisposable
+    {
+        private bool _ownershipTransferred;
+
+        public void TransferOwnership() => _ownershipTransferred = true;
+
+        public void Dispose()
+        {
+            if (!_ownershipTransferred)
+            {
+                ReturnPooledEvaluationData(
+                    globalMemoryBindings,
+                    vertexInputBindings);
+            }
+        }
+    }
+
+    private static void ReturnPooledEvaluationData(
+        IReadOnlyList<Gen5GlobalMemoryBinding> globalMemoryBindings,
+        IReadOnlyList<Gen5VertexInputBinding>? vertexInputBindings)
+    {
+        var returned = new HashSet<byte[]>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
+        foreach (var binding in globalMemoryBindings)
+        {
+            if (binding.DataPooled && returned.Add(binding.Data))
+            {
+                GlobalMemoryPool.Return(binding.Data);
+            }
+        }
+
+        if (vertexInputBindings is null)
+        {
+            return;
+        }
+
+        foreach (var binding in vertexInputBindings)
+        {
+            if (binding.DataPooled && returned.Add(binding.Data))
+            {
+                GlobalMemoryPool.Return(binding.Data);
+            }
+        }
     }
 
     private static bool IsBufferMemoryWrite(string opcode) =>
@@ -2050,6 +2164,174 @@ public static class Gen5ShaderScalarEvaluator
         return true;
     }
 
+    private static bool TryExecuteVectorLaneTransfer(
+        Gen5ShaderInstruction instruction,
+        uint[] scalarRegisters,
+        Dictionary<uint, Dictionary<uint, uint>> vectorLaneValues,
+        HashSet<uint> laneRestoredScalarRegisters)
+    {
+        if (instruction.Opcode == "VWritelaneB32")
+        {
+            if (instruction.Destinations.Count != 1 ||
+                instruction.Destinations[0] is not
+                {
+                    Kind: Gen5OperandKind.VectorRegister,
+                } vectorDestination ||
+                instruction.Sources.Count < 2)
+            {
+                return true;
+            }
+
+            if (!TryEvaluateScalarOperand(
+                    instruction.Sources[1],
+                    scalarRegisters,
+                    out var lane))
+            {
+                RemoveTrackedVectorLanes(
+                    vectorDestination.Value,
+                    vectorLaneValues);
+                return true;
+            }
+
+            if (!vectorLaneValues.TryGetValue(
+                    vectorDestination.Value,
+                    out var trackedLanes))
+            {
+                trackedLanes = [];
+                vectorLaneValues.Add(vectorDestination.Value, trackedLanes);
+            }
+
+            if (TryEvaluateScalarOperand(
+                    instruction.Sources[0],
+                    scalarRegisters,
+                    out var value))
+            {
+                trackedLanes[lane] = value;
+            }
+            else
+            {
+                trackedLanes.Remove(lane);
+                if (trackedLanes.Count == 0)
+                {
+                    vectorLaneValues.Remove(vectorDestination.Value);
+                }
+            }
+
+            return true;
+        }
+
+        if (instruction.Opcode != "VReadlaneB32")
+        {
+            return false;
+        }
+
+        if (instruction.Destinations.Count != 1 ||
+            instruction.Destinations[0] is not
+            {
+                Kind: Gen5OperandKind.ScalarRegister,
+                Value: < ScalarRegisterCount,
+            } scalarDestination ||
+            instruction.Sources.Count < 2 ||
+            instruction.Sources[0] is not
+            {
+                Kind: Gen5OperandKind.VectorRegister,
+            } vectorSource ||
+            !TryEvaluateScalarOperand(
+                instruction.Sources[1],
+                scalarRegisters,
+                out var sourceLane) ||
+            !vectorLaneValues.TryGetValue(vectorSource.Value, out var sourceLanes) ||
+            !sourceLanes.TryGetValue(sourceLane, out var restoredValue))
+        {
+            if (instruction.Destinations.Count == 1 &&
+                instruction.Destinations[0] is
+                {
+                    Kind: Gen5OperandKind.ScalarRegister,
+                    Value: < ScalarRegisterCount,
+                } unresolvedDestination)
+            {
+                laneRestoredScalarRegisters.Remove(unresolvedDestination.Value);
+            }
+
+            return true;
+        }
+
+        scalarRegisters[scalarDestination.Value] = restoredValue;
+        laneRestoredScalarRegisters.Add(scalarDestination.Value);
+        return true;
+    }
+
+    private static void InvalidateTrackedVectorLanes(
+        Gen5ShaderInstruction instruction,
+        Dictionary<uint, Dictionary<uint, uint>> vectorLaneValues)
+    {
+        if (vectorLaneValues.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var destination in instruction.Destinations)
+        {
+            if (destination.Kind == Gen5OperandKind.VectorRegister)
+            {
+                RemoveTrackedVectorLanes(destination.Value, vectorLaneValues);
+            }
+        }
+    }
+
+    private static void RemoveTrackedVectorLanes(
+        uint vectorRegister,
+        Dictionary<uint, Dictionary<uint, uint>> vectorLaneValues)
+    {
+        vectorLaneValues.Remove(vectorRegister);
+    }
+
+    private static Dictionary<uint, Dictionary<uint, uint>> CloneVectorLaneValues(
+        IReadOnlyDictionary<uint, Dictionary<uint, uint>> vectorLaneValues) =>
+        vectorLaneValues.ToDictionary(
+            static pair => pair.Key,
+            static pair => new Dictionary<uint, uint>(pair.Value));
+
+    private static void InvalidateLaneRestoredScalarRegisters(
+        Gen5ShaderInstruction instruction,
+        HashSet<uint> laneRestoredScalarRegisters)
+    {
+        if (laneRestoredScalarRegisters.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var destination in instruction.Destinations)
+        {
+            if (destination.Kind == Gen5OperandKind.ScalarRegister)
+            {
+                laneRestoredScalarRegisters.Remove(destination.Value);
+            }
+        }
+
+        if (Ir.Gen5ScalarSsa.WritesVccImplicitly(instruction))
+        {
+            laneRestoredScalarRegisters.Remove(Ir.Gen5ScalarSsa.VccLo);
+            laneRestoredScalarRegisters.Remove(Ir.Gen5ScalarSsa.VccHi);
+        }
+    }
+
+    private static bool AreRegistersLaneRestored(
+        IReadOnlySet<uint> laneRestoredScalarRegisters,
+        uint scalarBase,
+        uint registerCount)
+    {
+        for (var offset = 0u; offset < registerCount; offset++)
+        {
+            if (!laneRestoredScalarRegisters.Contains(scalarBase + offset))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool TryExecuteScalarLoad(
         CpuContext ctx,
         Gen5ShaderState state,
@@ -2059,6 +2341,7 @@ public static class Gen5ShaderScalarEvaluator
         List<Gen5GlobalMemoryBinding> globalMemoryBindings,
         Dictionary<(uint ScalarAddress, ulong BaseAddress), Gen5GlobalMemoryBinding> globalMemoryByAddress,
         IReadOnlySet<uint> runtimeScalarRegisters,
+        IReadOnlySet<uint> laneRestoredScalarRegisters,
         bool recordBinding,
         out string error)
     {
@@ -2097,11 +2380,18 @@ public static class Gen5ShaderScalarEvaluator
         var address = unchecked(
             baseAddress +
             byteOffset) & ~3UL;
-        var descriptorDiverged = IsDescriptorFromDivergentMerge(
-            state,
-            instruction.Pc,
-            scalarBase.Value,
-            isBufferLoad ? 4u : 2u) ||
+        var descriptorDiverged =
+            !AreRegistersLaneRestored(
+                laneRestoredScalarRegisters,
+                scalarBase.Value,
+                isBufferLoad ? 4u : 2u) &&
+            IsDescriptorFromDivergentMerge(
+                state,
+                instruction.Pc,
+                scalarBase.Value,
+                isBufferLoad ? 4u : 2u) ||
+            control.DynamicOffsetRegister is { } divergentOffsetRegister &&
+            !laneRestoredScalarRegisters.Contains(divergentOffsetRegister) &&
             IsOffsetFromUnmodelledWriter(state, instruction, control);
         if (descriptorDiverged)
         {

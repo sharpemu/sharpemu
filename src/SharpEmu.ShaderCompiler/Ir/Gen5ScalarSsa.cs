@@ -379,6 +379,17 @@ public sealed class Gen5ScalarSsa
     /// </summary>
     public static bool WritesVccImplicitly(Gen5ShaderInstruction instruction)
     {
+        // An SDWA or VOP3 compare instruction can use an SGPR pair as its
+        // destination. For an SGPR destination, write the comparison mask to the
+        // specified pair, not to VCC. If all VOPC instructions write to VCC, a later
+        // control-flow join can incorrectly identify s106:s107 offsets as vector
+        // values.
+        if (instruction.Destinations.Any(static destination =>
+                destination.Kind == Gen5OperandKind.ScalarRegister))
+        {
+            return false;
+        }
+
         if (instruction.Encoding == Gen5ShaderEncoding.Vopc)
         {
             return true;
