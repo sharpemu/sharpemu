@@ -1270,6 +1270,12 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS"));
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
+    // ACQUIRE_MEM does not update an image when CPU image tracking is off.
+    // Do not add an empty ordered action. Set the option to 0 to add this action.
+    private static readonly bool _skipNoopAcquireMem = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_SKIP_NOOP_ACQUIRE_MEM"),
+        "0",
+        StringComparison.Ordinal);
     private static readonly bool _traceDraws = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
@@ -1292,7 +1298,6 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_NO_TEXTURE_SKIP"),
         "1",
         StringComparison.Ordinal);
-
     // GPU deswizzle: ship raw tiled bytes + params to the backend instead of
     // detiling on the CPU. On by default; SHARPEMU_GPU_DETILE=0 forces the CPU
     // path. Backend-agnostic here (only inspects DetileParams); the Vulkan/Metal
@@ -1311,6 +1316,11 @@ public static partial class AgcExports
         StringComparison.Ordinal);
     private static readonly HashSet<uint> _seenTextureTileModes = new();
     private static readonly HashSet<uint> _gpuDetileGateDiag = new();
+    private static readonly bool _reuseGuestTextureSnapshots = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_REUSE_GUEST_TEXTURE_SNAPSHOTS"),
+        "0",
+        StringComparison.Ordinal);
+    private static int _guestTextureSnapshotReuseLogged;
     private static long _dcbWriteDataTraceCount;
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
@@ -1516,6 +1526,12 @@ public static partial class AgcExports
         uint MipLevel,
         IReadOnlyList<uint> SamplerDescriptor,
         bool IsArrayed = false);
+
+    private readonly record struct GuestTextureSnapshotReuseKey(
+        TextureDescriptor Descriptor,
+        bool IsStorage,
+        uint MipLevel,
+        bool IsArrayed);
 
     private readonly record struct RenderTargetWriter(
         ulong Sequence,
@@ -6067,6 +6083,11 @@ public static partial class AgcExports
         state.PendingAcquireBase = 0;
         state.PendingAcquireSize = 0;
 
+        if (_skipNoopAcquireMem && !SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
         var queueName = state.QueueName;
         var submissionId = state.ActiveSubmissionId;
         var debugName =
@@ -8792,18 +8813,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     return false;
                 }
 
-                texture = new TextureDescriptor(
-                    0,
-                    1,
-                    1,
-                    Gen5TextureFormatR8G8B8A8Unorm,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    1,
-                    0xFAC);
+                texture = CreateFallbackTextureDescriptor(
+                    binding.ResourceDescriptor,
+                    binding.Control.Dimension);
             }
 
             textures.Add(new TranslatedImageBinding(
@@ -9452,8 +9464,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     return false;
                 }
 
-                texture = new TextureDescriptor(
-                    0, 1, 1, Gen5TextureFormatR8G8B8A8Unorm, 0, 0, 0, 0, 0, 1, 0xFAC);
+                texture = CreateFallbackTextureDescriptor(
+                    binding.ResourceDescriptor,
+                    binding.Control.Dimension);
             }
 
             var isStorage = Gen5ShaderTranslator.RequiresStorageImage(
@@ -11065,23 +11078,62 @@ private static long _indirectDrawProbeCount;
         out int fallbackTextureCount)
     {
         var textures = new List<GuestDrawTexture>(bindings.Count);
+        Dictionary<GuestTextureSnapshotReuseKey, GuestDrawTexture>? snapshots = null;
+        if (_reuseGuestTextureSnapshots)
+        {
+            snapshots = new Dictionary<GuestTextureSnapshotReuseKey, GuestDrawTexture>();
+            if (Interlocked.Exchange(ref _guestTextureSnapshotReuseLogged, 1) == 0)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][INFO] Per-work guest texture snapshot reuse enabled.");
+            }
+        }
         fallbackTextureCount = 0;
         foreach (var binding in bindings)
         {
-            if (TryCreateGuestDrawTexture(
+            var reuseKey = new GuestTextureSnapshotReuseKey(
+                binding.Descriptor,
+                binding.IsStorage,
+                binding.MipLevel,
+                binding.IsArrayed);
+            GuestDrawTexture texture;
+            if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
+            {
+                // The sampling state is unique to each binding. Multiple bindings
+                // can share the decoded texture data. Keep one record for each binding.
+                // Share the unchanged snapshot only during this translation.
+                texture = snapshot with
+                {
+                    Sampler = ToGuestSampler(binding.SamplerDescriptor),
+                };
+            }
+            else if (TryCreateGuestDrawTexture(
                     ctx,
                     binding.Descriptor,
                     binding.IsStorage,
                     binding.MipLevel,
                     binding.SamplerDescriptor,
                     binding.IsArrayed,
-                    out var texture))
+                    out texture))
             {
-                textures.Add(texture);
-                if (texture.IsFallback)
+                // An empty non-fallback snapshot shows that this sampler-specific
+                // texture is in the presenter cache. Another sampler can require
+                // a different cache entry. Reuse only snapshots that contain
+                // decoded pixels.
+                if (!texture.IsFallback && texture.RgbaPixels.Length != 0)
                 {
-                    fallbackTextureCount++;
+                    snapshots?.Add(reuseKey, texture);
                 }
+            }
+            else
+            {
+                continue;
+            }
+
+            textures.Add(texture);
+            if (texture.IsFallback)
+            {
+                fallbackTextureCount++;
             }
         }
 
@@ -12870,7 +12922,9 @@ private static long _indirectDrawProbeCount;
             var descriptorValid = TryDecodeTextureDescriptor(binding.ResourceDescriptor, out var texture);
             if (!descriptorValid)
             {
-                texture = CreateFallbackTextureDescriptor(binding.ResourceDescriptor);
+                texture = CreateFallbackTextureDescriptor(
+                    binding.ResourceDescriptor,
+                    binding.Control.Dimension);
             }
 
             translatedBindings.Add(
@@ -14463,7 +14517,9 @@ GuestImageWriteTracker.Track(
         return true;
     }
 
-    private static TextureDescriptor CreateFallbackTextureDescriptor(IReadOnlyList<uint> fields)
+    private static TextureDescriptor CreateFallbackTextureDescriptor(
+        IReadOnlyList<uint> fields,
+        uint instructionDimension)
     {
         var format = Gen5TextureFormatR8G8B8A8Unorm;
         var numberType = 0u;
@@ -14493,12 +14549,23 @@ GuestImageWriteTracker.Track(
             Format: format,
             NumberType: numberType,
             TileMode: tileMode,
-            Type: Gen5TextureType2D,
+            Type: GetFallbackTextureType(instructionDimension),
             BaseLevel: 0,
             LastLevel: 0,
             Pitch: 1,
             DstSelect: 0xFAC);
     }
+
+    internal static uint GetFallbackTextureType(uint instructionDimension) =>
+        instructionDimension switch
+        {
+            0 => Gen5TextureType1D,
+            2 => Gen5TextureType3D,
+            3 => Gen5TextureTypeCube,
+            4 => Gen5TextureType1DArray,
+            5 or 7 => Gen5TextureType2DArray,
+            _ => Gen5TextureType2D,
+        };
 
     private static bool TrySoftwarePresent(
         CpuContext ctx,
