@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
+using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
@@ -11,6 +13,8 @@ namespace SharpEmu.Libs.Tests.Kernel;
 // otherwise falls back to the QPC-based Stopwatch, so the frequency selection has to follow suit.
 public sealed class KernelRuntimeCompatExportsTests
 {
+    private const ulong MemoryBase = 0x1_0000_0000;
+
     private static KernelRuntimeCompatExports.TryGetFrequency Yields(ulong hz) =>
         (out ulong frequencyHz) =>
         {
@@ -127,4 +131,105 @@ public sealed class KernelRuntimeCompatExportsTests
         Assert.Equal(10_000_000UL, frequencyHz); // DefaultKernelTscFrequency
         Assert.Equal("qpc", source);
     }
+
+    [Fact]
+    public void ConvertUtcToLocaltime_AllowsNullLocalOutputAndWritesTimesec()
+    {
+        const long utcSeconds = 1_786_262_400;
+        const ulong timesecAddress = MemoryBase + 0x100;
+        const ulong dstSecondsAddress = MemoryBase + 0x200;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var timesec = new byte[17];
+        Array.Fill(timesec, (byte)0xCC);
+        Assert.True(memory.TryWrite(timesecAddress, timesec));
+
+        context[CpuRegister.Rdi] = unchecked((ulong)utcSeconds);
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = timesecAddress;
+        context[CpuRegister.Rcx] = dstSecondsAddress;
+
+        var result = KernelRuntimeCompatExports.KernelConvertUtcToLocaltime(context);
+
+        Assert.Equal(0, result);
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        Assert.True(memory.TryRead(timesecAddress, timesec));
+        Assert.Equal(utcSeconds, BinaryPrimitives.ReadInt64LittleEndian(timesec));
+        Assert.Equal(
+            unchecked((uint)GetStandardOffsetSeconds()),
+            BinaryPrimitives.ReadUInt32LittleEndian(timesec.AsSpan(8)));
+        Assert.Equal(0U, BinaryPrimitives.ReadUInt32LittleEndian(timesec.AsSpan(12)));
+        Assert.Equal(0xCC, timesec[16]);
+
+        Span<byte> dstSeconds = stackalloc byte[sizeof(ulong)];
+        Assert.True(memory.TryRead(dstSecondsAddress, dstSeconds));
+        Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(dstSeconds));
+    }
+
+    [Fact]
+    public void ConvertLocaltimeToUtc_WritesTimezoneAndDstOutputs()
+    {
+        const long localSeconds = 1_786_240_800;
+        const ulong utcAddress = MemoryBase + 0x100;
+        const ulong timezoneAddress = MemoryBase + 0x200;
+        const ulong dstSecondsAddress = MemoryBase + 0x300;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = unchecked((ulong)localSeconds);
+        context[CpuRegister.Rsi] = 0xDEAD_BEEF;
+        context[CpuRegister.Rdx] = utcAddress;
+        context[CpuRegister.Rcx] = timezoneAddress;
+        context[CpuRegister.R8] = dstSecondsAddress;
+
+        var result = KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context);
+
+        Assert.Equal(0, result);
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+
+        Span<byte> utc = stackalloc byte[sizeof(ulong)];
+        Assert.True(memory.TryRead(utcAddress, utc));
+        Assert.Equal(
+            localSeconds - GetStandardOffsetSeconds(),
+            BinaryPrimitives.ReadInt64LittleEndian(utc));
+
+        Span<byte> timezone = stackalloc byte[sizeof(int) * 2];
+        Assert.True(memory.TryRead(timezoneAddress, timezone));
+        Assert.Equal(GetMinutesWest(), BinaryPrimitives.ReadInt32LittleEndian(timezone));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(timezone[sizeof(int)..]));
+
+        Span<byte> dstSeconds = stackalloc byte[sizeof(int)];
+        Assert.True(memory.TryRead(dstSecondsAddress, dstSeconds));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(dstSeconds));
+    }
+
+    [Theory]
+    [InlineData(360, 0, -21_600)]
+    [InlineData(360, 3_600, -18_000)]
+    [InlineData(-345, 0, 20_700)]
+    public void TimeConversionArithmetic_HandlesOffsetsAndDst(
+        int minutesWest,
+        int dstSeconds,
+        long expectedLocalDelta)
+    {
+        const long utcSeconds = 1_786_262_400;
+
+        var localSeconds = KernelRuntimeCompatExports.ConvertUtcToLocaltimeSeconds(
+            utcSeconds,
+            minutesWest,
+            dstSeconds);
+        var roundTrip = KernelRuntimeCompatExports.ConvertLocaltimeToUtcSeconds(
+            localSeconds,
+            minutesWest,
+            dstSeconds);
+
+        Assert.Equal(utcSeconds + expectedLocalDelta, localSeconds);
+        Assert.Equal(utcSeconds, roundTrip);
+    }
+
+    private static int GetMinutesWest() =>
+        unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
+
+    private static int GetStandardOffsetSeconds() =>
+        unchecked(-GetMinutesWest() * 60);
 }
