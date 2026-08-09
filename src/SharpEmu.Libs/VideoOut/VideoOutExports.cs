@@ -39,6 +39,7 @@ public static class VideoOutExports
     private const int VideoOutBuffersEntrySize = 0x20;
     private const int VideoOutOutputOptionsSize = 0x40;
     private const int VideoOutOutputStatusSize = 0x30;
+    private const int VideoOutFlipStatusSize = 0x80;
     private const int VideoOutVblankStatusSize = 0x28;
     private const ulong SceVideoOutOutputModeDefault = 1;
     private const ulong SceVideoOutOutputMode119_88Hz = 0xF;
@@ -205,6 +206,12 @@ public static class VideoOutExports
         public int FlipRate { get; set; }
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
+        public ulong FlipProcessTime { get; set; }
+        public ulong FlipProcessTimeCounter { get; set; }
+        public ulong SubmitProcessTimeCounter { get; set; }
+        public long FlipArg { get; set; } = -1;
+        public int GpuQueueCount { get; set; }
+        public int FlipPendingCount { get; set; }
         public int CurrentBuffer { get; set; } = -1;
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
@@ -716,27 +723,34 @@ public static class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        ulong count;
-        uint currentBuffer;
+        Span<byte> status = stackalloc byte[VideoOutFlipStatusSize];
         lock (_stateGate)
         {
-            count = port.FlipCount;
-            currentBuffer = unchecked((uint)port.CurrentBuffer);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x00..], port.FlipCount);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..], port.FlipProcessTime);
+            BinaryPrimitives.WriteInt64LittleEndian(status[0x18..], port.FlipArg);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x28..], port.FlipProcessTimeCounter);
+            BinaryPrimitives.WriteInt32LittleEndian(status[0x30..], port.GpuQueueCount);
+            BinaryPrimitives.WriteInt32LittleEndian(status[0x34..], port.FlipPendingCount);
+            BinaryPrimitives.WriteInt32LittleEndian(status[0x38..], port.CurrentBuffer);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x40..], port.SubmitProcessTimeCounter);
         }
 
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
-        // Ghost of Yotei polls a flag past the classic 0x28-byte struct and
-        // spins on sceKernelUsleep(1) while it's nonzero; the caller never
-        // pre-zeroes that stack buffer, so an untouched field reads back as
-        // garbage. Flips complete synchronously in this emulator (see
-        // SubmitFlip/sceVideoOutIsFlipPending, always not-pending), so the
-        // extended region must read zero here too.
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x30, 0);
+        for (var offset = 0; offset < status.Length; offset += sizeof(ulong))
+        {
+            if (!KernelMemoryCompatExports.TryWriteUInt64Compat(
+                    ctx,
+                    statusAddress + unchecked((ulong)offset),
+                    BinaryPrimitives.ReadUInt64LittleEndian(status[offset..])))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        TraceVideoOut(
+            $"videoout.flip_status handle={handle} count={port.FlipCount} " +
+            $"pending={port.FlipPendingCount} gpu_queue={port.GpuQueueCount} " +
+            $"buffer={port.CurrentBuffer} arg={port.FlipArg}");
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -748,13 +762,15 @@ public static class VideoOutExports
     public static int VideoOutIsFlipPending(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!TryGetPort(handle, out _))
+        if (!TryGetPort(handle, out var port))
         {
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        lock (_stateGate)
+        {
+            return port.FlipPendingCount;
+        }
     }
 
     [SysAbiExport(
@@ -1182,8 +1198,13 @@ public static class VideoOutExports
                 return OrbisVideoOutErrorInvalidIndex;
             }
 
-            port.CurrentBuffer = bufferIndex;
-            port.FlipCount++;
+            port.FlipPendingCount++;
+            if (!submitGpuImage)
+            {
+                port.GpuQueueCount++;
+            }
+
+            port.SubmitProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;
@@ -1223,6 +1244,20 @@ public static class VideoOutExports
 
         void TriggerFlipEvents()
         {
+            lock (_stateGate)
+            {
+                port.FlipCount++;
+                port.FlipProcessTime = KernelRuntimeCompatExports.ReadProcessTimeMicroseconds();
+                port.FlipProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
+                port.FlipArg = flipArg;
+                port.CurrentBuffer = bufferIndex;
+                port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
+                if (!submitGpuImage)
+                {
+                    port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
+                }
+            }
+
             if (flipEvents is null)
             {
                 return;
