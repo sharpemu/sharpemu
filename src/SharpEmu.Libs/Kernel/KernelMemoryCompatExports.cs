@@ -6355,18 +6355,68 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryProtectHostRange(ulong address, ulong length, int orbisProtection)
     {
-        if (length == 0 || length > nuint.MaxValue)
+        if (length == 0 ||
+            length > nuint.MaxValue ||
+            !TryAddU64(address, length, out var endAddress))
         {
             return false;
         }
 
         var hostProtection = ResolveHostProtection(orbisProtection);
-        if (!VirtualProtect((nint)address, (nuint)length, hostProtection, out _))
+        var changes = new List<(nint Address, nuint Length, uint OldProtection)>();
+        var cursor = address;
+        var infoSize = (nuint)Marshal.SizeOf<MemoryBasicInformation>();
+        while (cursor < endAddress)
         {
-            return false;
+            if (VirtualQuery((nint)cursor, out var info, infoSize) == 0 ||
+                info.State != MemCommit ||
+                info.RegionSize == 0)
+            {
+                RestoreHostProtections(changes);
+                return false;
+            }
+
+            var regionAddress = unchecked((ulong)info.BaseAddress);
+            var regionLength = unchecked((ulong)info.RegionSize);
+            if (cursor < regionAddress ||
+                !TryAddU64(regionAddress, regionLength, out var regionEnd) ||
+                regionEnd <= cursor)
+            {
+                RestoreHostProtections(changes);
+                return false;
+            }
+
+            var segmentEnd = Math.Min(endAddress, regionEnd);
+            var segmentLength = segmentEnd - cursor;
+            if (!VirtualProtect(
+                    (nint)cursor,
+                    (nuint)segmentLength,
+                    hostProtection,
+                    out var oldProtection))
+            {
+                RestoreHostProtections(changes);
+                return false;
+            }
+
+            changes.Add(((nint)cursor, (nuint)segmentLength, oldProtection));
+            cursor = segmentEnd;
         }
 
         return true;
+    }
+
+    private static void RestoreHostProtections(
+        List<(nint Address, nuint Length, uint OldProtection)> changes)
+    {
+        for (var index = changes.Count - 1; index >= 0; index--)
+        {
+            var change = changes[index];
+            _ = VirtualProtect(
+                change.Address,
+                change.Length,
+                change.OldProtection,
+                out _);
+        }
     }
 
     private static uint ResolveHostProtection(int orbisProtection)
