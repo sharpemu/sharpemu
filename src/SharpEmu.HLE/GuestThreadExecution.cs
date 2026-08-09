@@ -62,6 +62,11 @@ public interface IGuestThreadScheduler
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
 
     /// <summary>
+    /// Reports whether the current guest thread has an exception that waits for an import safe point.
+    /// </summary>
+    bool HasPendingGuestExceptionForCurrentThread();
+
+    /// <summary>
     /// Applies a new guest scheduling priority to a live thread, mapping it
     /// onto the host thread if one is running. Returns false when the thread
     /// handle is unknown.

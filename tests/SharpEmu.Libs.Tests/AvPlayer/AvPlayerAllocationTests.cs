@@ -80,6 +80,8 @@ public sealed class AvPlayerAllocationTests : IDisposable
 
         public int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue) => 0;
 
+        public bool HasPendingGuestExceptionForCurrentThread() => false;
+
         public bool TrySetGuestThreadPriority(ulong guestThreadHandle, int guestPriority) => false;
 
         public bool TrySetGuestThreadAffinity(ulong guestThreadHandle, ulong affinityMask) => false;

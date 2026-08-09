@@ -3905,6 +3905,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return wakeCount;
 	}
 
+	public bool HasPendingGuestExceptionForCurrentThread()
+	{
+		if (Volatile.Read(ref _pendingGuestExceptionCount) == 0)
+		{
+			return false;
+		}
+
+		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+		if (threadHandle == 0)
+		{
+			threadHandle = _currentExternalGuestThreadHandle;
+		}
+		if (threadHandle == 0)
+		{
+			return false;
+		}
+
+		lock (_guestThreadGate)
+		{
+			return _pendingGuestExceptions.ContainsKey(threadHandle);
+		}
+	}
+
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
 	{
 		using (LockGate("SnapshotThreads"))

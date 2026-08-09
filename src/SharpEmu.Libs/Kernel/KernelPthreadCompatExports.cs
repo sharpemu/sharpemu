@@ -1626,24 +1626,56 @@ public static class KernelPthreadCompatExports
         // Non-guest callers have no resumable CPU continuation. Park only
         // those host-side compatibility callers, preserving the same FIFO
         // mutex reacquisition rules as cooperative guest waiters.
-        lock (state.SyncRoot)
+        var deadline = timed
+            ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
+            : long.MaxValue;
+        while (true)
         {
-            var deadline = timed
-                ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
-                : long.MaxValue;
-            while (waiter.CompletionState == 0)
+            var completed = false;
+            lock (state.SyncRoot)
             {
-                if (!timed)
+                if (waiter.CompletionState != 0)
                 {
-                    Monitor.Wait(state.SyncRoot);
-                    continue;
+                    break;
                 }
 
-                var remaining = GetRemainingTimeout(deadline);
-                if (remaining <= TimeSpan.Zero || !Monitor.Wait(state.SyncRoot, remaining))
+                var waitDuration = TimeSpan.FromMilliseconds(10);
+                if (timed)
+                {
+                    var remaining = GetRemainingTimeout(deadline);
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        CompleteCondWaiterLocked(state, waiter, timedOut: true);
+                        break;
+                    }
+
+                    if (remaining < waitDuration)
+                    {
+                        waitDuration = remaining;
+                    }
+                }
+
+                _ = Monitor.Wait(state.SyncRoot, waitDuration);
+                if (waiter.CompletionState == 0 &&
+                    timed &&
+                    GetRemainingTimeout(deadline) <= TimeSpan.Zero)
                 {
                     CompleteCondWaiterLocked(state, waiter, timedOut: true);
-                    break;
+                }
+
+                completed = waiter.CompletionState != 0;
+            }
+
+            if (completed)
+            {
+                break;
+            }
+
+            if (GuestThreadExecution.Scheduler?.HasPendingGuestExceptionForCurrentThread() == true)
+            {
+                lock (state.SyncRoot)
+                {
+                    _ = CompleteCondWaiterLocked(state, waiter, timedOut: false);
                 }
             }
         }
