@@ -21,6 +21,7 @@ public static class AudioOutExports
     internal const int AudioOutErrorInvalidSize = unchecked((int)0x80260006);
 
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
+    private static readonly ConcurrentDictionary<int, PortState> ShutdownPorts = new();
     private static int _nextPortHandle;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
 
@@ -305,6 +306,11 @@ public static class AudioOutExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var sourceAddress = ctx[CpuRegister.Rsi];
+        if (Volatile.Read(ref _shutdown))
+        {
+            return ctx.SetReturn(PaceShutdownPort(handle));
+        }
+
         if (!Ports.TryGetValue(handle, out var port))
         {
             // Host shutdown disposes the ports while guest audio threads are
@@ -364,6 +370,11 @@ public static class AudioOutExports
 
     private static int SubmitOutputs(CpuContext ctx, ReadOnlySpan<OutputDescriptor> descriptors)
     {
+        if (Volatile.Read(ref _shutdown))
+        {
+            return PaceShutdownPorts(descriptors);
+        }
+
         var resolvedArray = ArrayPool<ResolvedOutput>.Shared.Rent(descriptors.Length);
         var resolved = resolvedArray.AsSpan(0, descriptors.Length);
         resolved.Clear();
@@ -518,6 +529,44 @@ public static class AudioOutExports
         (ulong)candidate.BufferLength * current.Frequency >
         (ulong)current.BufferLength * candidate.Frequency;
 
+    private static int PaceShutdownPort(int handle)
+    {
+        if (ShutdownPorts.TryGetValue(handle, out var port))
+        {
+            port.PaceSilence();
+        }
+        else
+        {
+            Thread.Sleep(1);
+        }
+
+        return 0;
+    }
+
+    private static int PaceShutdownPorts(ReadOnlySpan<OutputDescriptor> descriptors)
+    {
+        PortState? pacingPort = null;
+        for (var index = 0; index < descriptors.Length; index++)
+        {
+            if (ShutdownPorts.TryGetValue(descriptors[index].Handle, out var port) &&
+                (pacingPort is null || HasLongerBufferDuration(port, pacingPort)))
+            {
+                pacingPort = port;
+            }
+        }
+
+        if (pacingPort is null)
+        {
+            Thread.Sleep(1);
+        }
+        else
+        {
+            pacingPort.PaceSilence();
+        }
+
+        return 0;
+    }
+
     private static void ConvertForHost(PortState port, ReadOnlySpan<byte> source, Span<byte> destination)
     {
         if (port.PreservesGuestFormat)
@@ -632,11 +681,13 @@ public static class AudioOutExports
 
     public static void ShutdownAllPorts()
     {
+        ShutdownPorts.Clear();
         Volatile.Write(ref _shutdown, true);
         foreach (var handle in Ports.Keys)
         {
             if (Ports.TryRemove(handle, out var port))
             {
+                ShutdownPorts[handle] = port;
                 port.Dispose();
             }
         }
@@ -655,6 +706,7 @@ public static class AudioOutExports
             }
         }
 
+        ShutdownPorts.Clear();
         _nextPortHandle = 0;
         _outputCount = 0;
         Volatile.Write(ref _shutdown, false);

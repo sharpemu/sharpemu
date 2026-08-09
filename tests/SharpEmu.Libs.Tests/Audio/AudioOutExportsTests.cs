@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Audio;
@@ -57,6 +58,23 @@ public sealed class AudioOutExportsTests : IDisposable
         Assert.Equal(2, result);
         Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
         Assert.Equal(source.ToArray(), Assert.Single(_streams[0].Submissions));
+    }
+
+    [Fact]
+    public void Output_PacesAfterShutdownWithoutUsingDisposedStream()
+    {
+        var handle = OpenPort(bufferLength: 4800);
+        var stream = Assert.Single(_streams);
+        AudioOutExports.ShutdownAllPorts();
+
+        Assert.Equal(0, SubmitSingle(handle, sourceAddress: 0));
+        var timer = Stopwatch.StartNew();
+        var result = SubmitSingle(handle, sourceAddress: 0);
+
+        Assert.Equal(0, result);
+        Assert.True(timer.Elapsed >= TimeSpan.FromMilliseconds(50));
+        Assert.True(stream.IsDisposed);
+        Assert.Empty(stream.Submissions);
     }
 
     [Fact]
@@ -203,6 +221,13 @@ public sealed class AudioOutExportsTests : IDisposable
         return AudioOutExports.AudioOutOutputs(_ctx);
     }
 
+    private int SubmitSingle(int handle, ulong sourceAddress)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = sourceAddress;
+        return AudioOutExports.AudioOutOutput(_ctx);
+    }
+
     private void WriteDescriptor(int index, int handle, ulong sourceAddress)
     {
         Span<byte> descriptor = stackalloc byte[16];
@@ -217,15 +242,18 @@ public sealed class AudioOutExportsTests : IDisposable
     private sealed class RecordingAudioStream : IHostAudioStream
     {
         public List<byte[]> Submissions { get; } = [];
+        public bool IsDisposed { get; private set; }
 
         public bool Submit(ReadOnlySpan<byte> stereoPcm16)
         {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             Submissions.Add(stereoPcm16.ToArray());
             return true;
         }
 
         public void Dispose()
         {
+            IsDisposed = true;
         }
     }
 }
