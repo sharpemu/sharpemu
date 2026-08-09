@@ -61,6 +61,21 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void KernelMkdir_GuestRootReturnsAlreadyExists()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.KernelMkdir(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS, result);
+    }
+
+    [Fact]
     public void PosixFstat_BadDescriptorReturnsMinusOne()
     {
         const ulong memoryBase = 0x1_0000_0000;
