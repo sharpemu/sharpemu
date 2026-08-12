@@ -60,10 +60,6 @@ public static class GameServiceStubs
     public static int NpUniversalDataSystemPostEvent(CpuContext ctx) => Ok(ctx);
     public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx) => Ok(ctx);
 
-    [SysAbiExport(Nid = "47UAEuQl+iI", ExportName = "sceNpUniversalDataSystemTerminate",
-        Target = Generation.Gen5, LibraryName = "libSceNpUniversalDataSystem")]
-    public static int NpUniversalDataSystemTerminate(CpuContext ctx) => Ok(ctx);
-
     [SysAbiExport(Nid = "0HBYxYAjmf0", ExportName = "sceNpGameIntentTerminate",
         Target = Generation.Gen5, LibraryName = "libSceNpGameIntent")]
     public static int NpGameIntentTerminate(CpuContext ctx) => Ok(ctx);
