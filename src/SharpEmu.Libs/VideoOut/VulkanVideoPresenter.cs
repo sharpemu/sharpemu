@@ -582,9 +582,17 @@ internal static unsafe partial class VulkanVideoPresenter
     // geometry+composite path renders on its own.
     private static readonly bool _skipAllCompute =
         Environment.GetEnvironmentVariable("SHARPEMU_SKIP_ALL_COMPUTE") == "1";
-    // Use a second queue from the graphics queue family. A queue from the same
-    // family prevents queue ownership transfers. Set the option to 0 to use one queue.
+    // Use a second queue from the graphics queue family. Use one queue with
+    // RenderDoc because a capture changes the timing of cross-queue work.
+    // Set SHARPEMU_RENDERDOC_SINGLE_QUEUE=0 to test a multi-queue capture.
+    private static readonly bool _renderDocSingleQueue =
+        RenderDocCapture.IsAvailable &&
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_RENDERDOC_SINGLE_QUEUE"),
+            "0",
+            StringComparison.Ordinal);
     private static readonly bool _useDedicatedComputeQueueRequested =
+        !_renderDocSingleQueue &&
         !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_DEDICATED_COMPUTE_QUEUE"),
             "0",
@@ -15709,10 +15717,19 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw;
                 }
             }
+            finally
+            {
+                // EndFrame clears a completed capture. DiscardFrame only acts
+                // when this render attempt ended before it presented a frame.
+                RenderDocCapture.DiscardFrame();
+            }
         }
 
         private void RenderCore()
         {
+            RenderDocCapture.DiscardTimedOutFrame();
+            RenderDocCapture.BeginFrame();
+
             if (Volatile.Read(ref _presenterCloseRequested))
             {
                 Console.Error.WriteLine("[LOADER][WARN] Vulkan VideoOut closing on host shutdown request.");
@@ -16391,6 +16408,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 presentResult = _swapchainApi.QueuePresent(_queue, &presentInfo);
             }
+            RenderDocCapture.EndFrame();
 
             if (presentResult == Result.ErrorOutOfDateKhr)
             {
@@ -16403,7 +16421,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             CheckSwapchainResult(presentResult, "vkQueuePresentKHR");
             recreateAfterPresent |= presentResult == Result.SuboptimalKhr;
-            RenderDocCapture.OnPresent();
             VideoOutExports.ReportPresentedFrame();
             PerfOverlay.RecordPresent();
             RenderPhaseProfile.RecordFrame();

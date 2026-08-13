@@ -16,6 +16,7 @@ public static unsafe class RenderDocCapture
     private const int IndexStartFrameCapture = 19;
     private const int IndexIsFrameCapturing = 20;
     private const int IndexEndFrameCapture = 21;
+    private const int IndexDiscardFrameCapture = 24;
 
     private const int StateIdle = 0;
     private const int StateRequested = 1;
@@ -24,6 +25,13 @@ public static unsafe class RenderDocCapture
     private static IntPtr* _api;
     private static int _state = StateIdle;
     private static bool _initialized;
+    private static long _captureStartedTick;
+    private static readonly long _captureTimeoutMilliseconds =
+        long.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_RENDERDOC_CAPTURE_TIMEOUT_SECONDS"),
+            out var captureTimeoutSeconds) && captureTimeoutSeconds > 0
+            ? Math.Clamp(captureTimeoutSeconds, 1, 120) * 1_000
+            : 15_000;
 
     public static bool IsAvailable => _api is not null;
 
@@ -130,51 +138,91 @@ public static unsafe class RenderDocCapture
         }
     }
 
-    public static void OnPresent()
+    public static void BeginFrame()
     {
         if (_api is null)
         {
             return;
         }
 
-        switch (Volatile.Read(ref _state))
+        if (Volatile.Read(ref _state) != StateRequested)
         {
-            case StateIdle:
-                return;
-
-            case StateRequested:
-                if (IsFrameCapturing())
-                {
-                    Volatile.Write(ref _state, StateIdle);
-                    return;
-                }
-
-                StartFrameCapture();
-                if (!IsFrameCapturing())
-                {
-                    Console.Error.WriteLine(
-                        "[LOADER][WARN] renderdoc: StartFrameCapture did not begin a capture.");
-                    Volatile.Write(ref _state, StateIdle);
-                    return;
-                }
-
-                Volatile.Write(ref _state, StateCapturing);
-                return;
-
-            case StateCapturing:
-                var captured = EndFrameCapture() != 0;
-                Volatile.Write(ref _state, StateIdle);
-                if (captured)
-                {
-                    LogNewestCapture();
-                }
-                else
-                {
-                    Console.Error.WriteLine("[LOADER][WARN] renderdoc: EndFrameCapture failed.");
-                }
-
-                return;
+            return;
         }
+
+        if (IsFrameCapturing())
+        {
+            Volatile.Write(ref _state, StateIdle);
+            return;
+        }
+
+        StartFrameCapture();
+        if (!IsFrameCapturing())
+        {
+            Console.Error.WriteLine(
+                "[LOADER][WARN] renderdoc: StartFrameCapture did not begin a capture.");
+            Volatile.Write(ref _state, StateIdle);
+            return;
+        }
+
+        Volatile.Write(ref _state, StateCapturing);
+        Volatile.Write(ref _captureStartedTick, Environment.TickCount64);
+        Console.Error.WriteLine("[LOADER][INFO] renderdoc: frame capture started.");
+    }
+
+    public static void DiscardTimedOutFrame()
+    {
+        if (_api is null || Volatile.Read(ref _state) != StateCapturing)
+        {
+            return;
+        }
+
+        var elapsed = Environment.TickCount64 - Volatile.Read(ref _captureStartedTick);
+        if (elapsed < _captureTimeoutMilliseconds ||
+            Interlocked.CompareExchange(ref _state, StateIdle, StateCapturing) !=
+                StateCapturing)
+        {
+            return;
+        }
+
+        _ = ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint>)
+            _api[IndexDiscardFrameCapture])(IntPtr.Zero, IntPtr.Zero);
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] renderdoc: discarded a frame capture after {elapsed} ms without a presentation.");
+    }
+
+    public static void EndFrame()
+    {
+        if (_api is null ||
+            Interlocked.CompareExchange(ref _state, StateIdle, StateCapturing) !=
+                StateCapturing)
+        {
+            return;
+        }
+
+        if (EndFrameCapture() != 0)
+        {
+            LogNewestCapture();
+        }
+        else
+        {
+            Console.Error.WriteLine("[LOADER][WARN] renderdoc: EndFrameCapture failed.");
+        }
+    }
+
+    public static void DiscardFrame()
+    {
+        if (_api is null ||
+            Interlocked.CompareExchange(ref _state, StateIdle, StateCapturing) !=
+                StateCapturing)
+        {
+            return;
+        }
+
+        _ = ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint>)
+            _api[IndexDiscardFrameCapture])(IntPtr.Zero, IntPtr.Zero);
+        Console.Error.WriteLine(
+            "[LOADER][WARN] renderdoc: discarded an interrupted frame capture.");
     }
 
 
