@@ -101,6 +101,43 @@ internal sealed record VulkanOrderedGuestFlipWait(
     int VideoOutHandle,
     int DisplayBufferIndex);
 
+internal static class VulkanVertexBindingPlanner
+{
+    public static int BuildUniqueSourceIndices(
+        ReadOnlySpan<ulong> handles,
+        ReadOnlySpan<bool> perInstance,
+        Span<int> sourceIndices)
+    {
+        if (handles.Length != perInstance.Length || sourceIndices.Length < handles.Length)
+        {
+            throw new ArgumentException("Vertex binding spans must have compatible lengths.");
+        }
+
+        var bindingCount = 0;
+        for (var sourceIndex = 0; sourceIndex < handles.Length; sourceIndex++)
+        {
+            var found = false;
+            for (var bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
+            {
+                var previousSourceIndex = sourceIndices[bindingIndex];
+                if (handles[previousSourceIndex] == handles[sourceIndex] &&
+                    perInstance[previousSourceIndex] == perInstance[sourceIndex])
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                sourceIndices[bindingCount++] = sourceIndex;
+            }
+        }
+
+        return bindingCount;
+    }
+}
+
 internal sealed class VulkanGuestFlipCompletionTracker
 {
     private sealed class BufferState
@@ -11329,12 +11366,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => Format.R32Sfloat,
             };
 
-        // OffsetBytes selects the field within each interleaved record. Some
-        // guest fetch prologs apply firstVertex to their own vertex ID, so the
-        // Vulkan draw stays relative and the host stream starts at BaseRecord.
-        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer) =>
-            (ulong)vertexBuffer.BaseRecord * vertexBuffer.Stride;
-
         private static uint GetDrawVertexCount(
             uint primitiveType,
             uint vertexCount,
@@ -18240,16 +18271,31 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var buffers = stackalloc VkBuffer[resources.VertexBuffers.Length];
                 var offsets = stackalloc ulong[resources.VertexBuffers.Length];
+                var handles = stackalloc ulong[resources.VertexBuffers.Length];
+                var perInstance = stackalloc bool[resources.VertexBuffers.Length];
+                var sourceIndices = stackalloc int[resources.VertexBuffers.Length];
                 for (var index = 0; index < resources.VertexBuffers.Length; index++)
                 {
-                    buffers[index] = resources.VertexBuffers[index].Buffer;
-                    offsets[index] = GetVertexBindingOffset(resources.VertexBuffers[index]);
+                    handles[index] = resources.VertexBuffers[index].Buffer.Handle;
+                    perInstance[index] = resources.VertexBuffers[index].PerInstance;
+                }
+
+                var bindingCount = VulkanVertexBindingPlanner.BuildUniqueSourceIndices(
+                    new ReadOnlySpan<ulong>(handles, resources.VertexBuffers.Length),
+                    new ReadOnlySpan<bool>(perInstance, resources.VertexBuffers.Length),
+                    new Span<int>(sourceIndices, resources.VertexBuffers.Length));
+                for (var bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
+                {
+                    var sourceIndex = sourceIndices[bindingIndex];
+                    buffers[bindingIndex] = resources.VertexBuffers[sourceIndex].Buffer;
+                    // The pipeline attribute already contains OffsetBytes.
+                    offsets[bindingIndex] = 0;
                 }
 
                 _vk.CmdBindVertexBuffers(
                     _commandBuffer,
                     0,
-                    (uint)resources.VertexBuffers.Length,
+                    (uint)bindingCount,
                     buffers,
                     offsets);
             }
