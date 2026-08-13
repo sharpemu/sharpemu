@@ -2834,7 +2834,10 @@ public static partial class AgcExports
         var offset = (uint)ctx[CpuRegister.Rsi];
         var valuesAddress = ctx[CpuRegister.Rdx];
         var valueCount = (uint)ctx[CpuRegister.Rcx];
-        if (commandBufferAddress == 0 || offset == 0 || offset > 0x3FF || valueCount == 0)
+        if (commandBufferAddress == 0 ||
+            offset == 0 ||
+            offset > 0x3FF ||
+            !TryGetCbSetShRegisterRangeDirectLayout(valueCount, out var packetDwords, out _))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -2842,8 +2845,8 @@ public static partial class AgcExports
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var markerAddress) ||
             !TryWriteUInt32(ctx, markerAddress, Pm4(2, ItNop, RZero)) ||
             !TryWriteUInt32(ctx, markerAddress + 4, CbSetShRegisterRangeMarker) ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, valueCount + 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(valueCount + 2, ItSetShReg, 0)) ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, offset))
         {
             return ReturnPointer(ctx, 0);
@@ -2867,6 +2870,43 @@ public static partial class AgcExports
         TraceAgc($"agc.cb_set_sh_range buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{offset:X8} count={valueCount}");
         RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "bxGoVxpdSPQ",
+        ExportName = "sceAgcCbSetShRegisterRangeDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbSetShRegisterRangeDirectGetSize(CpuContext ctx)
+    {
+        var valueCount = (uint)ctx[CpuRegister.Rdi];
+        if (!TryGetCbSetShRegisterRangeDirectLayout(valueCount, out _, out var sizeBytes))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return 0;
+        }
+
+        ctx[CpuRegister.Rax] = sizeBytes;
+        return (int)sizeBytes;
+    }
+
+    private static bool TryGetCbSetShRegisterRangeDirectLayout(
+        uint valueCount,
+        out uint packetDwords,
+        out uint sizeBytes)
+    {
+        // The PM4 count field can encode at most 0x4001 dwords. This packet
+        // uses two header dwords. The SharpEmu marker uses two more dwords.
+        if (valueCount == 0 || valueCount > 0x3FFF)
+        {
+            packetDwords = 0;
+            sizeBytes = 0;
+            return false;
+        }
+
+        packetDwords = valueCount + 2;
+        sizeBytes = (valueCount + 4) * sizeof(uint);
+        return true;
     }
 
     [SysAbiExport(
