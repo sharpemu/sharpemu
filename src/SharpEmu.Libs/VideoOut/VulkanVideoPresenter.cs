@@ -3376,6 +3376,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupInvocations;
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
+        private bool _supportsDepthBiasClamp;
         private uint _maxColorAttachments;
         private Device _device;
         private PipelineCache _pipelineCache;
@@ -4520,6 +4521,7 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
+            _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 IndependentBlend = supportedFeatures.IndependentBlend,
@@ -4532,6 +4534,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ShaderStorageImageWriteWithoutFormat = supportedFeatures.ShaderStorageImageWriteWithoutFormat,
                 TextureCompressionBC = supportedFeatures.TextureCompressionBC,
                 RobustBufferAccess = supportedFeatures.RobustBufferAccess,
+                DepthBiasClamp = supportedFeatures.DepthBiasClamp,
             };
 
             if (!supportedFeatures.RobustBufferAccess)
@@ -7976,6 +7979,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         FrontFace = raster.FrontFaceClockwise
                             ? FrontFace.Clockwise
                             : FrontFace.CounterClockwise,
+                        DepthBiasEnable = raster.DepthBiasEnable,
+                        // D32Sfloat cannot reproduce fixed-point guest bias
+                        // scaling without the depth-bias-control extension.
+                        DepthBiasConstantFactor = raster.ResolveDepthBiasConstantFactor(
+                            hostDepthBits: 0),
+                        DepthBiasClamp = _supportsDepthBiasClamp
+                            ? raster.DepthBiasClamp
+                            : 0,
+                        DepthBiasSlopeFactor = raster.DepthBiasSlopeFactor,
                         LineWidth = 1,
                     };
                     var multisample = new PipelineMultisampleStateCreateInfo

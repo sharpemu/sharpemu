@@ -10905,8 +10905,14 @@ private static long _indirectDrawProbeCount;
     // PA_SU_SC_MODE_CNTL (context register 0x205) carries face culling, the
     // front-face winding and polygon (wireframe) mode.
     private const uint PaSuScModeCntl = 0x205;
+    private const uint PaSuPolyOffsetDbFmtCntl = 0x2DE;
+    private const uint PaSuPolyOffsetClamp = 0x2DF;
+    private const uint PaSuPolyOffsetFrontScale = 0x2E0;
+    private const uint PaSuPolyOffsetFrontOffset = 0x2E1;
+    private const uint PaSuPolyOffsetBackScale = 0x2E2;
+    private const uint PaSuPolyOffsetBackOffset = 0x2E3;
 
-    private static GuestRasterState DecodeRasterState(
+    internal static GuestRasterState DecodeRasterState(
         IReadOnlyDictionary<uint, uint> registers)
     {
         if (!registers.TryGetValue(PaSuScModeCntl, out var mode))
@@ -10921,7 +10927,37 @@ private static long _indirectDrawProbeCount;
         var frontPtype = (mode >> 5) & 0x7u;
         // POLY_MODE != 0 with a line front primitive type renders wireframe.
         var wireframe = polyMode != 0 && frontPtype == 1;
-        return new GuestRasterState(cullFront, cullBack, frontFaceClockwise, wireframe);
+        var useFrontBias = (mode & (1u << 11)) != 0 && !cullFront;
+        var useBackBias = (mode & (1u << 12)) != 0 && !cullBack;
+        var depthBiasEnable = useFrontBias || useBackBias;
+        var scaleRegister = useFrontBias
+            ? PaSuPolyOffsetFrontScale
+            : PaSuPolyOffsetBackScale;
+        var offsetRegister = useFrontBias
+            ? PaSuPolyOffsetFrontOffset
+            : PaSuPolyOffsetBackOffset;
+        registers.TryGetValue(scaleRegister, out var rawScale);
+        registers.TryGetValue(offsetRegister, out var rawOffset);
+        registers.TryGetValue(PaSuPolyOffsetClamp, out var rawClamp);
+        var negNumDbBits = (sbyte)-23;
+        var isFloatFormat = true;
+        if (registers.TryGetValue(PaSuPolyOffsetDbFmtCntl, out var formatControl))
+        {
+            negNumDbBits = unchecked((sbyte)(formatControl & 0xFFu));
+            isFloatFormat = (formatControl & (1u << 8)) != 0;
+        }
+
+        return new GuestRasterState(
+            cullFront,
+            cullBack,
+            frontFaceClockwise,
+            wireframe,
+            depthBiasEnable,
+            BitConverter.Int32BitsToSingle(unchecked((int)rawOffset)),
+            BitConverter.Int32BitsToSingle(unchecked((int)rawClamp)),
+            BitConverter.Int32BitsToSingle(unchecked((int)rawScale)) / 16f,
+            negNumDbBits,
+            isFloatFormat);
     }
 
     /// <summary>CB_BLEND_RED..ALPHA carry the constant blend color as raw

@@ -168,9 +168,27 @@ internal readonly record struct GuestRasterState(
     bool CullFront,
     bool CullBack,
     bool FrontFaceClockwise,
-    bool Wireframe)
+    bool Wireframe,
+    bool DepthBiasEnable = false,
+    float DepthBiasConstantFactor = 0,
+    float DepthBiasClamp = 0,
+    float DepthBiasSlopeFactor = 0,
+    sbyte DepthBiasNegNumDbBits = -23,
+    bool DepthBiasIsFloatFormat = true)
 {
     public static GuestRasterState Default { get; } = new(false, false, false, false);
+
+    public float ResolveDepthBiasConstantFactor(int hostDepthBits)
+    {
+        if (DepthBiasIsFloatFormat || hostDepthBits is not (16 or 24))
+        {
+            return DepthBiasConstantFactor;
+        }
+
+        return MathF.ScaleB(
+            DepthBiasConstantFactor,
+            hostDepthBits + DepthBiasNegNumDbBits);
+    }
 }
 
 // CompareOp uses the GCN DB_DEPTH_CONTROL ZFUNC encoding, which matches the
