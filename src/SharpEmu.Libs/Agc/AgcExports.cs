@@ -2069,6 +2069,14 @@ public static partial class AgcExports
         SetIndirectPatchAddress(ctx, "cx");
 
     [SysAbiExport(
+        Nid = "whb1RL7K4Ss",
+        ExportName = "sceAgcSetCxRegIndirectPatchSetNumRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetCxRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
+        SetIndirectPatchRegisterCount(ctx, "cx");
+
+    [SysAbiExport(
         Nid = "Qrj4c+61z4A",
         ExportName = "sceAgcSetShRegIndirectPatchSetAddress",
         Target = Generation.Gen5,
@@ -15298,6 +15306,25 @@ GuestImageWriteTracker.Track(
         }
 
         TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int SetIndirectPatchRegisterCount(CpuContext ctx, string registerSpace)
+    {
+        var commandAddress = ctx[CpuRegister.Rdi];
+        var registerCount = (uint)ctx[CpuRegister.Rsi];
+        if (commandAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!TryWriteUInt32(ctx, commandAddress + 4, registerCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc($"agc.patch_{registerSpace}_count cmd=0x{commandAddress:X16} count={registerCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
