@@ -342,8 +342,17 @@ internal static unsafe class GnmTiling
             : blockSizeLog2 <= 11
                 ? 1 + (1 << (blockSizeLog2 - 9))
                 : blockSizeLog2 - 4;
-        var tailWidth = (blockSizeLog2 & 1) != 0 ? blockWidth >> 1 : blockWidth;
-        var tailHeight = (blockSizeLog2 & 1) != 0 ? blockHeight : blockHeight >> 1;
+        // A thin GFX10 mip tail uses the left half of one swizzle block.
+        // The old dimensions used the bottom half for 4 KiB and 64 KiB
+        // blocks. This moved mip 0 by one full block for some mip chains.
+        var tailWidth = blockWidth >> 1;
+        var tailHeight = blockHeight;
+        if (swizzleMode == 24 && bytesPerElement < 4)
+        {
+            // Depth64KB has a smaller tail limit for 8-bit and 16-bit data.
+            tailWidth = 64;
+            tailHeight = 128;
+        }
 
         var firstMipInTail = mipLevels;
         var mipSizes = new ulong[mipLevels];
