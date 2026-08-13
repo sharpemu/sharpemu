@@ -249,7 +249,33 @@ internal static class AgcVertexMetadata
         CpuContext ctx,
         IReadOnlyList<uint> scalarRegisters,
         VertexTableRegisters tables,
+        Gen5ShaderProgram program,
+        IReadOnlyList<Gen5VertexInputBinding> discovered) =>
+        MergeVertexInputsFromMetadata(
+            ctx,
+            scalarRegisters,
+            tables,
+            discovered,
+            program);
+
+    internal static IReadOnlyList<Gen5VertexInputBinding> MergeVertexInputsFromMetadata(
+        CpuContext ctx,
+        IReadOnlyList<uint> scalarRegisters,
+        VertexTableRegisters tables,
         IReadOnlyList<Gen5VertexInputBinding> discovered)
+        => MergeVertexInputsFromMetadata(
+            ctx,
+            scalarRegisters,
+            tables,
+            discovered,
+            program: null);
+
+    private static IReadOnlyList<Gen5VertexInputBinding> MergeVertexInputsFromMetadata(
+        CpuContext ctx,
+        IReadOnlyList<uint> scalarRegisters,
+        VertexTableRegisters tables,
+        IReadOnlyList<Gen5VertexInputBinding> discovered,
+        Gen5ShaderProgram? program)
     {
         if (discovered.Count == 0 ||
             !TryBuildVertexResourcesFromMetadata(
@@ -261,16 +287,50 @@ internal static class AgcVertexMetadata
             return discovered;
         }
 
-        if (TryMergeByLocationPairing(discovered, resources, out var paired))
+        var hardwareAssignments = program is null
+            ? null
+            : BuildHardwareMappingAssignments(
+                program,
+                discovered,
+                resources);
+        if (program is null &&
+            TryMergeByLocationPairing(discovered, resources, out var paired))
         {
             return paired;
         }
 
         var merged = new List<Gen5VertexInputBinding>(discovered.Count);
         var usedResources = new bool[resources.Count];
-        var changed = false;
-        foreach (var input in discovered)
+        if (hardwareAssignments is not null)
         {
+            foreach (var resourceIndex in hardwareAssignments)
+            {
+                if (resourceIndex >= 0)
+                {
+                    usedResources[resourceIndex] = true;
+                }
+            }
+        }
+
+        var changed = false;
+        for (var inputIndex = 0; inputIndex < discovered.Count; inputIndex++)
+        {
+            var input = discovered[inputIndex];
+            if (hardwareAssignments is not null &&
+                hardwareAssignments[inputIndex] is var resourceIndex &&
+                resourceIndex >= 0)
+            {
+                var mappedResource = resources[resourceIndex];
+                if (TryGetMetadataOffset(input, mappedResource, out var mappedMetadataOffset) &&
+                    mappedMetadataOffset == input.OffsetBytes)
+                {
+                    var mapped = ApplyMetadataFormat(input, mappedResource);
+                    changed |= mapped != input;
+                    merged.Add(mapped);
+                    continue;
+                }
+            }
+
             if (!TryMatchMetadataResource(input, resources, usedResources, out var resource))
             {
                 merged.Add(input);
@@ -283,6 +343,110 @@ internal static class AgcVertexMetadata
         }
 
         return changed ? merged : discovered;
+    }
+
+    /// <summary>
+    /// Matches AGC hardware_mapping to the VGPR written by each discovered
+    /// fetch. A binding can represent more than one fetch PC, so aliases take
+    /// part in the match. Stream identity still has to agree. An assignment is
+    /// accepted only when it is unique in both directions.
+    /// </summary>
+    private static int[] BuildHardwareMappingAssignments(
+        Gen5ShaderProgram program,
+        IReadOnlyList<Gen5VertexInputBinding> discovered,
+        IReadOnlyList<MetadataVertexResource> resources)
+    {
+        var fetchVectorDataByPc = new Dictionary<uint, uint>();
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Control is Gen5BufferMemoryControl { IndexEnabled: true } control &&
+                (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal) ||
+                 instruction.Opcode.StartsWith("TBufferLoadFormat", StringComparison.Ordinal)))
+            {
+                fetchVectorDataByPc[instruction.Pc] = control.VectorData;
+            }
+        }
+
+        var assignments = new int[discovered.Count];
+        Array.Fill(assignments, -1);
+        var resourceUseCounts = new int[resources.Count];
+        for (var inputIndex = 0; inputIndex < discovered.Count; inputIndex++)
+        {
+            var input = discovered[inputIndex];
+            var vectorDestinations = new HashSet<uint>();
+            if (fetchVectorDataByPc.TryGetValue(input.Pc, out var vectorData))
+            {
+                vectorDestinations.Add(vectorData);
+            }
+
+            foreach (var aliasPc in input.AliasPcs ?? [])
+            {
+                if (fetchVectorDataByPc.TryGetValue(aliasPc, out vectorData))
+                {
+                    vectorDestinations.Add(vectorData);
+                }
+            }
+
+            if (vectorDestinations.Count == 0)
+            {
+                continue;
+            }
+
+            var candidateIndex = -1;
+            for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
+            {
+                var candidate = resources[resourceIndex];
+                if (!vectorDestinations.Contains(candidate.HardwareMapping) ||
+                    !IsCompatibleVertexStream(input, candidate))
+                {
+                    continue;
+                }
+
+                if (candidateIndex >= 0)
+                {
+                    candidateIndex = -1;
+                    break;
+                }
+
+                candidateIndex = resourceIndex;
+            }
+
+            if (candidateIndex >= 0)
+            {
+                assignments[inputIndex] = candidateIndex;
+                resourceUseCounts[candidateIndex]++;
+            }
+        }
+
+        for (var inputIndex = 0; inputIndex < assignments.Length; inputIndex++)
+        {
+            var resourceIndex = assignments[inputIndex];
+            if (resourceIndex >= 0 && resourceUseCounts[resourceIndex] != 1)
+            {
+                assignments[inputIndex] = -1;
+            }
+        }
+
+        return assignments;
+    }
+
+    private static bool IsCompatibleVertexStream(
+        Gen5VertexInputBinding input,
+        MetadataVertexResource resource) =>
+        (input.Stride == 0 || resource.Stride == 0 || input.Stride == resource.Stride) &&
+        IsSameVertexStream(input, resource);
+
+    private static bool IsSameVertexStream(
+        Gen5VertexInputBinding input,
+        MetadataVertexResource resource)
+    {
+        if (input.BaseAddress == resource.SharpBase ||
+            input.BaseAddress == resource.SharpBase + resource.OffsetBytes)
+        {
+            return true;
+        }
+
+        return IsAddressInsideCapturedSpan(input, resource.SharpBase);
     }
 
     /// <summary>
