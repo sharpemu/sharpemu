@@ -38,6 +38,9 @@ public static class KernelRuntimeCompatExports
     private const ulong ModuleInfoExSegmentsOffset = 0x160;
     private const ulong ModuleInfoExSegmentCountOffset = 0x1A0;
     private const int ModuleInfoSegmentSize = 16;
+    private const ulong GuestExecutableAddressFloor = 0x0000000800000000UL;
+    private const ulong GuestExecutableAddressCeiling = 0x0000000880000000UL;
+    private const ulong HostUnwindBoundarySize = 0x10_0000UL;
     private const ulong DefaultKernelTscFrequency = 10_000_000UL;
     private const ulong PrtAreaStartAddress = 0x0000001000000000UL;
     private const ulong PrtAreaSize = 0x000000EC00000000UL;
@@ -1013,14 +1016,34 @@ public static class KernelRuntimeCompatExports
 
         if (!KernelModuleRegistry.TryGetModuleByAddress(queriedAddress, out var module))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
+            if (queriedAddress >= GuestExecutableAddressFloor &&
+                queriedAddress < GuestExecutableAddressCeiling)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
 
-        if (!TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module))
+            if (!TryWriteHostBoundaryModuleInfoForUnwind(ctx, outInfoAddress, queriedAddress))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+        else if (!TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "crb5j7mkk1c",
+        ExportName = "_is_signal_return",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsSignalReturn(CpuContext ctx)
+    {
+        // SharpEmu calls guest exception handlers without a signal-return frame.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1505,6 +1528,14 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx) =>
+        KernelGetModuleInfoForUnwind(ctx);
+
+    [SysAbiExport(
         Nid = "fMP5NHUOaMk",
         ExportName = "sceSysmoduleIsLoaded",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1712,6 +1743,29 @@ public static class KernelRuntimeCompatExports
             payload.AsSpan(0x128),
             module.EndAddress - module.BaseAddress);
         return ctx.Memory.TryWrite(outInfoAddress, payload);
+    }
+
+    private static bool TryWriteHostBoundaryModuleInfoForUnwind(
+        CpuContext ctx,
+        ulong outInfoAddress,
+        ulong queriedAddress)
+    {
+        var boundaryBase = queriedAddress & ~(HostUnwindBoundarySize - 1);
+        var module = new KernelModuleRegistry.ModuleEntry(
+            Handle: 0,
+            Name: "SharpEmuHostBoundary",
+            Path: string.Empty,
+            BaseAddress: boundaryBase,
+            EndAddress: boundaryBase + HostUnwindBoundarySize,
+            EntryPoint: 0,
+            InitEntryPoint: 0,
+            EhFrameHeaderAddress: 0,
+            EhFrameAddress: 0,
+            EhFrameSize: 0,
+            StartState: KernelModuleRegistry.ModuleStartState.Started,
+            IsMain: false,
+            IsSystemModule: false);
+        return TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module);
     }
 
     private static void WriteModuleName(Span<byte> payload, string moduleName)

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using Xunit;
@@ -14,6 +15,8 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelRuntimeCompatExportsTests
 {
     private const ulong MemoryBase = 0x1_0000_0000;
+    private const ulong UnwindInfoAddress = MemoryBase + 0x400;
+    private const int UnwindInfoSize = 0x130;
 
     private static KernelRuntimeCompatExports.TryGetFrequency Yields(ulong hz) =>
         (out ulong frequencyHz) =>
@@ -227,9 +230,91 @@ public sealed class KernelRuntimeCompatExportsTests
         Assert.Equal(utcSeconds, roundTrip);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GetModuleInfoForUnwind_HostAddressWritesSyntheticBoundary(bool useSysmoduleAlias)
+    {
+        const ulong queriedAddress = 0x00000243_A84C_FFFF;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var payload = new byte[UnwindInfoSize + 1];
+        Array.Fill(payload, (byte)0xCC);
+        Assert.True(memory.TryWrite(UnwindInfoAddress, payload));
+        Assert.True(context.TryWriteUInt64(UnwindInfoAddress, UnwindInfoSize));
+        context[CpuRegister.Rdi] = queriedAddress;
+        context[CpuRegister.Rsi] = 1;
+        context[CpuRegister.Rdx] = UnwindInfoAddress;
+
+        var result = useSysmoduleAlias
+            ? KernelRuntimeCompatExports.SysmoduleGetModuleInfoForUnwind(context)
+            : KernelRuntimeCompatExports.KernelGetModuleInfoForUnwind(context);
+
+        Assert.Equal(0, result);
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        Assert.True(memory.TryRead(UnwindInfoAddress, payload));
+        Assert.Equal((ulong)UnwindInfoSize, BinaryPrimitives.ReadUInt64LittleEndian(payload));
+        Assert.Equal("SharpEmuHostBoundary", ReadUtf8Z(payload.AsSpan(0x08, 0x100)));
+        Assert.All(payload.AsSpan(0x108, 0x18).ToArray(), value => Assert.Equal(0, value));
+        Assert.Equal(
+            queriedAddress & ~0xF_FFFFUL,
+            BinaryPrimitives.ReadUInt64LittleEndian(payload.AsSpan(0x120)));
+        Assert.Equal(0x10_0000UL, BinaryPrimitives.ReadUInt64LittleEndian(payload.AsSpan(0x128)));
+        Assert.Equal(0xCC, payload[UnwindInfoSize]);
+    }
+
+    [Fact]
+    public void GetModuleInfoForUnwind_MissingGuestAddressReturnsNotFound()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(context.TryWriteUInt64(UnwindInfoAddress, UnwindInfoSize));
+        context[CpuRegister.Rdi] = 0x00000008_7FFF_1234;
+        context[CpuRegister.Rsi] = 1;
+        context[CpuRegister.Rdx] = UnwindInfoAddress;
+
+        var result = KernelRuntimeCompatExports.KernelGetModuleInfoForUnwind(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void GetModuleInfoForUnwind_InvalidFlagsReturnsInvalidArgument()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(context.TryWriteUInt64(UnwindInfoAddress, UnwindInfoSize));
+        context[CpuRegister.Rdi] = 0x00000243_A84C_FFFF;
+        context[CpuRegister.Rsi] = 3;
+        context[CpuRegister.Rdx] = UnwindInfoAddress;
+
+        var result = KernelRuntimeCompatExports.KernelGetModuleInfoForUnwind(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+    }
+
+    [Fact]
+    public void IsSignalReturn_ReportsNoSyntheticSignalFrame()
+    {
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x1000), Generation.Gen5);
+        context[CpuRegister.Rdi] = 0x00000243_A84C_FFFF;
+
+        var result = KernelRuntimeCompatExports.KernelIsSignalReturn(context);
+
+        Assert.Equal(0, result);
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+    }
+
     private static int GetMinutesWest() =>
         unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
 
     private static int GetStandardOffsetSeconds() =>
         unchecked(-GetMinutesWest() * 60);
+
+    private static string ReadUtf8Z(ReadOnlySpan<byte> value)
+    {
+        var length = value.IndexOf((byte)0);
+        Assert.True(length >= 0);
+        return Encoding.UTF8.GetString(value[..length]);
+    }
 }
