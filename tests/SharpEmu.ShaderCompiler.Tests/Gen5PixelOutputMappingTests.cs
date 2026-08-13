@@ -33,7 +33,22 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Equal([2u, 1u, 0u, 3u], shuffle.Operands[^4..]);
     }
 
-    private static byte[] Compile(Gen5ColorComponentMapping componentMapping)
+    [Fact]
+    public void BgraPartialExportPreservesPhysicalComponents()
+    {
+        var instructions = ReadInstructions(
+            Compile(new Gen5ColorComponentMapping(0xC6), enableMask: 0x1));
+        var preservedComponents = instructions
+            .Where(instruction => instruction.Opcode == SpirvOp.CompositeExtract)
+            .Select(instruction => instruction.Operands[^1])
+            .ToArray();
+
+        Assert.Equal([1u, 0u, 3u], preservedComponents);
+    }
+
+    private static byte[] Compile(
+        Gen5ColorComponentMapping componentMapping,
+        uint enableMask = 0xF)
     {
         var export = new Gen5ShaderInstruction(
             0,
@@ -47,7 +62,7 @@ public sealed class Gen5PixelOutputMappingTests
                 Gen5Operand.Vector(3),
             ],
             [],
-            new Gen5ExportControl(0, 0xF, false, true, true));
+            new Gen5ExportControl(0, enableMask, false, true, true));
         var end = new Gen5ShaderInstruction(
             8,
             Gen5ShaderEncoding.Sopp,

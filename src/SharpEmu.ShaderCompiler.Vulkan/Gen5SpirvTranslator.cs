@@ -4366,7 +4366,7 @@ public static partial class Gen5SpirvTranslator
                                 _ => _floatType,
                             },
                             Load(output.Type, output.Variable),
-                            (uint)component);
+                            outputComponent);
                         continue;
                     }
 
