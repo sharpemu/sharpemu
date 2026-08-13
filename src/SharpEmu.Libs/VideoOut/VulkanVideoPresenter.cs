@@ -28,7 +28,8 @@ namespace SharpEmu.Libs.VideoOut;
 
 internal readonly record struct VulkanRenderTargetFormat(
     Format Format,
-    Gen5PixelOutputKind OutputKind)
+    Gen5PixelOutputKind OutputKind,
+    Gen5ColorComponentMapping ExportMapping)
 {
     public bool IsInteger => OutputKind is Gen5PixelOutputKind.Uint or Gen5PixelOutputKind.Sint;
 }
@@ -2296,54 +2297,73 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,
+        out VulkanRenderTargetFormat result) =>
+        TryDecodeRenderTargetFormat(
+            dataFormat,
+            numberType,
+            componentSwap: 0,
+            out result);
+
+    internal static bool TryDecodeRenderTargetFormat(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
         out VulkanRenderTargetFormat result)
     {
-        var format = (dataFormat, numberType) switch
+        var format = (dataFormat, numberType, componentSwap) switch
         {
             // Early G-buffer / scene targets (R16 + RG32). GTA V Enhanced hits
             // these as color targets; texture decode already knew them.
-            (2, 0) => Format.R16Unorm,
-            (2, 1) => Format.R16SNorm,
-            (2, 2) => Format.R16Uscaled,
-            (2, 3) => Format.R16Sscaled,
-            (2, 4) => Format.R16Uint,
-            (2, 5) => Format.R16Sint,
-            (2, 7) => Format.R16Sfloat,
-            (4, 4) => Format.R32Uint,
-            (4, 5) => Format.R32Sint,
-            (4, 7) => Format.R32Sfloat,
-            (5, 4) => Format.R16G16Uint,
-            (5, 5) => Format.R16G16Sint,
-            (5, 7) => Format.R16G16Sfloat,
-            (6, 7) or (7, 7) => Format.B10G11R11UfloatPack32,
-            (9, _) => Format.A2R10G10B10UnormPack32,
-            (10, 4) => Format.R8G8B8A8Uint,
-            (10, 5) => Format.R8G8B8A8Sint,
-            (10, 9) => Format.R8G8B8A8Srgb,
-            (10, _) => Format.R8G8B8A8Unorm,
-            (11, 4) => Format.R32G32Uint,
-            (11, 5) => Format.R32G32Sint,
-            (11, 7) => Format.R32G32Sfloat,
-            (12, 4) => Format.R16G16B16A16Uint,
-            (12, 5) => Format.R16G16B16A16Sint,
-            (12, 7) => Format.R16G16B16A16Sfloat,
-            (13, 7) or (14, 7) => Format.R32G32B32A32Sfloat,
-            (20, 0) => Format.R32Uint,
-            (29, 0) or (4, 0) => Format.R32Sfloat,
-            (1, 0) or (36, 0) => Format.R8Unorm,
-            (49, 0) => Format.R8Uint,
-            (3, 0) => Format.R8G8Unorm,
-            (5, 0) => Format.R16G16Unorm,
-            (7, 0) => Format.B10G11R11UfloatPack32,
-            (12, 0) => Format.R16G16B16A16Unorm,
-            (13, 0) or (14, 0) => Format.R32G32B32A32Sfloat,
-            (22, 0) or (71, 0) => Format.R16G16B16A16Sfloat,
-            (56, 0) or (62, 0) or (64, 0) => Format.R8G8B8A8Unorm,
-            (75, 0) => Format.R32G32Sfloat,
+            (2, 0, _) => Format.R16Unorm,
+            (2, 1, _) => Format.R16SNorm,
+            (2, 2, _) => Format.R16Uscaled,
+            (2, 3, _) => Format.R16Sscaled,
+            (2, 4, _) => Format.R16Uint,
+            (2, 5, _) => Format.R16Sint,
+            (2, 7, _) => Format.R16Sfloat,
+            (4, 4, _) => Format.R32Uint,
+            (4, 5, _) => Format.R32Sint,
+            (4, 7, _) => Format.R32Sfloat,
+            (5, 4, _) => Format.R16G16Uint,
+            (5, 5, _) => Format.R16G16Sint,
+            (5, 7, _) => Format.R16G16Sfloat,
+            (6, 7, _) or (7, 7, _) => Format.B10G11R11UfloatPack32,
+            (9, _, 1) => Format.A2R10G10B10UnormPack32,
+            (9, _, _) => Format.A2B10G10R10UnormPack32,
+            (10, 4, _) => Format.R8G8B8A8Uint,
+            (10, 5, _) => Format.R8G8B8A8Sint,
+            (10, 6 or 9, 1) => Format.B8G8R8A8Srgb,
+            (10, 6 or 9, _) => Format.R8G8B8A8Srgb,
+            (10, 0, 1) => Format.B8G8R8A8Unorm,
+            (10, _, _) => Format.R8G8B8A8Unorm,
+            (11, 4, _) => Format.R32G32Uint,
+            (11, 5, _) => Format.R32G32Sint,
+            (11, 7, _) => Format.R32G32Sfloat,
+            (12, 4, _) => Format.R16G16B16A16Uint,
+            (12, 5, _) => Format.R16G16B16A16Sint,
+            (12, 7, _) => Format.R16G16B16A16Sfloat,
+            (13, 7, _) or (14, 7, _) => Format.R32G32B32A32Sfloat,
+            (20, 0, _) => Format.R32Uint,
+            (29, 0, _) or (4, 0, _) => Format.R32Sfloat,
+            (1, 0, _) or (36, 0, _) => Format.R8Unorm,
+            (49, 0, _) => Format.R8Uint,
+            (3, 0, _) => Format.R8G8Unorm,
+            (5, 0, _) => Format.R16G16Unorm,
+            (7, 0, _) => Format.B10G11R11UfloatPack32,
+            (12, 0, _) => Format.R16G16B16A16Unorm,
+            (13, 0, _) or (14, 0, _) => Format.R32G32B32A32Sfloat,
+            (22, 0, _) or (71, 0, _) => Format.R16G16B16A16Sfloat,
+            (56, 0, _) or (62, 0, _) or (64, 0, _) => Format.R8G8B8A8Unorm,
+            (75, 0, _) => Format.R32G32Sfloat,
             _ => Format.Undefined,
         };
 
-        if (format == Format.Undefined)
+        if (format == Format.Undefined ||
+            !TryGetRenderTargetComponentCount(dataFormat, out var componentCount) ||
+            !Gen5ColorComponentMapping.TryResolveRenderTarget(
+                componentSwap,
+                componentCount,
+                out var orderMapping))
         {
             result = default;
             return false;
@@ -2358,8 +2378,34 @@ internal static unsafe partial class VulkanVideoPresenter
                 Format.R8G8B8A8Sint or Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
-        result = new VulkanRenderTargetFormat(format, outputKind);
+
+        var hostToStorage = dataFormat switch
+        {
+            9 when componentSwap == 1 => new Gen5ColorComponentMapping(0xC6),
+            10 when componentSwap == 1 && numberType is 0 or 6 or 9 =>
+                new Gen5ColorComponentMapping(0xC6),
+            _ => Gen5ColorComponentMapping.Identity,
+        };
+        result = new VulkanRenderTargetFormat(
+            format,
+            outputKind,
+            hostToStorage.Then(orderMapping));
         return true;
+    }
+
+    private static bool TryGetRenderTargetComponentCount(
+        uint dataFormat,
+        out uint componentCount)
+    {
+        componentCount = dataFormat switch
+        {
+            1 or 2 or 4 or 20 or 29 or 36 or 49 => 1,
+            3 or 5 or 11 or 75 => 2,
+            6 or 7 => 3,
+            9 or 10 or 12 or 13 or 14 or 22 or 56 or 62 or 64 or 71 => 4,
+            _ => 0,
+        };
+        return componentCount != 0;
     }
 
     private static bool IsKnownGuestTextureFormat(uint format) =>
@@ -12798,7 +12844,11 @@ internal static unsafe partial class VulkanVideoPresenter
             for (var index = 0; index < targetFormats.Length; index++)
             {
                 var target = work.Targets[index];
-                if (!TryDecodeRenderTargetFormat(target.Format, target.NumberType, out targetFormats[index]) ||
+                if (!TryDecodeRenderTargetFormat(
+                        target.Format,
+                        target.NumberType,
+                        target.ComponentSwap,
+                        out targetFormats[index]) ||
                     !SupportsColorAttachment(targetFormats[index].Format))
                 {
                     Console.Error.WriteLine(
@@ -13455,7 +13505,11 @@ internal static unsafe partial class VulkanVideoPresenter
             for (var index = 0; index < targetFormats.Length; index++)
             {
                 var target = work.Targets[index];
-                if (!TryDecodeRenderTargetFormat(target.Format, target.NumberType, out targetFormats[index]) ||
+                if (!TryDecodeRenderTargetFormat(
+                        target.Format,
+                        target.NumberType,
+                        target.ComponentSwap,
+                        out targetFormats[index]) ||
                     !SupportsColorAttachment(targetFormats[index].Format))
                 {
                     Console.Error.WriteLine(
@@ -13468,11 +13522,23 @@ internal static unsafe partial class VulkanVideoPresenter
             EnsureGuestSubmissionCapacity();
             var commandBuffer = BeginBatchedGuestCommands();
             CloseOpenTranslatedRenderPass();
-            var clearValue = new ClearColorValue(work.Red, work.Green, work.Blue, work.Alpha);
+            var logicalClear = stackalloc float[4]
+            {
+                work.Red,
+                work.Green,
+                work.Blue,
+                work.Alpha,
+            };
 
             for (var index = 0; index < work.Targets.Count; index++)
             {
                 var targetDescriptor = work.Targets[index];
+                var exportMapping = targetFormats[index].ExportMapping;
+                var clearValue = new ClearColorValue(
+                    logicalClear[exportMapping.Map(0)],
+                    logicalClear[exportMapping.Map(1)],
+                    logicalClear[exportMapping.Map(2)],
+                    logicalClear[exportMapping.Map(3)]);
                 var image = GetOrCreateGuestImage(
                     targetDescriptor,
                     targetFormats[index].Format);

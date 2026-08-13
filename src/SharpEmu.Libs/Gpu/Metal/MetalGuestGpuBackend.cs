@@ -136,15 +136,26 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;
 
-    public bool TryGetRenderTargetOutputKind(uint dataFormat, uint numberType, out Gen5PixelOutputKind outputKind)
+    public bool TryGetRenderTargetOutputInfo(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
+        out Gen5PixelOutputKind outputKind,
+        out Gen5ColorComponentMapping componentMapping)
     {
-        if (MetalGuestFormats.TryDecodeRenderTargetFormat(dataFormat, numberType, out var format))
+        if (MetalGuestFormats.TryDecodeRenderTargetFormat(
+                dataFormat,
+                numberType,
+                componentSwap,
+                out var format))
         {
             outputKind = format.OutputKind;
+            componentMapping = format.ExportMapping;
             return true;
         }
 
         outputKind = default;
+        componentMapping = default;
         return false;
     }
 

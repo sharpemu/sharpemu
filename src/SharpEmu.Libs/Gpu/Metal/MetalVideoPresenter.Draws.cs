@@ -458,6 +458,7 @@ internal static partial class MetalVideoPresenter
             if (!MetalGuestFormats.TryDecodeRenderTargetFormat(
                     target.Format,
                     target.NumberType,
+                    target.ComponentSwap,
                     out targetFormats[index]))
             {
                 Console.Error.WriteLine(

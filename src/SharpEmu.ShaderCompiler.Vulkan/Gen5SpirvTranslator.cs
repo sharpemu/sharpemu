@@ -337,7 +337,8 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvPixelOutput(
             uint Variable,
             uint Type,
-            Gen5PixelOutputKind Kind);
+            Gen5PixelOutputKind Kind,
+            Gen5ColorComponentMapping ComponentMapping);
 
         public CompilationContext(
             Gen5SpirvStage stage,
@@ -1304,7 +1305,11 @@ public static partial class Gen5SpirvTranslator
                         binding.HostLocation);
                     _pixelOutputs.Add(
                         binding.GuestSlot,
-                        new SpirvPixelOutput(variable, outputType, binding.Kind));
+                        new SpirvPixelOutput(
+                            variable,
+                            outputType,
+                            binding.Kind,
+                            binding.ComponentMapping));
                     _interfaces.Add(variable);
                 }
             }
@@ -4334,6 +4339,19 @@ public static partial class Gen5SpirvTranslator
                     var enabled = (export.EnableMask & (1u << component)) != 0;
                     if (!enabled)
                     {
+                        var outputComponent = (uint)component;
+                        if (!output.ComponentMapping.IsIdentity)
+                        {
+                            for (var physicalComponent = 0u; physicalComponent < 4; physicalComponent++)
+                            {
+                                if (output.ComponentMapping.Map(physicalComponent) == component)
+                                {
+                                    outputComponent = physicalComponent;
+                                    break;
+                                }
+                            }
+                        }
+
                         values[component] = _module.AddInstruction(
                             SpirvOp.CompositeExtract,
                             output.Kind switch
@@ -4469,6 +4487,18 @@ public static partial class Gen5SpirvTranslator
                                 UInt(1),
                                 UInt(1)),
                     };
+                }
+                if (output.ComponentMapping != Gen5ColorComponentMapping.Identity)
+                {
+                    vector = _module.AddInstruction(
+                        SpirvOp.VectorShuffle,
+                        output.Type,
+                        vector,
+                        vector,
+                        output.ComponentMapping.Map(0),
+                        output.ComponentMapping.Map(1),
+                        output.ComponentMapping.Map(2),
+                        output.ComponentMapping.Map(3));
                 }
                 if (Environment.GetEnvironmentVariable(
                         "SHARPEMU_FORCE_TITLE_EXPORT_EXEC") == "1" &&

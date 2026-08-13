@@ -49,10 +49,98 @@ public enum Gen5PixelOutputKind
     Sint,
 }
 
+/// <summary>
+/// Selects the logical shader component for each physical color component.
+/// Each component uses two bits in <see cref="Packed"/>.
+/// </summary>
+public readonly record struct Gen5ColorComponentMapping
+{
+    public const byte IdentityPacked = 0xE4;
+    private readonly byte _encoded;
+
+    public Gen5ColorComponentMapping(byte packed)
+    {
+        _encoded = (byte)(packed ^ IdentityPacked);
+    }
+
+    public byte Packed => (byte)(_encoded ^ IdentityPacked);
+
+    public static Gen5ColorComponentMapping Identity { get; } = new(IdentityPacked);
+
+    public uint Map(uint physicalComponent) =>
+        physicalComponent < 4
+            ? (uint)(Packed >> checked((int)(physicalComponent * 2))) & 0x3u
+            : physicalComponent;
+
+    public uint ApplyMask(uint logicalMask)
+    {
+        var mappedMask = 0u;
+        for (var physicalComponent = 0u; physicalComponent < 4; physicalComponent++)
+        {
+            mappedMask |= ((logicalMask >> checked((int)Map(physicalComponent))) & 1u)
+                << checked((int)physicalComponent);
+        }
+
+        return mappedMask;
+    }
+
+    public Gen5ColorComponentMapping Then(Gen5ColorComponentMapping next)
+    {
+        var packed = 0u;
+        for (var physicalComponent = 0u; physicalComponent < 4; physicalComponent++)
+        {
+            packed |= next.Map(Map(physicalComponent))
+                << checked((int)(physicalComponent * 2));
+        }
+
+        return new Gen5ColorComponentMapping(checked((byte)packed));
+    }
+
+    public bool IsIdentity => Packed == IdentityPacked;
+
+    public static bool TryResolveRenderTarget(
+        uint componentSwap,
+        uint componentCount,
+        out Gen5ColorComponentMapping mapping)
+    {
+        var packed = (componentSwap, componentCount) switch
+        {
+            (0, >= 1 and <= 4) => IdentityPacked,
+            (1, 1) => 0xE1,
+            (1, 2) => 0x6C,
+            (1, 3) => 0xB4,
+            (1, 4) => 0xC6,
+            (2, 1) => 0xC6,
+            (2, 2) => 0xE1,
+            (2, 3) => 0xC6,
+            (2, 4) => 0x1B,
+            (3, 1) => 0x27,
+            (3, 2) => 0x63,
+            (3, 3) => 0x87,
+            (3, 4) => 0x93,
+            _ => -1,
+        };
+        mapping = packed >= 0
+            ? new Gen5ColorComponentMapping(checked((byte)packed))
+            : default;
+        return packed >= 0;
+    }
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
-    Gen5PixelOutputKind Kind);
+    Gen5PixelOutputKind Kind,
+    Gen5ColorComponentMapping ComponentMapping)
+{
+    public Gen5PixelOutputBinding(
+        uint guestSlot,
+        uint hostLocation,
+        Gen5PixelOutputKind kind)
+        : this(guestSlot, hostLocation, kind, Gen5ColorComponentMapping.Identity)
+    {
+    }
+}
 
 public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,

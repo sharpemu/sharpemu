@@ -182,7 +182,8 @@ internal static class Gen5ComputeFixtures
     }
 
     public static Gen5MslShader CompilePixelOrThrow(
-        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
+        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
+        Gen5ColorComponentMapping componentMapping = default)
     {
         var memory = new FakeGuestMemory();
         memory.AddRegion(ProgramAddress, PixelWords);
@@ -201,7 +202,7 @@ internal static class Gen5ComputeFixtures
         if (!Gen5MslTranslator.TryCompilePixelShader(
                 state,
                 evaluation,
-                outputKind,
+                [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)],
                 out var shader,
                 out var compileError))
         {

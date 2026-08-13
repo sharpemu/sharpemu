@@ -707,7 +707,20 @@ public static partial class Gen5MslTranslator
             {
                 if ((export.EnableMask & (1u << component)) == 0)
                 {
-                    values[component] = $"{field}[{component}]";
+                    var outputComponent = (uint)component;
+                    if (!binding.Value.ComponentMapping.IsIdentity)
+                    {
+                        for (var physicalComponent = 0u; physicalComponent < 4; physicalComponent++)
+                        {
+                            if (binding.Value.ComponentMapping.Map(physicalComponent) == component)
+                            {
+                                outputComponent = physicalComponent;
+                                break;
+                            }
+                        }
+                    }
+
+                    values[component] = $"{field}[{outputComponent}]";
                     continue;
                 }
 
@@ -731,6 +744,18 @@ public static partial class Gen5MslTranslator
                     Gen5PixelOutputKind.Sint => $"as_type<int>({raw})",
                     _ => $"as_type<float>({raw})",
                 };
+            }
+
+            if (binding.Value.ComponentMapping != Gen5ColorComponentMapping.Identity)
+            {
+                var mappedValues = new string[4];
+                for (var component = 0; component < mappedValues.Length; component++)
+                {
+                    mappedValues[component] = values[
+                        binding.Value.ComponentMapping.Map((uint)component)];
+                }
+
+                values = mappedValues;
             }
 
             // A lane removed from EXEC keeps the previous output value; killed

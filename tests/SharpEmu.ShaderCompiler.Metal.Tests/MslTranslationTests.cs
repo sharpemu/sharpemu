@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
@@ -98,6 +99,31 @@ public sealed class MslTranslationTests
 
         var sintShader = Gen5ComputeFixtures.CompilePixelOrThrow(Gen5PixelOutputKind.Sint);
         Assert.Contains("int4 mrt0 [[color(0)]];", sintShader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IdentityPixelOutputKeepsGuestComponentOrder()
+    {
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
+
+        Assert.Contains(
+            "vec<float, 4>(as_type<float>(v[0]), as_type<float>(v[1]), " +
+            "as_type<float>(v[2]), as_type<float>(v[3]))",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BgraPixelOutputMapsGuestComponentsToPhysicalOrder()
+    {
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow(
+            componentMapping: new Gen5ColorComponentMapping(0xC6));
+
+        Assert.Contains(
+            "vec<float, 4>(as_type<float>(v[2]), as_type<float>(v[1]), " +
+            "as_type<float>(v[0]), as_type<float>(v[3]))",
+            shader.Source,
+            StringComparison.Ordinal);
     }
 
     [Fact]

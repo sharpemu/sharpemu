@@ -85,8 +85,16 @@ internal readonly record struct MetalTextureFormat(
 
 internal readonly record struct MetalRenderTargetFormat(
     MtlPixelFormat Format,
-    Gen5PixelOutputKind OutputKind)
+    Gen5PixelOutputKind OutputKind,
+    Gen5ColorComponentMapping ExportMapping)
 {
+    public MetalRenderTargetFormat(
+        MtlPixelFormat format,
+        Gen5PixelOutputKind outputKind)
+        : this(format, outputKind, Gen5ColorComponentMapping.Identity)
+    {
+    }
+
     public static uint GetBytesPerPixel(MtlPixelFormat format) =>
         format switch
         {
@@ -214,52 +222,71 @@ internal static class MetalGuestFormats
     public static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
         uint numberType,
+        out MetalRenderTargetFormat result) =>
+        TryDecodeRenderTargetFormat(
+            dataFormat,
+            numberType,
+            componentSwap: 0,
+            out result);
+
+    public static bool TryDecodeRenderTargetFormat(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
         out MetalRenderTargetFormat result)
     {
-        var format = (dataFormat, numberType) switch
+        var format = (dataFormat, numberType, componentSwap) switch
         {
             // Early G-buffer / scene targets (R16 + RG32). Keep in sync with
             // VulkanVideoPresenter.TryDecodeRenderTargetFormat.
-            (2, 0) => MtlPixelFormat.R16Unorm,
-            (2, 1) => MtlPixelFormat.R16Snorm,
-            (2, 4) => MtlPixelFormat.R16Uint,
-            (2, 5) => MtlPixelFormat.R16Sint,
-            (2, 7) => MtlPixelFormat.R16Float,
-            (4, 4) => MtlPixelFormat.R32Uint,
-            (4, 5) => MtlPixelFormat.R32Sint,
-            (4, 7) => MtlPixelFormat.R32Float,
-            (5, 4) => MtlPixelFormat.Rg16Uint,
-            (5, 5) => MtlPixelFormat.Rg16Sint,
-            (5, 7) => MtlPixelFormat.Rg16Float,
-            (6, 7) or (7, 7) => MtlPixelFormat.Rg11B10Float,
-            (9, _) => MtlPixelFormat.Bgr10A2Unorm,
-            (10, 4) => MtlPixelFormat.Rgba8Uint,
-            (10, 5) => MtlPixelFormat.Rgba8Sint,
-            (10, 9) => MtlPixelFormat.Rgba8UnormSrgb,
-            (10, _) => MtlPixelFormat.Rgba8Unorm,
-            (11, 4) => MtlPixelFormat.Rg32Uint,
-            (11, 5) => MtlPixelFormat.Rg32Sint,
-            (11, 7) => MtlPixelFormat.Rg32Float,
-            (12, 4) => MtlPixelFormat.Rgba16Uint,
-            (12, 5) => MtlPixelFormat.Rgba16Sint,
-            (12, 7) => MtlPixelFormat.Rgba16Float,
-            (13, 7) or (14, 7) => MtlPixelFormat.Rgba32Float,
-            (20, 0) => MtlPixelFormat.R32Uint,
-            (29, 0) or (4, 0) => MtlPixelFormat.R32Float,
-            (1, 0) or (36, 0) => MtlPixelFormat.R8Unorm,
-            (49, 0) => MtlPixelFormat.R8Uint,
-            (3, 0) => MtlPixelFormat.Rg8Unorm,
-            (5, 0) => MtlPixelFormat.Rg16Unorm,
-            (7, 0) => MtlPixelFormat.Rg11B10Float,
-            (12, 0) => MtlPixelFormat.Rgba16Unorm,
-            (13, 0) or (14, 0) => MtlPixelFormat.Rgba32Float,
-            (22, 0) or (71, 0) => MtlPixelFormat.Rgba16Float,
-            (56, 0) or (62, 0) or (64, 0) => MtlPixelFormat.Rgba8Unorm,
-            (75, 0) => MtlPixelFormat.Rg32Float,
+            (2, 0, _) => MtlPixelFormat.R16Unorm,
+            (2, 1, _) => MtlPixelFormat.R16Snorm,
+            (2, 4, _) => MtlPixelFormat.R16Uint,
+            (2, 5, _) => MtlPixelFormat.R16Sint,
+            (2, 7, _) => MtlPixelFormat.R16Float,
+            (4, 4, _) => MtlPixelFormat.R32Uint,
+            (4, 5, _) => MtlPixelFormat.R32Sint,
+            (4, 7, _) => MtlPixelFormat.R32Float,
+            (5, 4, _) => MtlPixelFormat.Rg16Uint,
+            (5, 5, _) => MtlPixelFormat.Rg16Sint,
+            (5, 7, _) => MtlPixelFormat.Rg16Float,
+            (6, 7, _) or (7, 7, _) => MtlPixelFormat.Rg11B10Float,
+            (9, _, 1) => MtlPixelFormat.Bgr10A2Unorm,
+            (9, _, _) => MtlPixelFormat.Rgb10A2Unorm,
+            (10, 4, _) => MtlPixelFormat.Rgba8Uint,
+            (10, 5, _) => MtlPixelFormat.Rgba8Sint,
+            (10, 6 or 9, 1) => MtlPixelFormat.Bgra8UnormSrgb,
+            (10, 6 or 9, _) => MtlPixelFormat.Rgba8UnormSrgb,
+            (10, 0, 1) => MtlPixelFormat.Bgra8Unorm,
+            (10, _, _) => MtlPixelFormat.Rgba8Unorm,
+            (11, 4, _) => MtlPixelFormat.Rg32Uint,
+            (11, 5, _) => MtlPixelFormat.Rg32Sint,
+            (11, 7, _) => MtlPixelFormat.Rg32Float,
+            (12, 4, _) => MtlPixelFormat.Rgba16Uint,
+            (12, 5, _) => MtlPixelFormat.Rgba16Sint,
+            (12, 7, _) => MtlPixelFormat.Rgba16Float,
+            (13, 7, _) or (14, 7, _) => MtlPixelFormat.Rgba32Float,
+            (20, 0, _) => MtlPixelFormat.R32Uint,
+            (29, 0, _) or (4, 0, _) => MtlPixelFormat.R32Float,
+            (1, 0, _) or (36, 0, _) => MtlPixelFormat.R8Unorm,
+            (49, 0, _) => MtlPixelFormat.R8Uint,
+            (3, 0, _) => MtlPixelFormat.Rg8Unorm,
+            (5, 0, _) => MtlPixelFormat.Rg16Unorm,
+            (7, 0, _) => MtlPixelFormat.Rg11B10Float,
+            (12, 0, _) => MtlPixelFormat.Rgba16Unorm,
+            (13, 0, _) or (14, 0, _) => MtlPixelFormat.Rgba32Float,
+            (22, 0, _) or (71, 0, _) => MtlPixelFormat.Rgba16Float,
+            (56, 0, _) or (62, 0, _) or (64, 0, _) => MtlPixelFormat.Rgba8Unorm,
+            (75, 0, _) => MtlPixelFormat.Rg32Float,
             _ => MtlPixelFormat.Invalid,
         };
 
-        if (format == MtlPixelFormat.Invalid)
+        if (format == MtlPixelFormat.Invalid ||
+            !TryGetRenderTargetComponentCount(dataFormat, out var componentCount) ||
+            !Gen5ColorComponentMapping.TryResolveRenderTarget(
+                componentSwap,
+                componentCount,
+                out var orderMapping))
         {
             result = default;
             return false;
@@ -275,7 +302,32 @@ internal static class MetalGuestFormats
                 Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
-        result = new MetalRenderTargetFormat(format, outputKind);
+        var hostToStorage = dataFormat switch
+        {
+            9 when componentSwap == 1 => new Gen5ColorComponentMapping(0xC6),
+            10 when componentSwap == 1 && numberType is 0 or 6 or 9 =>
+                new Gen5ColorComponentMapping(0xC6),
+            _ => Gen5ColorComponentMapping.Identity,
+        };
+        result = new MetalRenderTargetFormat(
+            format,
+            outputKind,
+            hostToStorage.Then(orderMapping));
         return true;
+    }
+
+    private static bool TryGetRenderTargetComponentCount(
+        uint dataFormat,
+        out uint componentCount)
+    {
+        componentCount = dataFormat switch
+        {
+            1 or 2 or 4 or 20 or 29 or 36 or 49 => 1,
+            3 or 5 or 11 or 75 => 2,
+            6 or 7 => 3,
+            9 or 10 or 12 or 13 or 14 or 22 or 56 or 62 or 64 or 71 => 4,
+            _ => 0,
+        };
+        return componentCount != 0;
     }
 }

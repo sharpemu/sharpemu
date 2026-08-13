@@ -339,15 +339,26 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             destinationFormat,
             destinationNumberType);
 
-    public bool TryGetRenderTargetOutputKind(uint dataFormat, uint numberType, out Gen5PixelOutputKind outputKind)
+    public bool TryGetRenderTargetOutputInfo(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
+        out Gen5PixelOutputKind outputKind,
+        out Gen5ColorComponentMapping componentMapping)
     {
-        if (VulkanVideoPresenter.TryDecodeRenderTargetFormat(dataFormat, numberType, out var format))
+        if (VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat,
+                numberType,
+                componentSwap,
+                out var format))
         {
             outputKind = format.OutputKind;
+            componentMapping = format.ExportMapping;
             return true;
         }
 
         outputKind = default;
+        componentMapping = default;
         return false;
     }
 

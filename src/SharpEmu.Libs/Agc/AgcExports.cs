@@ -1237,8 +1237,8 @@ public static partial class AgcExports
     // shares _submitTraceGate with tracing).
     private static readonly ConcurrentDictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
-         uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
-         ulong PsInputCntl, ulong AliasAlignment),
+         ulong OutputMappings, uint OutputCount, uint Attributes, uint PsInputEna,
+         uint PsInputAddr, ulong PsInputCntl, ulong AliasAlignment),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
@@ -1488,6 +1488,7 @@ public static partial class AgcExports
         uint Height,
         uint Format,
         uint NumberType,
+        uint ComponentSwap,
         uint TileMode);
 
     private sealed record TranslatedGuestDraw(
@@ -5424,12 +5425,7 @@ public static partial class AgcExports
                         textures,
                         globalMemoryBuffers,
                         pendingComposite.AttributeCount,
-                        [new GuestRenderTarget(
-                            pendingDisplayTarget.Address,
-                            pendingDisplayTarget.Width,
-                            pendingDisplayTarget.Height,
-                            pendingDisplayTarget.Format,
-                            pendingDisplayTarget.NumberType)],
+                        [CreateGuestRenderTarget(pendingDisplayTarget)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -8948,6 +8944,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             depthTarget.Height,
             Format: 0,
             NumberType: 0,
+            ComponentSwap: 0,
             TileMode: 0);
         var renderState = CreateRenderState(state.CxRegisters, syntheticTarget) with
         {
@@ -9265,16 +9262,20 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         var renderTargetOutputKinds = new Gen5PixelOutputKind[renderTargets.Length];
+        var renderTargetOutputMappings = new Gen5ColorComponentMapping[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {
             var target = renderTargets[index];
-            if (!GuestGpu.Current.TryGetRenderTargetOutputKind(
+            if (!GuestGpu.Current.TryGetRenderTargetOutputInfo(
                     target.Format,
                     target.NumberType,
-                    out renderTargetOutputKinds[index]))
+                    target.ComponentSwap,
+                    out renderTargetOutputKinds[index],
+                    out renderTargetOutputMappings[index]))
             {
                 error =
-                    $"unsupported color target format={target.Format} number_type={target.NumberType}";
+                    $"unsupported color target format={target.Format} " +
+                    $"number_type={target.NumberType} component_swap={target.ComponentSwap}";
                 ReturnPooledEvaluationArrays(exportEvaluation);
                 ReturnPooledEvaluationArrays(pixelEvaluation);
                 return false;
@@ -9291,6 +9292,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
                 (uint)renderTargetOutputKinds[index]) << (index * 8);
         }
+        var outputMappings = PackPixelOutputMappings(renderTargetOutputMappings);
 
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = _bakeScalars
@@ -9307,6 +9309,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             pixelShaderAddress,
             pixelStateFingerprint,
             outputLayout,
+            outputMappings,
             (uint)renderTargets.Length,
             attributeCount,
             psInputEna,
@@ -9370,7 +9373,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     pixelOutputs[location] = new Gen5PixelOutputBinding(
                         renderTargets[location].Slot,
                         (uint)location,
-                        renderTargetOutputKinds[location]);
+                        renderTargetOutputKinds[location],
+                        renderTargetOutputMappings[location]);
                 }
 
                 if (!GuestGpu.Current.TryCompilePixelShader(
@@ -9492,12 +9496,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         var guestTargets = new GuestRenderTarget[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {
-            guestTargets[index] = new GuestRenderTarget(
-                renderTargets[index].Address,
-                renderTargets[index].Width,
-                renderTargets[index].Height,
-                renderTargets[index].Format,
-                renderTargets[index].NumberType);
+            guestTargets[index] = CreateGuestRenderTarget(renderTargets[index]);
         }
 
         var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);
@@ -9508,7 +9507,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         var renderState = ApplyTransparentPremultipliedFillClear(
-            CreateRenderState(state.CxRegisters, renderTargets, pixelColorExportMasks),
+            CreateRenderState(
+                state.CxRegisters,
+                renderTargets,
+                pixelColorExportMasks,
+                renderTargetOutputMappings),
             textures,
             vertexInputs,
             pixelEvaluation.InitialScalarRegisters);
@@ -10445,6 +10448,23 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             ? (packedMasks >> (int)(target * 4)) & 0xFu
             : 0;
 
+    internal static ulong PackPixelOutputMappings(
+        IReadOnlyList<Gen5ColorComponentMapping> mappings)
+    {
+        if (mappings.Count > ColorTargetCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mappings));
+        }
+
+        var packed = 0UL;
+        for (var index = 0; index < mappings.Count; index++)
+        {
+            packed |= (ulong)mappings[index].Packed << (index * 8);
+        }
+
+        return packed;
+    }
+
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
         var maxAttribute = -1;
@@ -10711,6 +10731,7 @@ private static long _indirectDrawProbeCount;
                 (attrib2 & 0x3FFFu) + 1,
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
+                ExtractRenderTargetComponentSwap(info),
                 (attrib3 >> 14) & 0x1Fu));
         }
 
@@ -10732,6 +10753,20 @@ private static long _indirectDrawProbeCount;
         return targets;
     }
 
+    internal static uint ExtractRenderTargetComponentSwap(uint colorInfo) =>
+        (colorInfo >> 11) & 0x3u;
+
+    private static GuestRenderTarget CreateGuestRenderTarget(
+        RenderTargetDescriptor target) =>
+        new(
+            target.Address,
+            target.Width,
+            target.Height,
+            target.Format,
+            target.NumberType,
+            MipLevels: 1,
+            ComponentSwap: target.ComponentSwap);
+
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         RenderTargetDescriptor target)
@@ -10749,7 +10784,8 @@ private static long _indirectDrawProbeCount;
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> targets,
-        uint pixelColorExportMasks)
+        uint pixelColorExportMasks,
+        IReadOnlyList<Gen5ColorComponentMapping> outputMappings)
     {
         if (targets.Count == 0)
         {
@@ -10764,10 +10800,11 @@ private static long _indirectDrawProbeCount;
             var blend = DecodeBlendState(registers, targets[index].Slot);
             blends[index] = blend with
             {
-                WriteMask = blend.WriteMask &
-                    GetPixelColorExportMask(
-                        pixelColorExportMasks,
-                        targets[index].Slot),
+                WriteMask = outputMappings[index].ApplyMask(
+                    blend.WriteMask &
+                        GetPixelColorExportMask(
+                            pixelColorExportMasks,
+                            targets[index].Slot)),
             };
         }
 

@@ -78,4 +78,76 @@ public sealed class VulkanPresentEncodeFormatTests
                 out var decoded));
         Assert.Equal(expected, decoded.Format);
     }
+
+    [Theory]
+    [InlineData(0u, Format.R8G8B8A8Unorm, 0xE4)]
+    [InlineData(1u, Format.B8G8R8A8Unorm, 0xE4)]
+    [InlineData(2u, Format.R8G8B8A8Unorm, 0x1B)]
+    [InlineData(3u, Format.R8G8B8A8Unorm, 0x93)]
+    public void TryDecodeRenderTargetFormat_MapsRgba8ComponentSwap(
+        uint componentSwap,
+        Format expectedFormat,
+        byte expectedMapping)
+    {
+        Assert.True(
+            VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat: 10,
+                numberType: 0,
+                componentSwap,
+                out var decoded));
+
+        Assert.Equal(expectedFormat, decoded.Format);
+        Assert.Equal(expectedMapping, decoded.ExportMapping.Packed);
+    }
+
+    [Theory]
+    [InlineData(6u, 0u, Format.R8G8B8A8Srgb)]
+    [InlineData(6u, 1u, Format.B8G8R8A8Srgb)]
+    // Keep the texture NUMBER_FORMAT value as a compatibility input.
+    [InlineData(9u, 0u, Format.R8G8B8A8Srgb)]
+    [InlineData(9u, 1u, Format.B8G8R8A8Srgb)]
+    public void TryDecodeRenderTargetFormat_DecodesCbSrgbNumberType(
+        uint numberType,
+        uint componentSwap,
+        Format expectedFormat)
+    {
+        Assert.True(
+            VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat: 10,
+                numberType,
+                componentSwap,
+                out var decoded));
+
+        Assert.Equal(expectedFormat, decoded.Format);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+    }
+
+    [Theory]
+    [InlineData(0u, Format.A2B10G10R10UnormPack32)]
+    [InlineData(1u, Format.A2R10G10B10UnormPack32)]
+    public void TryDecodeRenderTargetFormat_SelectsRgb10HostOrder(
+        uint componentSwap,
+        Format expectedFormat)
+    {
+        Assert.True(
+            VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat: 9,
+                numberType: 0,
+                componentSwap,
+                out var decoded));
+
+        Assert.Equal(expectedFormat, decoded.Format);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+    }
+
+    [Fact]
+    public void TryDecodeRenderTargetFormat_RejectsInvalidComponentSwap()
+    {
+        Assert.False(
+            VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat: 10,
+                numberType: 0,
+                componentSwap: 4,
+                out _));
+    }
 }

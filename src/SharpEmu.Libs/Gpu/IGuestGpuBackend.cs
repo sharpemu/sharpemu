@@ -191,11 +191,15 @@ internal interface IGuestGpuBackend
         uint destinationNumberType);
 
     /// <summary>
-    /// Whether the backend supports the guest render-target format, and how its pixel
-    /// outputs are typed. Deliberately does not expose the backend's native format —
-    /// the guest codes cross the seam and each backend maps them internally.
+    /// Gets the pixel-output type and component mapping for a guest render target.
+    /// This method does not expose a native backend format.
     /// </summary>
-    bool TryGetRenderTargetOutputKind(uint dataFormat, uint numberType, out Gen5PixelOutputKind outputKind);
+    bool TryGetRenderTargetOutputInfo(
+        uint dataFormat,
+        uint numberType,
+        uint componentSwap,
+        out Gen5PixelOutputKind outputKind,
+        out Gen5ColorComponentMapping componentMapping);
 
     // Guest work ordering. AGC submissions execute on a single backend consumer in
     // logical guest-queue order; sequences returned here are backend work tickets.
