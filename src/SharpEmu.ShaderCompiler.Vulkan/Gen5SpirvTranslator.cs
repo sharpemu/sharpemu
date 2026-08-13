@@ -3389,15 +3389,20 @@ public static partial class Gen5SpirvTranslator
                     0,
                     coordinateComponentCount);
                 var components = new uint[4];
-                uint sourceIndex = 0;
+                var dstSelect = Gen5ShaderTranslator.GetImageDescriptorDstSelect(
+                    _evaluation.ImageBindings[bindingIndex].ResourceDescriptor);
                 for (var component = 0; component < components.Length; component++)
                 {
-                    if ((image.Dmask & (1u << component)) != 0)
+                    var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
+                        dstSelect,
+                        image.Dmask,
+                        component);
+                    if (sourceIndex >= 0)
                     {
                         var raw = LoadImageStoreComponent(
                             image,
                             resource,
-                            sourceIndex++);
+                            (uint)sourceIndex);
                         components[component] = resource.ComponentKind switch
                         {
                             ImageComponentKind.Sint => Bitcast(_intType, raw),

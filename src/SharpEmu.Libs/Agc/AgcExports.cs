@@ -10491,7 +10491,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     /// input layouts, and compute system registers. Value churn in user data
     /// no longer forces a new translation and pipeline.
     /// </summary>
-    private static ulong ComputeShaderStructuralFingerprint(Gen5ShaderEvaluation evaluation)
+    internal static ulong ComputeShaderStructuralFingerprint(Gen5ShaderEvaluation evaluation)
     {
         const ulong prime = 1099511628211UL;
         var hash = 14695981039346656037UL;
@@ -10503,11 +10503,16 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             Mix((ulong)(uint)binding.Opcode.GetHashCode());
             if (binding.ResourceDescriptor.Count > 1)
             {
-                // The generated image type depends only on unified format.
-                // Bounds are queried from the bound view in SPIR-V; guest image
-                // addresses, dimensions, swizzles and sampler state are all
-                // runtime descriptor data and must not create pipeline variants.
+                // The unified format selects the generated image type.
                 Mix(binding.ResourceDescriptor[1] & 0x1FF0_0000u);
+            }
+
+            if (binding.ResourceDescriptor.Count > 3 &&
+                binding.Opcode.StartsWith("ImageStore", StringComparison.Ordinal))
+            {
+                // A storage write applies this value in generated shader code.
+                Mix(Gen5ShaderTranslator.GetImageDescriptorDstSelect(
+                    binding.ResourceDescriptor));
             }
 
             Mix(binding.MipLevel ?? 0xFFFF_FFFFUL);

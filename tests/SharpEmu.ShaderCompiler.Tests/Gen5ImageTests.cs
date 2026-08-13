@@ -62,13 +62,79 @@ public sealed class Gen5ImageTests
             expectedComponents: 3);
     }
 
-    private static byte[] CompileImageOperation(string opcode, uint dimension)
+    [Theory]
+    [InlineData(0xFACu, 0xFu, 4, 5, 6, 7)]
+    [InlineData(0x9F5u, 0xFu, 7, 4, 5, 6)]
+    [InlineData(0xF2Eu, 0xFu, 6, 5, 4, 7)]
+    [InlineData(0x3ACu, 0xFu, 4, 5, 6, -1)]
+    [InlineData(0xFA4u, 0xFu, 4, -1, 6, 7)]
+    [InlineData(0xFACu, 0x0u, 4, -1, -1, -1)]
+    public void ImageStoreAppliesInverseDescriptorSwizzle(
+        uint dstSelect,
+        uint dmask,
+        int physicalX,
+        int physicalY,
+        int physicalZ,
+        int physicalW)
+    {
+        var spirv = CompileImageOperation(
+            "ImageStore",
+            dimension: 1,
+            dmask,
+            dstSelect);
+
+        Assert.Equal(
+            [physicalX, physicalY, physicalZ, physicalW],
+            GetStoredVgprRegisters(spirv));
+    }
+
+    [Fact]
+    public void ImageStoreMipAppliesInverseDescriptorSwizzle()
+    {
+        var spirv = CompileImageOperation(
+            "ImageStoreMip",
+            dimension: 1,
+            dmask: 0xF,
+            dstSelect: 0x9F5u);
+
+        Assert.Equal([7, 4, 5, 6], GetStoredVgprRegisters(spirv));
+    }
+
+    [Fact]
+    public void UintImageStoreUsesUintTexelAndInverseDescriptorSwizzle()
+    {
+        var spirv = CompileImageOperation(
+            "ImageStore",
+            dimension: 1,
+            dmask: 0xF,
+            dstSelect: 0xF2Eu,
+            unifiedFormat: 69u); // FORMAT_16_16_16_16_UINT
+        var instructions = ReadSpirvInstructions(spirv);
+        var imageType = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.TypeImage);
+        var scalarType = Assert.Single(
+            instructions,
+            item =>
+                item.Opcode == SpirvOp.TypeInt &&
+                item.Operands[0] == imageType.Operands[1]);
+
+        Assert.Equal(0u, scalarType.Operands[2]);
+        Assert.Equal([6, 5, 4, 7], GetStoredVgprRegisters(spirv));
+    }
+
+    private static byte[] CompileImageOperation(
+        string opcode,
+        uint dimension,
+        uint dmask = 0xF,
+        uint dstSelect = Gen5ShaderTranslator.IdentityImageDstSelect,
+        uint unifiedFormat = 71u)
     {
         var addressRegisters = dimension == 2
             ? new uint[] { 0, 1, 2 }
             : [0, 1];
         var control = new Gen5ImageControl(
-            Dmask: 0xF,
+            Dmask: dmask,
             VectorAddress: 0,
             AddressRegisters: addressRegisters,
             VectorData: 4,
@@ -102,8 +168,8 @@ public sealed class Gen5ImageTests
             null);
         var scalarRegisters = new uint[256];
         var descriptor = new uint[8];
-        descriptor[1] = 71u << 20; // FORMAT_16_16_16_16_FLOAT
-        descriptor[3] = (dimension == 2 ? 10u : 9u) << 28;
+        descriptor[1] = unifiedFormat << 20;
+        descriptor[3] = ((dimension == 2 ? 10u : 9u) << 28) | dstSelect;
         var evaluation = new Gen5ShaderEvaluation(
             scalarRegisters,
             scalarRegisters,
@@ -130,6 +196,70 @@ public sealed class Gen5ImageTests
             error);
         return shader.Spirv;
     }
+
+    private static int[] GetStoredVgprRegisters(byte[] spirv)
+    {
+        var instructions = ReadSpirvInstructions(spirv);
+        var write = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageWrite);
+        var texel = FindResult(
+            instructions,
+            SpirvOp.CompositeConstruct,
+            write.Operands[2]);
+        Assert.Equal(6, texel.Operands.Length);
+
+        var result = new int[4];
+        for (var component = 0; component < result.Length; component++)
+        {
+            var valueId = texel.Operands[component + 2];
+            var value = FindValueDefinition(instructions, valueId);
+            if (value.Opcode == SpirvOp.Constant)
+            {
+                result[component] = -1;
+                continue;
+            }
+
+            if (value.Opcode == SpirvOp.Bitcast)
+            {
+                value = FindValueDefinition(instructions, value.Operands[2]);
+            }
+
+            Assert.Equal(SpirvOp.Load, value.Opcode);
+            var pointer = FindResult(
+                instructions,
+                SpirvOp.AccessChain,
+                value.Operands[2]);
+            var register = FindResult(
+                instructions,
+                SpirvOp.Constant,
+                pointer.Operands[^1]);
+            result[component] = checked((int)register.Operands[2]);
+        }
+
+        return result;
+    }
+
+    private static ParsedSpirvInstruction FindValueDefinition(
+        IReadOnlyList<ParsedSpirvInstruction> instructions,
+        uint resultId) =>
+        Assert.Single(
+            instructions,
+            item =>
+                item.Operands.Length > 1 &&
+                item.Operands[1] == resultId &&
+                item.Opcode is SpirvOp.Bitcast or SpirvOp.Load or SpirvOp.Constant);
+
+    private static ParsedSpirvInstruction FindResult(
+        IReadOnlyList<ParsedSpirvInstruction> instructions,
+        SpirvOp opcode,
+        uint resultId) =>
+        Assert.Single(
+            instructions,
+            item =>
+                item.Opcode == opcode &&
+                item.Operands.Length > 1 &&
+                item.Operands[1] == resultId);
 
     private static IReadOnlyList<ParsedSpirvInstruction> ReadSpirvInstructions(
         byte[] spirv)

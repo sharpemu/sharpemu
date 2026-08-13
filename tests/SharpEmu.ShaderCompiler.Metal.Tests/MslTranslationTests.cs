@@ -169,6 +169,69 @@ public sealed class MslTranslationTests
         Assert.Contains("fragment void depth_only_fs()", MslFixedShaders.CreateDepthOnlyFragment(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(0xFACu, "as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6]), as_type<float>(v[7])")]
+    [InlineData(0x9F5u, "as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])")]
+    [InlineData(0xF2Eu, "as_type<float>(v[6]), as_type<float>(v[5]), as_type<float>(v[4]), as_type<float>(v[7])")]
+    [InlineData(0x3ACu, "as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6]), 0.0f")]
+    [InlineData(0xFA4u, "as_type<float>(v[4]), 0.0f, as_type<float>(v[6]), as_type<float>(v[7])")]
+    public void ImageStoreAppliesInverseDescriptorSwizzle(
+        uint dstSelect,
+        string expectedComponents)
+    {
+        var shader = CompileImageStore(dstSelect, dmask: 0xF);
+
+        Assert.Contains(
+            $"tex0.write(vec<float, 4>({expectedComponents}),",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ImageStoreTreatsZeroDmaskAsX()
+    {
+        var shader = CompileImageStore(
+            Gen5ShaderTranslator.IdentityImageDstSelect,
+            dmask: 0);
+
+        Assert.Contains(
+            "tex0.write(vec<float, 4>(as_type<float>(v[4]), 0.0f, 0.0f, 0.0f),",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ImageStoreMipAppliesInverseDescriptorSwizzle()
+    {
+        var shader = CompileImageStore(
+            0x9F5u,
+            dmask: 0xF,
+            opcode: "ImageStoreMip");
+
+        Assert.Contains(
+            "tex0.write(vec<float, 4>(as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])),",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UintImageStoreUsesUintTextureAndInverseDescriptorSwizzle()
+    {
+        var shader = CompileImageStore(
+            0xF2Eu,
+            dmask: 0xF,
+            unifiedFormat: 69u); // FORMAT_16_16_16_16_UINT
+
+        Assert.Contains(
+            "texture2d<uint, access::write> tex0",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "tex0.write(vec<uint, 4>(v[6], v[5], v[4], v[7]),",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void UnsupportedOpcodeFailsLoudlyWithPc()
     {
@@ -185,5 +248,67 @@ public sealed class MslTranslationTests
         var exception = Assert.Throws<InvalidOperationException>(
             () => Gen5ComputeFixtures.CompileOrThrow(fixture));
         Assert.Contains("pc=0x", exception.Message, StringComparison.Ordinal);
+    }
+
+    private static Gen5MslShader CompileImageStore(
+        uint dstSelect,
+        uint dmask,
+        string opcode = "ImageStore",
+        uint unifiedFormat = 71u)
+    {
+        var control = new Gen5ImageControl(
+            Dmask: dmask,
+            VectorAddress: 0,
+            AddressRegisters: [0, 1],
+            VectorData: 4,
+            ScalarResource: 8,
+            ScalarSampler: 16,
+            Dimension: 1,
+            IsArray: false,
+            Glc: false,
+            Slc: false,
+            A16: false,
+            D16: false);
+        var store = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mimg,
+            opcode,
+            [],
+            [],
+            [],
+            control);
+        var end = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [0xBF810000],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0x1_0000_C000, [store, end]),
+            [],
+            null);
+        var descriptor = new uint[8];
+        descriptor[1] = unifiedFormat << 20;
+        descriptor[3] = (9u << 28) | dstSelect;
+        var scalarRegisters = new uint[256];
+        var evaluation = new Gen5ShaderEvaluation(
+            scalarRegisters,
+            scalarRegisters,
+            [new Gen5ImageBinding(0, opcode, control, descriptor, [], null)],
+            []);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                1,
+                1,
+                1,
+                out var shader,
+                out var error),
+            error);
+        return shader;
     }
 }

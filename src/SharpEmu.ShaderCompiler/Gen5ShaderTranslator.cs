@@ -1767,6 +1767,62 @@ public static class Gen5ShaderTranslator
         name.StartsWith("ImageStore", StringComparison.Ordinal) ||
         name.StartsWith("ImageAtomic", StringComparison.Ordinal);
 
+    public const uint IdentityImageDstSelect = 0xFACu;
+
+    public static uint GetImageDescriptorDstSelect(
+        IReadOnlyList<uint> resourceDescriptor) =>
+        resourceDescriptor.Count > 3
+            ? resourceDescriptor[3] & 0xFFFu
+            : IdentityImageDstSelect;
+
+    /// <summary>
+    /// Gets the sequential store-source index for one physical image channel.
+    /// A negative result means that the channel must contain zero.
+    /// </summary>
+    public static int GetImageStoreSourceIndex(
+        uint dstSelect,
+        uint dmask,
+        int destinationComponent)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(destinationComponent);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(destinationComponent, 3);
+
+        var logicalComponent = -1;
+        var physicalSelector = 4u + (uint)destinationComponent;
+        for (var component = 0; component < 4; component++)
+        {
+            if (((dstSelect >> (component * 3)) & 0x7u) == physicalSelector)
+            {
+                logicalComponent = component;
+                break;
+            }
+        }
+
+        if (logicalComponent < 0)
+        {
+            return -1;
+        }
+
+        var effectiveDmask = dmask & 0xFu;
+        if (effectiveDmask == 0)
+        {
+            effectiveDmask = 1;
+        }
+
+        if ((effectiveDmask & (1u << logicalComponent)) == 0)
+        {
+            return -1;
+        }
+
+        var sourceIndex = 0;
+        for (var component = 0; component < logicalComponent; component++)
+        {
+            sourceIndex += (int)((effectiveDmask >> component) & 1u);
+        }
+
+        return sourceIndex;
+    }
+
     public static bool RequiresStorageImage(
         Gen5ImageBinding binding,
         IReadOnlyList<Gen5ImageBinding> stageBindings)
