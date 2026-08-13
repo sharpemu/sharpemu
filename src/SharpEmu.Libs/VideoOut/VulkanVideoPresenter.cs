@@ -229,6 +229,22 @@ internal static unsafe partial class VulkanVideoPresenter
     internal const uint Gen5TextureType2D = 9;
     internal const uint Gen5TextureType3D = 10;
 
+    internal enum GuestImageVariantStoreAction
+    {
+        Add,
+        KeepExisting,
+        FlushAndReplace,
+    }
+
+    internal static GuestImageVariantStoreAction DecideGuestImageVariantStore(
+        object? stored,
+        object incoming) =>
+        stored is null
+            ? GuestImageVariantStoreAction.Add
+            : ReferenceEquals(stored, incoming)
+                ? GuestImageVariantStoreAction.KeepExisting
+                : GuestImageVariantStoreAction.FlushAndReplace;
+
     internal static bool IsGuestTexture3D(uint type) =>
         type == Gen5TextureType3D;
 
@@ -3693,6 +3709,15 @@ internal static unsafe partial class VulkanVideoPresenter
         // time the guest switches size or format at the same address.
         private readonly Dictionary<GuestImageVariantKey, GuestImageResource>
             _guestImageVariants = new();
+        // A conflict can retain a displaced image until teardown when a
+        // diagnostic queue still owns it or the device is lost.
+        private readonly List<GuestImageResource> _retiredGuestImageVariants = [];
+        private readonly Queue<(GuestImageResource Image, ulong RetireTimeline)>
+            _deferredGuestImageVariantDestroys = new();
+        private long _guestImageVariantConflictCount;
+        private long _guestImageVariantSameResourceCount;
+        private long _guestImageVariantReplacementCount;
+        private long _guestImageVariantDeferredDestroyCount;
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
         private readonly record struct GuestDepthKey(
             ulong Address,
@@ -6538,6 +6563,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 TraceVulkanShader(
                     $"vk.flip_retired version={imageEntry.Image.FlipVersion} " +
                     $"timeline={imageEntry.RetireTimeline} reason=presentation-dropped");
+            }
+
+            while (_deferredGuestImageVariantDestroys.TryPeek(out var variantEntry) &&
+                   variantEntry.RetireTimeline <= _completedTimeline)
+            {
+                _deferredGuestImageVariantDestroys.Dequeue();
+                DestroyGuestImage(variantEntry.Image);
+                _guestImageVariantDeferredDestroyCount++;
             }
         }
 
@@ -14304,7 +14337,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"initialized={existing.Initialized}");
                 }
 
-                _guestImageVariants.Add(
+                StoreGuestImageVariant(
                     new GuestImageVariantKey(
                         existing.Address,
                         existing.LogicalWidth,
@@ -14551,6 +14584,98 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return resource;
+        }
+
+        private void StoreGuestImageVariant(
+            GuestImageVariantKey key,
+            GuestImageResource resource)
+        {
+            _guestImageVariants.TryGetValue(key, out var stored);
+            switch (DecideGuestImageVariantStore(stored, resource))
+            {
+                case GuestImageVariantStoreAction.Add:
+                    _guestImageVariants.Add(key, resource);
+                    return;
+
+                case GuestImageVariantStoreAction.KeepExisting:
+                    _guestImageVariantSameResourceCount++;
+                    TraceGuestImageVariantConflict(
+                        "same-resource",
+                        key,
+                        resource,
+                        resource,
+                        flushed: false,
+                        deferred: false);
+                    return;
+
+                case GuestImageVariantStoreAction.FlushAndReplace:
+                    break;
+
+                default:
+                    throw new InvalidOperationException("Unknown guest image variant action.");
+            }
+
+            _guestImageVariantConflictCount++;
+            // This method runs on the presenter thread. Submit all recorded
+            // work before the dictionary stops owning the old image. Its
+            // destruction waits for that submission timeline to retire.
+            FlushBatchedGuestCommands();
+
+            _guestImageVariants[key] = resource;
+            _guestImageVariantReplacementCount++;
+
+            var storedOwnedElsewhere = _guestImages.Values.Any(
+                    candidate => ReferenceEquals(candidate, stored)) ||
+                _guestImageVariants.Values.Any(
+                    candidate => ReferenceEquals(candidate, stored));
+            var storedPendingDiagnostic = _pendingAliasImageDumps.Any(
+                candidate => ReferenceEquals(candidate, stored));
+            var deferred = false;
+            if (!storedOwnedElsewhere && !storedPendingDiagnostic && !_deviceLost)
+            {
+                _deferredGuestImageVariantDestroys.Enqueue((stored!, _submitTimeline));
+                deferred = true;
+            }
+            else if (!storedOwnedElsewhere)
+            {
+                _retiredGuestImageVariants.Add(stored!);
+            }
+
+            TraceGuestImageVariantConflict(
+                "replace",
+                key,
+                stored!,
+                resource,
+                flushed: true,
+                deferred);
+            ProcessDeferredTextureDestroys();
+        }
+
+        private void TraceGuestImageVariantConflict(
+            string action,
+            GuestImageVariantKey key,
+            GuestImageResource stored,
+            GuestImageResource incoming,
+            bool flushed,
+            bool deferred)
+        {
+            var count = action == "same-resource"
+                ? _guestImageVariantSameResourceCount
+                : _guestImageVariantConflictCount;
+            if (count > 8 && (count & (count - 1)) != 0)
+            {
+                return;
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] vk.guest_image_variant_conflict " +
+                $"action={action} count={count} seq={CurrentGuestWorkSequenceForDiagnostics} " +
+                $"addr=0x{key.Address:X16} size={key.Width}x{key.Height}x{key.Depth} " +
+                $"type={key.Type} mips={key.MipLevels} guest_fmt=0x{key.GuestFormat:X8} " +
+                $"vk_fmt={key.Format} stored_image=0x{stored.Image.Handle:X16} " +
+                $"incoming_image=0x{incoming.Image.Handle:X16} " +
+                $"flushed={(flushed ? 1 : 0)} deferred={(deferred ? 1 : 0)} " +
+                $"device_lost={(_deviceLost ? 1 : 0)}");
         }
 
         private void TrackCpuBackedGuestImage(GuestImageResource image)
@@ -19466,6 +19591,29 @@ internal static unsafe partial class VulkanVideoPresenter
                 DestroyGuestImage(guestImageVariant);
             }
             _guestImageVariants.Clear();
+            var deferredVariantsAtTeardown = _deferredGuestImageVariantDestroys.Count;
+            var retainedVariantsAtTeardown = _retiredGuestImageVariants.Count;
+            while (_deferredGuestImageVariantDestroys.TryDequeue(out var deferredVariant))
+            {
+                DestroyGuestImage(deferredVariant.Image);
+            }
+            foreach (var retiredGuestImageVariant in _retiredGuestImageVariants)
+            {
+                DestroyGuestImage(retiredGuestImageVariant);
+            }
+            _retiredGuestImageVariants.Clear();
+            if (_guestImageVariantConflictCount != 0 ||
+                _guestImageVariantSameResourceCount != 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] vk.guest_image_variant_summary " +
+                    $"conflicts={_guestImageVariantConflictCount} " +
+                    $"same_resource={_guestImageVariantSameResourceCount} " +
+                    $"replacements={_guestImageVariantReplacementCount} " +
+                    $"retired_during_runtime={_guestImageVariantDeferredDestroyCount} " +
+                    $"deferred_at_teardown={deferredVariantsAtTeardown} " +
+                    $"retained_at_teardown={retainedVariantsAtTeardown}");
+            }
             foreach (var guestImageVersion in _guestImageVersions.Values)
             {
                 DestroyGuestImage(guestImageVersion);
