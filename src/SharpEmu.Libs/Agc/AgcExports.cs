@@ -8930,7 +8930,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     binding,
                     exportEvaluation.ImageBindings),
                 binding.MipLevel ?? 0,
-                binding.SamplerDescriptor,
+                NormalizeSamplerDescriptorForImageOperation(
+                    binding.SamplerDescriptor),
                 Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
         }
 
@@ -9605,7 +9606,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     texture,
                     isStorage,
                     binding.MipLevel ?? 0,
-                    binding.SamplerDescriptor,
+                    NormalizeSamplerDescriptorForImageOperation(
+                        binding.SamplerDescriptor),
                     Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
         }
 
@@ -12842,6 +12844,27 @@ private static long _indirectDrawProbeCount;
                 descriptor[3])
             : default;
 
+    internal static IReadOnlyList<uint> NormalizeSamplerDescriptorForImageOperation(
+        IReadOnlyList<uint> descriptor)
+    {
+        const uint depthCompareMask = 0x7u << 12;
+        if (descriptor.Count < 4 ||
+            (descriptor[0] & depthCompareMask) == 0)
+        {
+            return descriptor;
+        }
+
+        // The shader translators perform guest depth comparisons after a
+        // normal sample. The native sampler must not compare the value first.
+        return
+        [
+            descriptor[0] & ~depthCompareMask,
+            descriptor[1],
+            descriptor[2],
+            descriptor[3],
+        ];
+    }
+
     private static byte[] ConvertRgba16FloatToRgba8(ReadOnlySpan<byte> source, uint width, uint height)
     {
         var destination = new byte[checked((int)((ulong)width * height * 4))];
@@ -13211,7 +13234,8 @@ private static long _indirectDrawProbeCount;
                     texture,
                     isStorage,
                     binding.MipLevel ?? 0,
-                    binding.SamplerDescriptor,
+                    NormalizeSamplerDescriptorForImageOperation(
+                        binding.SamplerDescriptor),
                     Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
             hasStorageBinding |= isStorage;
 
