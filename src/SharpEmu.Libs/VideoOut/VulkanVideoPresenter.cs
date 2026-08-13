@@ -101,6 +101,82 @@ internal sealed record VulkanOrderedGuestFlipWait(
     int VideoOutHandle,
     int DisplayBufferIndex);
 
+internal sealed class VulkanGuestFlipCompletionTracker
+{
+    private sealed class BufferState
+    {
+        public long CompletedThrough;
+        public SortedDictionary<long, bool> Pending { get; } = new();
+    }
+
+    private readonly Lock _gate = new();
+    private readonly Dictionary<(int Handle, int BufferIndex), BufferState> _states = new();
+
+    public void Register(int handle, int bufferIndex, long version)
+    {
+        lock (_gate)
+        {
+            var state = GetOrCreateState(handle, bufferIndex);
+            state.Pending.TryAdd(version, false);
+        }
+    }
+
+    public bool IsSafe(int handle, int bufferIndex, long version)
+    {
+        if (version == 0)
+        {
+            return true;
+        }
+
+        lock (_gate)
+        {
+            return _states.TryGetValue((handle, bufferIndex), out var state) &&
+                (version <= state.CompletedThrough ||
+                 state.Pending.GetValueOrDefault(version));
+        }
+    }
+
+    public void MarkSafe(int handle, int bufferIndex, long version)
+    {
+        lock (_gate)
+        {
+            var state = GetOrCreateState(handle, bufferIndex);
+            state.Pending[version] = true;
+            while (state.Pending.Count != 0)
+            {
+                var first = state.Pending.First();
+                if (!first.Value)
+                {
+                    break;
+                }
+
+                state.CompletedThrough = first.Key;
+                state.Pending.Remove(first.Key);
+            }
+        }
+    }
+
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _states.Clear();
+        }
+    }
+
+    private BufferState GetOrCreateState(int handle, int bufferIndex)
+    {
+        var key = (handle, bufferIndex);
+        if (!_states.TryGetValue(key, out var state))
+        {
+            state = new BufferState();
+            _states.Add(key, state);
+        }
+
+        return state;
+    }
+}
+
 internal readonly record struct VulkanGuestQueueIdentity(
     string Name,
     ulong SubmissionId)
@@ -567,6 +643,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly Dictionary<ulong, ulong> _untrackedGuestImageContentProbes = new();
     private static readonly Dictionary<(int Handle, int BufferIndex), long>
         _lastOrderedGuestFlipVersions = new();
+    private static readonly VulkanGuestFlipCompletionTracker _guestFlipCompletion = new();
     private static long _orderedGuestFlipVersionSequence;
     // Storage-image initialization is copied only by the first queued writer.
     // Later dispatches targeting the same image must not each retain another
@@ -854,6 +931,7 @@ internal static unsafe partial class VulkanVideoPresenter
         _cpuBackedUploadGenerations.Clear();
         _untrackedGuestImageContentProbes.Clear();
         _lastOrderedGuestFlipVersions.Clear();
+        _guestFlipCompletion.Reset();
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
         _pendingGuestImageInitialData.Clear();
@@ -1781,6 +1859,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     width,
                     height,
                     pitchInPixel)) > 0;
+            if (enqueued)
+            {
+                _guestFlipCompletion.Register(videoOutHandle, displayBufferIndex, version);
+            }
             SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceOrderedFlipEnqueue(
                 videoOutHandle,
                 displayBufferIndex,
@@ -3567,7 +3649,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly Dictionary<GuestImageVariantKey, GuestImageResource>
             _guestImageVariants = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
-        private readonly HashSet<long> _capturedGuestFlipVersions = [];
         private readonly record struct GuestDepthKey(
             ulong Address,
             ulong ReadAddress,
@@ -6040,6 +6121,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"[LOADER][WARN] vk.flip_capture_failed version={work.Version} " +
                     $"queue={_activeGuestQueue.Name} addr=0x{work.Address:X16} " +
                     $"found={(source is not null)} initialized={(source?.Initialized ?? false)}");
+                MarkGuestFlipVersionSafe(work);
                 return;
             }
 
@@ -6160,7 +6242,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 submitted = true;
                 snapshot.Initialized = true;
                 _guestImageVersions.Add(work.Version, snapshot);
-                _capturedGuestFlipVersions.Add(work.Version);
+                MarkGuestFlipVersionSafe(work);
 
                 lock (_gate)
                 {
@@ -6206,31 +6288,42 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (!submitted)
                 {
+                    MarkGuestFlipVersionSafe(work);
                     ReleaseGuestCommandBuffer(commandBuffer);
                     DestroyGuestImage(snapshot);
                 }
             }
         }
 
-        private void ExecuteOrderedGuestFlipWait(VulkanOrderedGuestFlipWait work)
+        private bool TryExecuteOrderedGuestFlipWait(VulkanOrderedGuestFlipWait work)
         {
-            var captured = work.Version != 0 &&
-                _capturedGuestFlipVersions.Contains(work.Version);
+            var safe = _guestFlipCompletion.IsSafe(
+                work.VideoOutHandle,
+                work.DisplayBufferIndex,
+                work.Version);
             TraceVulkanShader(
                 $"vk.flip_wait_safe version={work.Version} " +
                 $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
                 $"handle={work.VideoOutHandle} index={work.DisplayBufferIndex} " +
-                $"capture_complete={(captured ? 1 : 0)}");
-            // Demon's Souls executes wait-safe markers before their flip capture;
-            // an assert here would fail-fast the process, so warn once instead.
-            // Dedup on a flag, not the (per-frame-unique) version, to bound growth.
-            if (work.Version != 0 && !captured && !_loggedFlipWaitOrderViolation)
+                $"capture_complete={(safe ? 1 : 0)}");
+            if (!safe && !_loggedFlipWaitOrderViolation)
             {
                 _loggedFlipWaitOrderViolation = true;
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] vk.flip_wait_order version={work.Version} " +
-                    "executed before its flip capture; continuing.");
+                    $"handle={work.VideoOutHandle} index={work.DisplayBufferIndex} " +
+                    "executed before its flip capture; deferring.");
             }
+
+            return safe;
+        }
+
+        private void MarkGuestFlipVersionSafe(VulkanOrderedGuestFlip work)
+        {
+            _guestFlipCompletion.MarkSafe(
+                work.VideoOutHandle,
+                work.DisplayBufferIndex,
+                work.Version);
         }
 
         private bool _loggedFlipWaitOrderViolation;
@@ -6420,7 +6513,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     _frameGuestImageVersions[slot] is { } unsubmittedVersion)
                 {
                     _frameGuestImageVersions[slot] = null;
-                    _capturedGuestFlipVersions.Remove(unsubmittedVersion.FlipVersion);
                     DestroyGuestImage(unsubmittedVersion);
                     FlipProgressTracker.RecordFlip(unsubmittedVersion.FlipVersion);
                     TraceVulkanShader(
@@ -6454,7 +6546,6 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_frameGuestImageVersions[slot] is { } guestImageVersion)
             {
                 _frameGuestImageVersions[slot] = null;
-                _capturedGuestFlipVersions.Remove(guestImageVersion.FlipVersion);
                 DestroyGuestImage(guestImageVersion);
                 FlipProgressTracker.RecordFlip(guestImageVersion.FlipVersion);
                 TraceVulkanShader(
@@ -6502,7 +6593,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 _guestImageVersions.Remove(entry.Key);
-                _capturedGuestFlipVersions.Remove(entry.Key);
                 _deferredGuestImageVersionDestroys.Enqueue(
                     (entry.Value, _submitTimeline));
                 TraceVulkanShader(
@@ -15766,6 +15856,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 _lastGuestWorkLabel = _activeGuestWorkLabel;
                 var deferGuestWork = false;
+                var deferForFlipCapture = false;
 
                 var traceWork = ShouldTracePresentedGuestImageContentsForDiagnostics();
                 var workStart = traceWork ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
@@ -15839,7 +15930,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         case VulkanOrderedGuestFlipWait flipWait:
                             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flip))
                             {
-                                ExecuteOrderedGuestFlipWait(flipWait);
+                                deferGuestWork = !TryExecuteOrderedGuestFlipWait(flipWait);
+                                deferForFlipCapture = deferGuestWork;
                             }
 
                             break;
@@ -15863,6 +15955,15 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (deferGuestWork)
                 {
+                    // A flip can be on a different guest queue. Exclude the
+                    // waiting queue so that the capture queue can progress.
+                    if (deferForFlipCapture)
+                    {
+                        deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
+                        deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
+                        continue;
+                    }
+
                     // macOS: non-blocking defer — exclude this logical queue for
                     // the rest of the tick so sibling queues can still progress.
                     // Windows/Linux already blocked in WaitForFences; excluding
@@ -16378,7 +16479,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _frameGuestImageVersions[frameSlot] = null;
-            _capturedGuestFlipVersions.Remove(presentedGuestImage.FlipVersion);
             DestroyGuestImage(presentedGuestImage);
         }
 
@@ -19308,7 +19408,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 DestroyGuestImage(guestImageVersion);
             }
             _guestImageVersions.Clear();
-            _capturedGuestFlipVersions.Clear();
             while (_deferredGuestImageVersionDestroys.TryDequeue(out var deferredVersion))
             {
                 DestroyGuestImage(deferredVersion.Image);
