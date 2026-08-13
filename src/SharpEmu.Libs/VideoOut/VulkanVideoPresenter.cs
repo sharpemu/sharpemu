@@ -745,6 +745,21 @@ internal static unsafe partial class VulkanVideoPresenter
                (frame is 1 or 30 or 120 || frame % 600 == 0);
     }
 
+    internal static bool ShouldRefreshGuestGlobalBuffer(
+        bool writable,
+        bool capturedMatchesShadow,
+        bool liveMatchesShadow) =>
+        writable ? !liveMatchesShadow : !capturedMatchesShadow;
+
+    internal static bool ShouldVersionReadOnlyGuestGlobalBuffer(
+        bool writable,
+        bool needsRefresh,
+        bool allocationInFlight,
+        bool allocationInOpenBatch) =>
+        !writable &&
+        needsRefresh &&
+        (allocationInFlight || allocationInOpenBatch);
+
     public static void EnsureStarted(uint width, uint height)
     {
         if (width == 0 || height == 0)
@@ -10465,15 +10480,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var source = guestBuffer.Data.AsSpan(0, guestBuffer.Length);
             var shadow = allocation.Shadow.AsSpan(checked((int)guestOffset), guestBuffer.Length);
-            var needsRefresh = false;
-            if (_guestMemory is not null)
+            var capturedMatchesShadow = source.SequenceEqual(shadow);
+            var liveMatchesShadow = capturedMatchesShadow;
+            if (guestBuffer.Writable && _guestMemory is not null)
             {
                 if (_guestMemory.TryCompare(
                         guestBuffer.BaseAddress,
                         shadow,
-                        out var liveMatchesShadow))
+                        out var comparedLiveMatchesShadow))
                 {
-                    needsRefresh = !liveMatchesShadow;
+                    liveMatchesShadow = comparedLiveMatchesShadow;
                 }
                 else
                 {
@@ -10483,11 +10499,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         var liveSpan = live.AsSpan(0, guestBuffer.Length);
                         if (_guestMemory.TryRead(guestBuffer.BaseAddress, liveSpan))
                         {
-                            needsRefresh = !liveSpan.SequenceEqual(shadow);
-                        }
-                        else
-                        {
-                            needsRefresh = !source.SequenceEqual(shadow);
+                            liveMatchesShadow = liveSpan.SequenceEqual(shadow);
                         }
                     }
                     finally
@@ -10496,27 +10508,30 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
             }
-            else
+
+            var needsRefresh = ShouldRefreshGuestGlobalBuffer(
+                guestBuffer.Writable,
+                capturedMatchesShadow,
+                liveMatchesShadow);
+            var allocationInFlight = allocation.LastUseTimeline > _completedTimeline;
+            var allocationInOpenBatch =
+                IsGuestBufferAllocationReferencedByOpenBatch(allocation);
+            if (ShouldVersionReadOnlyGuestGlobalBuffer(
+                    guestBuffer.Writable,
+                    needsRefresh,
+                    allocationInFlight,
+                    allocationInOpenBatch))
             {
-                needsRefresh = !source.SequenceEqual(shadow);
+                return CreateVersionedReadOnlyGlobalBufferResource(
+                    guestBuffer,
+                    expectedBias,
+                    size);
             }
 
             if (needsRefresh)
             {
-                if (!guestBuffer.Writable &&
-                    (allocation.LastUseTimeline > _completedTimeline ||
-                     IsGuestBufferAllocationReferencedByOpenBatch(allocation)))
-                {
-                    return CreateVersionedReadOnlyGlobalBufferResource(
-                        guestBuffer,
-                        expectedBias,
-                        size);
-                }
-
-                // HOST_COHERENT does not permit racing a mapped CPU write with
-                // an in-flight shader access. Retire prior users, publish their
-                // dirty ranges to guest memory, then upload the current guest
-                // bytes (which may be newer than the parser's captured array).
+                // HOST_COHERENT does not permit a mapped CPU write while a
+                // shader uses the allocation. Retire prior users first.
                 WaitForGuestBufferAllocationForCpuVisibility(allocation);
                 WriteBackAllDirtyGuestBuffers();
                 // Populate the cached shadow copy first and write it out to the
@@ -10524,7 +10539,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 // HOST_VISIBLE|HOST_COHERENT (write-combined on most drivers),
                 // so CPU reads from it are uncached and orders of magnitude
                 // slower than heap reads — never use it as a copy source.
-                if (_guestMemory?.TryRead(guestBuffer.BaseAddress, shadow) != true)
+                if (!guestBuffer.Writable)
+                {
+                    source.CopyTo(shadow);
+                }
+                else if (_guestMemory?.TryRead(guestBuffer.BaseAddress, shadow) != true)
                 {
                     source.CopyTo(shadow);
                 }
