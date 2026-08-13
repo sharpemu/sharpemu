@@ -100,7 +100,55 @@ internal sealed record GuestIndexBuffer(
     byte[] Data,
     int Length,
     bool Is32Bit,
-    bool Pooled);
+    bool Pooled,
+    GuestIndexBufferLease? Lease = null)
+{
+    public bool LeaseReturned => Lease?.Returned ?? false;
+
+    public bool TryReturnPooledData()
+    {
+        if (!Pooled)
+        {
+            return false;
+        }
+
+        if (Lease is not null)
+        {
+            return Lease.TryReturn();
+        }
+
+        GuestDataPool.Shared.Return(Data);
+        return true;
+    }
+}
+
+/// <summary>
+/// This class owns one pool lease. Record copies share this class. Thus, only
+/// one copy can return the array. A late copy cannot return a newer lease.
+/// </summary>
+internal sealed class GuestIndexBufferLease
+{
+    private readonly byte[] _data;
+    private int _returned;
+
+    public GuestIndexBufferLease(byte[] data)
+    {
+        _data = data;
+    }
+
+    public bool Returned => Volatile.Read(ref _returned) != 0;
+
+    public bool TryReturn()
+    {
+        if (Interlocked.Exchange(ref _returned, 1) != 0)
+        {
+            return false;
+        }
+
+        GuestDataPool.Shared.Return(_data);
+        return true;
+    }
+}
 
 internal readonly record struct GuestRect(
     int X,

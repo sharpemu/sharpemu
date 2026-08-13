@@ -1050,7 +1050,9 @@ public static partial class AgcExports
                 sliceStart,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                tracePackets: true);
+                tracePackets: true,
+                indexSnapshots: null,
+                vertexSnapshots: null);
             DrainResumableDcbs(ctx, gpuState, tracePackets: true);
         }
     }
@@ -1606,13 +1608,36 @@ public static partial class AgcExports
              ((GcrControl >> Gl2RangeShift) & Gl2RangeMask) == 0);
     }
 
+    // Keep submitted geometry stable after the guest reuses its memory.
+    // Set either variable to 0 only for a comparison test.
+    private static readonly bool _retainSubmittedIndexData = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA"),
+        "0",
+        StringComparison.Ordinal);
+    private static readonly bool _retainSubmittedVertexData = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_VERTEX_DATA"),
+        "0",
+        StringComparison.Ordinal);
+
+    private sealed record SubmittedIndexSnapshot(
+        ulong SourceAddress,
+        uint IndexCount,
+        int IndexStride,
+        byte[] Data);
+
+    private sealed record SubmittedVertexSnapshot(
+        ulong ExportShaderAddress,
+        IReadOnlyList<Gen5VertexInputBinding> Bindings);
+
     private sealed class SubmittedDcbState
     {
         public readonly record struct PendingSubmission(
             ulong CommandAddress,
             uint DwordCount,
             ulong SubmissionId,
-            bool TracePackets);
+            bool TracePackets,
+            Dictionary<ulong, SubmittedIndexSnapshot>? IndexSnapshots,
+            Dictionary<ulong, SubmittedVertexSnapshot>? VertexSnapshots);
 
         public Dictionary<uint, uint> CxRegisters { get; } = new();
         public Dictionary<uint, uint> ShRegisters { get; } = new();
@@ -1638,6 +1663,10 @@ public static partial class AgcExports
         // sceAgcDriverAddEqEvent.
         public ulong CompletionEventId { get; set; }
         public ulong ActiveSubmissionId { get; set; }
+        public Dictionary<ulong, SubmittedIndexSnapshot>? ActiveIndexSnapshots { get; set; }
+        public SubmittedIndexSnapshot? CurrentIndexSnapshot { get; set; }
+        public Dictionary<ulong, SubmittedVertexSnapshot>? ActiveVertexSnapshots { get; set; }
+        public SubmittedVertexSnapshot? CurrentVertexSnapshot { get; set; }
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
         public bool HasActiveSubmission { get; set; }
         public bool IsSuspended { get; set; }
@@ -4457,6 +4486,12 @@ public static partial class AgcExports
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        var submittedIndexSnapshots = CaptureSubmittedIndexPackets(
+            ctx,
+            commandAddress,
+            dwordCount,
+            gpuState.Graphics.IndexSize,
+            out var submittedVertexSnapshots);
         lock (gpuState.Gate)
         {
             gpuState.Graphics.QueueName = "dcb.graphics";
@@ -4467,7 +4502,9 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                tracePackets);
+                tracePackets,
+                indexSnapshots: null,
+                vertexSnapshots: null);
             DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
@@ -4533,7 +4570,9 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                tracePackets);
+                tracePackets,
+                submittedIndexSnapshots,
+                submittedVertexSnapshots);
             DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
@@ -4671,13 +4710,17 @@ public static partial class AgcExports
         ulong commandAddress,
         uint dwordCount,
         ulong submissionId,
-        bool tracePackets)
+        bool tracePackets,
+        Dictionary<ulong, SubmittedIndexSnapshot>? indexSnapshots,
+        Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots)
     {
         state.PendingSubmissions.Enqueue(new SubmittedDcbState.PendingSubmission(
             commandAddress,
             dwordCount,
             submissionId,
-            tracePackets));
+            tracePackets,
+            indexSnapshots,
+            vertexSnapshots));
         PumpSubmittedQueue(ctx, gpuState, state);
     }
 
@@ -4705,6 +4748,8 @@ public static partial class AgcExports
             state.RingTailParkAddress = 0;
             state.IsSuspended = false;
             state.HasActiveSubmission = false;
+            state.ActiveIndexSnapshots = null;
+            state.ActiveVertexSnapshots = null;
             NotifySubmittedDcbCompleted(gpuState, state, state.ActiveSubmissionId);
         }
 
@@ -4713,6 +4758,8 @@ public static partial class AgcExports
         {
             state.HasActiveSubmission = true;
             state.ActiveSubmissionId = submission.SubmissionId;
+            state.ActiveIndexSnapshots = submission.IndexSnapshots;
+            state.ActiveVertexSnapshots = submission.VertexSnapshots;
             state.RingChunkBase = state.IsForceSubmittedRing ? 0 : submission.CommandAddress;
             state.FollowedChunkAdvance = false;
             state.IsSuspended = ParseSubmittedDcb(
@@ -4728,6 +4775,8 @@ public static partial class AgcExports
             }
 
             state.HasActiveSubmission = false;
+            state.ActiveIndexSnapshots = null;
+            state.ActiveVertexSnapshots = null;
             NotifySubmittedDcbCompleted(gpuState, state, submission.SubmissionId);
         }
     }
@@ -5275,7 +5324,15 @@ public static partial class AgcExports
                     ItDrawIndexIndirect or
                     ItDrawIndexIndirectMulti;
                 state.SawIndexedDraw |= indexed;
-                TryTranslateGuestDraw(ctx, gpuState, state, indexCount, indexed);
+                try
+                {
+                    TryTranslateGuestDraw(ctx, gpuState, state, indexCount, indexed);
+                }
+                finally
+                {
+                    state.CurrentIndexSnapshot = null;
+                    state.CurrentVertexSnapshot = null;
+                }
             }
 
             if (op == ItNop &&
@@ -7600,6 +7657,8 @@ public static partial class AgcExports
         {
             state.IsSuspended = false;
             state.HasActiveSubmission = false;
+            state.ActiveIndexSnapshots = null;
+            state.ActiveVertexSnapshots = null;
             NotifySubmittedDcbCompleted(gpuState, state, waiter.SubmissionId);
             PumpSubmittedQueue(ctx, gpuState, state);
             return;
@@ -7630,6 +7689,8 @@ public static partial class AgcExports
         }
 
         state.HasActiveSubmission = false;
+        state.ActiveIndexSnapshots = null;
+        state.ActiveVertexSnapshots = null;
         NotifySubmittedDcbCompleted(gpuState, state, waiter.SubmissionId);
         PumpSubmittedQueue(ctx, gpuState, state);
     }
@@ -7999,6 +8060,29 @@ public static partial class AgcExports
         }
     }
 
+    internal static bool TryGetGraphicsIndexStateForTests(
+        CpuContext ctx,
+        out ulong address,
+        out uint count,
+        out uint offset)
+    {
+        address = 0;
+        count = 0;
+        offset = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            address = gpuState.Graphics.IndexBufferAddress;
+            count = gpuState.Graphics.IndexBufferCount;
+            offset = gpuState.Graphics.DrawIndexOffset;
+            return true;
+        }
+    }
+
     /// <summary>
     /// GraphicsDcbSetIndexSize writes VGT_INDEX_TYPE via SET_UCONFIG_REG.
     /// Mirror that into <see cref="SubmittedDcbState.IndexSize"/>.
@@ -8039,13 +8123,39 @@ public static partial class AgcExports
         out uint drawCount)
     {
         drawCount = 0;
+        state.CurrentVertexSnapshot = null;
+        if (state.ActiveVertexSnapshots is not null &&
+            state.ActiveVertexSnapshots.TryGetValue(packetAddress, out var vertexSnapshot))
+        {
+            state.CurrentVertexSnapshot = vertexSnapshot;
+        }
+
         switch (op)
         {
             case ItDrawIndexAuto when packetLength >= 3:
                 return TryReadUInt32(ctx, packetAddress + 4, out drawCount);
             case ItDrawIndex2 when packetLength >= 6:
+                if (!TryReadUInt32(ctx, packetAddress + 4, out var maximumIndexCount) ||
+                    !TryReadUInt32(ctx, packetAddress + 8, out var indexBaseLo) ||
+                    !TryReadUInt32(ctx, packetAddress + 12, out var indexBaseHi) ||
+                    !TryReadUInt32(ctx, packetAddress + 16, out drawCount))
+                {
+                    return false;
+                }
+
+                state.IndexBufferAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
+                state.IndexBufferCount = maximumIndexCount;
                 state.DrawIndexOffset = 0;
-                return TryReadUInt32(ctx, packetAddress + 16, out drawCount);
+                state.CurrentIndexSnapshot = null;
+                if (state.ActiveIndexSnapshots is not null &&
+                    state.ActiveIndexSnapshots.TryGetValue(packetAddress, out var snapshot) &&
+                    snapshot.SourceAddress == state.IndexBufferAddress &&
+                    snapshot.IndexCount == drawCount)
+                {
+                    state.CurrentIndexSnapshot = snapshot;
+                }
+
+                return true;
             case ItDrawIndexOffset2 when packetLength >= 5:
                 if (!TryReadUInt32(ctx, packetAddress + 8, out var indexOffset))
                 {
@@ -8966,6 +9076,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         {
             return false;
         }
+
+        ApplySubmittedVertexSnapshot(
+            state,
+            exportShaderAddress,
+            ref exportEvaluation);
 
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
@@ -10099,6 +10214,32 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)guestBytesPerIndex);
         var guestByteCount = checked((int)(indexCount * (uint)guestBytesPerIndex));
         var address = state.IndexBufferAddress + byteOffset;
+        var retained = state.CurrentIndexSnapshot;
+        if (retained is not null &&
+            retained.SourceAddress == address &&
+            retained.IndexCount == indexCount &&
+            retained.IndexStride == guestBytesPerIndex &&
+            retained.Data.Length >= guestByteCount)
+        {
+            if (indexType == AgcIndexHelpers.ProsperoIndexType.Index8)
+            {
+                var expanded = new byte[checked((int)(indexCount * sizeof(ushort)))];
+                AgcIndexHelpers.ExpandIndex8ToU16(
+                    retained.Data.AsSpan(0, guestByteCount),
+                    expanded);
+                return new GuestIndexBuffer(
+                    expanded,
+                    expanded.Length,
+                    Is32Bit: false,
+                    Pooled: false);
+            }
+
+            return new GuestIndexBuffer(
+                retained.Data,
+                guestByteCount,
+                indexType == AgcIndexHelpers.ProsperoIndexType.Index32,
+                Pooled: false);
+        }
 
         // Host backends only bind u16/u32. Expand kIndex8 -> u16.
         if (indexType == AgcIndexHelpers.ProsperoIndexType.Index8)
@@ -10118,7 +10259,10 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 guestSpan,
                 hostData.AsSpan(0, hostByteCount));
             GuestDataPool.Shared.Return(guestData);
-            return new GuestIndexBuffer(hostData, hostByteCount, Is32Bit: false, Pooled: true);
+            return CreatePooledGuestIndexBuffer(
+                hostData,
+                hostByteCount,
+                is32Bit: false);
         }
 
         var is32Bit = indexType == AgcIndexHelpers.ProsperoIndexType.Index32;
@@ -10127,12 +10271,23 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         if (ctx.Memory.TryRead(address, span) ||
             KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, span))
         {
-            return new GuestIndexBuffer(data, guestByteCount, is32Bit, Pooled: true);
+            return CreatePooledGuestIndexBuffer(data, guestByteCount, is32Bit);
         }
 
         GuestDataPool.Shared.Return(data);
         return null;
     }
+
+    private static GuestIndexBuffer CreatePooledGuestIndexBuffer(
+        byte[] data,
+        int length,
+        bool is32Bit) =>
+        new(
+            data,
+            length,
+            is32Bit,
+            Pooled: true,
+            new GuestIndexBufferLease(data));
 
     private static bool TryGetRequiredVertexRecordCount(
         CpuContext ctx,
@@ -10160,6 +10315,51 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         var bytesPerIndex = AgcIndexHelpers.GetGuestStrideBytes(indexType);
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
         var address = state.IndexBufferAddress + byteOffset;
+        var retained = state.CurrentIndexSnapshot;
+        var retainedByteCount = checked((int)(drawCount * (uint)bytesPerIndex));
+        if (retained is not null &&
+            retained.SourceAddress == address &&
+            retained.IndexCount == drawCount &&
+            retained.IndexStride == bytesPerIndex &&
+            retained.Data.Length >= retainedByteCount)
+        {
+            var retainedMaxIndex = 0u;
+            var retainedSawIndex = false;
+            var retainedSpan = retained.Data.AsSpan(0, retainedByteCount);
+            for (var index = 0; index < drawCount; index++)
+            {
+                var offset = checked((int)index * bytesPerIndex);
+                uint value = indexType switch
+                {
+                    AgcIndexHelpers.ProsperoIndexType.Index32 =>
+                        BinaryPrimitives.ReadUInt32LittleEndian(
+                            retainedSpan.Slice(offset, sizeof(uint))),
+                    AgcIndexHelpers.ProsperoIndexType.Index8 => retainedSpan[offset],
+                    _ => BinaryPrimitives.ReadUInt16LittleEndian(
+                        retainedSpan.Slice(offset, sizeof(ushort))),
+                };
+                var restart = indexType switch
+                {
+                    AgcIndexHelpers.ProsperoIndexType.Index32 => uint.MaxValue,
+                    AgcIndexHelpers.ProsperoIndexType.Index8 => 0xFFu,
+                    _ => ushort.MaxValue,
+                };
+                if (value == restart)
+                {
+                    continue;
+                }
+
+                retainedMaxIndex = Math.Max(retainedMaxIndex, value);
+                retainedSawIndex = true;
+            }
+
+            var retainedRecords = retainedSawIndex
+                ? baseVertex + retainedMaxIndex + 1
+                : Math.Max(baseVertex + 1, 1u);
+            recordCount = Math.Max(retainedRecords, Math.Max(state.InstanceCount, 1u));
+            return true;
+        }
+
         const int chunkBytes = 64 * 1024;
         var scratch = GuestDataPool.Shared.Rent(chunkBytes);
         var remaining = drawCount;
@@ -11378,7 +11578,7 @@ private static long _indirectDrawProbeCount;
         if (index && draw.IndexBuffer is { Pooled: true } indexBuffer &&
             returned.Add(indexBuffer.Data))
         {
-            GuestDataPool.Shared.Return(indexBuffer.Data);
+            indexBuffer.TryReturnPooledData();
         }
     }
 
@@ -15805,6 +16005,376 @@ GuestImageWriteTracker.Track(
         ((System.Diagnostics.Stopwatch.GetTimestamp() - _traceStartTicks) /
          (double)System.Diagnostics.Stopwatch.Frequency).ToString(
             "F3", System.Globalization.CultureInfo.InvariantCulture);
+
+    private const long MaximumRetainedIndexBytesPerSubmission = 64L * 1024 * 1024;
+    private const long MaximumRetainedVertexBytesPerSubmission = 64L * 1024 * 1024;
+
+    private static Dictionary<ulong, SubmittedIndexSnapshot>? CaptureSubmittedIndexPackets(
+        CpuContext ctx,
+        ulong commandAddress,
+        uint dwordCount,
+        uint initialIndexSize,
+        out Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots)
+    {
+        vertexSnapshots = null;
+        if (!_retainSubmittedIndexData &&
+            !_retainSubmittedVertexData)
+        {
+            return null;
+        }
+
+        var visited = new HashSet<(ulong Address, uint Dwords)>();
+        var indexSnapshots = _retainSubmittedIndexData
+            ? new Dictionary<ulong, SubmittedIndexSnapshot>()
+            : null;
+        vertexSnapshots = _retainSubmittedVertexData
+            ? new Dictionary<ulong, SubmittedVertexSnapshot>()
+            : null;
+        var captureState = new SubmittedDcbState
+        {
+            IndexSize = initialIndexSize,
+        };
+        var retainedIndexBytes = 0L;
+        var retainedVertexBytes = 0L;
+        CaptureSubmittedIndexPacketsCore(
+            ctx,
+            commandAddress,
+            dwordCount,
+            visited,
+            indexSnapshots,
+            vertexSnapshots,
+            captureState,
+            ref retainedIndexBytes,
+            ref retainedVertexBytes,
+            depth: 0);
+        if (vertexSnapshots is { Count: 0 })
+        {
+            vertexSnapshots = null;
+        }
+
+        return indexSnapshots is { Count: > 0 } ? indexSnapshots : null;
+    }
+
+    private static void CaptureSubmittedIndexPacketsCore(
+        CpuContext ctx,
+        ulong commandAddress,
+        uint dwordCount,
+        HashSet<(ulong Address, uint Dwords)> visited,
+        Dictionary<ulong, SubmittedIndexSnapshot>? indexSnapshots,
+        Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots,
+        SubmittedDcbState captureState,
+        ref long retainedIndexBytes,
+        ref long retainedVertexBytes,
+        int depth)
+    {
+        if (commandAddress == 0 || dwordCount == 0 || depth > 8 ||
+            !visited.Add((commandAddress, dwordCount)))
+        {
+            return;
+        }
+
+        var offset = 0u;
+        while (offset < dwordCount)
+        {
+            var packetAddress = commandAddress + ((ulong)offset * sizeof(uint));
+            if (!TryReadUInt32(ctx, packetAddress, out var header))
+            {
+                return;
+            }
+
+            var packetType = header >> 30;
+            if (packetType == 2)
+            {
+                offset++;
+                continue;
+            }
+
+            if (packetType != 3)
+            {
+                return;
+            }
+
+            var length = Pm4Length(header);
+            if (length == 0 || offset + length > dwordCount)
+            {
+                return;
+            }
+
+            var opcode = (header >> 8) & 0xFFu;
+            var register = (header >> 2) & 0x3Fu;
+            if (opcode == ItIndexType && length >= 2 &&
+                TryReadUInt32(ctx, packetAddress + 4, out var packetIndexSize))
+            {
+                captureState.IndexSize = packetIndexSize & 0x3u;
+            }
+
+            ApplySubmittedRegisters(
+                ctx,
+                captureState,
+                packetAddress,
+                length,
+                opcode,
+                register);
+
+            if (opcode == ItDrawIndex2 && length >= 6 &&
+                TryReadUInt32(ctx, packetAddress + 4, out var maximumIndexCount) &&
+                TryReadUInt32(ctx, packetAddress + 8, out var indexBaseLo) &&
+                TryReadUInt32(ctx, packetAddress + 12, out var indexBaseHi) &&
+                TryReadUInt32(ctx, packetAddress + 16, out var indexCount))
+            {
+                var indexAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
+                var indexStride = AgcIndexHelpers.GetGuestStrideBytes(
+                    AgcIndexHelpers.Decode(captureState.IndexSize));
+                var byteCount64 = (ulong)indexCount * (uint)indexStride;
+                SubmittedIndexSnapshot? indexSnapshot = null;
+                if (indexSnapshots is not null &&
+                    byteCount64 != 0 &&
+                    byteCount64 <= int.MaxValue &&
+                    retainedIndexBytes + (long)byteCount64 <=
+                        MaximumRetainedIndexBytesPerSubmission)
+                {
+                    var data = new byte[(int)byteCount64];
+                    if (ctx.Memory.TryRead(indexAddress, data) ||
+                        KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
+                    {
+                        indexSnapshot = new SubmittedIndexSnapshot(
+                            indexAddress,
+                            indexCount,
+                            indexStride,
+                            data);
+                        indexSnapshots[packetAddress] = indexSnapshot;
+                        retainedIndexBytes += data.Length;
+                    }
+                }
+
+                captureState.IndexBufferAddress = indexAddress;
+                captureState.IndexBufferCount = maximumIndexCount;
+                captureState.DrawIndexOffset = 0;
+                captureState.CurrentIndexSnapshot = indexSnapshot;
+                TryCaptureSubmittedVertexSnapshot(
+                    ctx,
+                    captureState,
+                    packetAddress,
+                    indexCount,
+                    indexed: true,
+                    vertexSnapshots,
+                    ref retainedVertexBytes);
+                captureState.CurrentIndexSnapshot = null;
+            }
+            else if (opcode == ItDrawIndexAuto && length >= 3 &&
+                     TryReadUInt32(ctx, packetAddress + 4, out var vertexCount))
+            {
+                TryCaptureSubmittedVertexSnapshot(
+                    ctx,
+                    captureState,
+                    packetAddress,
+                    vertexCount,
+                    indexed: false,
+                    vertexSnapshots,
+                    ref retainedVertexBytes);
+            }
+
+            if (opcode == ItIndirectBuffer && length >= 4 &&
+                TryReadUInt32(ctx, packetAddress + 4, out var chainLow) &&
+                TryReadUInt32(ctx, packetAddress + 8, out var chainHigh) &&
+                TryReadUInt32(ctx, packetAddress + 12, out var chainDwords))
+            {
+                var chainAddress = ((ulong)(chainHigh & 0xFFFFu) << 32) | chainLow;
+                var chainLength = chainDwords & 0xFFFFFu;
+                CaptureSubmittedIndexPacketsCore(
+                    ctx,
+                    chainAddress,
+                    chainLength,
+                    visited,
+                    indexSnapshots,
+                    vertexSnapshots,
+                    captureState,
+                    ref retainedIndexBytes,
+                    ref retainedVertexBytes,
+                    depth + 1);
+            }
+
+            offset += length;
+        }
+    }
+
+    private static void TryCaptureSubmittedVertexSnapshot(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint drawCount,
+        bool indexed,
+        Dictionary<ulong, SubmittedVertexSnapshot>? snapshots,
+        ref long retainedBytes)
+    {
+        if (snapshots is null ||
+            drawCount == 0 ||
+            !TryGetShaderAddress(
+                state.ShRegisters,
+                SpiShaderPgmLoEs,
+                SpiShaderPgmHiEs,
+                out var exportShaderAddress))
+        {
+            return;
+        }
+
+        ulong exportShaderHeader;
+        lock (_submitTraceGate)
+        {
+            _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
+        }
+
+        if (!Gen5ShaderTranslator.TryCreateState(
+                ctx,
+                exportShaderAddress,
+                exportShaderHeader,
+                state.ShRegisters,
+                SelectExportUserDataRegister(state.ShRegisters),
+                out var exportState,
+                out _,
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
+            !TryGetRequiredVertexRecordCount(
+                ctx,
+                state,
+                drawCount,
+                indexed,
+                out var recordCount) ||
+            !Gen5ShaderScalarEvaluator.TryEvaluate(
+                ctx,
+                exportState,
+                out var evaluation,
+                out _,
+                resolveVertexInputs: true,
+                requiredVertexRecordCount: recordCount,
+                captureVertexInputsOnly: true))
+        {
+            return;
+        }
+
+        try
+        {
+            if (evaluation.VertexInputs is not { Count: > 0 } inputs)
+            {
+                return;
+            }
+
+            if (!TryCopySubmittedVertexInputs(
+                    inputs,
+                    MaximumRetainedVertexBytesPerSubmission - retainedBytes,
+                    out var retainedInputs,
+                    out var snapshotBytes))
+            {
+                return;
+            }
+
+            snapshots[packetAddress] = new SubmittedVertexSnapshot(
+                exportShaderAddress,
+                retainedInputs);
+            retainedBytes += snapshotBytes;
+        }
+        finally
+        {
+            ReturnPooledEvaluationArrays(evaluation);
+        }
+    }
+
+    internal static bool TryCopySubmittedVertexInputs(
+        IReadOnlyList<Gen5VertexInputBinding> inputs,
+        long maximumBytes,
+        out Gen5VertexInputBinding[] retainedInputs,
+        out long retainedBytes)
+    {
+        retainedInputs = [];
+        retainedBytes = 0;
+        if (inputs.Count == 0 || maximumBytes <= 0)
+        {
+            return false;
+        }
+
+        var uniqueLengths = new Dictionary<byte[], int>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
+        foreach (var input in inputs)
+        {
+            var length = Math.Clamp(input.DataLength, 0, input.Data.Length);
+            if (!uniqueLengths.TryGetValue(input.Data, out var existing) ||
+                length > existing)
+            {
+                uniqueLengths[input.Data] = length;
+            }
+        }
+
+        retainedBytes = uniqueLengths.Values.Sum(static length => (long)length);
+        if (retainedBytes == 0 || retainedBytes > maximumBytes)
+        {
+            retainedBytes = 0;
+            return false;
+        }
+
+        var copies = new Dictionary<byte[], byte[]>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
+        foreach (var (source, length) in uniqueLengths)
+        {
+            var copy = new byte[length];
+            source.AsSpan(0, length).CopyTo(copy);
+            copies.Add(source, copy);
+        }
+
+        retainedInputs = new Gen5VertexInputBinding[inputs.Count];
+        for (var index = 0; index < inputs.Count; index++)
+        {
+            var input = inputs[index];
+            var copy = copies[input.Data];
+            retainedInputs[index] = input with
+            {
+                Data = copy,
+                DataLength = Math.Clamp(input.DataLength, 0, copy.Length),
+                DataPooled = false,
+            };
+        }
+
+        return true;
+    }
+
+    private static void ApplySubmittedVertexSnapshot(
+        SubmittedDcbState state,
+        ulong exportShaderAddress,
+        ref Gen5ShaderEvaluation evaluation)
+    {
+        var snapshot = state.CurrentVertexSnapshot;
+        var current = evaluation.VertexInputs;
+        if (snapshot is null ||
+            snapshot.ExportShaderAddress != exportShaderAddress ||
+            current is null ||
+            current.Count != snapshot.Bindings.Count)
+        {
+            return;
+        }
+
+        for (var index = 0; index < current.Count; index++)
+        {
+            var live = current[index];
+            var retained = snapshot.Bindings[index];
+            if (live.Pc != retained.Pc ||
+                live.Location != retained.Location ||
+                live.BaseAddress != retained.BaseAddress ||
+                live.Stride != retained.Stride ||
+                live.OffsetBytes != retained.OffsetBytes)
+            {
+                return;
+            }
+        }
+
+        var returned = new HashSet<byte[]>(
+            System.Collections.Generic.ReferenceEqualityComparer.Instance);
+        foreach (var binding in current)
+        {
+            if (binding.DataPooled && returned.Add(binding.Data))
+            {
+                GuestDataPool.Shared.Return(binding.Data);
+            }
+        }
+        evaluation = evaluation with { VertexInputs = snapshot.Bindings };
+    }
 
     private static void TraceAgc(
         [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument] ref AgcTraceHandler message)

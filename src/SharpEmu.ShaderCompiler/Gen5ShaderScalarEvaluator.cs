@@ -275,7 +275,8 @@ public static class Gen5ShaderScalarEvaluator
         out Gen5ShaderEvaluation evaluation,
         out string error,
         bool resolveVertexInputs = false,
-        uint? requiredVertexRecordCount = null)
+        uint? requiredVertexRecordCount = null,
+        bool captureVertexInputsOnly = false)
     {
         evaluation = default!;
         error = string.Empty;
@@ -508,8 +509,9 @@ public static class Gen5ShaderScalarEvaluator
                 // set (it scans every instruction's destinations), so no
                 // per-load mutation is needed here.
                 var recordBinding =
-                    !path.Supplemental ||
-                    !HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc);
+                    !captureVertexInputsOnly &&
+                    (!path.Supplemental ||
+                     !HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc));
                 if (!TryExecuteScalarLoad(
                         ctx,
                         state,
@@ -528,8 +530,13 @@ public static class Gen5ShaderScalarEvaluator
                 continue;
             }
 
-                if (instruction.Control is Gen5GlobalMemoryControl globalMemory)
+            if (instruction.Control is Gen5GlobalMemoryControl globalMemory)
+            {
+                if (captureVertexInputsOnly)
                 {
+                    continue;
+                }
+
                 if (path.Supplemental &&
                     HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc))
                 {
@@ -765,6 +772,11 @@ public static class Gen5ShaderScalarEvaluator
                     continue;
                 }
 
+                if (captureVertexInputsOnly)
+                {
+                    continue;
+                }
+
                 var key = (bufferMemory.ScalarResource, bufferDescriptor.BaseAddress);
                 if (globalMemoryByAddress.TryGetValue(key, out var existingBinding))
                 {
@@ -833,6 +845,11 @@ public static class Gen5ShaderScalarEvaluator
 
                 if (instruction.Control is not Gen5ImageControl image)
                 {
+                continue;
+            }
+
+            if (captureVertexInputsOnly)
+            {
                 continue;
             }
 

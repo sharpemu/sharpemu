@@ -6294,7 +6294,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (draw.IndexBuffer is { Pooled: true } indexBuffer &&
                 returned.Add(indexBuffer.Data))
             {
-                GuestDataPool.Shared.Return(indexBuffer.Data);
+                indexBuffer.TryReturnPooledData();
             }
         }
 
@@ -7427,7 +7427,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     resources.Index32Bit = indexBuffer.Is32Bit;
                     if (indexBuffer.Pooled)
                     {
-                        GuestDataPool.Shared.Return(indexBuffer.Data);
+                        indexBuffer.TryReturnPooledData();
                     }
                 }
 
