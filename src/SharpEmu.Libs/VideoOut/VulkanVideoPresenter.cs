@@ -5578,12 +5578,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly List<TranslatedDrawResources> _batchResources = new();
         private readonly List<GuestImageResource> _batchTraceImages = new();
 
-        // Consecutive draws into the same target stay inside one render pass:
-        // on MoltenVK every render pass is a Metal render encoder, and one
-        // encoder per draw was the dominant per-draw fixed cost after submit
-        // batching. The pass closes when the target changes, when a draw
-        // needs transfer/storage work outside a pass, or when the batch
-        // flushes.
+        // The optional reuse path keeps compatible draws in one render pass.
+        // The pass closes before transfer, storage, depth, or barrier work.
         private GuestImageResource? _openPassTarget;
 
         private void CloseOpenTranslatedRenderPass()
@@ -5594,6 +5590,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _openPassTarget = null;
+            _openPassKey = null;
             _vk.CmdEndRenderPass(_batchCommandBuffer);
             var toShaderRead = new ImageMemoryBarrier
             {
@@ -5610,7 +5607,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdPipelineBarrier(
                 _batchCommandBuffer,
                 PipelineStageFlags.ColorAttachmentOutputBit,
-                PipelineStageFlags.FragmentShaderBit,
+                PipelineStageFlags.AllCommandsBit,
                 0,
                 0,
                 null,
@@ -13409,6 +13406,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 BeginDebugLabel(_commandBuffer, resources.DebugName);
                 if (clearDepthSeparately && depth is not null)
                 {
+                    CloseOpenTranslatedRenderPass();
                     RecordStandaloneGuestDepthClear(depth);
                 }
                 var hasStorageImages = false;
@@ -13422,7 +13420,47 @@ internal static unsafe partial class VulkanVideoPresenter
                     hasStorageImages |= texture.IsStorage;
                 }
 
-                CloseOpenTranslatedRenderPass();
+                var hasDepthAttachment = depth is not null && !clearDepthSeparately;
+                var usesInitializedColorLoad =
+                    firstTarget.Initialized &&
+                    !firstTarget.InitialUploadPending;
+                var usesInitializedLoadPass =
+                    targets.Length == 1 &&
+                    usesInitializedColorLoad &&
+                    (!hasDepthAttachment
+                        ? renderPass.Handle == firstTarget.RenderPass.Handle &&
+                          framebuffer.Handle == firstTarget.Framebuffer.Handle
+                        : depth is not null &&
+                          depthFramebuffer is not null &&
+                          depth.Initialized &&
+                          !clearDepthForDraw &&
+                          renderPass.Handle == depthFramebuffer.LoadRenderPass.Handle &&
+                          framebuffer.Handle == depthFramebuffer.Framebuffer.Handle);
+                var needsGlobalBufferBarrier =
+                    NeedsGlobalBufferVisibilityBarrier(resources);
+                var reuseHazards = GetRenderPassReuseHazards(
+                    targets,
+                    resources,
+                    usesInitializedLoadPass,
+                    needsGlobalBufferBarrier);
+                var passKey = new VulkanRenderPassReuseKey(
+                    firstTarget.Image.Handle,
+                    hasDepthAttachment ? depth!.Image.Handle : 0,
+                    renderPass.Handle,
+                    framebuffer.Handle,
+                    extent.Width,
+                    extent.Height);
+                var continueOpenPass =
+                    _reuseTranslatedRenderPasses &&
+                    _openPassKey is { } openPassKey &&
+                    VulkanRenderPassReusePolicy.CanContinue(
+                        openPassKey,
+                        passKey,
+                        reuseHazards);
+                if (!continueOpenPass)
+                {
+                    CloseOpenTranslatedRenderPass();
+                }
                 RecordGlobalBufferVisibilityBarrier(
                     _commandBuffer,
                     resources,
@@ -13437,137 +13475,158 @@ internal static unsafe partial class VulkanVideoPresenter
                 RecordTextureUploads(resources, PipelineStageFlags.FragmentShaderBit);
                 RecordStorageImagesForWrite(resources, PipelineStageFlags.FragmentShaderBit);
 
-                var toColorAttachments = stackalloc ImageMemoryBarrier[targets.Length];
-                var anyPriorContents = false;
-                for (var index = 0; index < targets.Length; index++)
+                if (!continueOpenPass)
                 {
-                    var hasPriorContents =
-                        targets[index].Initialized || targets[index].InitialUploadPending;
-                    anyPriorContents |= hasPriorContents;
-                    toColorAttachments[index] = new ImageMemoryBarrier
+                    var toColorAttachments = stackalloc ImageMemoryBarrier[targets.Length];
+                    var anyPriorContents = false;
+                    for (var index = 0; index < targets.Length; index++)
                     {
-                        SType = StructureType.ImageMemoryBarrier,
-                        SrcAccessMask = hasPriorContents ? AccessFlags.ShaderReadBit : 0,
-                        DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
-                        OldLayout = hasPriorContents
-                            ? ImageLayout.ShaderReadOnlyOptimal
-                            : ImageLayout.Undefined,
-                        NewLayout = ImageLayout.ColorAttachmentOptimal,
-                        SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        Image = targets[index].Image,
-                        SubresourceRange = ColorSubresourceRange(),
-                    };
-                }
-                _vk.CmdPipelineBarrier(
-                    _commandBuffer,
-                    anyPriorContents
-                        ? PipelineStageFlags.AllCommandsBit
-                        : PipelineStageFlags.TopOfPipeBit,
-                    PipelineStageFlags.ColorAttachmentOutputBit,
-                    0,
-                    0,
-                    null,
-                    0,
-                    null,
-                    (uint)targets.Length,
-                    toColorAttachments);
-
-                if (depth is not null &&
-                    !clearDepthSeparately &&
-                    depth.Layout == ImageLayout.ShaderReadOnlyOptimal)
-                {
-                    var toDepthAttachment = new ImageMemoryBarrier
-                    {
-                        SType = StructureType.ImageMemoryBarrier,
-                        SrcAccessMask = AccessFlags.ShaderReadBit,
-                        DstAccessMask =
-                            AccessFlags.DepthStencilAttachmentReadBit |
-                            AccessFlags.DepthStencilAttachmentWriteBit,
-                        OldLayout = ImageLayout.ShaderReadOnlyOptimal,
-                        NewLayout = ImageLayout.DepthStencilAttachmentOptimal,
-                        SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        Image = depth.Image,
-                        SubresourceRange = new ImageSubresourceRange(
-                            ImageAspectFlags.DepthBit, 0, 1, 0, 1),
-                    };
+                        var hasPriorContents =
+                            targets[index].Initialized || targets[index].InitialUploadPending;
+                        anyPriorContents |= hasPriorContents;
+                        toColorAttachments[index] = new ImageMemoryBarrier
+                        {
+                            SType = StructureType.ImageMemoryBarrier,
+                            SrcAccessMask = hasPriorContents ? AccessFlags.ShaderReadBit : 0,
+                            DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
+                            OldLayout = hasPriorContents
+                                ? ImageLayout.ShaderReadOnlyOptimal
+                                : ImageLayout.Undefined,
+                            NewLayout = ImageLayout.ColorAttachmentOptimal,
+                            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            Image = targets[index].Image,
+                            SubresourceRange = ColorSubresourceRange(),
+                        };
+                    }
                     _vk.CmdPipelineBarrier(
                         _commandBuffer,
-                        PipelineStageFlags.FragmentShaderBit |
-                        PipelineStageFlags.ComputeShaderBit,
-                        PipelineStageFlags.EarlyFragmentTestsBit |
-                        PipelineStageFlags.LateFragmentTestsBit,
+                        anyPriorContents
+                            ? PipelineStageFlags.AllCommandsBit
+                            : PipelineStageFlags.TopOfPipeBit,
+                        PipelineStageFlags.ColorAttachmentOutputBit,
                         0,
                         0,
                         null,
                         0,
                         null,
-                        1,
-                        &toDepthAttachment);
+                        (uint)targets.Length,
+                        toColorAttachments);
+
+                    if (depth is not null &&
+                        !clearDepthSeparately &&
+                        depth.Layout == ImageLayout.ShaderReadOnlyOptimal)
+                    {
+                        var toDepthAttachment = new ImageMemoryBarrier
+                        {
+                            SType = StructureType.ImageMemoryBarrier,
+                            SrcAccessMask = AccessFlags.ShaderReadBit,
+                            DstAccessMask =
+                                AccessFlags.DepthStencilAttachmentReadBit |
+                                AccessFlags.DepthStencilAttachmentWriteBit,
+                            OldLayout = ImageLayout.ShaderReadOnlyOptimal,
+                            NewLayout = ImageLayout.DepthStencilAttachmentOptimal,
+                            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            Image = depth.Image,
+                            SubresourceRange = new ImageSubresourceRange(
+                                ImageAspectFlags.DepthBit, 0, 1, 0, 1),
+                        };
+                        _vk.CmdPipelineBarrier(
+                            _commandBuffer,
+                            PipelineStageFlags.FragmentShaderBit |
+                            PipelineStageFlags.ComputeShaderBit,
+                            PipelineStageFlags.EarlyFragmentTestsBit |
+                            PipelineStageFlags.LateFragmentTestsBit,
+                            0,
+                            0,
+                            null,
+                            0,
+                            null,
+                            1,
+                            &toDepthAttachment);
+                    }
+
+                    ClearColorValue[]? metaClearValues = null;
+                    for (var colorIndex = 0; colorIndex < targets.Length; colorIndex++)
+                    {
+                        if (!targets[colorIndex].Initialized &&
+                            work.Targets[colorIndex].Address != 0)
+                        {
+                            var (clearWord0, clearWord1) = Agc.AgcExports.GetMetaClearValue(
+                                work.Targets[colorIndex].Address);
+                            if (clearWord0 != 0 || clearWord1 != 0)
+                            {
+                                metaClearValues ??= new ClearColorValue[targets.Length];
+                                metaClearValues[colorIndex] = UnpackMetaClearValue(
+                                    work.Targets[colorIndex].Format,
+                                    clearWord0,
+                                    clearWord1);
+                            }
+                        }
+                    }
+
+                    BeginTranslatedRenderPass(
+                        renderPass,
+                        framebuffer,
+                        extent,
+                        colorAttachmentCount: targets.Length,
+                        hasDepthAttachment: hasDepthAttachment,
+                        clearDepth: depth?.ClearDepth ?? 1f,
+                        colorClearValues: metaClearValues);
                 }
 
-                ClearColorValue[]? metaClearValues = null;
-                for (var ci = 0; ci < targets.Length; ci++)
+                RecordTranslatedDrawInPass(resources, extent);
+                MarkGlobalBufferShaderWrites(resources);
+                var keepPassOpen =
+                    _reuseTranslatedRenderPasses &&
+                    VulkanRenderPassReusePolicy.CanKeepOpen(reuseHazards);
+                if (keepPassOpen)
                 {
-                    if (!targets[ci].Initialized &&
-                        work.Targets[ci].Address != 0)
+                    _openPassTarget = firstTarget;
+                    _openPassKey = passKey;
+                }
+                else
+                {
+                    _vk.CmdEndRenderPass(_commandBuffer);
+
+                    var toShaderRead = stackalloc ImageMemoryBarrier[targets.Length];
+                    for (var index = 0; index < targets.Length; index++)
                     {
-                        var (cw0, cw1) = Agc.AgcExports.GetMetaClearValue(
-                            work.Targets[ci].Address);
-                        if (cw0 != 0 || cw1 != 0)
+                        toShaderRead[index] = new ImageMemoryBarrier
                         {
-                            metaClearValues ??= new ClearColorValue[targets.Length];
-                            metaClearValues[ci] = UnpackMetaClearValue(
-                                work.Targets[ci].Format, cw0, cw1);
-                        }
+                            SType = StructureType.ImageMemoryBarrier,
+                            SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
+                            DstAccessMask = AccessFlags.ShaderReadBit,
+                            OldLayout = ImageLayout.ColorAttachmentOptimal,
+                            NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            Image = targets[index].Image,
+                            SubresourceRange = ColorSubresourceRange(),
+                        };
+                    }
+                    _vk.CmdPipelineBarrier(
+                        _commandBuffer,
+                        PipelineStageFlags.ColorAttachmentOutputBit,
+                        PipelineStageFlags.FragmentShaderBit,
+                        0,
+                        0,
+                        null,
+                        0,
+                        null,
+                        (uint)targets.Length,
+                        toShaderRead);
+
+                    if (hasStorageImages)
+                    {
+                        RecordStorageImagesForRead(
+                            resources,
+                            PipelineStageFlags.FragmentShaderBit);
                     }
                 }
 
-                BeginTranslatedRenderPass(
-                    renderPass,
-                    framebuffer,
-                    extent,
-                    colorAttachmentCount: targets.Length,
-                    hasDepthAttachment: depth is not null && !clearDepthSeparately,
-                    clearDepth: depth?.ClearDepth ?? 1f,
-                    colorClearValues: metaClearValues);
-                RecordTranslatedDrawInPass(resources, extent);
-                MarkGlobalBufferShaderWrites(resources);
-                _vk.CmdEndRenderPass(_commandBuffer);
-
-                var toShaderRead = stackalloc ImageMemoryBarrier[targets.Length];
-                for (var index = 0; index < targets.Length; index++)
-                {
-                    toShaderRead[index] = new ImageMemoryBarrier
-                    {
-                        SType = StructureType.ImageMemoryBarrier,
-                        SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
-                        DstAccessMask = AccessFlags.ShaderReadBit,
-                        OldLayout = ImageLayout.ColorAttachmentOptimal,
-                        NewLayout = ImageLayout.ShaderReadOnlyOptimal,
-                        SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                        Image = targets[index].Image,
-                        SubresourceRange = ColorSubresourceRange(),
-                    };
-                }
-                _vk.CmdPipelineBarrier(
-                    _commandBuffer,
-                    PipelineStageFlags.ColorAttachmentOutputBit,
-                    PipelineStageFlags.FragmentShaderBit,
-                    0,
-                    0,
-                    null,
-                    0,
-                    null,
-                    (uint)targets.Length,
-                    toShaderRead);
-
-                if (hasStorageImages)
-                {
-                    RecordStorageImagesForRead(resources, PipelineStageFlags.FragmentShaderBit);
-                }
+                RecordRenderPassReuseDecision(reuseHazards, continueOpenPass);
 
                 EndDebugLabel(_commandBuffer);
 
