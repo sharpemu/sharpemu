@@ -13266,7 +13266,11 @@ private static long _indirectDrawProbeCount;
         }
 
         var bindings = evaluation.ImageBindings;
-        var descriptions = new List<string>(bindings.Count);
+        var describeBindings =
+            _traceAgcShader || _traceComputeShaderAddress == shaderAddress;
+        var descriptions = describeBindings
+            ? new List<string>(bindings.Count)
+            : null;
         var translatedBindings = new List<TranslatedImageBinding>(bindings.Count);
         var hasStorageBinding = false;
         foreach (var binding in bindings)
@@ -13291,12 +13295,15 @@ private static long _indirectDrawProbeCount;
                     Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
             hasStorageBinding |= isStorage;
 
-            var descriptorState = descriptorValid ? string.Empty : "/invalid-desc";
-            descriptions.Add(
-                $"{binding.Opcode}@0x{binding.Pc:X}:" +
-                $"0x{texture.Address:X16}:{texture.Width}x{texture.Height}:" +
-                $"fmt{texture.Format}/num{texture.NumberType}/tile{texture.TileMode}" +
-                $"{descriptorState}/{ProbeTexture(ctx, texture)}");
+            if (descriptions is not null)
+            {
+                var descriptorState = descriptorValid ? string.Empty : "/invalid-desc";
+                descriptions.Add(
+                    $"{binding.Opcode}@0x{binding.Pc:X}:" +
+                    $"0x{texture.Address:X16}:{texture.Width}x{texture.Height}:" +
+                    $"fmt{texture.Format}/num{texture.NumberType}/tile{texture.TileMode}" +
+                    $"{descriptorState}/{ProbeTexture(ctx, texture)}");
+            }
             if (writesStorage && descriptorValid && texture.Address != 0)
             {
                 gpuState.ComputeImageWriters[texture.Address] = new ComputeImageWriter(
@@ -13319,7 +13326,7 @@ private static long _indirectDrawProbeCount;
         var localSizeX = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadX);
         var localSizeY = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadY);
         var localSizeZ = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadZ);
-        if (_traceComputeShaderAddress == shaderAddress)
+        if (_traceComputeShaderAddress == shaderAddress && descriptions is not null)
         {
             var globalHeads = evaluation.GlobalMemoryBindings.Count == 0
                 ? string.Empty
@@ -13516,7 +13523,9 @@ private static long _indirectDrawProbeCount;
 
         lock (_submitTraceGate)
         {
-            if (_tracedComputeShaders.Add(shaderAddress))
+            if (_traceAgcShader &&
+                descriptions is not null &&
+                _tracedComputeShaders.Add(shaderAddress))
             {
                 var globalBuffers = evaluation.GlobalMemoryBindings.Count == 0
                     ? string.Empty
