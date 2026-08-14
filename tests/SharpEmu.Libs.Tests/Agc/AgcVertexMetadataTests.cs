@@ -120,10 +120,15 @@ public sealed class AgcVertexMetadataTests
                 DataPooled: false),
         };
 
+        // hardware_mapping 0 for the single semantic; associate the fetch's
+        // destination VGPR with it so the merge has a validated association.
+        var program = CreateVertexFetchProgram((Pc: 0x40u, VectorData: 0u));
+
         var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
             ctx,
             scalars,
             tables,
+            program,
             discovered);
         Assert.Single(merged);
         Assert.Equal(0u, merged[0].Location);
@@ -304,10 +309,13 @@ public sealed class AgcVertexMetadataTests
                 0x40, 0, 4, 14, 7, sharpBase, 16, 12, data, data.Length, false),
         };
 
+        var program = CreateVertexFetchProgram((Pc: 0x40u, VectorData: 0u));
+
         var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
             ctx,
             scalars,
             tables,
+            program,
             discovered);
         Assert.Equal(10u, merged[0].DataFormat);
         Assert.Equal(0u, merged[0].NumberFormat);
@@ -357,10 +365,16 @@ public sealed class AgcVertexMetadataTests
                 0x80, 1, 4, 14, 7, sharpBase, 16, 12, data, data.Length, false),
         };
 
+        // semantic0 → hardware_mapping 0, semantic1 → hardware_mapping 4.
+        var program = CreateVertexFetchProgram(
+            (Pc: 0x40u, VectorData: 0u),
+            (Pc: 0x80u, VectorData: 4u));
+
         var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
             ctx,
             scalars,
             tables,
+            program,
             discovered);
         Assert.Equal(2, merged.Count);
         Assert.Equal(0u, merged[0].OffsetBytes);
@@ -454,8 +468,12 @@ public sealed class AgcVertexMetadataTests
     }
 
     [Fact]
-    public void MergeVertexInputs_FallsBackToOffsetWhenHardwareMappingIsAmbiguous()
+    public void MergeVertexInputs_PreservesDiscoveryWhenHardwareMappingIsAmbiguous()
     {
+        // Two resources claim the same hardware_mapping, so the destination
+        // VGPR does not identify one of them. Falling back to a byte-offset
+        // match would pick a resource the association never endorsed; there is
+        // no basis for preferring either key, so discovery stands.
         var fixture = CreateMetadataFixture(
             (HardwareMapping: 4u, Format: 29u, Offset: 0u),
             (HardwareMapping: 4u, Format: 56u, Offset: 12u));
@@ -475,17 +493,18 @@ public sealed class AgcVertexMetadataTests
             program,
             discovered);
 
-        Assert.Equal(10u, merged[0].DataFormat);
-        Assert.Equal(0u, merged[0].NumberFormat);
+        Assert.Same(discovered, merged);
+        Assert.Equal(14u, merged[0].DataFormat);
+        Assert.Equal(7u, merged[0].NumberFormat);
         Assert.Equal(12u, merged[0].OffsetBytes);
-        Assert.Equal(5u, merged[0].Location);
-        Assert.Equal(0x10u, merged[0].Pc);
-        Assert.Same(data, merged[0].Data);
     }
 
     [Fact]
-    public void MergeVertexInputs_UsesOffsetMatchingWhenHardwareMappingIsMissing()
+    public void MergeVertexInputs_PreservesDiscoveryWhenHardwareMappingIsMissing()
     {
+        // No metadata hardware_mapping matches either fetch destination VGPR,
+        // so nothing associates. A byte-offset-only match is not a validated
+        // association and must not rewrite the bindings.
         var fixture = CreateMetadataFixture(
             (HardwareMapping: 20u, Format: 29u, Offset: 0u),
             (HardwareMapping: 21u, Format: 56u, Offset: 12u));
@@ -510,11 +529,10 @@ public sealed class AgcVertexMetadataTests
             program,
             discovered);
 
-        // Location pairing would produce the reverse formats here. The
-        // program-aware path must instead use the unambiguous byte offsets.
-        Assert.Equal(10u, merged[0].DataFormat);
+        Assert.Same(discovered, merged);
+        Assert.Equal(14u, merged[0].DataFormat);
         Assert.Equal(12u, merged[0].OffsetBytes);
-        Assert.Equal(5u, merged[1].DataFormat);
+        Assert.Equal(14u, merged[1].DataFormat);
         Assert.Equal(0u, merged[1].OffsetBytes);
     }
 
@@ -631,6 +649,209 @@ public sealed class AgcVertexMetadataTests
         var pcs = AgcVertexMetadata.CollectFetchPrologPcs(program, tables);
         Assert.Contains(0x10u, pcs);
         Assert.DoesNotContain(0x20u, pcs);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_RefinesFiveResourceInterleavedStream()
+    {
+        // The HOA character draw: five attributes in one stride-60 stream,
+        // hardware_mapping laid out as a contiguous VGPR allocation
+        // (9, 13, 17, 20, 24) whose spacings match the component counts.
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 9u, Format: 74u, Offset: 0u),   // k32_32_32Float
+            (HardwareMapping: 13u, Format: 77u, Offset: 24u), // k32_32_32_32Float
+            (HardwareMapping: 17u, Format: 74u, Offset: 12u), // k32_32_32Float
+            (HardwareMapping: 20u, Format: 77u, Offset: 44u), // k32_32_32_32Float
+            (HardwareMapping: 24u, Format: 56u, Offset: 40u)); // k8_8_8_8UNorm
+        var data = new byte[256];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x178, 0, 4, 10, 0, fixture.SharpBase, 60, 40, data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x1E0, 1, 3, 13, 7, fixture.SharpBase, 60, 0, data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x258, 2, 4, 14, 7, fixture.SharpBase, 60, 44, data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x2CC, 3, 3, 13, 7, fixture.SharpBase, 60, 12, data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x33C, 4, 4, 14, 7, fixture.SharpBase, 60, 24, data, data.Length, false),
+        };
+        var program = CreateVertexFetchProgram(
+            (Pc: 0x178u, VectorData: 24u),
+            (Pc: 0x1E0u, VectorData: 9u),
+            (Pc: 0x258u, VectorData: 20u),
+            (Pc: 0x2CCu, VectorData: 17u),
+            (Pc: 0x33Cu, VectorData: 13u));
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            program,
+            discovered);
+
+        // Every association agrees with its byte offset, so all five refine and
+        // none has its offset moved.
+        Assert.Equal(5, merged.Count);
+        Assert.Equal((10u, 0u, 40u), (merged[0].DataFormat, merged[0].NumberFormat, merged[0].OffsetBytes));
+        Assert.Equal((13u, 7u, 0u), (merged[1].DataFormat, merged[1].NumberFormat, merged[1].OffsetBytes));
+        Assert.Equal((14u, 7u, 44u), (merged[2].DataFormat, merged[2].NumberFormat, merged[2].OffsetBytes));
+        Assert.Equal((13u, 7u, 12u), (merged[3].DataFormat, merged[3].NumberFormat, merged[3].OffsetBytes));
+        Assert.Equal((14u, 7u, 24u), (merged[4].DataFormat, merged[4].NumberFormat, merged[4].OffsetBytes));
+        for (var index = 0; index < merged.Count; index++)
+        {
+            Assert.Equal(discovered[index].Pc, merged[index].Pc);
+            Assert.Equal(discovered[index].Location, merged[index].Location);
+            Assert.Same(data, merged[index].Data);
+        }
+    }
+
+    [Fact]
+    public void MergeVertexInputs_PreservesDiscoveryWhenHardwareAndOffsetKeysConflict()
+    {
+        // The hardware_mapping association points at the resource 24 bytes into
+        // the stream while discovery resolved a definite offset of 12. Applying
+        // the association would silently move the attribute; preserve instead.
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 13u, Format: 77u, Offset: 24u),
+            (HardwareMapping: 17u, Format: 74u, Offset: 12u));
+        var data = new byte[128];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x2CC, 0, 3, 13, 7, fixture.SharpBase, 60, 12, data, data.Length, false),
+        };
+        var program = CreateVertexFetchProgram((Pc: 0x2CCu, VectorData: 13u));
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            program,
+            discovered);
+
+        Assert.Same(discovered, merged);
+        Assert.Equal(12u, merged[0].OffsetBytes);
+        Assert.Equal(13u, merged[0].DataFormat);
+        Assert.Equal(7u, merged[0].NumberFormat);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_PreservesDiscoveryWhenMetadataFormatIsUnknown()
+    {
+        // 500 is neither a VertexAttribFormat nor a BufferFormat. The old
+        // fallback turned it into R32G32B32A32_SFLOAT, widening float3
+        // attributes to float4 and reading past the end of each one.
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 4u, Format: 500u, Offset: 12u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 0, 3, 13, 7, fixture.SharpBase, 16, 12,
+                data, data.Length, false),
+        };
+        var program = CreateVertexFetchProgram((Pc: 0x10u, VectorData: 4u));
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            program,
+            discovered);
+
+        Assert.Same(discovered, merged);
+        Assert.Equal(13u, merged[0].DataFormat);
+        Assert.Equal(7u, merged[0].NumberFormat);
+        Assert.Equal(3u, merged[0].ComponentCount);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_InvalidFormatPreservesFormatAndAppliesOtherMetadata()
+    {
+        // Format 0 is the SDK kInvalid sentinel. It means that this entry does
+        // not override the shader-discovered format. The association, offset,
+        // and input-rate fields remain usable.
+        var fixture = CreateMetadataFixture(
+            perInstance: true,
+            (HardwareMapping: 4u, Format: 0u, Offset: 12u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 0, 3, 13, 7, fixture.SharpBase, 16, 0,
+                data, data.Length, false),
+        };
+        var program = CreateVertexFetchProgram((Pc: 0x10u, VectorData: 4u));
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            program,
+            discovered);
+
+        Assert.NotSame(discovered, merged);
+        Assert.Equal(13u, merged[0].DataFormat);
+        Assert.Equal(7u, merged[0].NumberFormat);
+        Assert.Equal(3u, merged[0].ComponentCount);
+        Assert.Equal(12u, merged[0].OffsetBytes);
+        Assert.True(merged[0].PerInstance);
+    }
+
+    [Theory]
+    [InlineData(113u, 5u, 5u, 2u)]  // k16_16SInt — was overridden to RGBA32F
+    [InlineData(117u, 5u, 7u, 2u)]  // k16_16Float — 121 was never this value
+    [InlineData(227u, 10u, 0u, 4u)] // k8_8_8_8UNorm
+    [InlineData(298u, 13u, 7u, 3u)] // k32_32_32Float
+    [InlineData(311u, 14u, 7u, 4u)] // k32_32_32_32Float
+    public void MergeVertexInputs_MapsSdkVertexAttribFormats(
+        uint attribFormat,
+        uint expectedDataFormat,
+        uint expectedNumberFormat,
+        uint expectedComponents)
+    {
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 4u, Format: attribFormat, Offset: 0u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 0, 4, 1, 1, fixture.SharpBase, 16, 0,
+                data, data.Length, false),
+        };
+        var program = CreateVertexFetchProgram((Pc: 0x10u, VectorData: 4u));
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            program,
+            discovered);
+
+        Assert.Equal(expectedDataFormat, merged[0].DataFormat);
+        Assert.Equal(expectedNumberFormat, merged[0].NumberFormat);
+        Assert.Equal(expectedComponents, merged[0].ComponentCount);
+    }
+
+    [Fact]
+    public void VertexTableRegisters_AddNggUserDataScalarBase()
+    {
+        var registers = new AgcVertexMetadata.VertexTableRegisters(
+            VertexBufferReg: 26,
+            VertexAttribReg: 28,
+            InputSemanticsCount: 5,
+            InputSemanticsAddress: 0x1234);
+
+        var resolved = AgcVertexMetadata.AddUserDataScalarRegisterBase(
+            registers,
+            userDataScalarRegisterBase: 8);
+
+        Assert.Equal(34, resolved.VertexBufferReg);
+        Assert.Equal(36, resolved.VertexAttribReg);
+        Assert.Equal(registers.InputSemanticsCount, resolved.InputSemanticsCount);
+        Assert.Equal(registers.InputSemanticsAddress, resolved.InputSemanticsAddress);
     }
 
     private static MetadataFixture CreateMetadataFixture(
