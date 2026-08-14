@@ -226,6 +226,7 @@ internal static unsafe partial class VulkanVideoPresenter
     // Standalone launches use a desktop-sized SDL surface unless configured.
     private const uint DefaultWindowWidth = 1920;
     private const uint DefaultWindowHeight = 1080;
+    internal const uint Gen5DepthTileMode = 24;
     internal const uint Gen5TextureType2D = 9;
     internal const uint Gen5TextureType3D = 10;
 
@@ -2110,6 +2111,42 @@ internal static unsafe partial class VulkanVideoPresenter
         Format viewFormat) =>
         Presenter.IsCompatibleViewFormat(imageFormat, viewFormat);
 
+    internal static bool HasCompatibleGuestImageTileMode(
+        uint requestedTileMode,
+        uint existingTileMode) =>
+        requestedTileMode == existingTileMode;
+
+    internal static bool IsCompatibleGuestDepthTextureDescriptor(
+        GuestDrawTexture texture,
+        uint depthWidth,
+        uint depthHeight,
+        uint depthGuestFormat)
+    {
+        var expectedFormat = depthGuestFormat switch
+        {
+            1 => Format.R16Unorm,
+            3 => Format.R32Sfloat,
+            _ => Format.Undefined,
+        };
+
+        return expectedFormat != Format.Undefined &&
+            Presenter.GetTextureFormat(texture.Format, texture.NumberType) == expectedFormat &&
+            !texture.IsFallback &&
+            !texture.IsStorage &&
+            texture.Width == depthWidth &&
+            texture.Height == depthHeight &&
+            texture.Type == Gen5TextureType2D &&
+            texture.Depth == 1 &&
+            !texture.ArrayedView &&
+            texture.ArrayLayers == 1 &&
+            texture.MipLevel == 0 &&
+            texture.BaseMipLevel == 0 &&
+            texture.MipLevels == 1 &&
+            texture.ResourceMipLevels == 1 &&
+            texture.TileMode == Gen5DepthTileMode &&
+            texture.Pitch >= texture.Width;
+    }
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -3701,6 +3738,7 @@ internal static unsafe partial class VulkanVideoPresenter
             uint Depth,
             uint Type,
             uint MipLevels,
+            uint TileMode,
             uint GuestFormat,
             Format Format);
 
@@ -3732,6 +3770,13 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _nextDepthOnlyColorAddress = 0xFFFF_FF00_0000_0000UL;
         private readonly HashSet<(ulong Address, uint Width, uint Height, Format Format)> _tracedTextureCacheHits = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height, uint DstSelect)> _tracedDepthTextureAliases = new();
+        private readonly HashSet<(
+            ulong Address,
+            uint Width,
+            uint Height,
+            uint Format,
+            uint NumberType,
+            uint TileMode)> _tracedDepthTextureAliasRejects = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height)> _tracedDepthExtentFallbacks = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height, Format Format)> _tracedTextureUploads = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height, uint Format)> _dumpedTextures = new();
@@ -3985,6 +4030,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public uint LogicalHeight;
             public uint LogicalDepth = 1;
             public uint MipLevels;
+            public uint TileMode;
             public uint GuestFormat;
             public Format Format;
             public Image Image;
@@ -4255,7 +4301,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static string GuestImageDebugName(GuestRenderTarget target, Format format) =>
             $"SharpEmu guest 0x{target.Address:X16} {target.Width}x{target.Height} " +
-            $"fmt{target.Format}/{format}";
+            $"fmt{target.Format}/{format} tile{target.TileMode}";
 
         private static string TextureDebugName(GuestDrawTexture texture, Format format) =>
             $"SharpEmu texture 0x{texture.Address:X16} {texture.Width}x{texture.Height} " +
@@ -6463,6 +6509,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 LogicalWidth = source.LogicalWidth,
                 LogicalHeight = source.LogicalHeight,
                 MipLevels = 1,
+                TileMode = source.TileMode,
                 GuestFormat = source.GuestFormat,
                 Format = source.Format,
                 Image = image,
@@ -9154,8 +9201,31 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                if (texture.Width > depth.LogicalWidth || texture.Height > depth.LogicalHeight)
+                if (!IsCompatibleGuestDepthTextureDescriptor(
+                        texture,
+                        depth.LogicalWidth,
+                        depth.LogicalHeight,
+                        depth.GuestFormat))
                 {
+                    if ((_traceGuestImageEvents || _traceVulkanShaderEnabled) &&
+                        _tracedDepthTextureAliasRejects.Add((
+                            texture.Address,
+                            texture.Width,
+                            texture.Height,
+                            texture.Format,
+                            texture.NumberType,
+                            texture.TileMode)))
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] vk.depth_texture_alias_reject " +
+                            $"addr=0x{texture.Address:X16} " +
+                            $"texture={texture.Width}x{texture.Height} " +
+                            $"fmt={texture.Format}/{texture.NumberType} " +
+                            $"tile={texture.TileMode} pitch={texture.Pitch} " +
+                            $"depth=0x{depth.Address:X16} " +
+                            $"surface={depth.LogicalWidth}x{depth.LogicalHeight} " +
+                            $"zfmt={depth.GuestFormat}");
+                    }
                     continue;
                 }
 
@@ -9186,14 +9256,19 @@ internal static unsafe partial class VulkanVideoPresenter
                     depth.SampleViews.Add(texture.DstSelect, view);
                 }
 
-                if (_tracedDepthTextureAliases.Add(
+                if ((_traceGuestImageEvents || _traceVulkanShaderEnabled) &&
+                    _tracedDepthTextureAliases.Add(
                         (texture.Address, texture.Width, texture.Height, texture.DstSelect)))
                 {
-                    TraceVulkanShader(
+                    Console.Error.WriteLine(
+                        "[LOADER][TRACE] " +
                         $"vk.depth_texture_alias addr=0x{texture.Address:X16} " +
                         $"depth=0x{depth.Address:X16} " +
                         $"texture={texture.Width}x{texture.Height} " +
-                        $"surface={depth.Width}x{depth.Height} dst=0x{texture.DstSelect:X3}");
+                        $"surface={depth.Width}x{depth.Height} " +
+                        $"fmt={texture.Format}/{texture.NumberType} " +
+                        $"tile={texture.TileMode} pitch={texture.Pitch} " +
+                        $"dst=0x{texture.DstSelect:X3}");
                 }
                 resource = new TextureResource
                 {
@@ -9475,6 +9550,13 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawTexture texture,
             GuestImageResource guestImage)
         {
+            if (!HasCompatibleGuestImageTileMode(
+                    texture.TileMode,
+                    guestImage.TileMode))
+            {
+                return false;
+            }
+
             var textureIs3D = IsGuestTexture3D(texture.Type);
             if (textureIs3D != IsGuestTexture3D(guestImage.Type))
             {
@@ -9704,7 +9786,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     texture.Height,
                     texture.Format,
                     texture.NumberType,
-                    texture.ResourceMipLevels),
+                    texture.ResourceMipLevels,
+                    TileMode: texture.TileMode),
                 format,
                 requiresStorage: true,
                 texture.Type,
@@ -10056,6 +10139,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     LogicalHeight = height,
                     LogicalDepth = depth,
                     MipLevels = 1,
+                    TileMode = texture.TileMode,
                     GuestFormat = guestFormat,
                     Format = vkFormat,
                     Image = image,
@@ -14231,6 +14315,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 depth,
                 type,
                 mipLevels,
+                target.TileMode,
                 guestFormat,
                 format);
             if (_guestImages.TryGetValue(target.Address, out var existing))
@@ -14256,6 +14341,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
                     (!requiresStorage || existing.SupportsStorageUsage) &&
+                    HasCompatibleGuestImageTileMode(
+                        target.TileMode,
+                        existing.TileMode) &&
                     (exactFormatMatch ||
                     IsAliasableGuestImageFormat(existing.Format, format)))
                 {
@@ -14292,6 +14380,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     existing.Height == target.Height &&
                     existing.MipLevels == mipLevels &&
                     (!requiresStorage || existing.SupportsStorageUsage) &&
+                    HasCompatibleGuestImageTileMode(
+                        target.TileMode,
+                        existing.TileMode) &&
                     IsCompatibleViewFormat(existing.Format, format))
                 {
                     if (_traceGuestImageEvents)
@@ -14345,6 +14436,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         existing.LogicalDepth,
                         existing.Type,
                         existing.MipLevels,
+                        existing.TileMode,
                         existing.GuestFormat,
                         existing.Format),
                     existing);
@@ -14522,6 +14614,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 LogicalHeight = target.Height,
                 LogicalDepth = depth,
                 MipLevels = mipLevels,
+                TileMode = target.TileMode,
                 GuestFormat = guestFormat,
                 Format = format,
                 Image = image,
@@ -14671,7 +14764,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"[LOADER][WARN] vk.guest_image_variant_conflict " +
                 $"action={action} count={count} seq={CurrentGuestWorkSequenceForDiagnostics} " +
                 $"addr=0x{key.Address:X16} size={key.Width}x{key.Height}x{key.Depth} " +
-                $"type={key.Type} mips={key.MipLevels} guest_fmt=0x{key.GuestFormat:X8} " +
+                $"type={key.Type} mips={key.MipLevels} tile={key.TileMode} " +
+                $"guest_fmt=0x{key.GuestFormat:X8} " +
                 $"vk_fmt={key.Format} stored_image=0x{stored.Image.Handle:X16} " +
                 $"incoming_image=0x{incoming.Image.Handle:X16} " +
                 $"flushed={(flushed ? 1 : 0)} deferred={(deferred ? 1 : 0)} " +

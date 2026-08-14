@@ -10,6 +10,32 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanGuestImageAliasTests
 {
     [Theory]
+    [InlineData(0u)]
+    [InlineData(24u)]
+    [InlineData(27u)]
+    public void MatchingTileModeCanReusePhysicalImage(uint tileMode)
+    {
+        Assert.True(
+            VulkanVideoPresenter.HasCompatibleGuestImageTileMode(
+                tileMode,
+                tileMode));
+    }
+
+    [Theory]
+    [InlineData(0u, 27u)]
+    [InlineData(24u, 27u)]
+    [InlineData(27u, 0u)]
+    public void DifferentTileModeRequiresDifferentPhysicalImage(
+        uint requestedTileMode,
+        uint existingTileMode)
+    {
+        Assert.False(
+            VulkanVideoPresenter.HasCompatibleGuestImageTileMode(
+                requestedTileMode,
+                existingTileMode));
+    }
+
+    [Theory]
     [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]
     [InlineData(Format.R8G8B8A8Unorm, Format.R8G8B8A8Srgb)]
     public void SrgbAndUnormCounterpartsShareOneGuestImage(

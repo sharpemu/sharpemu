@@ -10791,7 +10791,7 @@ private static long _indirectDrawProbeCount;
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
                 ExtractRenderTargetComponentSwap(info),
-                (attrib3 >> 14) & 0x1Fu));
+                ExtractRenderTargetTileMode(attrib3)));
         }
 
         if (targets.Count > 1 &&
@@ -10815,6 +10815,9 @@ private static long _indirectDrawProbeCount;
     internal static uint ExtractRenderTargetComponentSwap(uint colorInfo) =>
         (colorInfo >> 11) & 0x3u;
 
+    internal static uint ExtractRenderTargetTileMode(uint colorAttrib3) =>
+        (colorAttrib3 >> 14) & 0x1Fu;
+
     private static GuestRenderTarget CreateGuestRenderTarget(
         RenderTargetDescriptor target) =>
         new(
@@ -10824,7 +10827,8 @@ private static long _indirectDrawProbeCount;
             target.Format,
             target.NumberType,
             MipLevels: 1,
-            ComponentSwap: target.ComponentSwap);
+            ComponentSwap: target.ComponentSwap,
+            TileMode: target.TileMode);
 
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,

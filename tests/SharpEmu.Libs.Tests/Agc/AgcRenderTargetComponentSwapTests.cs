@@ -101,6 +101,22 @@ public sealed class AgcRenderTargetComponentSwapTests
                 unrelatedBits | (componentSwap << 11)));
     }
 
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    [InlineData(24u)]
+    [InlineData(27u)]
+    [InlineData(31u)]
+    public void ColorAttrib3ExtractsTileModeBits(uint tileMode)
+    {
+        var unrelatedBits = 0xA5A5_A5A5u & ~(0x1Fu << 14);
+
+        Assert.Equal(
+            tileMode,
+            AgcExports.ExtractRenderTargetTileMode(
+                unrelatedBits | (tileMode << 14)));
+    }
+
     [Fact]
     public void GraphicsOutputIdentitySeparatesComponentMappings()
     {
