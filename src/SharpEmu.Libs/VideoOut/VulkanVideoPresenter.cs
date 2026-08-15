@@ -3943,6 +3943,8 @@ internal static unsafe partial class VulkanVideoPresenter
             // this TextureResource and retires with the draw fence.
             public GuestImageResource? FeedbackSource;
             public GuestDepthResource? DepthFeedbackSource;
+            public VulkanFeedbackSnapshotKey? FeedbackSnapshotKey;
+            public ulong FeedbackAllocationBytes;
         }
 
         private sealed class GlobalBufferResource
@@ -10245,6 +10247,46 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawTexture texture,
             GuestImageResource source)
         {
+            var viewFormat = GetTextureFormat(texture.Format, texture.NumberType);
+            if (!IsCompatibleViewFormat(source.Format, viewFormat))
+            {
+                throw new InvalidOperationException(
+                    $"Feedback view format {viewFormat} is incompatible with " +
+                    $"render-target format {source.Format}.");
+            }
+
+            var key = new VulkanFeedbackSnapshotKey(
+                VulkanFeedbackSnapshotKind.Color,
+                source.Format,
+                viewFormat,
+                source.Width,
+                source.Height,
+                source.MipLevels,
+                texture.DstSelect);
+            if (TryRentFeedbackSnapshot(key, out var pooled))
+            {
+                RecordFeedbackSnapshotAcquired(
+                    VulkanFeedbackSnapshotKind.Color,
+                    pooled.AllocationBytes,
+                    allocated: false);
+                return new TextureResource
+                {
+                    Address = texture.Address,
+                    Image = pooled.Image,
+                    ImageMemory = pooled.Memory,
+                    View = pooled.View,
+                    Width = source.Width,
+                    Height = source.Height,
+                    RowLength = source.Width,
+                    DstSelect = texture.DstSelect,
+                    OwnsStorage = true,
+                    FeedbackSnapshotKey = key,
+                    FeedbackAllocationBytes = pooled.AllocationBytes,
+                    SamplerState = texture.Sampler,
+                    FeedbackSource = source,
+                };
+            }
+
             var image = default(Image);
             var memory = default(DeviceMemory);
             var view = default(ImageView);
@@ -10288,14 +10330,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     _vk.BindImageMemory(_device, image, memory, 0),
                     "vkBindImageMemory(render-target feedback snapshot)");
 
-                var viewFormat = GetTextureFormat(texture.Format, texture.NumberType);
-                if (!IsCompatibleViewFormat(source.Format, viewFormat))
-                {
-                    throw new InvalidOperationException(
-                        $"Feedback view format {viewFormat} is incompatible with " +
-                        $"render-target format {source.Format}.");
-                }
-
                 var viewInfo = new ImageViewCreateInfo
                 {
                     SType = StructureType.ImageViewCreateInfo,
@@ -10319,6 +10353,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"size={source.Width}x{source.Height} mips={source.MipLevels} " +
                     $"image_format={source.Format} view_format={viewFormat} " +
                     $"dst=0x{texture.DstSelect:X3}");
+                RecordFeedbackSnapshotAcquired(
+                    VulkanFeedbackSnapshotKind.Color,
+                    requirements.Size,
+                    allocated: true);
 
                 return new TextureResource
                 {
@@ -10331,6 +10369,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     RowLength = source.Width,
                     DstSelect = texture.DstSelect,
                     OwnsStorage = true,
+                    FeedbackSnapshotKey = key,
+                    FeedbackAllocationBytes = requirements.Size,
                     SamplerState = texture.Sampler,
                     FeedbackSource = source,
                 };
@@ -10360,6 +10400,38 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawTexture texture,
             GuestDepthResource source)
         {
+            var key = new VulkanFeedbackSnapshotKey(
+                VulkanFeedbackSnapshotKind.Depth,
+                DepthFormat,
+                DepthFormat,
+                source.Width,
+                source.Height,
+                1,
+                texture.DstSelect);
+            if (TryRentFeedbackSnapshot(key, out var pooled))
+            {
+                RecordFeedbackSnapshotAcquired(
+                    VulkanFeedbackSnapshotKind.Depth,
+                    pooled.AllocationBytes,
+                    allocated: false);
+                return new TextureResource
+                {
+                    Address = texture.Address,
+                    Image = pooled.Image,
+                    ImageMemory = pooled.Memory,
+                    View = pooled.View,
+                    Width = source.Width,
+                    Height = source.Height,
+                    RowLength = source.Width,
+                    DstSelect = texture.DstSelect,
+                    OwnsStorage = true,
+                    FeedbackSnapshotKey = key,
+                    FeedbackAllocationBytes = pooled.AllocationBytes,
+                    SamplerState = texture.Sampler,
+                    DepthFeedbackSource = source,
+                };
+            }
+
             var image = default(Image);
             var memory = default(DeviceMemory);
             var view = default(ImageView);
@@ -10422,6 +10494,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     ObjectType.ImageView,
                     view.Handle,
                     $"SharpEmu depth feedback 0x{source.Address:X16} view");
+                RecordFeedbackSnapshotAcquired(
+                    VulkanFeedbackSnapshotKind.Depth,
+                    requirements.Size,
+                    allocated: true);
                 return new TextureResource
                 {
                     Address = texture.Address,
@@ -10433,6 +10509,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     RowLength = source.Width,
                     DstSelect = texture.DstSelect,
                     OwnsStorage = true,
+                    FeedbackSnapshotKey = key,
+                    FeedbackAllocationBytes = requirements.Size,
                     SamplerState = texture.Sampler,
                     DepthFeedbackSource = source,
                 };
@@ -13351,7 +13429,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     ? firstTarget.Initialized
                         ? firstTarget.RenderPass
                         : firstTarget.InitialRenderPass
-                    : firstTarget.Initialized
+                        : firstTarget.Initialized
                         ? depth!.Initialized && !clearDepthForDraw
                             ? depthFramebuffer.LoadRenderPass
                             : depthFramebuffer.DepthClearRenderPass
@@ -17646,6 +17724,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         ImageLayout.TransferDstOptimal,
                         1,
                         &copy);
+                    RecordFeedbackSnapshotCopy(
+                        source.Format,
+                        source.Width,
+                        source.Height);
                     var sourceToShaderRead = new ImageMemoryBarrier
                     {
                         SType = StructureType.ImageMemoryBarrier,
@@ -17792,6 +17874,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         ImageLayout.TransferDstOptimal,
                         1,
                         &copy);
+                    RecordFeedbackSnapshotCopy(
+                        DepthFormat,
+                        source.Width,
+                        source.Height);
                     var sourceToAttachment = new ImageMemoryBarrier
                     {
                         SType = StructureType.ImageMemoryBarrier,
@@ -18659,6 +18745,12 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (texture is null || texture.Cached)
                 {
+                    continue;
+                }
+
+                if (texture.FeedbackSnapshotKey is not null)
+                {
+                    RetireFeedbackSnapshot(texture);
                     continue;
                 }
 
@@ -19684,6 +19776,8 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
+            DestroyFeedbackSnapshotPool();
+            ReportFeedbackSnapshotTelemetry(final: true);
             ClearCachedTextureIdentities();
             foreach (var pipeline in _computePipelines.Values)
             {
