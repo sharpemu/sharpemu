@@ -121,4 +121,51 @@ public sealed class VulkanFeedbackSnapshotTelemetryTests
     {
         Assert.Equal(expected, VulkanFeedbackSnapshotTelemetry.ShouldReport(created));
     }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("1", true)]
+    [InlineData("0", false)]
+    public void DirectReadOnlyDepthFeedbackIsOptOut(string? value, bool expected)
+    {
+        Assert.Equal(expected, VulkanReadOnlyDepthFeedbackPolicy.IsEnabled(value));
+    }
+
+    [Theory]
+    [InlineData(true, true, true, true, true, false, false, 1, true, true)]
+    [InlineData(false, true, true, true, true, false, false, 1, true, false)]
+    [InlineData(true, false, true, true, true, false, false, 1, true, false)]
+    [InlineData(true, true, false, true, true, false, false, 1, true, false)]
+    [InlineData(true, true, true, false, true, false, false, 1, true, false)]
+    [InlineData(true, true, true, true, false, false, false, 1, true, false)]
+    [InlineData(true, true, true, true, true, true, false, 1, true, false)]
+    [InlineData(true, true, true, true, true, false, true, 1, true, false)]
+    [InlineData(true, true, true, true, true, false, false, 2, true, false)]
+    [InlineData(true, true, true, true, true, false, false, 1, false, false)]
+    public void RestrictsDirectDepthFeedbackToReadOnlySingleTargetDraws(
+        bool featureEnabled,
+        bool hasDepthAttachment,
+        bool depthInitialized,
+        bool depthLayoutSupported,
+        bool depthTestEnabled,
+        bool depthWriteEnabled,
+        bool depthClearEnabled,
+        int renderTargetCount,
+        bool hasCompatibleSample,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VulkanReadOnlyDepthFeedbackPolicy.CanUse(
+                featureEnabled,
+                hasDepthAttachment,
+                depthInitialized,
+                depthLayoutSupported,
+                depthTestEnabled,
+                depthWriteEnabled,
+                depthClearEnabled,
+                renderTargetCount,
+                hasCompatibleSample));
+    }
 }

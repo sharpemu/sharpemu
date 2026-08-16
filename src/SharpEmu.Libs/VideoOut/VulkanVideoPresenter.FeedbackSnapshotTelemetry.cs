@@ -168,6 +168,32 @@ internal static class VulkanFeedbackSnapshotPoolPolicy
             };
 }
 
+internal static class VulkanReadOnlyDepthFeedbackPolicy
+{
+    internal static bool IsEnabled(string? value) =>
+        !string.Equals(value, "0", StringComparison.Ordinal);
+
+    internal static bool CanUse(
+        bool featureEnabled,
+        bool hasDepthAttachment,
+        bool depthInitialized,
+        bool depthLayoutSupported,
+        bool depthTestEnabled,
+        bool depthWriteEnabled,
+        bool depthClearEnabled,
+        int renderTargetCount,
+        bool hasCompatibleSample) =>
+        featureEnabled &&
+        hasDepthAttachment &&
+        depthInitialized &&
+        depthLayoutSupported &&
+        depthTestEnabled &&
+        !depthWriteEnabled &&
+        !depthClearEnabled &&
+        renderTargetCount == 1 &&
+        hasCompatibleSample;
+}
+
 internal static unsafe partial class VulkanVideoPresenter
 {
     private static readonly bool _logFeedbackSnapshots =
@@ -179,6 +205,10 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly bool _poolFeedbackSnapshots =
         VulkanFeedbackSnapshotPoolPolicy.IsEnabled(
             Environment.GetEnvironmentVariable("SHARPEMU_POOL_FEEDBACK_SNAPSHOTS"));
+
+    private static readonly bool _directReadOnlyDepthFeedback =
+        VulkanReadOnlyDepthFeedbackPolicy.IsEnabled(
+            Environment.GetEnvironmentVariable("SHARPEMU_DIRECT_READONLY_DEPTH_FEEDBACK"));
 
     private const int FeedbackSnapshotPoolMaxEntriesPerKey = 2;
     private static readonly ulong _feedbackSnapshotPoolMaxBytes =
@@ -203,6 +233,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _feedbackSnapshotPoolBytes;
         private int _feedbackSnapshotPoolPeakCount;
         private ulong _feedbackSnapshotPoolPeakBytes;
+        private long _directReadOnlyDepthFeedbackUses;
 
         private bool TryRentFeedbackSnapshot(
             VulkanFeedbackSnapshotKey key,
@@ -375,7 +406,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"pooled={_feedbackSnapshotPoolCount} " +
                 $"pooled_bytes={_feedbackSnapshotPoolBytes} " +
                 $"peak_pooled={_feedbackSnapshotPoolPeakCount} " +
-                $"peak_pooled_bytes={_feedbackSnapshotPoolPeakBytes}");
+                $"peak_pooled_bytes={_feedbackSnapshotPoolPeakBytes} " +
+                $"direct_depth={_directReadOnlyDepthFeedbackUses}");
+        }
+
+        private void RecordDirectReadOnlyDepthFeedback()
+        {
+            var count = Interlocked.Increment(
+                ref _directReadOnlyDepthFeedbackUses);
+            if (_logFeedbackSnapshots &&
+                VulkanFeedbackSnapshotTelemetry.ShouldReport(count))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] vk.depth_feedback_direct count={count}");
+            }
         }
     }
 }

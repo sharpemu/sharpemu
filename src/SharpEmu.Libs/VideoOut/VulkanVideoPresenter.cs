@@ -3943,6 +3943,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // this TextureResource and retires with the draw fence.
             public GuestImageResource? FeedbackSource;
             public GuestDepthResource? DepthFeedbackSource;
+            public bool ReadOnlyDepthFeedback;
             public VulkanFeedbackSnapshotKey? FeedbackSnapshotKey;
             public ulong FeedbackAllocationBytes;
         }
@@ -4017,6 +4018,9 @@ internal static unsafe partial class VulkanVideoPresenter
             public RenderPass DepthClearRenderPass;
             public RenderPass BothClearRenderPass;
             public Framebuffer Framebuffer;
+            public RenderPass ReadOnlyLoadRenderPass;
+            public RenderPass ReadOnlyColorClearRenderPass;
+            public Framebuffer ReadOnlyFramebuffer;
         }
 
         private sealed class GuestImageResource
@@ -7487,7 +7491,8 @@ internal static unsafe partial class VulkanVideoPresenter
             Extent2D extent,
             IReadOnlyList<GuestImageResource>? feedbackTargets = null,
             bool hasDepthAttachment = false,
-            GuestDepthResource? feedbackDepth = null)
+            GuestDepthResource? feedbackDepth = null,
+            GuestDepthResource? directReadOnlyDepthFeedback = null)
         {
             var isTitleDraw = IsTitleDraw(draw.VertexBuffers);
             var forceFullscreenVertex = _forceFullscreenPipeline ||
@@ -7639,7 +7644,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 for (var index = 0; index < draw.Textures.Count; index++)
                 {
                     var texture = draw.Textures[index];
-                    var resolved = index == hostMovieTextures.Luma
+                    var usesDirectReadOnlyDepth =
+                        directReadOnlyDepthFeedback is not null &&
+                        IsMatchingGuestDepthTexture(
+                            texture,
+                            directReadOnlyDepthFeedback);
+                    var resolved = usesDirectReadOnlyDepth
+                        ? CreateReadOnlyDepthFeedbackResource(
+                            texture,
+                            directReadOnlyDepthFeedback!)
+                        : index == hostMovieTextures.Luma
                         ? CreateHostMovieTextureResource(texture, plane: 0)
                         : index == hostMovieTextures.Chroma
                             ? CreateHostMovieTextureResource(texture, plane: 1)
@@ -7654,7 +7668,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     // actually resolved to the target; a separately uploaded
                     // texture has no Vulkan attachment feedback hazard.
                     resources.Textures[index] =
-                        feedbackDepth is not null &&
+                        usesDirectReadOnlyDepth
+                            ? resolved
+                            : feedbackDepth is not null &&
                         !texture.IsStorage &&
                         ReferenceEquals(resolved.GuestDepth, feedbackDepth)
                             ? CreateDepthFeedbackSnapshot(texture, feedbackDepth)
@@ -8025,7 +8041,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         Sampler = isStorage ? default : resources.Textures[index].Sampler,
                         ImageView = resources.Textures[index].View,
-                        ImageLayout = isStorage ||
+                        ImageLayout = resources.Textures[index].ReadOnlyDepthFeedback
+                            ? ImageLayout.DepthStencilReadOnlyOptimal
+                            : isStorage ||
                             resources.Textures[index].GuestImage is { } guestImage &&
                             resources.Textures.Any(
                                 texture =>
@@ -9228,32 +9246,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                if (!depth.SampleViews.TryGetValue(texture.DstSelect, out var view))
-                {
-                    var viewInfo = new ImageViewCreateInfo
-                    {
-                        SType = StructureType.ImageViewCreateInfo,
-                        Image = depth.Image,
-                        ViewType = ImageViewType.Type2D,
-                        Format = DepthFormat,
-                        Components = ToVkComponentMapping(texture.DstSelect),
-                        SubresourceRange = new ImageSubresourceRange(
-                            ImageAspectFlags.DepthBit,
-                            0,
-                            1,
-                            0,
-                            1),
-                    };
-                    Check(
-                        _vk.CreateImageView(_device, &viewInfo, null, out view),
-                        "vkCreateImageView(depth sample)");
-                    SetDebugName(
-                        ObjectType.ImageView,
-                        view.Handle,
-                        $"SharpEmu guest depth sample 0x{depth.Address:X16} " +
-                        $"dst=0x{texture.DstSelect:X3}");
-                    depth.SampleViews.Add(texture.DstSelect, view);
-                }
+                var view = GetOrCreateGuestDepthSampleView(
+                    depth,
+                    texture.DstSelect);
 
                 if ((_traceGuestImageEvents || _traceVulkanShaderEnabled) &&
                     _tracedDepthTextureAliases.Add(
@@ -9287,6 +9282,73 @@ internal static unsafe partial class VulkanVideoPresenter
             resource = null!;
             return false;
         }
+
+        private static bool IsMatchingGuestDepthTexture(
+            GuestDrawTexture texture,
+            GuestDepthResource depth) =>
+            !texture.IsStorage &&
+            (texture.Address == depth.Address ||
+             texture.Address == depth.ReadAddress ||
+             texture.Address == depth.WriteAddress) &&
+            IsCompatibleGuestDepthTextureDescriptor(
+                texture,
+                depth.LogicalWidth,
+                depth.LogicalHeight,
+                depth.GuestFormat);
+
+        private ImageView GetOrCreateGuestDepthSampleView(
+            GuestDepthResource depth,
+            uint dstSelect)
+        {
+            if (depth.SampleViews.TryGetValue(dstSelect, out var view))
+            {
+                return view;
+            }
+
+            var viewInfo = new ImageViewCreateInfo
+            {
+                SType = StructureType.ImageViewCreateInfo,
+                Image = depth.Image,
+                ViewType = ImageViewType.Type2D,
+                Format = DepthFormat,
+                Components = ToVkComponentMapping(dstSelect),
+                SubresourceRange = new ImageSubresourceRange(
+                    ImageAspectFlags.DepthBit,
+                    0,
+                    1,
+                    0,
+                    1),
+            };
+            Check(
+                _vk.CreateImageView(_device, &viewInfo, null, out view),
+                "vkCreateImageView(depth sample)");
+            SetDebugName(
+                ObjectType.ImageView,
+                view.Handle,
+                $"SharpEmu guest depth sample 0x{depth.Address:X16} " +
+                $"dst=0x{dstSelect:X3}");
+            depth.SampleViews.Add(dstSelect, view);
+            return view;
+        }
+
+        private TextureResource CreateReadOnlyDepthFeedbackResource(
+            GuestDrawTexture texture,
+            GuestDepthResource source) =>
+            new()
+            {
+                Address = texture.Address,
+                Image = source.Image,
+                View = GetOrCreateGuestDepthSampleView(
+                    source,
+                    texture.DstSelect),
+                Width = source.Width,
+                Height = source.Height,
+                RowLength = source.Width,
+                DstSelect = texture.DstSelect,
+                SamplerState = texture.Sampler,
+                GuestDepth = source,
+                ReadOnlyDepthFeedback = true,
+            };
 
         private readonly Dictionary<TextureContentIdentity, TextureResource> _textureCache = new();
 
@@ -13425,34 +13487,64 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                 }
 
-                var renderPass = depthFramebuffer is null
-                    ? firstTarget.Initialized
-                        ? firstTarget.RenderPass
-                        : firstTarget.InitialRenderPass
-                        : firstTarget.Initialized
-                        ? depth!.Initialized && !clearDepthForDraw
-                            ? depthFramebuffer.LoadRenderPass
-                            : depthFramebuffer.DepthClearRenderPass
-                        : depth!.Initialized && !clearDepthForDraw
-                            ? depthFramebuffer.ColorClearRenderPass
-                            : depthFramebuffer.BothClearRenderPass;
-                var framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
-                if (targets.Length > 1)
+                var hasAttachedDepth = depth is not null && !clearDepthSeparately;
+                var hasCompatibleDepthSample = depth is not null &&
+                    draw.Textures.Any(texture =>
+                        IsMatchingGuestDepthTexture(texture, depth));
+                var directReadOnlyDepthFeedback =
+                    VulkanReadOnlyDepthFeedbackPolicy.CanUse(
+                        _directReadOnlyDepthFeedback,
+                        hasAttachedDepth,
+                        depth?.Initialized == true,
+                        depth?.Layout is ImageLayout.ShaderReadOnlyOptimal or
+                            ImageLayout.DepthStencilAttachmentOptimal or
+                            ImageLayout.DepthStencilReadOnlyOptimal,
+                        draw.RenderState.Depth.TestEnable,
+                        draw.RenderState.Depth.WriteEnable,
+                        clearDepthForDraw,
+                        targets.Length,
+                        hasCompatibleDepthSample);
+
+                RenderPass renderPass;
+                Framebuffer framebuffer;
+                if (directReadOnlyDepthFeedback)
                 {
-                    var attachedDepth = clearDepthSeparately ? null : depth;
-                    (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
-                        formats,
-                        targets.Select(target => target.MipViews.Length > 0
-                            ? target.MipViews[0]
-                            : target.View).ToArray(),
-                        extent.Width,
-                        extent.Height,
-                        targets.Select(target =>
-                            target.Initialized || target.InitialUploadPending).ToArray(),
-                        attachedDepth,
-                        attachedDepth?.Initialized == true && !clearDepthForDraw);
-                    transientRenderPass = renderPass;
-                    transientFramebuffer = framebuffer;
+                    renderPass = firstTarget.Initialized
+                        ? depthFramebuffer!.ReadOnlyLoadRenderPass
+                        : depthFramebuffer!.ReadOnlyColorClearRenderPass;
+                    framebuffer = depthFramebuffer.ReadOnlyFramebuffer;
+                }
+                else
+                {
+                    renderPass = depthFramebuffer is null
+                        ? firstTarget.Initialized
+                            ? firstTarget.RenderPass
+                            : firstTarget.InitialRenderPass
+                            : firstTarget.Initialized
+                            ? depth!.Initialized && !clearDepthForDraw
+                                ? depthFramebuffer.LoadRenderPass
+                                : depthFramebuffer.DepthClearRenderPass
+                            : depth!.Initialized && !clearDepthForDraw
+                                ? depthFramebuffer.ColorClearRenderPass
+                                : depthFramebuffer.BothClearRenderPass;
+                    framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
+                    if (targets.Length > 1)
+                    {
+                        var attachedDepth = clearDepthSeparately ? null : depth;
+                        (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
+                            formats,
+                            targets.Select(target => target.MipViews.Length > 0
+                                ? target.MipViews[0]
+                                : target.View).ToArray(),
+                            extent.Width,
+                            extent.Height,
+                            targets.Select(target =>
+                                target.Initialized || target.InitialUploadPending).ToArray(),
+                            attachedDepth,
+                            attachedDepth?.Initialized == true && !clearDepthForDraw);
+                        transientRenderPass = renderPass;
+                        transientFramebuffer = framebuffer;
+                    }
                 }
 
                 resources = CreateTranslatedDrawResources(
@@ -13461,8 +13553,17 @@ internal static unsafe partial class VulkanVideoPresenter
                     formats,
                     extent,
                     targets,
-                    hasDepthAttachment: depth is not null && !clearDepthSeparately,
-                    feedbackDepth: clearDepthSeparately ? null : depth);
+                    hasDepthAttachment: hasAttachedDepth,
+                    feedbackDepth: directReadOnlyDepthFeedback || clearDepthSeparately
+                        ? null
+                        : depth,
+                    directReadOnlyDepthFeedback: directReadOnlyDepthFeedback
+                        ? depth
+                        : null);
+                if (directReadOnlyDepthFeedback)
+                {
+                    RecordDirectReadOnlyDepthFeedback();
+                }
                 resources.TransientRenderPass = transientRenderPass;
                 resources.TransientFramebuffer = transientFramebuffer;
                 transientRenderPass = default;
@@ -13529,6 +13630,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     extent.Width,
                     extent.Height);
                 var continueOpenPass =
+                    !directReadOnlyDepthFeedback &&
                     _reuseTranslatedRenderPasses &&
                     _openPassKey is { } openPassKey &&
                     VulkanRenderPassReusePolicy.CanContinue(
@@ -13592,17 +13694,65 @@ internal static unsafe partial class VulkanVideoPresenter
                         toColorAttachments);
 
                     if (depth is not null &&
+                        directReadOnlyDepthFeedback &&
+                        depth.Layout != ImageLayout.DepthStencilReadOnlyOptimal)
+                    {
+                        var fromDepthAttachment =
+                            depth.Layout == ImageLayout.DepthStencilAttachmentOptimal;
+                        var toReadOnlyDepth = new ImageMemoryBarrier
+                        {
+                            SType = StructureType.ImageMemoryBarrier,
+                            SrcAccessMask = fromDepthAttachment
+                                ? AccessFlags.DepthStencilAttachmentReadBit |
+                                  AccessFlags.DepthStencilAttachmentWriteBit
+                                : AccessFlags.ShaderReadBit,
+                            DstAccessMask =
+                                AccessFlags.DepthStencilAttachmentReadBit |
+                                AccessFlags.ShaderReadBit,
+                            OldLayout = depth.Layout,
+                            NewLayout = ImageLayout.DepthStencilReadOnlyOptimal,
+                            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                            Image = depth.Image,
+                            SubresourceRange = new ImageSubresourceRange(
+                                ImageAspectFlags.DepthBit, 0, 1, 0, 1),
+                        };
+                        _vk.CmdPipelineBarrier(
+                            _commandBuffer,
+                            fromDepthAttachment
+                                ? PipelineStageFlags.EarlyFragmentTestsBit |
+                                  PipelineStageFlags.LateFragmentTestsBit
+                                : PipelineStageFlags.FragmentShaderBit |
+                                  PipelineStageFlags.ComputeShaderBit,
+                            PipelineStageFlags.EarlyFragmentTestsBit |
+                            PipelineStageFlags.LateFragmentTestsBit |
+                            PipelineStageFlags.FragmentShaderBit,
+                            0,
+                            0,
+                            null,
+                            0,
+                            null,
+                            1,
+                            &toReadOnlyDepth);
+                        depth.Layout = ImageLayout.DepthStencilReadOnlyOptimal;
+                    }
+                    else if (depth is not null &&
                         !clearDepthSeparately &&
-                        depth.Layout == ImageLayout.ShaderReadOnlyOptimal)
+                        (depth.Layout == ImageLayout.ShaderReadOnlyOptimal ||
+                         depth.Layout == ImageLayout.DepthStencilReadOnlyOptimal))
                     {
                         var toDepthAttachment = new ImageMemoryBarrier
                         {
                             SType = StructureType.ImageMemoryBarrier,
-                            SrcAccessMask = AccessFlags.ShaderReadBit,
+                            SrcAccessMask = depth.Layout ==
+                                ImageLayout.DepthStencilReadOnlyOptimal
+                                    ? AccessFlags.DepthStencilAttachmentReadBit |
+                                      AccessFlags.ShaderReadBit
+                                    : AccessFlags.ShaderReadBit,
                             DstAccessMask =
                                 AccessFlags.DepthStencilAttachmentReadBit |
                                 AccessFlags.DepthStencilAttachmentWriteBit,
-                            OldLayout = ImageLayout.ShaderReadOnlyOptimal,
+                            OldLayout = depth.Layout,
                             NewLayout = ImageLayout.DepthStencilAttachmentOptimal,
                             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
@@ -13613,7 +13763,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         _vk.CmdPipelineBarrier(
                             _commandBuffer,
                             PipelineStageFlags.FragmentShaderBit |
-                            PipelineStageFlags.ComputeShaderBit,
+                            PipelineStageFlags.ComputeShaderBit |
+                            PipelineStageFlags.EarlyFragmentTestsBit |
+                            PipelineStageFlags.LateFragmentTestsBit,
                             PipelineStageFlags.EarlyFragmentTestsBit |
                             PipelineStageFlags.LateFragmentTestsBit,
                             0,
@@ -13657,6 +13809,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 RecordTranslatedDrawInPass(resources, extent);
                 MarkGlobalBufferShaderWrites(resources);
                 var keepPassOpen =
+                    !directReadOnlyDepthFeedback &&
                     _reuseTranslatedRenderPasses &&
                     VulkanRenderPassReusePolicy.CanKeepOpen(reuseHazards);
                 if (keepPassOpen)
@@ -13726,7 +13879,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     depth.Initialized = true;
                     if (!clearDepthSeparately)
                     {
-                        depth.Layout = ImageLayout.DepthStencilAttachmentOptimal;
+                        depth.Layout = directReadOnlyDepthFeedback
+                            ? ImageLayout.DepthStencilReadOnlyOptimal
+                            : ImageLayout.DepthStencilAttachmentOptimal;
                     }
                     if (clearDepthForDraw)
                     {
@@ -15280,6 +15435,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 color.Format,
                 clearColor: true,
                 clearDepth: true);
+            var readOnlyLoadRenderPass = CreateDepthRenderPass(
+                color.Format,
+                clearColor: false,
+                clearDepth: false,
+                readOnlyDepth: true);
+            var readOnlyColorClearRenderPass = CreateDepthRenderPass(
+                color.Format,
+                clearColor: true,
+                clearDepth: false,
+                readOnlyDepth: true);
             var attachments = stackalloc ImageView[2];
             attachments[0] = attachmentView;
             attachments[1] = depth.View;
@@ -15296,6 +15461,14 @@ internal static unsafe partial class VulkanVideoPresenter
             Check(
                 _vk.CreateFramebuffer(_device, &framebufferInfo, null, out var framebuffer),
                 "vkCreateFramebuffer(offscreen depth)");
+            framebufferInfo.RenderPass = readOnlyLoadRenderPass;
+            Check(
+                _vk.CreateFramebuffer(
+                    _device,
+                    &framebufferInfo,
+                    null,
+                    out var readOnlyFramebuffer),
+                "vkCreateFramebuffer(offscreen read-only depth)");
             var resource = new DepthFramebufferResource
             {
                 Depth = depth,
@@ -15304,13 +15477,28 @@ internal static unsafe partial class VulkanVideoPresenter
                 DepthClearRenderPass = depthClearRenderPass,
                 BothClearRenderPass = bothClearRenderPass,
                 Framebuffer = framebuffer,
+                ReadOnlyLoadRenderPass = readOnlyLoadRenderPass,
+                ReadOnlyColorClearRenderPass = readOnlyColorClearRenderPass,
+                ReadOnlyFramebuffer = readOnlyFramebuffer,
             };
             var name = $"SharpEmu color 0x{color.Address:X16} depth 0x{depth.Address:X16}";
             SetDebugName(ObjectType.RenderPass, loadRenderPass.Handle, $"{name} load");
             SetDebugName(ObjectType.RenderPass, colorClearRenderPass.Handle, $"{name} color-clear");
             SetDebugName(ObjectType.RenderPass, depthClearRenderPass.Handle, $"{name} depth-clear");
             SetDebugName(ObjectType.RenderPass, bothClearRenderPass.Handle, $"{name} both-clear");
+            SetDebugName(
+                ObjectType.RenderPass,
+                readOnlyLoadRenderPass.Handle,
+                $"{name} read-only load");
+            SetDebugName(
+                ObjectType.RenderPass,
+                readOnlyColorClearRenderPass.Handle,
+                $"{name} read-only color-clear");
             SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{name} framebuffer");
+            SetDebugName(
+                ObjectType.Framebuffer,
+                readOnlyFramebuffer.Handle,
+                $"{name} read-only framebuffer");
             color.DepthFramebuffers.Add(depth.Key, resource);
             return resource;
         }
@@ -15318,8 +15506,18 @@ internal static unsafe partial class VulkanVideoPresenter
         private RenderPass CreateDepthRenderPass(
             Format colorFormat,
             bool clearColor,
-            bool clearDepth)
+            bool clearDepth,
+            bool readOnlyDepth = false)
         {
+            if (readOnlyDepth && clearDepth)
+            {
+                throw new InvalidOperationException(
+                    "a read-only depth render pass cannot clear depth");
+            }
+
+            var depthLayout = readOnlyDepth
+                ? ImageLayout.DepthStencilReadOnlyOptimal
+                : ImageLayout.DepthStencilAttachmentOptimal;
             var attachments = stackalloc AttachmentDescription[2];
             attachments[0] = new AttachmentDescription
             {
@@ -15342,8 +15540,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 InitialLayout = clearDepth
                     ? ImageLayout.Undefined
-                    : ImageLayout.DepthStencilAttachmentOptimal,
-                FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
+                    : depthLayout,
+                FinalLayout = depthLayout,
             };
             var colorReference = new AttachmentReference
             {
@@ -15353,7 +15551,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthReference = new AttachmentReference
             {
                 Attachment = 1,
-                Layout = ImageLayout.DepthStencilAttachmentOptimal,
+                Layout = depthLayout,
             };
             var subpass = new SubpassDescription
             {
@@ -15366,14 +15564,26 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SrcSubpass = Vk.SubpassExternal,
                 DstSubpass = 0,
-                SrcStageMask = PipelineStageFlags.LateFragmentTestsBit,
+                SrcStageMask = readOnlyDepth
+                    ? PipelineStageFlags.EarlyFragmentTestsBit |
+                      PipelineStageFlags.LateFragmentTestsBit |
+                      PipelineStageFlags.FragmentShaderBit
+                    : PipelineStageFlags.LateFragmentTestsBit,
                 DstStageMask =
                     PipelineStageFlags.EarlyFragmentTestsBit |
-                    PipelineStageFlags.LateFragmentTestsBit,
-                SrcAccessMask = AccessFlags.DepthStencilAttachmentWriteBit,
+                    PipelineStageFlags.LateFragmentTestsBit |
+                    (readOnlyDepth
+                        ? PipelineStageFlags.FragmentShaderBit
+                        : (PipelineStageFlags)0),
+                SrcAccessMask = readOnlyDepth
+                    ? AccessFlags.DepthStencilAttachmentWriteBit |
+                      AccessFlags.ShaderReadBit
+                    : AccessFlags.DepthStencilAttachmentWriteBit,
                 DstAccessMask =
                     AccessFlags.DepthStencilAttachmentReadBit |
-                    AccessFlags.DepthStencilAttachmentWriteBit,
+                    (readOnlyDepth
+                        ? AccessFlags.ShaderReadBit
+                        : AccessFlags.DepthStencilAttachmentWriteBit),
                 DependencyFlags = DependencyFlags.ByRegionBit,
             };
             var createInfo = new RenderPassCreateInfo
@@ -15839,6 +16049,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DestroyDepthFramebuffer(DepthFramebufferResource resource)
         {
+            if (resource.ReadOnlyFramebuffer.Handle != 0)
+            {
+                _vk.DestroyFramebuffer(
+                    _device,
+                    resource.ReadOnlyFramebuffer,
+                    null);
+            }
             if (resource.Framebuffer.Handle != 0)
             {
                 _vk.DestroyFramebuffer(_device, resource.Framebuffer, null);
@@ -15859,6 +16076,20 @@ internal static unsafe partial class VulkanVideoPresenter
             if (resource.BothClearRenderPass.Handle != 0)
             {
                 _vk.DestroyRenderPass(_device, resource.BothClearRenderPass, null);
+            }
+            if (resource.ReadOnlyLoadRenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(
+                    _device,
+                    resource.ReadOnlyLoadRenderPass,
+                    null);
+            }
+            if (resource.ReadOnlyColorClearRenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(
+                    _device,
+                    resource.ReadOnlyColorClearRenderPass,
+                    null);
             }
         }
 
@@ -17241,7 +17472,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             foreach (var texture in resources.Textures)
             {
-                if (texture.GuestDepth is { } depth)
+                if (!texture.ReadOnlyDepthFeedback &&
+                    texture.GuestDepth is { } depth)
                 {
                     RecordGuestDepthForSampling(depth, shaderStage);
                 }
@@ -17442,7 +17674,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.ImageMemoryBarrier,
                 SrcAccessMask = depth.Layout == ImageLayout.TransferDstOptimal
                     ? AccessFlags.TransferWriteBit
-                    : AccessFlags.DepthStencilAttachmentWriteBit,
+                    : depth.Layout == ImageLayout.DepthStencilReadOnlyOptimal
+                        ? AccessFlags.DepthStencilAttachmentReadBit |
+                          AccessFlags.ShaderReadBit
+                        : AccessFlags.DepthStencilAttachmentWriteBit,
                 DstAccessMask = AccessFlags.ShaderReadBit,
                 OldLayout = depth.Layout,
                 NewLayout = ImageLayout.ShaderReadOnlyOptimal,
@@ -17460,7 +17695,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 _commandBuffer,
                 depth.Layout == ImageLayout.TransferDstOptimal
                     ? PipelineStageFlags.TransferBit
-                    : PipelineStageFlags.LateFragmentTestsBit,
+                    : depth.Layout == ImageLayout.DepthStencilReadOnlyOptimal
+                        ? PipelineStageFlags.EarlyFragmentTestsBit |
+                          PipelineStageFlags.LateFragmentTestsBit |
+                          PipelineStageFlags.FragmentShaderBit
+                        : PipelineStageFlags.LateFragmentTestsBit,
                 shaderStage,
                 0,
                 0,
@@ -17568,6 +17807,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     sourceAccess =
                         AccessFlags.DepthStencilAttachmentReadBit |
                         AccessFlags.DepthStencilAttachmentWriteBit;
+                    break;
+                case ImageLayout.DepthStencilReadOnlyOptimal:
+                    sourceStage =
+                        PipelineStageFlags.EarlyFragmentTestsBit |
+                        PipelineStageFlags.LateFragmentTestsBit |
+                        PipelineStageFlags.FragmentShaderBit;
+                    sourceAccess =
+                        AccessFlags.DepthStencilAttachmentReadBit |
+                        AccessFlags.ShaderReadBit;
                     break;
                 case ImageLayout.TransferDstOptimal:
                     sourceStage = PipelineStageFlags.TransferBit;
@@ -17830,7 +18078,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         SType = StructureType.ImageMemoryBarrier,
                         SrcAccessMask = source.Layout == ImageLayout.ShaderReadOnlyOptimal
                             ? AccessFlags.ShaderReadBit
-                            : AccessFlags.DepthStencilAttachmentWriteBit,
+                            : source.Layout == ImageLayout.DepthStencilReadOnlyOptimal
+                                ? AccessFlags.DepthStencilAttachmentReadBit |
+                                  AccessFlags.ShaderReadBit
+                                : AccessFlags.DepthStencilAttachmentWriteBit,
                         DstAccessMask = AccessFlags.TransferReadBit,
                         OldLayout = source.Layout,
                         NewLayout = ImageLayout.TransferSrcOptimal,
