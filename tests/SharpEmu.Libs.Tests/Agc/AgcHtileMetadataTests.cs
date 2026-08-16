@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -132,5 +133,38 @@ public sealed class AgcHtileMetadataTests
             registers,
             out _,
             out _));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, false, true, true)]
+    [InlineData(true, true, true, true)]
+    public void DepthClearModePreservesDepthStateForMetadataClear(
+        bool directClear,
+        bool metadataClear,
+        bool expectedAttachmentClear,
+        bool expectedDepthStateSuppression)
+    {
+        var depthState = new GuestDepthState(
+            TestEnable: true,
+            WriteEnable: true,
+            CompareOp: 3,
+            ClearEnable: directClear);
+        var depthTarget = new GuestDepthTarget(
+            ReadAddress: 0x1000,
+            WriteAddress: 0x1000,
+            Width: 64,
+            Height: 64,
+            GuestFormat: 3,
+            SwizzleMode: 0x18,
+            ClearDepth: 1.0f,
+            ReadOnly: false,
+            MetadataClear: metadataClear);
+
+        var mode = GuestDepthClearMode.Resolve(depthState, depthTarget);
+
+        Assert.Equal(expectedAttachmentClear, mode.ClearAttachment);
+        Assert.Equal(expectedDepthStateSuppression, mode.SuppressDrawDepthState);
     }
 }

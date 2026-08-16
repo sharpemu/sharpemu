@@ -283,3 +283,15 @@ internal sealed record GuestDepthTarget(
 {
     public ulong Address => WriteAddress != 0 ? WriteAddress : ReadAddress;
 }
+
+/// <summary>Separates an attachment clear from a direct DB clear operation.</summary>
+internal readonly record struct GuestDepthClearMode(
+    bool ClearAttachment,
+    bool SuppressDrawDepthState)
+{
+    public static GuestDepthClearMode Resolve(
+        GuestDepthState depthState,
+        GuestDepthTarget? depthTarget) => new(
+            ClearAttachment: depthState.ClearEnable || depthTarget?.MetadataClear == true,
+            SuppressDrawDepthState: depthState.ClearEnable);
+}

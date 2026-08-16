@@ -13663,7 +13663,10 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 var extent = new Extent2D(firstTarget.Width, firstTarget.Height);
-                var clearDepthForDraw = draw.RenderState.Depth.ClearEnable;
+                var depthClearMode = GuestDepthClearMode.Resolve(
+                    draw.RenderState.Depth,
+                    work.DepthTarget);
+                var clearDepthForDraw = depthClearMode.ClearAttachment;
                 if (work.DepthTarget?.ReadOnly == true && draw.RenderState.Depth.WriteEnable)
                 {
                     draw = draw with
@@ -13725,7 +13728,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         Math.Min(firstTarget.Height, depth.Height));
                 }
 
-                if (clearDepthForDraw)
+                if (depthClearMode.SuppressDrawDepthState)
                 {
                     // DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE makes this a DB
                     // clear operation. The draw still produces color, but its
