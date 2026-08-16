@@ -275,7 +275,11 @@ internal sealed record GuestDepthTarget(
     uint GuestFormat,
     uint SwizzleMode,
     float ClearDepth,
-    bool ReadOnly)
+    bool ReadOnly,
+    ulong HtileAddress = 0,
+    uint HtileBaseLayer = 0,
+    bool HtileAcceleration = false,
+    bool MetadataClear = false)
 {
     public ulong Address => WriteAddress != 0 ? WriteAddress : ReadAddress;
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
 using System.Buffers;
@@ -3485,6 +3486,7 @@ public static partial class KernelMemoryCompatExports
         if (physicallyBacked || removedAny)
         {
             KernelRuntimeCompatExports.RegisterReleasedVirtualRange(address, length);
+            AgcExports.UnregisterHtileMetadataRange(ctx.Memory, address, length);
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;

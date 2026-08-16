@@ -516,7 +516,9 @@ internal static partial class MetalVideoPresenter
         // Depth attachment, keyed by guest DB address; read-only depth drops write.
         GuestImage? depth = null;
         var depthState = draw.RenderState.Depth;
-        if (work.DepthTarget is { } depthTarget && (depthState.TestEnable || depthState.WriteEnable))
+        var clearDepthForDraw = depthState.ClearEnable;
+        if (work.DepthTarget is { } depthTarget &&
+            (depthState.TestEnable || depthState.WriteEnable || clearDepthForDraw))
         {
             if (depthTarget.ReadOnly && depthState.WriteEnable)
             {
@@ -559,10 +561,22 @@ internal static partial class MetalVideoPresenter
             MetalNative.Send(
                 depthAttachment,
                 MetalNative.Selector("setLoadAction:"),
-                (nint)(depth.Initialized ? LoadActionLoad : LoadActionClear));
+                (nint)(clearDepthForDraw || !depth.Initialized
+                    ? LoadActionClear
+                    : LoadActionLoad));
             MetalNative.Send(depthAttachment, MetalNative.Selector("setStoreAction:"), (nint)StoreActionStore);
             MetalNative.SendVoidDouble(
                 depthAttachment, MetalNative.Selector("setClearDepth:"), depthDescriptor.ClearDepth);
+        }
+
+        if (clearDepthForDraw)
+        {
+            depthState = depthState with
+            {
+                TestEnable = false,
+                WriteEnable = false,
+                ClearEnable = false,
+            };
         }
 
         var encoder = MetalNative.Send(

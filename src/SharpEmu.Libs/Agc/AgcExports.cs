@@ -1146,6 +1146,7 @@ public static partial class AgcExports
     // GFX10 DB context registers (register byte address minus 0x28000, / 4).
     private const uint DbRenderControl = 0x000;
     private const uint DbDepthView = 0x002;
+    private const uint DbHtileDataBase = 0x005;
     private const uint DbDepthSizeXy = 0x007;
     private const uint DbDepthClear = 0x00B;
     private const uint DbZInfo = 0x010;
@@ -1153,6 +1154,8 @@ public static partial class AgcExports
     private const uint DbZWriteBase = 0x014;
     private const uint DbZReadBaseHi = 0x01A;
     private const uint DbZWriteBaseHi = 0x01C;
+    private const uint DbHtileDataBaseHi = 0x01E;
+    private const uint DbHtileSurface = 0x2AF;
     private const int ColorTargetCount = 8;
     private const uint PsTextureUserDataRegister = 0xC;
     private const uint VsUserDataRegister = 0x4C;
@@ -1277,6 +1280,19 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_SHADER_ADDRESS"));
     private static readonly ulong? _tracePixelShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS"));
+    private static readonly bool _traceDepthMetadata = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEPTH_METADATA"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly ConcurrentDictionary<
+        (ulong Depth, ulong Htile, uint ZInfo, uint Surface, uint Control, uint RenderControl), byte>
+        _tracedDepthMetadataStates = new();
+    private static readonly ConcurrentDictionary<(ulong Htile, string Source), byte>
+        _tracedHtileMetadataMarks = new();
+    private static readonly ConcurrentDictionary<
+        (ulong Depth, ulong Htile, uint Layer, uint ClearBits), byte>
+        _tracedHtileMetadataConsumes = new();
+    private static int _depthMetadataTraceCount;
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
     // ACQUIRE_MEM does not update an image when CPU image tracking is off.
@@ -1718,6 +1734,7 @@ public static partial class AgcExports
         public SubmittedDcbState Graphics { get; } = new();
         public Dictionary<uint, SubmittedDcbState> ComputeQueues { get; } = new();
         public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
+        public AgcHtileMetadataTracker HtileMetadata { get; } = new();
         public Dictionary<uint, string> ResourceOwners { get; } = new();
         public Dictionary<uint, RegisteredAgcResource> RegisteredResources { get; } = new();
         public bool ResourceRegistrationInitialized { get; set; }
@@ -5703,11 +5720,23 @@ public static partial class AgcExports
         var byteCountOffset = compactLayout ? 20UL : 12UL;
         var destinationOffset = compactLayout ? 4UL : 16UL;
         var sourceOffset = compactLayout ? 12UL : 24UL;
+        var selectorOffset = compactLayout ? 24UL : 4UL;
         if (!TryReadUInt32(ctx, packetAddress + byteCountOffset, out var byteCount) ||
             !TryReadUInt64(ctx, packetAddress + destinationOffset, out var destinationAddress) ||
-            !TryReadUInt64(ctx, packetAddress + sourceOffset, out var sourceAddress))
+            !TryReadUInt64(ctx, packetAddress + sourceOffset, out var sourceAddress) ||
+            !TryReadUInt32(ctx, packetAddress + selectorOffset, out var selectorControl))
         {
             return;
+        }
+
+        var immediateFill = IsWrappedDmaGuestMemoryFill(compactLayout, selectorControl);
+        if (immediateFill)
+        {
+            RegisterActiveHtile(gpuState, state.CxRegisters);
+            MarkHtileMetadataClear(
+                gpuState,
+                destinationAddress,
+                "agc-dma-fill");
         }
 
         SubmitOrderedGpuSideEffect(
@@ -5717,10 +5746,6 @@ public static partial class AgcExports
             () =>
             {
                 InvalidateDcbWindowIfOverlaps(destinationAddress, byteCount);
-                var immediateFill =
-                    compactLayout &&
-                    destinationAddress >= 0x10000 &&
-                    sourceAddress <= uint.MaxValue;
                 var copied =
                     byteCount != 0 &&
                     byteCount <= 256u * 1024u * 1024u &&
@@ -5751,6 +5776,19 @@ public static partial class AgcExports
             destinationAddress,
             byteCount,
             deferLabelCompletion: true);
+    }
+
+    internal static bool IsWrappedDmaGuestMemoryFill(
+        bool compactLayout,
+        uint selectorControl)
+    {
+        var sourceSelector = compactLayout
+            ? selectorControl & 0xFFu
+            : (selectorControl >> 16) & 0xFFu;
+        var destinationSelector = compactLayout
+            ? (selectorControl >> 8) & 0xFFu
+            : selectorControl & 0xFFu;
+        return sourceSelector == 2 && destinationSelector is 0 or 3;
     }
 
     private static bool PacketRequiresPendingAcquireFlush(
@@ -6533,12 +6571,25 @@ public static partial class AgcExports
         var destinationSelect = (control >> 20) & 0x3u;
         var destinationSwap = (command >> 24) & 0x3u;
         var destinationAddressSpace = (command >> 27) & 0x1u;
+        var sourceSelect = (control >> 29) & 0x3u;
+        var sourceAddressIncrement = (command >> 28) & 0x1u;
         var destinationAddress = destinationLow | ((ulong)destinationHigh << 32);
         var writesGuestMemory =
             byteCount != 0 &&
             destinationSwap == 0 &&
             destinationSelect is 0 or 3 &&
             (destinationSelect == 3 || destinationAddressSpace == 0);
+        var fillsGuestMemory =
+            sourceSelect == 2 ||
+            (sourceSelect is 0 or 3 && sourceAddressIncrement != 0);
+        if (writesGuestMemory && fillsGuestMemory)
+        {
+            RegisterActiveHtile(gpuState, state.CxRegisters);
+            MarkHtileMetadataClear(
+                gpuState,
+                destinationAddress,
+                "dma-fill");
+        }
 
         SubmitOrderedGpuSideEffect(
             ctx,
@@ -8600,6 +8651,10 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 out var depthOnlyDraw,
                 out translationError))
         {
+            depthOnlyDraw = ApplyHtileMetadataClear(
+                gpuState,
+                drawSequence,
+                depthOnlyDraw);
             state.TranslatedDraw = depthOnlyDraw;
             var activeDepthTarget = depthOnlyDraw.DepthTarget!;
             var textures = CreateGuestDrawTextures(
@@ -8779,16 +8834,18 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             var firstTarget = translatedDraw.RenderTargets.FirstOrDefault();
             if (firstTarget.Address != 0)
             {
-                // Render every bound color target. A deferred G-buffer draw
-                // writes several targets in one guest pass; we render one bound
-                // target per Vulkan pass, each with the pixel variant that
-                // routes that target's MRT export slot to the fragment output.
-                // Every pass is enqueued in order on the same guest render
-                // queue. Share the immutable snapshots between those passes
-                // and let only the final pass return pooled arrays after its
-                // host upload. Copying the full vertex/global payload for each
-                // secondary target made deferred G-buffer draws allocate
-                // hundreds of MiB per second on the managed large-object heap.
+                if (!translatedDraw.IsFullscreenColorClear)
+                {
+                    translatedDraw = ApplyHtileMetadataClear(
+                        gpuState,
+                        drawSequence,
+                        translatedDraw);
+                    state.TranslatedDraw = translatedDraw;
+                }
+
+                // Submit all color targets in one host MRT pass. The depth
+                // attachment is therefore loaded or cleared once for this
+                // guest draw.
                 var drawRenderTargets = translatedDraw.RenderTargets;
                 var lastTargetIndex = 0;
                 for (var targetIndex = 1; targetIndex < drawRenderTargets.Count; targetIndex++)
@@ -8858,6 +8915,12 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             {
                 if (translatedDraw.DepthTarget is { } translatedDepthTarget)
                 {
+                    translatedDraw = ApplyHtileMetadataClear(
+                        gpuState,
+                        drawSequence,
+                        translatedDraw);
+                    state.TranslatedDraw = translatedDraw;
+                    translatedDepthTarget = translatedDraw.DepthTarget!;
                     var textures = CreateGuestDrawTextures(
                         ctx,
                         translatedDraw.Textures,
@@ -11061,6 +11124,109 @@ private static long _indirectDrawProbeCount;
         return new GuestDepthState(testEnable, writeEnable, compareOp, clearEnable);
     }
 
+    internal static bool TryDecodeHtileMetadataBinding(
+        IReadOnlyDictionary<uint, uint> registers,
+        out ulong address,
+        out uint baseLayer)
+    {
+        address = 0;
+        baseLayer = 0;
+        if (!registers.TryGetValue(DbZInfo, out var zInfo) ||
+            (zInfo & 0x20000000u) == 0 ||
+            !registers.TryGetValue(DbHtileDataBase, out var htileBase))
+        {
+            return false;
+        }
+
+        registers.TryGetValue(DbHtileDataBaseHi, out var htileBaseHi);
+        registers.TryGetValue(DbDepthView, out var depthView);
+        address =
+            ((ulong)(htileBaseHi & 0xFFu) << 40) |
+            ((ulong)htileBase << 8);
+        baseLayer = depthView & 0x1FFFu;
+        return address != 0;
+    }
+
+    private static void RegisterActiveHtile(
+        SubmittedGpuState gpuState,
+        IReadOnlyDictionary<uint, uint> registers)
+    {
+        if (TryDecodeHtileMetadataBinding(registers, out var address, out _))
+        {
+            gpuState.HtileMetadata.Register(address);
+        }
+    }
+
+    private static void MarkHtileMetadataClear(
+        SubmittedGpuState gpuState,
+        ulong address,
+        string source)
+    {
+        if (!gpuState.HtileMetadata.TryMarkAllLayersCleared(address))
+        {
+            return;
+        }
+
+        if (_traceDepthMetadata &&
+            _tracedHtileMetadataMarks.TryAdd((address, source), 0))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.htile_metadata_mark " +
+                $"htile=0x{address:X16} source={source}");
+        }
+    }
+
+    private static TranslatedGuestDraw ApplyHtileMetadataClear(
+        SubmittedGpuState gpuState,
+        ulong drawSequence,
+        TranslatedGuestDraw draw)
+    {
+        if (draw.DepthTarget is not { HtileAcceleration: true } depthTarget)
+        {
+            return draw;
+        }
+
+        gpuState.HtileMetadata.Register(depthTarget.HtileAddress);
+        if (draw.RenderState.Depth.ClearEnable)
+        {
+            MarkHtileMetadataClear(
+                gpuState,
+                depthTarget.HtileAddress,
+                "direct-depth-clear");
+        }
+
+        if (!gpuState.HtileMetadata.TryConsumeClearedLayer(
+                depthTarget.HtileAddress,
+                depthTarget.HtileBaseLayer))
+        {
+            return draw;
+        }
+
+        if (_traceDepthMetadata &&
+            _tracedHtileMetadataConsumes.TryAdd(
+                (depthTarget.Address,
+                 depthTarget.HtileAddress,
+                 depthTarget.HtileBaseLayer,
+                 BitConverter.SingleToUInt32Bits(depthTarget.ClearDepth)),
+                0))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.htile_metadata_consume " +
+                $"seq={drawSequence} depth=0x{depthTarget.Address:X16} " +
+                $"htile=0x{depthTarget.HtileAddress:X16} " +
+                $"layer={depthTarget.HtileBaseLayer} clear={depthTarget.ClearDepth:R}");
+        }
+
+        return draw with
+        {
+            DepthTarget = depthTarget with { MetadataClear = true },
+            RenderState = draw.RenderState with
+            {
+                Depth = draw.RenderState.Depth with { ClearEnable = true },
+            },
+        };
+    }
+
     private static GuestDepthTarget? DecodeDepthTarget(
         IReadOnlyDictionary<uint, uint> registers)
     {
@@ -11103,12 +11269,48 @@ private static long _indirectDrawProbeCount;
         }
 
         registers.TryGetValue(DbDepthView, out var depthView);
+        registers.TryGetValue(DbHtileDataBase, out var htileBase);
+        registers.TryGetValue(DbHtileDataBaseHi, out var htileBaseHi);
+        var htileAddress =
+            ((ulong)(htileBaseHi & 0xFFu) << 40) |
+            ((ulong)htileBase << 8);
+        var htileAcceleration =
+            htileAddress != 0 && (zInfo & 0x20000000u) != 0;
+        var htileBaseLayer = depthView & 0x1FFFu;
         var clearDepth = registers.TryGetValue(DbDepthClear, out var clearBits)
             ? BitConverter.UInt32BitsToSingle(clearBits)
             : 1f;
         if (!float.IsFinite(clearDepth) || clearDepth < 0f || clearDepth > 1f)
         {
             clearDepth = 1f;
+        }
+
+        if (_traceDepthMetadata)
+        {
+            registers.TryGetValue(DbHtileSurface, out var htileSurface);
+            registers.TryGetValue(DbDepthControl, out var depthControl);
+            registers.TryGetValue(DbRenderControl, out var renderControl);
+            var depthAddress = writeAddress != 0 ? writeAddress : readAddress;
+            if (_tracedDepthMetadataStates.TryAdd(
+                    (depthAddress,
+                     htileAddress,
+                     zInfo,
+                     htileSurface,
+                     depthControl,
+                     renderControl),
+                    0) &&
+                Interlocked.Increment(ref _depthMetadataTraceCount) <= 128)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] agc.depth_metadata " +
+                    $"depth=0x{depthAddress:X16} htile=0x{htileAddress:X16} " +
+                    $"size={width}x{height} z_info=0x{zInfo:X8} " +
+                    $"htile_accel={((zInfo & 0x20000000u) != 0 ? 1 : 0)} " +
+                    $"surface=0x{htileSurface:X8} control=0x{depthControl:X8} " +
+                    $"render_control=0x{renderControl:X8} " +
+                    $"direct_clear={(depthState.ClearEnable ? 1 : 0)} " +
+                    $"clear={clearDepth:R}");
+            }
         }
 
         return new GuestDepthTarget(
@@ -11119,7 +11321,10 @@ private static long _indirectDrawProbeCount;
             guestFormat,
             (zInfo >> 4) & 0x1Fu,
             clearDepth,
-            ReadOnly: (depthView & (1u << 24)) != 0 || writeAddress == 0);
+            ReadOnly: (depthView & (1u << 24)) != 0 || writeAddress == 0,
+            HtileAddress: htileAddress,
+            HtileBaseLayer: htileBaseLayer,
+            HtileAcceleration: htileAcceleration);
     }
 
     // PA_SU_SC_MODE_CNTL (context register 0x205) carries face culling, the
@@ -13687,6 +13892,47 @@ private static long _indirectDrawProbeCount;
 
         const int blitCount = 0;
 
+        if (gpuDispatch)
+        {
+            var metadataBindings = evaluation.GlobalMemoryBindings
+                .Where(binding =>
+                    gpuState.HtileMetadata.IsRegistered(binding.BaseAddress))
+                .ToArray();
+            var hasMetadataWrite = metadataBindings.Any(static binding => binding.Writable);
+            var instructionsByPc = hasMetadataWrite
+                ? shaderState.Program.Instructions.ToDictionary(
+                    static instruction => instruction.Pc,
+                    static instruction => instruction.Opcode)
+                : null;
+            var hasWriteOnlyMetadataAccess =
+                instructionsByPc is not null &&
+                metadataBindings.All(binding =>
+                    IsHtileMetadataWriteOnlyAccess(
+                        binding,
+                        instructionsByPc));
+            if (hasMetadataWrite &&
+                hasWriteOnlyMetadataAccess &&
+                !shaderState.Program.Instructions.Any(static instruction =>
+                    instruction.Opcode.Contains("Xor", StringComparison.Ordinal)))
+            {
+                foreach (var binding in evaluation.GlobalMemoryBindings)
+                {
+                    if (!binding.Writable ||
+                        !gpuState.HtileMetadata.IsRegistered(binding.BaseAddress))
+                    {
+                        continue;
+                    }
+
+                    MarkHtileMetadataClear(
+                        gpuState,
+                        binding.BaseAddress,
+                        _traceDepthMetadata
+                            ? $"compute:0x{shaderAddress:X16}"
+                            : string.Empty);
+                }
+            }
+        }
+
         lock (_submitTraceGate)
         {
             if (_traceAgcShader &&
@@ -13750,6 +13996,48 @@ private static long _indirectDrawProbeCount;
         {
             ReturnPooledEvaluationArrays(evaluation);
         }
+    }
+
+    private static bool IsHtileMetadataWriteOnlyAccess(
+        Gen5GlobalMemoryBinding binding,
+        IReadOnlyDictionary<uint, string> instructionsByPc)
+    {
+        if (!binding.Writable || binding.InstructionPcs.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var pc in binding.InstructionPcs)
+        {
+            if (!instructionsByPc.TryGetValue(pc, out var opcode) ||
+                !IsHtileMetadataWriteOnlyOpcode(opcode))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static bool IsHtileMetadataWriteOnlyOpcode(string opcode) =>
+        opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
+        opcode.StartsWith("TBufferStore", StringComparison.Ordinal) ||
+        opcode.StartsWith("GlobalStore", StringComparison.Ordinal) ||
+        opcode.StartsWith("FlatStore", StringComparison.Ordinal);
+
+    internal static void UnregisterHtileMetadataRange(
+        ICpuMemory memory,
+        ulong address,
+        ulong length)
+    {
+        if (!_submittedGpuStates.TryGetValue(
+                CanonicalMemory(memory),
+                out var gpuState))
+        {
+            return;
+        }
+
+        gpuState.HtileMetadata.UnregisterRange(address, length);
     }
 
     /// <summary>
