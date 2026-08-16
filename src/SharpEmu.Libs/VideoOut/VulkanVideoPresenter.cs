@@ -87,6 +87,11 @@ internal sealed record VulkanOrderedGuestAction(
     Action Action,
     string DebugName);
 
+internal sealed record VulkanGpuLabelSignal(
+    Action<GuestGpuLabelDependency> PublishGpu,
+    Action? PublishHost,
+    string DebugName);
+
 internal sealed record VulkanOrderedGuestFlip(
     long Version,
     int VideoOutHandle,
@@ -651,6 +656,19 @@ internal static unsafe partial class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_DEDICATED_COMPUTE_QUEUE"),
             "0",
             StringComparison.Ordinal);
+    private static readonly bool _gpuLabelTimelineRequested =
+        IsGpuLabelTimelineRequested(
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_TIMELINE"));
+    private static readonly bool _gpuLabelVirtualWritesEnabled =
+        _gpuLabelTimelineRequested &&
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_VIRTUAL_WRITES"),
+            "0",
+            StringComparison.Ordinal);
+    private static bool _gpuLabelTimelineAvailable;
+
+    internal static bool IsGpuLabelTimelineRequested(string? setting) =>
+        !string.Equals(setting, "0", StringComparison.Ordinal);
     // Diagnostic: skip compute dispatches whose GroupCountZ is at least this,
     // to isolate a specific tall dispatch (e.g. Demon's Souls' 27x15x72 froxel
     // shader that hangs the Metal queue) without needing its ASLR-varying
@@ -814,6 +832,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly HashSet<long> _completedGuestWorkOutOfOrder = [];
     private static readonly Dictionary<string, long> _lastEnqueuedGuestWorkByQueue =
         new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, GuestGpuLabelDependency>
+        _requiredGpuLabelDependenciesByGuestQueue = new(StringComparer.Ordinal);
     private static long _executingGuestWorkSequence;
     [ThreadStatic]
     private static VulkanGuestQueueIdentity? _submittingGuestQueue;
@@ -1002,6 +1022,8 @@ internal static unsafe partial class VulkanVideoPresenter
         _completedGuestWorkSequence = 0;
         _completedGuestWorkOutOfOrder.Clear();
         _lastEnqueuedGuestWorkByQueue.Clear();
+        _requiredGpuLabelDependenciesByGuestQueue.Clear();
+        Volatile.Write(ref _gpuLabelTimelineAvailable, false);
         _executingGuestWorkSequence = 0;
     }
 
@@ -1751,6 +1773,52 @@ internal static unsafe partial class VulkanVideoPresenter
             return _closed || _thread is null
                 ? 0
                 : EnqueueGuestWorkLocked(new VulkanOrderedGuestAction(action, debugName));
+        }
+    }
+
+    /// <summary>
+    /// Enqueues a GPU-only label marker. The callback receives the last Vulkan
+    /// timeline token for the current logical guest queue. A return value of
+    /// zero tells AGC to use the CPU-visible compatibility path.
+    /// </summary>
+    public static long SubmitGpuLabelSignal(
+        Action<GuestGpuLabelDependency> publishGpu,
+        Action? publishHost,
+        string debugName)
+    {
+        ArgumentNullException.ThrowIfNull(publishGpu);
+        lock (_gate)
+        {
+            return !_gpuLabelVirtualWritesEnabled ||
+                !Volatile.Read(ref _gpuLabelTimelineAvailable) ||
+                _closed ||
+                _thread is null
+                ? 0
+                : EnqueueGuestWorkLocked(
+                    new VulkanGpuLabelSignal(publishGpu, publishHost, debugName));
+        }
+    }
+
+    /// <summary>
+    /// Adds the producer timeline token to the next Vulkan submission from
+    /// the current logical guest queue.
+    /// </summary>
+    public static void RequireGpuLabelDependency(GuestGpuLabelDependency dependency)
+    {
+        if (dependency.IsEmpty || !_gpuLabelTimelineRequested)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var queue = _submittingGuestQueue ?? VulkanGuestQueueIdentity.Default;
+            _requiredGpuLabelDependenciesByGuestQueue[queue.Name] =
+                _requiredGpuLabelDependenciesByGuestQueue.TryGetValue(
+                    queue.Name,
+                    out var current)
+                    ? current.Merge(dependency)
+                    : dependency;
         }
     }
 
@@ -3006,6 +3074,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static bool IsPrioritySyncGuestWork(object work) => work is
         VulkanOrderedGuestAction or
+        VulkanGpuLabelSignal or
         VulkanOrderedGuestFlip or
         VulkanOrderedGuestFlipWait;
 
@@ -3592,6 +3661,16 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _queueFamilyQueueCount;
         private bool _queueFamilySupportsCompute;
         private bool _useDedicatedComputeQueue;
+        private bool _gpuLabelTimelineEnabled;
+        private VkSemaphore _graphicsGuestTimelineSemaphore;
+        private VkSemaphore _computeGuestTimelineSemaphore;
+        private ulong _graphicsGuestTimelineValue;
+        private ulong _computeGuestTimelineValue;
+        private long _gpuLabelTimelineSignalCount;
+        private long _gpuLabelTimelineCrossQueueWaitCount;
+        private readonly Dictionary<string, GuestGpuLabelDependency>
+            _lastSubmittedGpuLabelDependencyByGuestQueue = new(StringComparer.Ordinal);
+        private readonly GpuLabelHostPublicationQueue _gpuLabelHostPublications = new();
         private long _graphicsQueueSubmitCount;
         private long _computeQueueSubmitCount;
         private SwapchainKHR _swapchain;
@@ -4071,6 +4150,7 @@ internal static unsafe partial class VulkanVideoPresenter
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers,
             IReadOnlyList<VulkanDetilePass.Transients> RetireDetile,
             ulong Timeline,
+            GuestGpuLabelDependency LabelDependency,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
             long WorkSequence);
@@ -4807,12 +4887,18 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
                 PNext = &maintenance8Features,
             };
+            var timelineSemaphoreFeatures = new PhysicalDeviceTimelineSemaphoreFeatures
+            {
+                SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
+                PNext = &robustness2Features,
+            };
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &robustness2Features,
+                PNext = &timelineSemaphoreFeatures,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
+            var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -4865,12 +4951,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 robustness2Features.RobustImageAccess2 = supportsRobustImageAccess2;
                 robustness2Features.NullDescriptor = supportsNullDescriptor;
                 robustness2Features.PNext = supportsMaintenance8 ? &maintenance8Features : null;
+                _gpuLabelTimelineEnabled =
+                    _gpuLabelTimelineRequested && supportsTimelineSemaphore;
+                timelineSemaphoreFeatures.TimelineSemaphore = _gpuLabelTimelineEnabled;
+                timelineSemaphoreFeatures.PNext = supportsRobustness2
+                    ? &robustness2Features
+                    : (supportsMaintenance8 ? &maintenance8Features : null);
                 var features2 = new PhysicalDeviceFeatures2
                 {
                     SType = StructureType.PhysicalDeviceFeatures2,
-                    PNext = supportsRobustness2
-                        ? &robustness2Features
-                        : (supportsMaintenance8 ? &maintenance8Features : null),
+                    PNext = _gpuLabelTimelineEnabled
+                        ? &timelineSemaphoreFeatures
+                        : supportsRobustness2
+                            ? &robustness2Features
+                            : (supportsMaintenance8 ? &maintenance8Features : null),
                     Features = enabledFeatures,
                 };
                 var createInfo = new DeviceCreateInfo
@@ -4907,6 +5001,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"[LOADER][WARN] Vulkan dedicated compute queue requested but " +
                     $"unavailable family={_queueFamilyIndex} queues={_queueFamilyQueueCount} " +
                     $"compute={_queueFamilySupportsCompute}; using graphics queue.");
+            }
+            if (_gpuLabelTimelineEnabled)
+            {
+                CreateGuestTimelineSemaphores();
+                Volatile.Write(ref _gpuLabelTimelineAvailable, true);
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan GPU label timelines enabled " +
+                    $"dedicated_compute={_useDedicatedComputeQueue}.");
+            }
+            else if (_gpuLabelTimelineRequested)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] Vulkan GPU label timelines requested but " +
+                    "timeline semaphores are unavailable; using CPU-visible labels.");
             }
             LoadDebugUtilsCommands();
             VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
@@ -5709,26 +5817,70 @@ internal static unsafe partial class VulkanVideoPresenter
             bool useComputeQueue = false)
         {
             var fence = AcquireGuestFence();
+            GuestGpuLabelDependency submittedLabelDependency = default;
             try
             {
-                var submitQueue =
-                    useComputeQueue && _useDedicatedComputeQueue ? _computeQueue : _queue;
+                var physicalCompute = useComputeQueue && _useDedicatedComputeQueue;
+                var submitQueue = physicalCompute ? _computeQueue : _queue;
+                var dependency = TakeRequiredGpuLabelDependency(_activeGuestQueue.Name);
                 var submitInfo = new SubmitInfo
                 {
                     SType = StructureType.SubmitInfo,
                     CommandBufferCount = 1,
                     PCommandBuffers = &commandBuffer,
                 };
-                var submitContext = ResolveGuestSubmitContext(resources);
-                _lastSubmitDebugName = submitContext;
-                var submitLabel = string.IsNullOrEmpty(submitContext)
-                    ? "vkQueueSubmit(guest)"
-                    : $"vkQueueSubmit(guest) during {submitContext}";
-                using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit))
+                VkSemaphore* waitSemaphores = stackalloc VkSemaphore[2];
+                ulong* waitValues = stackalloc ulong[2];
+                PipelineStageFlags* waitStages = stackalloc PipelineStageFlags[2];
+                var waitCount = 0u;
+                if (_gpuLabelTimelineEnabled)
                 {
-                    Check(
-                        _vk.QueueSubmit(submitQueue, 1, &submitInfo, fence),
-                        submitLabel);
+                    if (physicalCompute && dependency.GraphicsTimeline != 0)
+                    {
+                        waitSemaphores[waitCount] = _graphicsGuestTimelineSemaphore;
+                        waitValues[waitCount] = dependency.GraphicsTimeline;
+                        waitStages[waitCount++] = PipelineStageFlags.AllCommandsBit;
+                    }
+                    if (!physicalCompute && dependency.ComputeTimeline != 0)
+                    {
+                        waitSemaphores[waitCount] = _computeGuestTimelineSemaphore;
+                        waitValues[waitCount] = dependency.ComputeTimeline;
+                        waitStages[waitCount++] = PipelineStageFlags.AllCommandsBit;
+                    }
+                    _gpuLabelTimelineCrossQueueWaitCount += waitCount;
+
+                    var signalSemaphore = physicalCompute
+                        ? _computeGuestTimelineSemaphore
+                        : _graphicsGuestTimelineSemaphore;
+                    var signalValue = physicalCompute
+                        ? ++_computeGuestTimelineValue
+                        : ++_graphicsGuestTimelineValue;
+                    var timelineInfo = new TimelineSemaphoreSubmitInfo
+                    {
+                        SType = StructureType.TimelineSemaphoreSubmitInfo,
+                        WaitSemaphoreValueCount = waitCount,
+                        PWaitSemaphoreValues = waitCount == 0 ? null : waitValues,
+                        SignalSemaphoreValueCount = 1,
+                        PSignalSemaphoreValues = &signalValue,
+                    };
+                    submitInfo.PNext = &timelineInfo;
+                    submitInfo.WaitSemaphoreCount = waitCount;
+                    submitInfo.PWaitSemaphores = waitCount == 0 ? null : waitSemaphores;
+                    submitInfo.PWaitDstStageMask = waitCount == 0 ? null : waitStages;
+                    submitInfo.SignalSemaphoreCount = 1;
+                    submitInfo.PSignalSemaphores = &signalSemaphore;
+
+                    SubmitGuestQueue(submitQueue, &submitInfo, fence, resources);
+                    submittedLabelDependency =
+                        physicalCompute
+                            ? new GuestGpuLabelDependency(0, signalValue)
+                            : new GuestGpuLabelDependency(signalValue, 0);
+                    _lastSubmittedGpuLabelDependencyByGuestQueue[_activeGuestQueue.Name] =
+                        submittedLabelDependency;
+                }
+                else
+                {
+                    SubmitGuestQueue(submitQueue, &submitInfo, fence, resources);
                 }
 
                 if (useComputeQueue && _useDedicatedComputeQueue)
@@ -5780,11 +5932,77 @@ internal static unsafe partial class VulkanVideoPresenter
                     retireBuffers ?? [],
                     retireDetile ?? [],
                     _submitTimeline,
+                    submittedLabelDependency,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
                     _activeGuestWorkSequence));
             _lastSubmittedTimelineByGuestQueue[_activeGuestQueue.Name] =
                 _submitTimeline;
+        }
+
+        private void SubmitGuestQueue(
+            Queue submitQueue,
+            SubmitInfo* submitInfo,
+            Fence fence,
+            IReadOnlyList<TranslatedDrawResources> resources)
+        {
+            var submitContext = ResolveGuestSubmitContext(resources);
+            _lastSubmitDebugName = submitContext;
+            var submitLabel = string.IsNullOrEmpty(submitContext)
+                ? "vkQueueSubmit(guest)"
+                : $"vkQueueSubmit(guest) during {submitContext}";
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit))
+            {
+                Check(_vk.QueueSubmit(submitQueue, 1, submitInfo, fence), submitLabel);
+            }
+        }
+
+        private static GuestGpuLabelDependency TakeRequiredGpuLabelDependency(
+            string queueName)
+        {
+            lock (_gate)
+            {
+                if (!_requiredGpuLabelDependenciesByGuestQueue.Remove(
+                        queueName,
+                        out var dependency))
+                {
+                    return default;
+                }
+
+                return dependency;
+            }
+        }
+
+        private void CreateGuestTimelineSemaphores()
+        {
+            var typeInfo = new SemaphoreTypeCreateInfo
+            {
+                SType = StructureType.SemaphoreTypeCreateInfo,
+                SemaphoreType = SemaphoreType.Timeline,
+                InitialValue = 0,
+            };
+            var createInfo = new SemaphoreCreateInfo
+            {
+                SType = StructureType.SemaphoreCreateInfo,
+                PNext = &typeInfo,
+            };
+            Check(
+                _vk.CreateSemaphore(
+                    _device,
+                    &createInfo,
+                    null,
+                    out _graphicsGuestTimelineSemaphore),
+                "vkCreateSemaphore(graphics guest timeline)");
+            if (_useDedicatedComputeQueue)
+            {
+                Check(
+                    _vk.CreateSemaphore(
+                        _device,
+                        &createInfo,
+                        null,
+                        out _computeGuestTimelineSemaphore),
+                    "vkCreateSemaphore(compute guest timeline)");
+            }
         }
 
         private void TransitionNewGuestImageToSampled(Image image, uint mipLevels)
@@ -6018,10 +6236,23 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (!_deviceLost)
             {
+                if (submission.Timeline > _completedTimeline)
+                {
+                    _completedTimeline = submission.Timeline;
+                }
+
+                _gpuLabelHostPublications.Complete(submission.LabelDependency);
+
                 foreach (var image in submission.TraceImages)
                 {
                     TraceGuestImageContents(image);
                 }
+            }
+            else
+            {
+                // A lost device cannot complete the label producer. Do not
+                // expose its value to CPU-visible guest memory.
+                _gpuLabelHostPublications.Cancel();
             }
 
             // The fence has signalled, so the detile dispatch that used these
@@ -6044,10 +6275,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             ReleaseGuestCommandBuffer(submission.CommandBuffer);
             ReleaseGuestFence(submission.Fence, needsReset: true);
-            if (submission.Timeline > _completedTimeline)
-            {
-                _completedTimeline = submission.Timeline;
-            }
         }
 
         private void WaitForAllGuestSubmissionsForCpuVisibility()
@@ -6207,7 +6434,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool TryExecuteOrderedGuestAction(VulkanOrderedGuestAction work)
         {
-            if (!TryMakeActiveGuestQueueSubmissionsCpuVisible())
+            var visible = TryMakeActiveGuestQueueSubmissionsCpuVisible();
+            if (!visible)
             {
                 RenderPhaseProfile.RecordOrderedAction(work.DebugName, completed: false);
                 return false;
@@ -6226,6 +6454,35 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return true;
         }
+
+        private void ExecuteGpuLabelSignal(VulkanGpuLabelSignal work)
+        {
+            FlushBatchedGuestCommands();
+            _lastSubmittedGpuLabelDependencyByGuestQueue.TryGetValue(
+                _activeGuestQueue.Name,
+                out var dependency);
+            _gpuLabelTimelineSignalCount++;
+            if (_gpuLabelTimelineSignalCount <= 8 ||
+                (_gpuLabelTimelineSignalCount & (_gpuLabelTimelineSignalCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] vk.gpu_label_signal " +
+                    $"count={_gpuLabelTimelineSignalCount} " +
+                    $"queue={_activeGuestQueue.Name} " +
+                    $"dependency=g{dependency.GraphicsTimeline}/" +
+                    $"c{dependency.ComputeTimeline}");
+            }
+            work.PublishGpu(dependency);
+            if (work.PublishHost is not null)
+            {
+                RegisterGpuLabelHostPublication(dependency, work.PublishHost);
+            }
+        }
+
+        private void RegisterGpuLabelHostPublication(
+            GuestGpuLabelDependency dependency,
+            Action publish) =>
+            _gpuLabelHostPublications.Register(dependency, publish);
 
         private void ExecuteOrderedGuestFlip(VulkanOrderedGuestFlip work)
         {
@@ -16398,7 +16655,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 using var collectScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Collect);
                 CollectCompletedGuestSubmissions(waitForOldest: false);
             }
-
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Evict))
             {
                 DrainGuestImageCpuSync();
@@ -16554,6 +16810,9 @@ internal static unsafe partial class VulkanVideoPresenter
                                 deferGuestWork = !TryExecuteOrderedGuestAction(orderedAction);
                             }
 
+                            break;
+                        case VulkanGpuLabelSignal gpuLabelSignal:
+                            ExecuteGpuLabelSignal(gpuLabelSignal);
                             break;
                         case VulkanOrderedGuestFlip orderedFlip:
                             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flip))
@@ -20138,6 +20397,32 @@ internal static unsafe partial class VulkanVideoPresenter
             _detilePass = null;
             if (_device.Handle != 0)
             {
+                Volatile.Write(ref _gpuLabelTimelineAvailable, false);
+                if (_gpuLabelTimelineEnabled)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][PERF] vk.gpu_label_timeline " +
+                        $"signals={_gpuLabelTimelineSignalCount} " +
+                        $"cross_queue_waits={_gpuLabelTimelineCrossQueueWaitCount} " +
+                        $"graphics_value={_graphicsGuestTimelineValue} " +
+                        $"compute_value={_computeGuestTimelineValue}");
+                }
+                if (_graphicsGuestTimelineSemaphore.Handle != 0)
+                {
+                    _vk.DestroySemaphore(
+                        _device,
+                        _graphicsGuestTimelineSemaphore,
+                        null);
+                    _graphicsGuestTimelineSemaphore = default;
+                }
+                if (_computeGuestTimelineSemaphore.Handle != 0)
+                {
+                    _vk.DestroySemaphore(
+                        _device,
+                        _computeGuestTimelineSemaphore,
+                        null);
+                    _computeGuestTimelineSemaphore = default;
+                }
                 if (_pipelineCache.Handle != 0)
                 {
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);

@@ -368,6 +368,15 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
+    public long SubmitGpuLabelSignal(
+        Action<GuestGpuLabelDependency> publishGpu,
+        Action? publishHost,
+        string debugName) =>
+        VulkanVideoPresenter.SubmitGpuLabelSignal(publishGpu, publishHost, debugName);
+
+    public void RequireGpuLabelDependency(GuestGpuLabelDependency dependency) =>
+        VulkanVideoPresenter.RequireGpuLabelDependency(dependency);
+
     public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
         VulkanVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
 

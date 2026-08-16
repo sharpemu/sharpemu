@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.Libs.Gpu;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -18,6 +19,19 @@ namespace SharpEmu.Libs.Agc;
 /// </summary>
 internal static class GpuWaitRegistry
 {
+    internal enum VirtualLabelEngine : byte
+    {
+        Pfp,
+        Me,
+        Mec,
+    }
+
+    internal enum VirtualLabelVisibility : byte
+    {
+        Gpu,
+        Cpu,
+    }
+
     public struct WaitingDcb
     {
         public ulong CommandBufferAddress;
@@ -39,12 +53,15 @@ internal static class GpuWaitRegistry
         public long RegisteredTicks;
         public bool StaleReported;
         public object? State;
-        // Latched by LatchSatisfiedByValue when a producer wrote a value that
+        // Latched when a producer wrote a value that
         // satisfies this waiter. The label is frequently reused (reset to 0 for
         // the next frame) immediately after the producing write, so re-reading
         // guest memory at wake time can miss the transient satisfied window.
         // Latching records satisfaction at the moment of the write instead.
         public bool Latched;
+        // Vulkan timeline values that must precede the resumed queue's next
+        // GPU submission. This is empty for CPU-visible labels.
+        public GuestGpuLabelDependency Dependency;
         // Non-zero for indirect-dispatch dimension retries: a bounded deadline
         // (Stopwatch ticks) after which the waiter is resumed even if unsatisfied,
         // so a legitimately empty indirect dispatch can never stall forever.
@@ -63,6 +80,18 @@ internal static class GpuWaitRegistry
     // WAIT_REG_MEM in frame N+1 is not satisfied by a stale write from frame N.
     private static readonly Dictionary<(object, ulong), long> _labelFrameIds = new();
     private static long _currentFrameId;
+    private readonly record struct VirtualLabelValue(
+        uint Value,
+        GuestGpuLabelDependency Dependency,
+        ulong Generation,
+        ulong PublicationAddress,
+        uint DwordCount,
+        uint CachePolicy,
+        VirtualLabelEngine Engine,
+        VirtualLabelVisibility Visibility);
+    private static readonly Dictionary<(object, ulong), VirtualLabelValue>
+        _virtualLabels = new();
+    private static ulong _nextVirtualLabelGeneration;
 
   
     private static object? Canonicalize(object? memory)
@@ -240,8 +269,31 @@ internal static class GpuWaitRegistry
                     var satisfied = list[i].Latched;
                     if (!satisfied)
                     {
-                        var value = readValue(address, list[i].Is64Bit);
+                        var waiter = list[i];
+                        ulong? value;
+                        GuestGpuLabelDependency dependency = default;
+                        var waitCachePolicy = (waiter.ControlValue >> 25) & 0x3u;
+                        if (waitCachePolicy <= 2 &&
+                            TryReadVirtualLocked(
+                                memory,
+                                address,
+                                waiter.Is64Bit,
+                                out var virtualValue,
+                                out dependency,
+                                waitCachePolicy))
+                        {
+                            value = virtualValue;
+                        }
+                        else
+                        {
+                            value = readValue(address, waiter.Is64Bit);
+                        }
                         satisfied = value is not null && Compare(list[i], value.Value);
+                        if (satisfied && !dependency.IsEmpty)
+                        {
+                            waiter.Dependency = waiter.Dependency.Merge(dependency);
+                            list[i] = waiter;
+                        }
                     }
 
                     if (!satisfied)
@@ -365,6 +417,35 @@ internal static class GpuWaitRegistry
         }
 
         return matches;
+    }
+
+    /// <summary>
+    /// Returns the waiters for one label. This method is for diagnostics only.
+    /// </summary>
+    public static List<WaitingDcb>? SnapshotAt(object memory, ulong address)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            if (!_waiters.TryGetValue(address, out var list))
+            {
+                return null;
+            }
+
+            List<WaitingDcb>? matches = null;
+            foreach (var waiter in list)
+            {
+                if (!ReferenceEquals(waiter.Memory, memory))
+                {
+                    continue;
+                }
+
+                matches ??= new List<WaitingDcb>();
+                matches.Add(waiter);
+            }
+
+            return matches;
+        }
     }
 
     /// <summary>
@@ -609,9 +690,257 @@ internal static class GpuWaitRegistry
 
             _lastProduced[(memory, address)] = value;
             _labelFrameIds[(memory, address)] = System.Threading.Volatile.Read(ref _currentFrameId);
+            _virtualLabels.Remove((memory, address));
         }
 
         return LatchSatisfiedByValue(memory, address, value);
+    }
+
+    /// <summary>
+    /// Publishes one GPU-visible label packet as a single state transition.
+    /// Waiters cannot observe a mixture of dwords from two publications.
+    /// </summary>
+    public static void RecordVirtualProducedRange(
+        object memory,
+        ulong address,
+        ReadOnlySpan<uint> values,
+        GuestGpuLabelDependency dependency,
+        uint cachePolicy,
+        VirtualLabelEngine engine,
+        VirtualLabelVisibility visibility = VirtualLabelVisibility.Gpu)
+    {
+        if (values.IsEmpty)
+        {
+            return;
+        }
+
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            if (_virtualLabels.Count + values.Length >= 8192)
+            {
+                PruneUnwatchedVirtualLocked();
+            }
+
+            var generation = ++_nextVirtualLabelGeneration;
+            var dwordCount = checked((uint)values.Length);
+            for (var index = 0; index < values.Length; index++)
+            {
+                var dwordAddress = address + checked((ulong)index * sizeof(uint));
+                _virtualLabels[(memory, dwordAddress)] = new VirtualLabelValue(
+                    values[index],
+                    dependency,
+                    generation,
+                    address,
+                    dwordCount,
+                    cachePolicy,
+                    engine,
+                    visibility);
+                _lastProduced[(memory, dwordAddress)] = values[index];
+                _labelFrameIds[(memory, dwordAddress)] =
+                    System.Threading.Volatile.Read(ref _currentFrameId);
+            }
+
+            if (values.Length >= 2)
+            {
+                _lastProduced[(memory, address)] =
+                    values[0] | ((ulong)values[1] << 32);
+            }
+
+            // All dwords are visible before any waiter is evaluated.
+            for (var index = 0; index < values.Length; index++)
+            {
+                LatchVirtualWaitersLocked(
+                    memory,
+                    address + checked((ulong)index * sizeof(uint)));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Publishes a single GPU-visible dword. This wrapper keeps call sites that
+    /// naturally produce one value on the atomic range path.
+    /// </summary>
+    public static void RecordVirtualProduced(
+        object memory,
+        ulong address,
+        uint value,
+        GuestGpuLabelDependency dependency) =>
+        RecordVirtualProducedRange(
+            memory,
+            address,
+            new[] { value },
+            dependency,
+            cachePolicy: 0,
+            engine: VirtualLabelEngine.Pfp);
+
+    private static void LatchVirtualWaitersLocked(object memory, ulong producedAddress)
+    {
+        LatchAt(producedAddress);
+        if (producedAddress >= sizeof(uint))
+        {
+            // A 64-bit waiter is keyed by its low dword. Publishing its high
+            // dword completes the value, so recheck the preceding address too.
+            LatchAt(producedAddress - sizeof(uint));
+        }
+
+        void LatchAt(ulong waitAddress)
+        {
+            if (!_waiters.TryGetValue(waitAddress, out var list))
+            {
+                return;
+            }
+
+            for (var index = 0; index < list.Count; index++)
+            {
+                var waiter = list[index];
+                if (waiter.Latched ||
+                    !ReferenceEquals(waiter.Memory, memory) ||
+                    !TryReadVirtualLocked(
+                        memory,
+                        waitAddress,
+                        waiter.Is64Bit,
+                        out var virtualValue,
+                        out var virtualDependency,
+                        (waiter.ControlValue >> 25) & 0x3u) ||
+                    !Compare(waiter, virtualValue))
+                {
+                    continue;
+                }
+
+                waiter.Latched = true;
+                waiter.Dependency = waiter.Dependency.Merge(virtualDependency);
+                list[index] = waiter;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads a GPU-only label and its producer timeline token.
+    /// </summary>
+    public static bool TryReadVirtual(
+        object memory,
+        ulong address,
+        bool is64Bit,
+        out ulong value,
+        out GuestGpuLabelDependency dependency,
+        uint? requiredCachePolicy = null)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            return TryReadVirtualLocked(
+                memory,
+                address,
+                is64Bit,
+                out value,
+                out dependency,
+                requiredCachePolicy);
+        }
+    }
+
+    private static bool TryReadVirtualLocked(
+        object memory,
+        ulong address,
+        bool is64Bit,
+        out ulong value,
+        out GuestGpuLabelDependency dependency,
+        uint? requiredCachePolicy = null)
+    {
+        value = 0;
+        dependency = default;
+        if (!_virtualLabels.TryGetValue((memory, address), out var low))
+        {
+            return false;
+        }
+
+        // LRU, Stream, and Noalloc select how the GPU accesses GL2. They do
+        // not create separate visibility domains. Bypass is not valid for a
+        // GPU label read.
+        if (low.Visibility != VirtualLabelVisibility.Gpu ||
+            requiredCachePolicy > 2)
+        {
+            return false;
+        }
+
+        value = low.Value;
+        dependency = low.Dependency;
+        if (!is64Bit)
+        {
+            return true;
+        }
+
+        if (!_virtualLabels.TryGetValue(
+                (memory, address + sizeof(uint)),
+                out var high))
+        {
+            value = 0;
+            dependency = default;
+            return false;
+        }
+
+        if (address < low.PublicationAddress)
+        {
+            value = 0;
+            dependency = default;
+            return false;
+        }
+
+        var byteOffset = address - low.PublicationAddress;
+        if (byteOffset % sizeof(uint) != 0 ||
+            byteOffset / sizeof(uint) + 1 >= low.DwordCount ||
+            low.Generation != high.Generation ||
+            high.PublicationAddress != low.PublicationAddress ||
+            high.DwordCount != low.DwordCount ||
+            low.DwordCount < 2 ||
+            high.DwordCount < 2 ||
+            high.CachePolicy != low.CachePolicy ||
+            high.Engine != low.Engine ||
+            high.Visibility != low.Visibility)
+        {
+            value = 0;
+            dependency = default;
+            return false;
+        }
+
+        value |= (ulong)high.Value << 32;
+        dependency = dependency.Merge(high.Dependency);
+        return true;
+    }
+
+    private static void PruneUnwatchedVirtualLocked()
+    {
+        List<(object, ulong)>? removable = null;
+        foreach (var key in _virtualLabels.Keys)
+        {
+            var watched = false;
+            if (_waiters.TryGetValue(key.Item2, out var list))
+            {
+                foreach (var waiter in list)
+                {
+                    if (ReferenceEquals(waiter.Memory, key.Item1))
+                    {
+                        watched = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!watched)
+            {
+                (removable ??= []).Add(key);
+            }
+        }
+
+        if (removable is null)
+        {
+            return;
+        }
+
+        foreach (var key in removable)
+        {
+            _virtualLabels.Remove(key);
+        }
     }
 
     /// <summary>
@@ -643,6 +972,20 @@ internal static class GpuWaitRegistry
                         !Compare(waiter, produced))
                     {
                         continue;
+                    }
+
+                    var waitCachePolicy = (waiter.ControlValue >> 25) & 0x3u;
+                    if (waitCachePolicy <= 2 &&
+                        TryReadVirtualLocked(
+                            memory,
+                            address,
+                            waiter.Is64Bit,
+                            out var virtualValue,
+                            out var dependency,
+                            waitCachePolicy) &&
+                        Compare(waiter, virtualValue))
+                    {
+                        waiter.Dependency = waiter.Dependency.Merge(dependency);
                     }
 
                     broken ??= new List<WaitingDcb>();
@@ -709,6 +1052,9 @@ internal static class GpuWaitRegistry
         {
             _waiters.Clear();
             _lastProduced.Clear();
+            _labelFrameIds.Clear();
+            _currentFrameId = 0;
+            _virtualLabels.Clear();
         }
     }
 }

@@ -6,6 +6,17 @@ using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu;
 
+internal readonly record struct GuestGpuLabelDependency(
+    ulong GraphicsTimeline,
+    ulong ComputeTimeline)
+{
+    public bool IsEmpty => GraphicsTimeline == 0 && ComputeTimeline == 0;
+
+    public GuestGpuLabelDependency Merge(GuestGpuLabelDependency other) => new(
+        Math.Max(GraphicsTimeline, other.GraphicsTimeline),
+        Math.Max(ComputeTimeline, other.ComputeTimeline));
+}
+
 /// <summary>
 /// The guest-GPU backend seam: everything the AGC/VideoOut export layers need from a
 /// host renderer, expressed in guest-domain terms so Vulkan, Metal, and DX12 backends
@@ -212,6 +223,19 @@ internal interface IGuestGpuBackend
     /// <summary>Enqueues an action at its exact position in the current guest queue;
     /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
     long SubmitOrderedGuestAction(Action action, string debugName);
+
+    /// <summary>
+    /// Enqueues a GPU-only label marker. The callback receives the producer
+    /// queue timeline. Returns zero when the backend cannot preserve GPU-only
+    /// visibility.
+    /// </summary>
+    long SubmitGpuLabelSignal(
+        Action<GuestGpuLabelDependency> publishGpu,
+        Action? publishHost,
+        string debugName);
+
+    /// <summary>Adds a producer dependency to the current logical queue.</summary>
+    void RequireGpuLabelDependency(GuestGpuLabelDependency dependency);
 
     /// <summary>Preserves sceAgcDcbWaitUntilSafeForRendering in queue order.</summary>
     long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex);

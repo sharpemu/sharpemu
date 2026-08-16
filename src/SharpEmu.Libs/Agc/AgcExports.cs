@@ -108,6 +108,13 @@ public static partial class AgcExports
         address >= GpuLabelPoolBase &&
         address < GpuLabelPoolBase + GpuLabelPoolSize;
 
+    // SharpEmu still has GPU label consumers that read guest memory. Mirror
+    // the value after the producer completes. A value of 0 keeps the label in
+    // the virtual GL2 view for diagnostics only.
+    private static readonly bool _gpuLabelHostMirrorEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_HOST_MIRROR"),
+        "0",
+        StringComparison.Ordinal);
     // Async-compute ring tracking, env-gated. Off by default; only
     // validated against Ghost of Yotei.
     private static readonly bool _forceSubmitOrphanPreamblesEnabled = string.Equals(
@@ -4927,11 +4934,18 @@ public static partial class AgcExports
             bool suspended;
             try
             {
+                _dcbWindowLease = DcbWindowInvalidationRegistry.Register(
+                    commandAddress,
+                    (ulong)windowByteCount);
                 if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
                 {
                     _dcbWindowBuffer = rented;
                     _dcbWindowStart = commandAddress;
                     _dcbWindowByteLength = windowByteCount;
+                }
+                else
+                {
+                    DropCurrentDcbWindow();
                 }
 
                 suspended = ParseSubmittedDcbCore(
@@ -4944,8 +4958,7 @@ public static partial class AgcExports
             }
             finally
             {
-                _dcbWindowBuffer = null;
-                _dcbWindowByteLength = 0;
+                DropCurrentDcbWindow();
                 GuestDataPool.Shared.Return(rented);
             }
 
@@ -6101,8 +6114,7 @@ public static partial class AgcExports
 
         // The bulk PM4 read is itself a parser-side cache. Do not retain it
         // across a guest cache-invalidation point.
-        _dcbWindowBuffer = null;
-        _dcbWindowByteLength = 0;
+        DropCurrentDcbWindow();
 
         if (!acquire.InvalidatesGuestResources)
         {
@@ -6665,6 +6677,22 @@ public static partial class AgcExports
             }
         }
 
+        if (TrySubmitGpuOnlyWriteDataLabel(
+                ctx,
+                gpuState,
+                state,
+                packetAddress,
+                destinationAddress,
+                destination,
+                incrementAddress,
+                writeConfirm,
+                cachePolicy,
+                values,
+                tracePacket))
+        {
+            return;
+        }
+
         SubmitOrderedGpuSideEffect(
             ctx,
             gpuState,
@@ -6716,6 +6744,120 @@ public static partial class AgcExports
             destination is 1 or 2 or 4 or 5
                 ? incrementAddress ? (ulong)dwordCount * sizeof(uint) : sizeof(uint)
                 : 0);
+    }
+
+    private static bool TrySubmitGpuOnlyWriteDataLabel(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        ulong destinationAddress,
+        uint destination,
+        bool incrementAddress,
+        bool writeConfirm,
+        uint cachePolicy,
+        uint[] values,
+        bool tracePacket)
+    {
+        if (!TryClassifyGpuLabelWrite(
+                state.QueueName,
+                destination,
+                incrementAddress,
+                writeConfirm,
+                cachePolicy,
+                out var producerEngine) ||
+            values.Length == 0)
+        {
+            return false;
+        }
+
+        var byteCount = checked((ulong)values.Length * sizeof(uint));
+        var debugName =
+            $"gpu_label dst=0x{destinationAddress:X16} count={values.Length}";
+        var producer = RegisterLabelProducer(
+            ctx.Memory,
+            state,
+            packetAddress,
+            destinationAddress,
+            byteCount,
+            debugName);
+
+        void Publish(GuestGpuLabelDependency dependency)
+        {
+            GpuWaitRegistry.RecordVirtualProducedRange(
+                ctx.Memory,
+                destinationAddress,
+                values,
+                dependency,
+                cachePolicy,
+                producerEngine);
+
+            CompleteLabelProducer(producer);
+            lock (gpuState.WaitMonitorSignalGate)
+            {
+                gpuState.WaitMonitorSignalVersion++;
+                Monitor.Pulse(gpuState.WaitMonitorSignalGate);
+            }
+
+            RequestResumableDcbDrain(ctx, gpuState);
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.write_data_gpu_label dst={destination} " +
+                    $"addr=0x{destinationAddress:X16} count={values.Length} " +
+                    $"queue={state.QueueName} dependency=" +
+                    $"g{dependency.GraphicsTimeline}/c{dependency.ComputeTimeline}");
+            }
+        }
+
+        void PublishHost()
+        {
+            for (var index = 0; index < values.Length; index++)
+            {
+                TryWriteUInt32(
+                    ctx,
+                    destinationAddress + ((ulong)index * sizeof(uint)),
+                    values[index]);
+            }
+
+            // Invalidate after the full write. A parser that drops its cached
+            // window must only fall back after the new value is in memory.
+            InvalidateDcbWindowIfOverlaps(destinationAddress, byteCount);
+        }
+
+        if (GuestGpu.Current.SubmitGpuLabelSignal(
+                Publish,
+                _gpuLabelHostMirrorEnabled ? PublishHost : null,
+                debugName) != 0)
+        {
+            return true;
+        }
+
+        // The backend cannot keep this label on the GPU. Remove the trace
+        // producer and let the existing CPU-visible ordered action handle it.
+        CompleteLabelProducer(producer);
+        return false;
+    }
+
+    internal static bool TryClassifyGpuLabelWrite(
+        string queueName,
+        uint destination,
+        bool incrementAddress,
+        bool writeConfirm,
+        uint cachePolicy,
+        out GpuWaitRegistry.VirtualLabelEngine engine)
+    {
+        var computeQueue = queueName.StartsWith("acb.", StringComparison.Ordinal);
+        engine = computeQueue
+            ? GpuWaitRegistry.VirtualLabelEngine.Mec
+            : destination == 5u
+                ? GpuWaitRegistry.VirtualLabelEngine.Me
+                : GpuWaitRegistry.VirtualLabelEngine.Pfp;
+
+        return cachePolicy <= 2 &&
+            incrementAddress &&
+            writeConfirm &&
+            (computeQueue ? destination == 2u : destination is 4u or 5u);
     }
 
     private static (uint Destination, bool IncrementAddress, bool WriteConfirm, uint CachePolicy)
@@ -7233,8 +7375,21 @@ public static partial class AgcExports
         }
 
         ulong currentValue = 0;
+        GuestGpuLabelDependency currentDependency = default;
+        var waitCachePolicy = (controlValue >> 25) & 0x3u;
         bool hasCurrent;
-        if (is64Bit)
+        if (waitCachePolicy <= 2 &&
+            GpuWaitRegistry.TryReadVirtual(
+                ctx.Memory,
+                waitAddress,
+                is64Bit,
+                out currentValue,
+                out currentDependency,
+                waitCachePolicy))
+        {
+            hasCurrent = true;
+        }
+        else if (is64Bit)
         {
             hasCurrent = TryReadUInt64(ctx, waitAddress, out currentValue);
         }
@@ -7279,6 +7434,7 @@ public static partial class AgcExports
             // means the producer hasn't written yet this frame — must wait.
             if (GpuWaitRegistry.IsLabelFresh(ctx.Memory, waitAddress))
             {
+                GuestGpu.Current.RequireGpuLabelDependency(currentDependency);
                 return false; // satisfied by current-frame write — keep parsing
             }
         }
@@ -7720,13 +7876,17 @@ public static partial class AgcExports
         state.QueueName = waiter.QueueName ?? state.QueueName;
         state.ActiveSubmissionId = waiter.SubmissionId;
         state.IsSuspended = false;
+        using var guestQueueScope = GuestGpu.Current.EnterGuestQueue(
+            state.QueueName,
+            state.ActiveSubmissionId);
+        GuestGpu.Current.RequireGpuLabelDependency(waiter.Dependency);
         if (ParseSubmittedDcb(
-                ctx,
-                gpuState,
-                state,
-                waiter.ResumeAddress,
-                remainingDwords,
-                tracePackets))
+            ctx,
+            gpuState,
+            state,
+            waiter.ResumeAddress,
+            remainingDwords,
+            tracePackets))
         {
             state.IsSuspended = true;
             return;
@@ -7778,7 +7938,8 @@ public static partial class AgcExports
         ulong packetAddress,
         bool tracePacket)
     {
-        if (!TryReadUInt32(ctx, packetAddress + 8, out var control) ||
+        if (!TryReadUInt32(ctx, packetAddress + 4, out _) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var control) ||
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
             !TryReadUInt32(ctx, packetAddress + 20, out var dataLo) ||
@@ -7905,7 +8066,8 @@ public static partial class AgcExports
         ulong packetAddress,
         bool tracePacket)
     {
-        if (!TryReadUInt32(ctx, packetAddress + 8, out var control) ||
+        if (!TryReadUInt32(ctx, packetAddress + 4, out _) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var control) ||
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
             !TryReadUInt32(ctx, packetAddress + 20, out var dataLo) ||
@@ -15921,6 +16083,8 @@ GuestImageWriteTracker.Track(
     private static ulong _dcbWindowStart;
     [ThreadStatic]
     private static int _dcbWindowByteLength;
+    [ThreadStatic]
+    private static DcbWindowInvalidationRegistry.Lease? _dcbWindowLease;
 
     /// <summary>
     /// Drops the bulk-read window when a self-patching command buffer writes
@@ -15930,28 +16094,47 @@ GuestImageWriteTracker.Track(
     /// </summary>
     private static void InvalidateDcbWindowIfOverlaps(ulong address, ulong length)
     {
-        if (_dcbWindowBuffer is null || length == 0)
+        if (length == 0)
         {
             return;
         }
 
-        var windowEnd = _dcbWindowStart + (ulong)_dcbWindowByteLength;
-        if (address < windowEnd && address + length > _dcbWindowStart)
+        DcbWindowInvalidationRegistry.Invalidate(address, length);
+
+        if (_dcbWindowBuffer is not null &&
+            address < SaturatingAdd(_dcbWindowStart, (ulong)_dcbWindowByteLength) &&
+            SaturatingAdd(address, length) > _dcbWindowStart)
         {
-            _dcbWindowBuffer = null;
-            _dcbWindowByteLength = 0;
+            DropCurrentDcbWindow();
         }
     }
+
+    private static void DropCurrentDcbWindow()
+    {
+        DcbWindowInvalidationRegistry.Unregister(_dcbWindowLease);
+        _dcbWindowLease = null;
+        _dcbWindowBuffer = null;
+        _dcbWindowByteLength = 0;
+    }
+
+    private static ulong SaturatingAdd(ulong value, ulong addend) =>
+        ulong.MaxValue - value < addend ? ulong.MaxValue : value + addend;
 
     private static bool TryReadUInt16(CpuContext ctx, ulong address, out ushort value)
     {
         if (_dcbWindowBuffer is { } window &&
+            _dcbWindowLease is { } lease &&
             address >= _dcbWindowStart &&
             address - _dcbWindowStart + sizeof(ushort) <= (ulong)_dcbWindowByteLength)
         {
             value = BinaryPrimitives.ReadUInt16LittleEndian(
                 window.AsSpan((int)(address - _dcbWindowStart)));
-            return true;
+            if (DcbWindowInvalidationRegistry.IsValid(lease))
+            {
+                return true;
+            }
+
+            DropCurrentDcbWindow();
         }
 
         Span<byte> buffer = stackalloc byte[sizeof(ushort)];
@@ -15968,12 +16151,18 @@ GuestImageWriteTracker.Track(
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
         if (_dcbWindowBuffer is { } window &&
+            _dcbWindowLease is { } lease &&
             address >= _dcbWindowStart &&
             address - _dcbWindowStart + sizeof(uint) <= (ulong)_dcbWindowByteLength)
         {
             value = BinaryPrimitives.ReadUInt32LittleEndian(
                 window.AsSpan((int)(address - _dcbWindowStart)));
-            return true;
+            if (DcbWindowInvalidationRegistry.IsValid(lease))
+            {
+                return true;
+            }
+
+            DropCurrentDcbWindow();
         }
 
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
@@ -15997,12 +16186,18 @@ GuestImageWriteTracker.Track(
     private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
     {
         if (_dcbWindowBuffer is { } window &&
+            _dcbWindowLease is { } lease &&
             address >= _dcbWindowStart &&
             address - _dcbWindowStart + sizeof(ulong) <= (ulong)_dcbWindowByteLength)
         {
             value = BinaryPrimitives.ReadUInt64LittleEndian(
                 window.AsSpan((int)(address - _dcbWindowStart)));
-            return true;
+            if (DcbWindowInvalidationRegistry.IsValid(lease))
+            {
+                return true;
+            }
+
+            DropCurrentDcbWindow();
         }
 
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];

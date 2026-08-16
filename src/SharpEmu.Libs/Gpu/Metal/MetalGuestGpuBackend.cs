@@ -388,6 +388,20 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
+    public long SubmitGpuLabelSignal(
+        Action<GuestGpuLabelDependency> publishGpu,
+        Action? publishHost,
+        string debugName)
+    {
+        _ = publishGpu;
+        _ = publishHost;
+        _ = debugName;
+        return 0;
+    }
+
+    public void RequireGpuLabelDependency(GuestGpuLabelDependency dependency) =>
+        _ = dependency;
+
     public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
         MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
 
