@@ -479,6 +479,13 @@ public static class Gen5ShaderScalarEvaluator
                 continue;
             }
 
+                if (instruction.Opcode == "SWaitcnt")
+                {
+                    // Host shader memory operations preserve this instruction's
+                    // program order. The guest counter has no scalar state effect.
+                    continue;
+                }
+
                 if (instruction.Encoding is
                 Gen5ShaderEncoding.Sop1 or
                 Gen5ShaderEncoding.Sop2 or
@@ -1530,6 +1537,31 @@ public static class Gen5ShaderScalarEvaluator
             return true;
         }
 
+        if (instruction.Opcode is "SBcnt1I32B64" or "SFF1I32B64")
+        {
+            if (!TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    execMask,
+                    out var value))
+            {
+                error = $"scalar-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            registers[destination.Value] = instruction.Opcode == "SBcnt1I32B64"
+                ? (uint)BitOperations.PopCount(value)
+                : value == 0
+                    ? uint.MaxValue
+                    : (uint)BitOperations.TrailingZeroCount(value);
+            if (instruction.Opcode == "SBcnt1I32B64")
+            {
+                scalarConditionCode = registers[destination.Value] != 0;
+            }
+
+            return true;
+        }
+
         if (instruction.Opcode is "SLshlB64" or "SLshrB64")
         {
             if (instruction.Sources.Count < 2 ||
@@ -1687,6 +1719,7 @@ public static class Gen5ShaderScalarEvaluator
 
         if (instruction.Opcode is
             "SNotB32" or
+            "SWqmB32" or
             "SBrevB32" or
             "SBcnt1I32B32" or
             "SFF1I32B32" or
@@ -1695,12 +1728,14 @@ public static class Gen5ShaderScalarEvaluator
             registers[destination.Value] = instruction.Opcode switch
             {
                 "SNotB32" => ~left,
+                "SWqmB32" =>
+                    ((left | (left >> 1) | (left >> 2) | (left >> 3)) & 0x1111_1111u) * 0xFu,
                 "SBrevB32" => ReverseBits(left),
                 "SBcnt1I32B32" => (uint)BitOperations.PopCount(left),
                 "SFF1I32B32" => left == 0 ? uint.MaxValue : (uint)BitOperations.TrailingZeroCount(left),
                 _ => registers[destination.Value] | (1u << ((int)left & 31)),
             };
-            if (instruction.Opcode != "SBitset1B32")
+            if (instruction.Opcode is "SNotB32" or "SWqmB32" or "SBcnt1I32B32")
             {
                 scalarConditionCode = registers[destination.Value] != 0;
             }
@@ -2080,8 +2115,36 @@ public static class Gen5ShaderScalarEvaluator
     {
         scalarConditionCode = false;
         error = string.Empty;
-        if (instruction.Sources.Count != 2 ||
-            !TryEvaluateScalarOperand(instruction.Sources[0], registers, out var left) ||
+        if (instruction.Sources.Count != 2)
+        {
+            error = $"scalar-compare-source pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+            return false;
+        }
+
+        if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+        {
+            if (!TryEvaluateScalarOperand64(
+                    instruction.Sources[0],
+                    registers,
+                    ulong.MaxValue,
+                    out var wideLeft) ||
+                !TryEvaluateScalarOperand64(
+                    instruction.Sources[1],
+                    registers,
+                    ulong.MaxValue,
+                    out var wideRight))
+            {
+                error = $"scalar-compare-source64 pc=0x{instruction.Pc:X} op={instruction.Opcode}";
+                return false;
+            }
+
+            scalarConditionCode = instruction.Opcode == "SCmpEqU64"
+                ? wideLeft == wideRight
+                : wideLeft != wideRight;
+            return true;
+        }
+
+        if (!TryEvaluateScalarOperand(instruction.Sources[0], registers, out var left) ||
             !TryEvaluateScalarOperand(instruction.Sources[1], registers, out var right))
         {
             error = $"scalar-compare-source pc=0x{instruction.Pc:X} op={instruction.Opcode}";

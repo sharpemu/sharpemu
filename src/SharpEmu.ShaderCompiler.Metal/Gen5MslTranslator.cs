@@ -466,7 +466,8 @@ public static partial class Gen5MslTranslator
                 if (instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                     instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32"
                         or "VReadlaneB32" or "VReadfirstlaneB32"
-                        or "VMbcntLoU32B32" or "VMbcntHiU32B32" ||
+                        or "VMbcntLoU32B32" or "VMbcntHiU32B32"
+                        or "DsAppend" or "DsConsume" ||
                     instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
                     instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
                     instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
@@ -1186,6 +1187,11 @@ public static partial class Gen5MslTranslator
                 "SCbranchVccnz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
                 "SCbranchExecz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
                 "SCbranchExecnz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
+                // The emulator does not expose a shader debug session.
+                "SCbranchCdbgsys" or
+                "SCbranchCdbguser" or
+                "SCbranchCdbgsysOrUser" or
+                "SCbranchCdbgsysAndUser" => "false",
                 _ => string.Empty,
             };
             return condition.Length != 0;
@@ -1513,6 +1519,68 @@ public static partial class Gen5MslTranslator
 
             switch (instruction.Opcode)
             {
+                case "DsAppend":
+                case "DsConsume":
+                {
+                    if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 1)
+                    {
+                        error = $"missing {instruction.Opcode} operand";
+                        return false;
+                    }
+
+                    var offset = control.Offset0 | (control.Offset1 << 8);
+                    var m0 = Temp("uint", RawSource(instruction, 0));
+                    var baseAddress = Temp("uint", $"{m0} >> 16u");
+                    var sizeBytes = Temp("uint", $"{m0} & 0xFFFFu");
+                    var inBounds = Temp("bool", $"{offset + 3}u < {sizeBytes}");
+                    var index = LdsIndex(baseAddress, offset);
+                    var destination = instruction.Destinations[0].Value;
+                    var operation = instruction.Opcode == "DsAppend" ? "add" : "sub";
+
+                    // Graphics stages use the existing one-lane LDS model.
+                    if (_stage != Gen5MslStage.Compute)
+                    {
+                        var original = Temp("uint", $"sharpemu_lds[{index}]");
+                        var assignment = operation == "add" ? "+=" : "-=";
+                        Line($"if (exec && {inBounds}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
+                        StoreVector(destination, $"{inBounds} ? {original} : 0u");
+                        return true;
+                    }
+
+                    string count;
+                    string first;
+                    if (IsWave64)
+                    {
+                        Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
+                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                        var low = Temp("uint", "sharpemu_wave_scratch[0]");
+                        var high = Temp("uint", "sharpemu_wave_scratch[1]");
+                        count = Temp("uint", $"popcount({low}) + popcount({high})");
+                        first = Temp(
+                            "uint",
+                            $"({low} != 0u) ? (uint)ctz({low}) : (({high} != 0u) ? (32u + (uint)ctz({high})) : 0u)");
+                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                        var atomic =
+                            $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed)";
+                        var broadcast = EmitWave64ReadFirstLane($"{inBounds} ? {atomic} : 0u");
+                        StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
+                        return true;
+                    }
+
+                    var mask = Temp("uint", "sharpemu_ballot(exec)");
+                    count = Temp("uint", $"popcount({mask})");
+                    first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
+                    var firstValue = Temp("uint", "0u");
+                    Line($"if (exec && {inBounds} && sharpemu_lane == {first})");
+                    Line("{");
+                    _indent++;
+                    Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
+                    _indent--;
+                    Line("}");
+                    var result = Temp("uint", $"simd_broadcast({firstValue}, {first})");
+                    StoreVector(destination, $"{inBounds} ? {result} : 0u");
+                    return true;
+                }
                 case "DsAddU32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));

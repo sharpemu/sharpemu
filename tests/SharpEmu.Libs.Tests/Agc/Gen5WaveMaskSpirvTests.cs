@@ -41,6 +41,22 @@ public sealed class Gen5WaveMaskSpirvTests
                 + "(mask & lane_bit), not as a whole-word non-zero test");
     }
 
+    [Theory]
+    [InlineData(0xBF970001u)]
+    [InlineData(0xBF980001u)]
+    [InlineData(0xBF990001u)]
+    [InlineData(0xBF9A0001u)]
+    public void DebugConditionBranchesCompileWithoutShaderDebugger(uint branch)
+    {
+        var spirv = Compile(
+        [
+            branch,
+            0xBF800000, // s_nop 0
+        ]);
+
+        Assert.NotEmpty(spirv);
+    }
+
     // True when the module contains an OpBitwiseAnd whose operand is a 64-bit
     // constant of value 1 — the current-lane bit that IsCurrentLaneSet masks the
     // wave mask with before the non-zero test.

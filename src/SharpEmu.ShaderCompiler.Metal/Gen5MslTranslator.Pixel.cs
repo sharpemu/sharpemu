@@ -826,20 +826,28 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (control.DwordCount == 0 || control.DwordCount > input.ComponentCount)
+            if (control.DwordCount == 0)
             {
                 error =
-                    $"invalid vertex input fetch components={control.DwordCount} " +
-                    $"input={input.ComponentCount}";
+                    $"invalid vertex input fetch components={control.DwordCount}";
                 return false;
             }
 
             for (uint component = 0; component < control.DwordCount; component++)
             {
-                var value = input.ComponentCount == 1
-                    ? $"sharpemu_vin.in{input.Location}"
-                    : $"sharpemu_vin.in{input.Location}[{component}]";
-                StoreVector(control.VectorData + component, AsUInt(value));
+                if (component >= input.ComponentCount)
+                {
+                    // Formatted buffer loads return zero for components that
+                    // are not present in the resource format.
+                    StoreVector(control.VectorData + component, "0u");
+                }
+                else
+                {
+                    var value = input.ComponentCount == 1
+                        ? $"sharpemu_vin.in{input.Location}"
+                        : $"sharpemu_vin.in{input.Location}[{component}]";
+                    StoreVector(control.VectorData + component, AsUInt(value));
+                }
             }
 
             return true;

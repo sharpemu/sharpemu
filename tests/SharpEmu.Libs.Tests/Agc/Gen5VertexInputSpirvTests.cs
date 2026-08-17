@@ -185,6 +185,78 @@ public sealed class Gen5VertexInputSpirvTests
                 candidate.Operands[2] == inputVariable));
     }
 
+    [Fact]
+    public void FormattedFetchZeroFillsMissingComponents()
+    {
+        var fetch = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mubuf,
+            "BufferLoadFormatXyz",
+            [],
+            [],
+            [],
+            new Gen5BufferMemoryControl(
+                3,
+                5,
+                0,
+                0,
+                0,
+                IndexEnabled: true,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false));
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [fetch, end]),
+            [],
+            null);
+        var registers = new uint[256];
+        var data = new byte[8];
+        var evaluation = new Gen5ShaderEvaluation(
+            registers,
+            registers,
+            [],
+            [],
+            VertexInputs:
+            [
+                new Gen5VertexInputBinding(
+                    0,
+                    0,
+                    2,
+                    11,
+                    7,
+                    0x1000,
+                    8,
+                    0,
+                    data,
+                    data.Length,
+                    DataPooled: false),
+            ]);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var shader,
+                out var error),
+            error);
+
+        var module = ParseModule(shader.Spirv);
+        Assert.Contains(
+            module,
+            instruction =>
+                instruction.Opcode == SpirvOp.Constant &&
+                instruction.Operands.Length == 3 &&
+                instruction.Operands[2] == 0);
+    }
+
     private static Gen5ShaderInstruction CreateVertexFetch(uint pc) =>
         new(
             pc,

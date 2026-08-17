@@ -1883,6 +1883,51 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBcnt1I32B64")
+            {
+                var wideCount = _module.AddInstruction(
+                    SpirvOp.BitCount,
+                    _ulongType,
+                    GetRawSource64(instruction, 0));
+                var bitCountResult = _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    wideCount);
+                StoreS(destination, bitCountResult);
+                Store(_scc, IsNotZero(bitCountResult));
+                return true;
+            }
+
+            if (instruction.Opcode == "SFF1I32B64")
+            {
+                var wide = GetRawSource64(instruction, 0);
+                var low = _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    wide);
+                var high = _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    ShiftRightLogical64(
+                        wide,
+                        _module.Constant64(_ulongType, 32)));
+                var lowIndex = Ext(73, _uintType, low);
+                var highIndex = IAdd(Ext(73, _uintType, high), UInt(32));
+                var bitIndex = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    IsNotZero(low),
+                    lowIndex,
+                    _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        IsNotZero(high),
+                        highIndex,
+                        UInt(uint.MaxValue)));
+                StoreS(destination, bitIndex);
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
                 instruction.Opcode is "SWqmB64" or "SBfeU64" or "SBfeI64")
             {
@@ -1951,6 +1996,26 @@ public static partial class Gen5SpirvTranslator
                     StoreS(destination, result);
                     Store(_scc, IsNotZero(result));
                     return true;
+                case "SWqmB32":
+                {
+                    var quadAny = BitwiseAnd(
+                        BitwiseOr(
+                            left,
+                            BitwiseOr(
+                                ShiftRightLogical(left, UInt(1)),
+                                BitwiseOr(
+                                    ShiftRightLogical(left, UInt(2)),
+                                    ShiftRightLogical(left, UInt(3))))),
+                        UInt(0x1111_1111));
+                    result = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        quadAny,
+                        UInt(0xF));
+                    StoreS(destination, result);
+                    Store(_scc, IsNotZero(result));
+                    return true;
+                }
                 case "SBrevB32":
                     result = _module.AddInstruction(SpirvOp.BitReverse, _uintType, left);
                     StoreS(destination, result);
@@ -1964,7 +2029,6 @@ public static partial class Gen5SpirvTranslator
                 case "SFF1I32B32":
                     result = Ext(73, _uintType, left);
                     StoreS(destination, result);
-                    Store(_scc, IsNotZero(result));
                     return true;
                 case "SBitset1B32":
                     result = _module.AddInstruction(
@@ -2336,6 +2400,22 @@ public static partial class Gen5SpirvTranslator
             {
                 error = "missing scalar compare source";
                 return false;
+            }
+
+            if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+            {
+                var wideLeft = GetRawSource64(instruction, 0);
+                var wideRight = GetRawSource64(instruction, 1);
+                Store(
+                    _scc,
+                    _module.AddInstruction(
+                        instruction.Opcode == "SCmpEqU64"
+                            ? SpirvOp.IEqual
+                            : SpirvOp.INotEqual,
+                        _boolType,
+                        wideLeft,
+                        wideRight));
+                return true;
             }
 
             var left = GetRawSource(instruction, 0);

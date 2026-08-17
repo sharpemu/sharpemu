@@ -1170,7 +1170,10 @@ public static partial class Gen5SpirvTranslator
                     _interfaces.Add(_subgroupSizeInput);
                 }
 
-                if (_waveLaneCount == 64)
+                // LocalInvocationIndex is a compute-stage built-in. Graphics
+                // stages can still use native subgroup operations, but they
+                // cannot combine two subgroup32 halves through a workgroup.
+                if (_stage == Gen5SpirvStage.Compute && _waveLaneCount == 64)
                 {
                     _localInvocationIndexInput = _module.AddGlobalVariable(
                         subgroupPointer,
@@ -1785,6 +1788,11 @@ public static partial class Gen5SpirvTranslator
                 "SCbranchVccnz" => SubgroupAny(Load(_boolType, _vcc)),
                 "SCbranchExecz" => LogicalNot(SubgroupAny(Load(_boolType, _exec))),
                 "SCbranchExecnz" => SubgroupAny(Load(_boolType, _exec)),
+                // The emulator does not expose a shader debug session.
+                "SCbranchCdbgsys" or
+                "SCbranchCdbguser" or
+                "SCbranchCdbgsysOrUser" or
+                "SCbranchCdbgsysAndUser" => _module.ConstantBool(false),
                 _ => 0,
             };
             return condition != 0;
@@ -1900,6 +1908,9 @@ public static partial class Gen5SpirvTranslator
 
             switch (instruction.Opcode)
             {
+                case "DsAppend":
+                case "DsConsume":
+                    return TryEmitDataShareWaveCounter(instruction, control, out error);
                 case "DsWriteB32":
                 {
                     if (instruction.Sources.Count < 2)
@@ -2056,6 +2067,142 @@ public static partial class Gen5SpirvTranslator
 
         private static uint EffectiveDsPairOffsetBytes(uint offset, bool st64 = false) =>
             offset * (st64 ? 256u : sizeof(uint));
+
+        private bool TryEmitDataShareWaveCounter(
+            Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 1)
+            {
+                error = $"missing {instruction.Opcode} operand";
+                return false;
+            }
+
+            var offset = control.Offset0 | (control.Offset1 << 8);
+            var m0 = GetRawSource(instruction, 0);
+            var baseAddress = ShiftRightLogical(m0, UInt(16));
+            var sizeBytes = BitwiseAnd(m0, UInt(0xFFFF));
+            var inBounds = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                UInt(offset + 3),
+                sizeBytes);
+            var pointer = LdsPointer(baseAddress, offset);
+            var destination = instruction.Destinations[0].Value;
+            var active = Load(_boolType, _exec);
+
+            var activeMask = BooleanToWaveMask(active);
+            var activeCount64 = _module.AddInstruction(
+                SpirvOp.BitCount,
+                _ulongType,
+                activeMask);
+            var activeCount = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                activeCount64);
+            var activeLow = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                activeMask);
+            var activeHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(
+                    activeMask,
+                    _module.Constant64(_ulongType, 32)));
+            var firstLane = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                IsNotZero(activeLow),
+                Ext(73, _uintType, activeLow),
+                IAdd(Ext(73, _uintType, activeHigh), UInt(32)));
+            var isFirstActive = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                inBounds,
+                _module.AddInstruction(
+                    SpirvOp.LogicalAnd,
+                    _boolType,
+                    active,
+                    _module.AddInstruction(
+                        SpirvOp.IEqual,
+                        _boolType,
+                        GuestWaveLane(),
+                        firstLane)));
+
+            EmitConditional(isFirstActive, () =>
+            {
+                uint original;
+                if (_stage == Gen5SpirvStage.Compute)
+                {
+                    original = EmitAtomic(
+                        instruction.Opcode == "DsAppend"
+                            ? SpirvOp.AtomicIAdd
+                            : SpirvOp.AtomicISub,
+                        _uintType,
+                        pointer,
+                        scope: 2,
+                        semantics: 0x108,
+                        value: () => activeCount,
+                        comparator: () => UInt(0));
+                }
+                else
+                {
+                    // Vulkan graphics stages cannot use Workgroup storage.
+                    // Keep the counter in the first active lane's private LDS
+                    // model, but preserve the RDNA2 wave operation: change it
+                    // by the active-lane count and broadcast the old value.
+                    original = Load(_uintType, pointer);
+                    var changed = instruction.Opcode == "DsAppend"
+                        ? IAdd(original, activeCount)
+                        : _module.AddInstruction(
+                            SpirvOp.ISub,
+                            _uintType,
+                            original,
+                            activeCount);
+                    Store(pointer, changed);
+                }
+
+                StoreV(destination, original);
+            });
+
+            var firstValue = LoadV(destination);
+            uint broadcast;
+            if (_emulateWave64)
+            {
+                EmitConditional(isFirstActive, () =>
+                    Store(WaveBroadcastScratchPointer(), firstValue));
+                EmitWave64Barrier();
+                broadcast = Load(_uintType, WaveBroadcastScratchPointer());
+                EmitWave64Barrier();
+            }
+            else
+            {
+                broadcast = _module.AddInstruction(
+                    SpirvOp.GroupNonUniformShuffle,
+                    _uintType,
+                    UInt(3),
+                    firstValue,
+                    firstLane);
+            }
+
+            var validResult = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                inBounds,
+                IsNotZero64(activeMask));
+            StoreV(
+                destination,
+                _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    validResult,
+                    broadcast,
+                    UInt(0)));
+            return true;
+        }
 
         private uint LdsPointer(uint address, uint offsetBytes)
         {
@@ -3274,28 +3421,37 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
-            if (control.DwordCount == 0 ||
-                control.DwordCount > input.ComponentCount)
+            if (control.DwordCount == 0)
             {
                 error =
-                    $"invalid vertex input fetch components={control.DwordCount} " +
-                    $"input={input.ComponentCount}";
+                    $"invalid vertex input fetch components={control.DwordCount}";
                 return false;
             }
 
             var loaded = Load(input.Type, input.Variable);
             for (uint component = 0; component < control.DwordCount; component++)
             {
-                var value = input.ComponentCount == 1
-                    ? loaded
-                    : _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        input.ComponentType,
-                        loaded,
-                        component);
-                var raw = input.ComponentKind == VertexInputComponentKind.Uint
-                    ? value
-                    : Bitcast(_uintType, value);
+                uint raw;
+                if (component >= input.ComponentCount)
+                {
+                    // Formatted buffer loads return zero for components that
+                    // are not present in the resource format.
+                    raw = UInt(0);
+                }
+                else
+                {
+                    var value = input.ComponentCount == 1
+                        ? loaded
+                        : _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            input.ComponentType,
+                            loaded,
+                            component);
+                    raw = input.ComponentKind == VertexInputComponentKind.Uint
+                        ? value
+                        : Bitcast(_uintType, value);
+                }
+
                 StoreV(control.VectorData + component, raw);
             }
 
@@ -5551,7 +5707,8 @@ public static partial class Gen5SpirvTranslator
         private bool UsesSubgroupShuffle() =>
             _state.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
-                instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32");
+                instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
+                    "DsAppend" or "DsConsume");
 
         private bool UsesSubgroupBroadcast() =>
             _state.Program.Instructions.Any(instruction =>
@@ -5567,12 +5724,14 @@ public static partial class Gen5SpirvTranslator
                 instruction.Destinations.Any(IsWaveMaskOperand));
 
         private bool UsesSubgroupOperations() =>
-            _stage == Gen5SpirvStage.Compute &&
-            (UsesSubgroupShuffle() ||
-             UsesSubgroupBroadcast() ||
-             UsesWaveControl() ||
-             _state.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32"));
+            _state.Program.Instructions.Any(static instruction =>
+                instruction.Opcode is "DsAppend" or "DsConsume") ||
+            (_stage == Gen5SpirvStage.Compute &&
+             (UsesSubgroupShuffle() ||
+              UsesSubgroupBroadcast() ||
+              UsesWaveControl() ||
+              _state.Program.Instructions.Any(static instruction =>
+                  instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32")));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&

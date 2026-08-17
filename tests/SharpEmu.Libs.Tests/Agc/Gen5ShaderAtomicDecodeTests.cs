@@ -103,6 +103,22 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(3) }, instruction.Destinations);
     }
 
+    [Theory]
+    [InlineData(0xD8FA3412u, "DsAppend")]
+    [InlineData(0xD8F63412u, "DsConsume")]
+    public void DsWaveCounter_UsesM0AndReturnsOldValue(uint word, string opcode)
+    {
+        var instruction = DecodeSingle(word, 0x07000000);
+
+        Assert.Equal(opcode, instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Scalar(124) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(7) }, instruction.Destinations);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.Equal(0x12u, control.Offset0);
+        Assert.Equal(0x34u, control.Offset1);
+        Assert.False(control.Gds);
+    }
+
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);

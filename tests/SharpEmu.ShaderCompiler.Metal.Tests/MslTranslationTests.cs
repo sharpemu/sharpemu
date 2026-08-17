@@ -250,6 +250,158 @@ public sealed class MslTranslationTests
         Assert.Contains("pc=0x", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RelativeVectorSourceUsesM0ForDynamicRead()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "relative-vector-source",
+            [
+                0x7E6E870C, // v_movrels_b32 v55, v12
+                0xBF810000, // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+
+        Assert.Contains("12u + (s[124])", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("< 256u ?", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScalarBlockerOpcodesCompileWithRdna2Semantics()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "scalar-blockers",
+            [
+                0xBF130200, // s_cmp_lg_u64 s[0:1], s[2:3]
+                0xBE861404, // s_ff1_i32_b64 s6, s[4:5]
+                0xBEEB106A, // s_bcnt1_i32_b64 s107, s[106:107]
+                0xBE890908, // s_wqm_b32 s9, s8
+                0xBF810000, // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+
+        Assert.Contains(" != ", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("(uint)ctz(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("(uint)popcount(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 0x11111111u", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("* 0xFu", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DataShareWaveCountersUseOneAtomicPerWave()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "data-share-wave-counters",
+            [
+                0xD8FA0014, 0x07000000, // ds_append v7 offset:20
+                0xD8F60014, 0x08000000, // ds_consume v8 offset:20
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+
+        Assert.Contains("popcount(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 16u", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 0xFFFFu", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_fetch_add_explicit", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_fetch_sub_explicit", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("simd_broadcast", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0xBF970001u)]
+    [InlineData(0xBF980001u)]
+    [InlineData(0xBF990001u)]
+    [InlineData(0xBF9A0001u)]
+    public void DebugConditionBranchesFallThroughWithoutShaderDebugger(uint branch)
+    {
+        var fixture = new Gen5ComputeFixture(
+            "debug-condition-branch",
+            [
+                branch,
+                0xBF800000, // s_nop 0
+                0xBF810000, // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+
+        Assert.Contains("pc = (false) ?", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormattedVertexFetchZeroFillsMissingComponents()
+    {
+        var fetch = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mubuf,
+            "BufferLoadFormatXyz",
+            [],
+            [],
+            [],
+            new Gen5BufferMemoryControl(
+                3,
+                5,
+                0,
+                0,
+                0,
+                IndexEnabled: true,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false));
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [fetch, end]),
+            [],
+            null);
+        var registers = new uint[256];
+        var data = new byte[8];
+        var evaluation = new Gen5ShaderEvaluation(
+            registers,
+            registers,
+            [],
+            [],
+            VertexInputs:
+            [
+                new Gen5VertexInputBinding(
+                    0,
+                    0,
+                    2,
+                    11,
+                    7,
+                    0x1000,
+                    8,
+                    0,
+                    data,
+                    data.Length,
+                    DataPooled: false),
+            ]);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var shader,
+                out var error),
+            error);
+        Assert.Contains("v[2] = 0u;", shader.Source, StringComparison.Ordinal);
+    }
+
     private static Gen5MslShader CompileImageStore(
         uint dstSelect,
         uint dmask,
