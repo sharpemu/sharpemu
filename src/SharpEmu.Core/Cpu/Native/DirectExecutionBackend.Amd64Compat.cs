@@ -9,17 +9,18 @@ namespace SharpEmu.Core.Cpu.Native;
 
 // General software fallback for the AMD-only instructions PS5 titles occasionally emit that a
 // Zen 2-only host implements but Intel hosts (and Rosetta 2 on Apple Silicon) do not:
-//   - SSE4a EXTRQ/INSERTQ, immediate form
+//   - SSE4a EXTRQ, immediate and register-controlled forms
+//   - SSE4a INSERTQ, immediate form
 //   - MONITORX/MWAITX
 //
 // This is a direct port of Kyty's Loader::X64InstructionEmulator (TryEmulateSse4a /
 // TryEmulateMonitorxMwaitx). SharpEmu already special-cases exactly one compiled EXTRQ+VPBLENDD
 // byte sequence at load time (Sse4aExtrqBlendPatch), which only helps the one idiom it was
 // reverse-engineered from. This file is a general, fault-time fallback that engages for any
-// immediate-form EXTRQ/INSERTQ or MONITORX/MWAITX the narrower patch (or a title using a
-// different compiler/register allocation) does not cover, complementing rather than replacing
-// it: the load-time patch still avoids paying the fault-and-recover cost on the hot path it was
-// built for, while this method is the safety net for everything else.
+// EXTRQ/INSERTQ or MONITORX/MWAITX the narrower patch (or a title using a different
+// compiler/register allocation) does not cover, complementing rather than replacing it: the
+// load-time patch still avoids paying the fault-and-recover cost on the hot path it was built for,
+// while this method is the safety net for everything else.
 //
 // This is deliberately additive: DirectExecutionBackend.IllegalInstruction.cs (the BMI1/BMI2/ABM
 // fallback) is untouched, and this method is only reached from VectoredHandler after that one
@@ -111,7 +112,10 @@ public sealed partial class DirectExecutionBackend
             return false;
         }
 
-        if (isExtrq && instruction.OpCount != 3 || isInsertq && instruction.OpCount != 4)
+        var isImmediateExtrq = isExtrq && instruction.OpCount == 3;
+        var isRegisterExtrq = isExtrq && instruction.OpCount == 2;
+        var isImmediateInsertq = isInsertq && instruction.OpCount == 4;
+        if (!isImmediateExtrq && !isRegisterExtrq && !isImmediateInsertq)
         {
             return false;
         }
@@ -125,11 +129,26 @@ public sealed partial class DirectExecutionBackend
         var destLow = ReadCtxU64(contextRecord, destOffset);
         if (isExtrq)
         {
-            var length = (int)instruction.GetImmediate(1);
-            var index = (int)instruction.GetImmediate(2);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
+            int length;
+            int index;
+            if (isRegisterExtrq)
             {
-                return false;
+                if (instruction.GetOpKind(1) != OpKind.Register ||
+                    !TryGetXmmOffset(instruction.GetOpRegister(1), out var controlOffset))
+                {
+                    return false;
+                }
+
+                // AMD defines the register form's field length in xmm2[5:0] and its start
+                // index in xmm2[13:8]. Other control bits do not affect the instruction.
+                var control = ReadCtxU64(contextRecord, controlOffset);
+                length = (int)(control & 0x3F);
+                index = (int)((control >> 8) & 0x3F);
+            }
+            else
+            {
+                length = (int)instruction.GetImmediate(1);
+                index = (int)instruction.GetImmediate(2);
             }
 
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.ExtractBitField(destLow, length, index));
@@ -145,11 +164,6 @@ public sealed partial class DirectExecutionBackend
 
             var length = (int)instruction.GetImmediate(2);
             var index = (int)instruction.GetImmediate(3);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
-            {
-                return false;
-            }
-
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.InsertBitField(
                 destLow, ReadCtxU64(contextRecord, srcOffset), length, index));
             WriteCtxU64(contextRecord, destOffset + 8, 0);

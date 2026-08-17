@@ -68,10 +68,10 @@ public sealed class Sse4aBitFieldEmulatorTests
     }
 
     [Fact]
-    public void ExtractBitField_RejectsUndefinedFieldPastRegisterEnd()
+    public void ExtractBitField_ClampsUndefinedFieldPastRegisterEnd()
     {
         Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 8, index: 60));
-        Assert.Equal(0UL, Sse4aBitFieldEmulator.ExtractBitField(
+        Assert.Equal(0xFUL, Sse4aBitFieldEmulator.ExtractBitField(
             0xFFFF_FFFF_FFFF_FFFF,
             length: 8,
             index: 60));
@@ -81,6 +81,12 @@ public sealed class Sse4aBitFieldEmulatorTests
     public void ExtractBitField_RejectsZeroLengthAtNonZeroIndex()
     {
         Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 0, index: 1));
+        Assert.Equal(
+            0x7FFF_FFFF_FFFF_FFFFUL,
+            Sse4aBitFieldEmulator.ExtractBitField(
+                0xFFFF_FFFF_FFFF_FFFF,
+                length: 0,
+                index: 1));
     }
 
     [Fact]
@@ -143,5 +149,19 @@ public sealed class Sse4aBitFieldEmulatorTests
             index: 20);
 
         Assert.Equal(0xABCD_EF01_0005_6789UL, result);
+    }
+
+    [Fact]
+    public void InsertBitField_ClampsUndefinedFieldPastRegisterEnd()
+    {
+        Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 8, index: 60));
+
+        var result = Sse4aBitFieldEmulator.InsertBitField(
+            destination: 0,
+            source: ulong.MaxValue,
+            length: 8,
+            index: 60);
+
+        Assert.Equal(0xF000_0000_0000_0000UL, result);
     }
 }
