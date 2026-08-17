@@ -2157,6 +2157,91 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    internal static (int Luma, int Chroma) SelectRememberedHostMovieTextureBindings(
+        IReadOnlyList<GuestDrawTexture> textures,
+        ulong lumaAddress,
+        ulong chromaAddress,
+        uint hostWidth,
+        uint hostHeight)
+    {
+        var lumaIndex = -1;
+        ulong lumaArea = 0;
+        for (var index = 0; index < textures.Count; index++)
+        {
+            var texture = textures[index];
+            if (texture.Address != lumaAddress ||
+                !IsHostMovieLumaCandidateForFrame(texture, hostWidth, hostHeight))
+            {
+                continue;
+            }
+
+            var area = (ulong)texture.Width * texture.Height;
+            if (lumaIndex < 0 || area > lumaArea)
+            {
+                lumaIndex = index;
+                lumaArea = area;
+            }
+        }
+
+        if (lumaIndex < 0)
+        {
+            return (-1, -1);
+        }
+
+        var luma = textures[lumaIndex];
+        for (var index = 0; index < textures.Count; index++)
+        {
+            var texture = textures[index];
+            if (texture.Address == chromaAddress &&
+                IsHostMovieChromaCandidateForLuma(luma, texture))
+            {
+                return (lumaIndex, index);
+            }
+        }
+
+        return (-1, -1);
+    }
+
+    private static bool IsHostMovieLumaCandidateForFrame(
+        GuestDrawTexture texture,
+        uint hostWidth,
+        uint hostHeight)
+    {
+        if (texture.Address == 0 ||
+            texture.IsStorage ||
+            texture.IsFallback ||
+            texture.ArrayedView ||
+            texture.ArrayLayers > 1 ||
+            texture.Format != 1 ||
+            texture.NumberType != 0 ||
+            texture.Width < 1280 ||
+            texture.Height < 720)
+        {
+            return false;
+        }
+
+        var guestAspect = (ulong)texture.Width * hostHeight;
+        var hostAspect = (ulong)texture.Height * hostWidth;
+        var difference = guestAspect > hostAspect
+            ? guestAspect - hostAspect
+            : hostAspect - guestAspect;
+        return difference * 100 <= Math.Max(guestAspect, hostAspect) * 2;
+    }
+
+    private static bool IsHostMovieChromaCandidateForLuma(
+        GuestDrawTexture luma,
+        GuestDrawTexture chroma) =>
+        chroma.Address != 0 &&
+        chroma.Address != luma.Address &&
+        !chroma.IsStorage &&
+        !chroma.IsFallback &&
+        !chroma.ArrayedView &&
+        chroma.ArrayLayers <= 1 &&
+        chroma.Format == 3 &&
+        chroma.NumberType == 0 &&
+        luma.Width == chroma.Width * 2 &&
+        luma.Height == chroma.Height * 2;
+
     // A guest image accepts a request in a different Vulkan format without
     // being recreated when the two formats are the same texel layout read
     // through different transfer functions (sRGB vs UNORM counterparts).
@@ -8859,26 +8944,18 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_hostMovieLumaTextureAddress != 0 &&
                 _hostMovieChromaTextureAddress != 0)
             {
-                var lumaIndex = -1;
-                var chromaIndex = -1;
-                for (var index = 0; index < textures.Count; index++)
-                {
-                    if (textures[index].Address == _hostMovieLumaTextureAddress)
-                    {
-                        lumaIndex = index;
-                    }
-                    else if (textures[index].Address == _hostMovieChromaTextureAddress)
-                    {
-                        chromaIndex = index;
-                    }
-                }
-
-                if (lumaIndex >= 0 && chromaIndex >= 0)
+                var remembered = SelectRememberedHostMovieTextureBindings(
+                    textures,
+                    _hostMovieLumaTextureAddress,
+                    _hostMovieChromaTextureAddress,
+                    _hostMovieFrameWidth,
+                    _hostMovieFrameHeight);
+                if (remembered.Chroma >= 0)
                 {
                     return RememberHostMovieTextureMappings(
                         textures,
-                        lumaIndex,
-                        chromaIndex);
+                        remembered.Luma,
+                        remembered.Chroma);
                 }
 
                 // Bluepoint alternates decoder output between multiple Y/UV
@@ -8955,43 +9032,15 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private bool IsHostMovieLumaCandidate(GuestDrawTexture texture)
-        {
-            if (texture.Address == 0 ||
-                texture.IsStorage ||
-                texture.IsFallback ||
-                texture.ArrayedView ||
-                texture.ArrayLayers > 1 ||
-                texture.Format != 1 ||
-                texture.NumberType != 0 ||
-                texture.Width < 1280 ||
-                texture.Height < 720)
-            {
-                return false;
-            }
-
-            var guestAspect = (ulong)texture.Width * _hostMovieFrameHeight;
-            var hostAspect = (ulong)texture.Height * _hostMovieFrameWidth;
-            var difference = guestAspect > hostAspect
-                ? guestAspect - hostAspect
-                : hostAspect - guestAspect;
-            return difference * 100 <= Math.Max(guestAspect, hostAspect) * 2;
-        }
+            => IsHostMovieLumaCandidateForFrame(
+                texture,
+                _hostMovieFrameWidth,
+                _hostMovieFrameHeight);
 
         private static bool IsHostMovieChromaCandidate(
             GuestDrawTexture luma,
-            GuestDrawTexture chroma)
-        {
-            return chroma.Address != 0 &&
-                   chroma.Address != luma.Address &&
-                   !chroma.IsStorage &&
-                   !chroma.IsFallback &&
-                   !chroma.ArrayedView &&
-                   chroma.ArrayLayers <= 1 &&
-                   chroma.Format == 3 &&
-                   chroma.NumberType == 0 &&
-                   luma.Width == chroma.Width * 2 &&
-                   luma.Height == chroma.Height * 2;
-        }
+            GuestDrawTexture chroma) =>
+            IsHostMovieChromaCandidateForLuma(luma, chroma);
 
         private TextureResource CreateHostMovieTextureResource(
             GuestDrawTexture texture,
