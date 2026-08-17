@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -241,6 +242,71 @@ public sealed class AgcFusedShaderTests
         Assert.Equal(0x5555_5555u, ReadUInt32(memory, Scratch + 36));
     }
 
+    [Fact]
+    public void FuseShaderHalves_RegistersBothProgramSegmentsForTranslation()
+    {
+        var (memory, ctx) = CreateGsPair();
+        var entryCode = BaseAddress + 0x1000;
+        var continuationCode = BaseAddress + 0x1100;
+        WriteUInt64(memory, FrontShader + ShaderCodeOffset, entryCode);
+        WriteUInt64(memory, BackShader + ShaderCodeOffset, continuationCode);
+        WriteUInt32(memory, FrontShader + 0x44, 2 * sizeof(uint));
+        WriteUInt32(memory, BackShader + 0x44, 2 * sizeof(uint));
+        WriteWords(memory, entryCode, 0xBF800000u, 0xBE802000u);
+        WriteWords(memory, continuationCode, 0xBF800000u, 0xBF810000u);
+
+        ctx[CpuRegister.Rdi] = FusedShader;
+        ctx[CpuRegister.Rsi] = FrontShader;
+        ctx[CpuRegister.Rdx] = BackShader;
+        ctx[CpuRegister.Rcx] = Scratch;
+        Assert.Equal(0, AgcExports.FuseShaderHalves(ctx));
+
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                entryCode,
+                out var program,
+                out var error),
+            error);
+        Assert.Equal(
+            ["SNop", "SNop", "SNop", "SEndpgm"],
+            program.Instructions.Select(static instruction => instruction.Opcode));
+    }
+
+    [Fact]
+    public void EmbeddedFusedProgram_RegistersValidatedContinuationDescriptor()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1_0000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var entryHeader = BaseAddress + 0x100;
+        var entryCode = BaseAddress + 0x1000;
+        var continuationHeader = entryCode + 0x80;
+        var continuationCode = entryCode + 0x200;
+
+        WriteUInt32(memory, entryHeader, 0x34333231u);
+        WriteUInt32(memory, entryHeader + sizeof(uint), 0x18u);
+        WriteUInt64(memory, entryHeader + ShaderCodeOffset, entryCode);
+        WriteUInt32(memory, entryHeader + 0x44, 2 * sizeof(uint));
+        WriteByte(memory, entryHeader + ShaderTypeOffset, GsFront);
+        WriteWords(memory, entryCode, 0xBF800000u, 0xBE802000u);
+
+        WriteUInt32(memory, continuationHeader, 0x34333231u);
+        WriteUInt32(memory, continuationHeader + sizeof(uint), 0x18u);
+        WriteUInt64(memory, continuationHeader + ShaderCodeOffset, continuationCode);
+        WriteUInt32(memory, continuationHeader + 0x44, 2 * sizeof(uint));
+        WriteByte(memory, continuationHeader + ShaderTypeOffset, GsBack);
+        WriteWords(memory, continuationCode, 0xBF800000u, 0xBF810000u);
+
+        Assert.True(
+            AgcExports.TryRegisterEmbeddedFusedProgram(ctx, entryCode, entryHeader));
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(ctx, entryCode, out var program, out var error),
+            error);
+        Assert.Equal(
+            ["SNop", "SNop", "SNop", "SEndpgm"],
+            program.Instructions.Select(static instruction => instruction.Opcode));
+    }
+
     private static (FakeCpuMemory Memory, CpuContext Ctx) CreateGsPair()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
@@ -305,6 +371,19 @@ public sealed class AgcFusedShaderTests
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
         Assert.True(memory.TryWrite(address, buffer));
+    }
+
+    private static void WriteWords(FakeCpuMemory memory, ulong address, params uint[] words)
+    {
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bytes.AsSpan(index * sizeof(uint), sizeof(uint)),
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(address, bytes));
     }
 
     private static byte ReadByte(FakeCpuMemory memory, ulong address)

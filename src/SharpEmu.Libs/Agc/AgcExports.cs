@@ -1196,6 +1196,7 @@ public static partial class AgcExports
     private const ulong ShaderSpecialsOffset = 0x28;
     private const ulong ShaderInputSemanticsOffset = 0x30;
     private const ulong ShaderOutputSemanticsOffset = 0x38;
+    private const ulong ShaderSizeOffset = 0x44;
     private const ulong ResourceRegistrationBytesPerResource = 0x118;
     private const ulong ResourceRegistrationBytesPerOwner = 0x1E0;
     private const int ResourceRegistrationMaxNameLength = 256;
@@ -1204,6 +1205,8 @@ public static partial class AgcExports
     private const ulong ShaderTypeOffset = 0x5A;
     private const ulong ShaderNumShRegistersOffset = 0x5C;
     private const int ShaderStructBytes = 0x60;
+    private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
+    private const int MaximumEmbeddedFusedScanBytes = 64 * 1024;
     private const ulong FusedShaderImageAlignment = 4;
     private const byte ComputeShaderType = 0;
     private const byte PsShaderType = 1;
@@ -1258,6 +1261,10 @@ public static partial class AgcExports
         (ulong Es, ulong State, ulong AliasAlignment),
         IGuestCompiledShader> _depthOnlyVertexShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
+    private static readonly ConditionalWeakTable<
+        object,
+        ConcurrentDictionary<(ulong Code, ulong Header), byte>>
+        _embeddedFusedScanAttempts = new();
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
     private static readonly bool _traceAgc = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
@@ -1908,9 +1915,159 @@ public static partial class AgcExports
             _shaderHeadersByCode[codeAddress] = headerAddress;
         }
 
+        TryRegisterEmbeddedFusedProgram(ctx, codeAddress, headerAddress);
+
         TraceCreateShader(destinationAddress, headerAddress, codeAddress, "ok");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Registers a pre-combined shader whose continuation descriptor is in the
+    /// same AGC upload. Some titles create this object without a fuse API call.
+    /// </summary>
+    internal static bool TryRegisterEmbeddedFusedProgram(
+        CpuContext ctx,
+        ulong entryCodeAddress,
+        ulong entryHeaderAddress)
+    {
+        if (!TryReadByte(ctx, entryHeaderAddress + ShaderTypeOffset, out var entryType) ||
+            entryType is not (GsFrontShaderType or HsFrontShaderType))
+        {
+            return false;
+        }
+
+        var attempts = _embeddedFusedScanAttempts.GetValue(
+            ctx.Memory,
+            static _ => new ConcurrentDictionary<(ulong Code, ulong Header), byte>());
+        if (!attempts.TryAdd((entryCodeAddress, entryHeaderAddress), 0))
+        {
+            return false;
+        }
+
+        if (!TryReadUInt32(ctx, entryHeaderAddress + ShaderSizeOffset, out var entrySize) ||
+            !IsValidDeclaredShaderSize(entrySize))
+        {
+            return false;
+        }
+
+        var upload = new byte[MaximumEmbeddedFusedScanBytes];
+        var bytesRead = 0;
+        const int readChunkBytes = 4 * 1024;
+        while (bytesRead < upload.Length)
+        {
+            var chunkLength = Math.Min(readChunkBytes, upload.Length - bytesRead);
+            if (!ctx.Memory.TryRead(
+                    entryCodeAddress + (ulong)bytesRead,
+                    upload.AsSpan(bytesRead, chunkLength)))
+            {
+                break;
+            }
+
+            bytesRead += chunkLength;
+        }
+
+        if (bytesRead < ShaderStructBytes)
+        {
+            return false;
+        }
+
+        var requiredContinuationType = entryType == GsFrontShaderType
+            ? GsBackShaderType
+            : HsBackShaderType;
+        var waveSizeBit = entryType == GsFrontShaderType
+            ? VgtShaderStagesGsW32EnBit
+            : VgtShaderStagesHsW32EnBit;
+        TryReadUInt64(
+            ctx,
+            entryHeaderAddress + ShaderSpecialsOffset,
+            out var entrySpecialsAddress);
+
+        ulong bestCodeAddress = 0;
+        ulong bestHeaderAddress = 0;
+        var bestDistance = ulong.MaxValue;
+        for (var offset = 0;
+             offset <= bytesRead - ShaderStructBytes;
+             offset += sizeof(uint))
+        {
+            var descriptor = upload.AsSpan(offset, ShaderStructBytes);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(descriptor) != ShaderFileHeader ||
+                BinaryPrimitives.ReadUInt32LittleEndian(descriptor[sizeof(uint)..]) != ShaderVersion ||
+                descriptor[(int)ShaderTypeOffset] != requiredContinuationType)
+            {
+                continue;
+            }
+
+            var continuationCodeAddress = BinaryPrimitives.ReadUInt64LittleEndian(
+                descriptor[(int)ShaderCodeOffset..]);
+            var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
+                descriptor[(int)ShaderSizeOffset..]);
+            if (continuationCodeAddress <= entryCodeAddress ||
+                continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
+                !IsValidDeclaredShaderSize(continuationSize) ||
+                !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
+            {
+                continue;
+            }
+
+            var continuationSpecialsAddress = BinaryPrimitives.ReadUInt64LittleEndian(
+                descriptor[(int)ShaderSpecialsOffset..]);
+            if (entrySpecialsAddress != 0 && continuationSpecialsAddress != 0)
+            {
+                if (!TryReadUInt32(
+                        ctx,
+                        entrySpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
+                        out var entryStages) ||
+                    !TryReadUInt32(
+                        ctx,
+                        continuationSpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
+                        out var continuationStages) ||
+                    ((entryStages ^ continuationStages) & waveSizeBit) != 0)
+                {
+                    continue;
+                }
+            }
+
+            var distance = continuationCodeAddress - entryCodeAddress;
+            if (distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            bestCodeAddress = continuationCodeAddress;
+            bestHeaderAddress = entryCodeAddress + (ulong)offset;
+        }
+
+        if (bestHeaderAddress == 0)
+        {
+            return false;
+        }
+
+        Gen5ShaderTranslator.RegisterFusedProgram(
+            ctx,
+            entryCodeAddress,
+            entryHeaderAddress,
+            bestCodeAddress,
+            bestHeaderAddress);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.fused_shader_discovered " +
+            $"entry=0x{entryCodeAddress:X16} type={entryType} size=0x{entrySize:X} " +
+            $"continuation=0x{bestCodeAddress:X16} type={requiredContinuationType} " +
+            $"header=0x{bestHeaderAddress:X16}");
+        return true;
+    }
+
+    private static bool IsValidDeclaredShaderSize(uint size) =>
+        size != 0 &&
+        (size & (sizeof(uint) - 1)) == 0 &&
+        size <= MaximumDeclaredShaderSizeBytes;
+
+    private static bool CanReadShaderRange(CpuContext ctx, ulong address, uint size)
+    {
+        Span<byte> word = stackalloc byte[sizeof(uint)];
+        return ctx.Memory.TryRead(address, word) &&
+               ctx.Memory.TryRead(address + size - sizeof(uint), word);
     }
 
     // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
@@ -2009,7 +2166,8 @@ public static partial class AgcExports
 
         if (!TryReadUInt64(ctx, backAddress + ShaderShRegistersOffset, out var backRegistersAddress) ||
             !TryReadByte(ctx, backAddress + ShaderNumShRegistersOffset, out var registerCount) ||
-            !TryReadUInt64(ctx, frontAddress + ShaderCodeOffset, out var frontCodeAddress))
+            !TryReadUInt64(ctx, frontAddress + ShaderCodeOffset, out var frontCodeAddress) ||
+            !TryReadUInt64(ctx, backAddress + ShaderCodeOffset, out var backCodeAddress))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -2075,10 +2233,18 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        Gen5ShaderTranslator.RegisterFusedProgram(
+            ctx,
+            frontCodeAddress,
+            frontAddress,
+            backCodeAddress,
+            backAddress);
+
         TraceAgc(
             $"agc.fuse_shader_halves fused=0x{fusedAddress:X16} front=0x{frontAddress:X16} " +
             $"back=0x{backAddress:X16} scratch=0x{scratchAddress:X16} types={frontType}/{backType} " +
-            $"registers={registerCount} code=0x{frontCodeAddress:X16}");
+            $"registers={registerCount} entry=0x{frontCodeAddress:X16} " +
+            $"continuation=0x{backCodeAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -9094,6 +9260,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
         }
 
+        TryRegisterEmbeddedFusedProgram(ctx, exportShaderAddress, exportShaderHeader);
+
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
                 exportShaderAddress,
@@ -9305,6 +9473,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
             _shaderHeadersByCode.TryGetValue(pixelShaderAddress, out pixelShaderHeader);
         }
+
+        TryRegisterEmbeddedFusedProgram(ctx, exportShaderAddress, exportShaderHeader);
 
         // Sequential (not short-circuited into one condition) so a failure
         // after an evaluation succeeded can return that evaluation's pooled

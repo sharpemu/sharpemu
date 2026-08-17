@@ -187,6 +187,8 @@ public static class Gen5ShaderTranslator
         register < 256 && (mask[register >> 6] & (1UL << (int)(register & 63))) != 0;
 
     private const int MaxInstructions = 16384;
+    private const ulong ShaderSizeOffset = 0x44;
+    private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
     private const uint PsUserDataRegister = 0x0C;
     private const uint VsUserDataRegister = 0x4C;
     private const uint GsUserDataRegister = 0x8C;
@@ -200,7 +202,43 @@ public static class Gen5ShaderTranslator
     {
         public object Gate { get; } = new();
         public Dictionary<ulong, Gen5ShaderProgram> Programs { get; } = new();
+        public Dictionary<ulong, FusedShaderParts> FusedPrograms { get; } = new();
         public Dictionary<ulong, Gen5ShaderMetadata?> Metadata { get; } = new();
+    }
+
+    private sealed record FusedShaderParts(
+        ulong EntryHeaderAddress,
+        ulong ContinuationAddress,
+        ulong ContinuationHeaderAddress);
+
+    /// <summary>
+    /// Records the two code objects that AGC joins into one hardware shader.
+    /// The entry code transfers control to the continuation with S_SETPC_B64.
+    /// </summary>
+    public static void RegisterFusedProgram(
+        CpuContext ctx,
+        ulong entryAddress,
+        ulong entryHeaderAddress,
+        ulong continuationAddress,
+        ulong continuationHeaderAddress)
+    {
+        if (entryAddress == 0 ||
+            entryHeaderAddress == 0 ||
+            continuationAddress == 0 ||
+            continuationHeaderAddress == 0)
+        {
+            return;
+        }
+
+        var cache = _decodeCaches.GetValue(ctx.Memory, static _ => new ShaderDecodeCache());
+        lock (cache.Gate)
+        {
+            cache.FusedPrograms[entryAddress] = new FusedShaderParts(
+                entryHeaderAddress,
+                continuationAddress,
+                continuationHeaderAddress);
+            cache.Programs.Remove(entryAddress);
+        }
     }
 
     private static readonly uint[] FullscreenBarycentricEs =
@@ -535,7 +573,159 @@ public static class Gen5ShaderTranslator
         out string error)
     {
         ValidateDppControlVectors();
+        var cache = _decodeCaches.GetValue(ctx.Memory, static _ => new ShaderDecodeCache());
+        FusedShaderParts? fusedParts;
+        lock (cache.Gate)
+        {
+            cache.FusedPrograms.TryGetValue(address, out fusedParts);
+        }
+
+        if (fusedParts is not null)
+        {
+            return TryDecodeFusedProgram(ctx, address, fusedParts, out program, out error);
+        }
+
+        return TryDecodeProgramSegment(
+            ctx,
+            address,
+            maximumBytes: null,
+            stopAtSetProgramCounter: false,
+            out program,
+            out _,
+            out error);
+    }
+
+    private enum ProgramTermination
+    {
+        None,
+        EndProgram,
+        SetProgramCounter,
+    }
+
+    private static bool TryDecodeFusedProgram(
+        CpuContext ctx,
+        ulong entryAddress,
+        FusedShaderParts parts,
+        out Gen5ShaderProgram program,
+        out string error)
+    {
+        program = new Gen5ShaderProgram(entryAddress, []);
+        if (!TryReadDeclaredShaderSize(ctx, parts.EntryHeaderAddress, out var entrySize, out error) ||
+            !TryReadDeclaredShaderSize(
+                ctx,
+                parts.ContinuationHeaderAddress,
+                out var continuationSize,
+                out error))
+        {
+            return false;
+        }
+
+        if (parts.ContinuationAddress <= entryAddress ||
+            parts.ContinuationAddress - entryAddress > uint.MaxValue ||
+            ((parts.ContinuationAddress - entryAddress) & (sizeof(uint) - 1)) != 0)
+        {
+            error = $"invalid-fused-layout entry=0x{entryAddress:X} " +
+                $"continuation=0x{parts.ContinuationAddress:X}";
+            return false;
+        }
+
+        if (!TryDecodeProgramSegment(
+                ctx,
+                entryAddress,
+                entrySize,
+                stopAtSetProgramCounter: true,
+                out var entryProgram,
+                out var entryTermination,
+                out error))
+        {
+            error = $"fused-entry: {error}";
+            return false;
+        }
+
+        if (entryTermination != ProgramTermination.SetProgramCounter ||
+            entryProgram.Instructions.Count == 0)
+        {
+            error = $"fused-entry-missing-setpc entry=0x{entryAddress:X}";
+            return false;
+        }
+
+        if (!TryDecodeProgramSegment(
+                ctx,
+                parts.ContinuationAddress,
+                continuationSize,
+                stopAtSetProgramCounter: false,
+                out var continuationProgram,
+                out _,
+                out error))
+        {
+            error = $"fused-continuation: {error}";
+            return false;
+        }
+
+        var continuationPc = checked((uint)(parts.ContinuationAddress - entryAddress));
+        var instructions = new List<Gen5ShaderInstruction>(
+            entryProgram.Instructions.Count + continuationProgram.Instructions.Count);
+        instructions.AddRange(entryProgram.Instructions.Take(entryProgram.Instructions.Count - 1));
+
+        var setProgramCounter = entryProgram.Instructions[^1];
+        instructions.Add(setProgramCounter with
+        {
+            Encoding = Gen5ShaderEncoding.Sopp,
+            Opcode = "SNop",
+            Words = [0xBF800000u],
+            Sources = [],
+            Destinations = [],
+            Control = null,
+        });
+
+        foreach (var instruction in continuationProgram.Instructions)
+        {
+            var rebasedPc = (ulong)continuationPc + instruction.Pc;
+            if (rebasedPc > uint.MaxValue)
+            {
+                error = $"fused-continuation-pc-overflow pc=0x{instruction.Pc:X} " +
+                    $"base=0x{continuationPc:X}";
+                return false;
+            }
+
+            instructions.Add(instruction with { Pc = (uint)rebasedPc });
+        }
+
+        program = new Gen5ShaderProgram(entryAddress, instructions);
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadDeclaredShaderSize(
+        CpuContext ctx,
+        ulong headerAddress,
+        out uint sizeBytes,
+        out string error)
+    {
+        if (!TryReadUInt32(ctx, headerAddress + ShaderSizeOffset, out sizeBytes) ||
+            sizeBytes == 0 ||
+            (sizeBytes & (sizeof(uint) - 1)) != 0 ||
+            sizeBytes > MaximumDeclaredShaderSizeBytes)
+        {
+            error = $"invalid-shader-size header=0x{headerAddress:X} size=0x{sizeBytes:X}";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool TryDecodeProgramSegment(
+        CpuContext ctx,
+        ulong address,
+        uint? maximumBytes,
+        bool stopAtSetProgramCounter,
+        out Gen5ShaderProgram program,
+        out ProgramTermination termination,
+        out string error)
+    {
         program = new Gen5ShaderProgram(address, []);
+        termination = ProgramTermination.None;
         error = string.Empty;
         if (address == 0)
         {
@@ -545,8 +735,16 @@ public static class Gen5ShaderTranslator
 
         var instructions = new List<Gen5ShaderInstruction>();
         var instructionCount = 0;
-        for (uint pc = 0; instructionCount < MaxInstructions;)
+        for (uint pc = 0;
+             instructionCount < MaxInstructions &&
+             (!maximumBytes.HasValue || pc < maximumBytes.Value);)
         {
+            if (maximumBytes.HasValue && maximumBytes.Value - pc < sizeof(uint))
+            {
+                error = $"truncated-word pc=0x{pc:X} limit=0x{maximumBytes.Value:X}";
+                return false;
+            }
+
             if (!TryReadUInt32(ctx, address + pc, out var word))
             {
                 error = $"read-failed pc=0x{pc:X}";
@@ -563,6 +761,14 @@ public static class Gen5ShaderTranslator
                     out var sizeDwords,
                     out error))
             {
+                return false;
+            }
+
+            var instructionBytes = checked(sizeDwords * sizeof(uint));
+            if (maximumBytes.HasValue && instructionBytes > maximumBytes.Value - pc)
+            {
+                error = $"truncated-instruction pc=0x{pc:X} dwords={sizeDwords} " +
+                    $"limit=0x{maximumBytes.Value:X}";
                 return false;
             }
 
@@ -592,11 +798,22 @@ public static class Gen5ShaderTranslator
             if (string.Equals(name, "SEndpgm", StringComparison.Ordinal))
             {
                 program = new Gen5ShaderProgram(address, instructions);
+                termination = ProgramTermination.EndProgram;
+                return true;
+            }
+
+            if (stopAtSetProgramCounter &&
+                string.Equals(name, "SSetpcB64", StringComparison.Ordinal))
+            {
+                program = new Gen5ShaderProgram(address, instructions);
+                termination = ProgramTermination.SetProgramCounter;
                 return true;
             }
         }
 
-        error = "unterminated";
+        error = maximumBytes.HasValue
+            ? $"unterminated limit=0x{maximumBytes.Value:X}"
+            : "unterminated";
         return false;
     }
 
