@@ -38,8 +38,13 @@ internal sealed class MediaFramePlayback : IDisposable
     private long _nextDecodedFrameIndex;
     private long _playbackStartTimestamp;
     private double _audioStartSeconds;
+    private long _pausedWallTicks;
+    private double _pausedAudioSeconds;
+    private long _pauseStartTimestamp;
+    private double _pauseAudioStartSeconds;
     private long _lastSkewTraceTimestamp;
     private bool _playbackClockStarted;
+    private bool _paused;
     private bool _decoderCompleted;
     private bool _stopRequested;
     private bool _finished;
@@ -99,10 +104,52 @@ internal sealed class MediaFramePlayback : IDisposable
             {
                 return (
                     _playbackClockStarted
-                        ? Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds
+                        ? CurrentWallPlaybackSecondsLocked()
                         : 0,
                     _currentFrameIndex);
             }
+        }
+    }
+
+    internal void Pause()
+    {
+        lock (_gate)
+        {
+            if (_paused)
+            {
+                return;
+            }
+
+            _paused = true;
+            if (_playbackClockStarted)
+            {
+                _pauseStartTimestamp = Stopwatch.GetTimestamp();
+                _pauseAudioStartSeconds = GuestAudioClock.PlayedSeconds;
+            }
+        }
+    }
+
+    internal void Resume()
+    {
+        lock (_gate)
+        {
+            if (!_paused)
+            {
+                return;
+            }
+
+            if (_playbackClockStarted)
+            {
+                var now = Stopwatch.GetTimestamp();
+                _pausedWallTicks += Math.Max(0, now - _pauseStartTimestamp);
+                _pausedAudioSeconds += Math.Max(
+                    0,
+                    GuestAudioClock.PlayedSeconds - _pauseAudioStartSeconds);
+            }
+
+            _paused = false;
+            _pauseStartTimestamp = 0;
+            _pauseAudioStartSeconds = 0;
         }
     }
 
@@ -115,7 +162,7 @@ internal sealed class MediaFramePlayback : IDisposable
         {
             pixels = [];
             advanced = false;
-            if (_finished)
+            if (_finished || _paused)
             {
                 return false;
             }
@@ -142,6 +189,8 @@ internal sealed class MediaFramePlayback : IDisposable
             {
                 _playbackStartTimestamp = Stopwatch.GetTimestamp();
                 _audioStartSeconds = GuestAudioClock.PlayedSeconds;
+                _pausedWallTicks = 0;
+                _pausedAudioSeconds = 0;
                 _playbackClockStarted = true;
             }
 
@@ -189,6 +238,89 @@ internal sealed class MediaFramePlayback : IDisposable
     }
 
     /// <summary>
+    /// Returns the newest decoded frame that does not exceed the frame that
+    /// the guest received. Decode can run ahead, but it cannot make a frame
+    /// visible before the AvPlayer client receives that frame.
+    /// </summary>
+    internal bool TryGetFrameAtOrBeforeIndex(
+        long targetFrameIndex,
+        out byte[] pixels,
+        out long frameIndex,
+        out bool advanced)
+    {
+        lock (_gate)
+        {
+            pixels = [];
+            frameIndex = -1;
+            advanced = false;
+            if (_finished || _paused || targetFrameIndex < 0)
+            {
+                return false;
+            }
+
+            if (_currentFrame is null)
+            {
+                if (_decodedFrames.Count == 0)
+                {
+                    if (_decoderCompleted)
+                    {
+                        _finished = true;
+                    }
+                    return false;
+                }
+
+                var first = _decodedFrames.Dequeue();
+                _currentFrame = first.Pixels;
+                _currentFrameIndex = first.Index;
+                advanced = true;
+                Monitor.PulseAll(_gate);
+            }
+
+            if (_currentFrameIndex > targetFrameIndex)
+            {
+                return false;
+            }
+
+            DecodedFrame? replacement = null;
+            while (_decodedFrames.Count > 0 &&
+                   _decodedFrames.Peek().Index <= targetFrameIndex)
+            {
+                if (replacement is { } skipped)
+                {
+                    _freeBuffers.Enqueue(skipped.Pixels);
+                }
+                replacement = _decodedFrames.Dequeue();
+            }
+
+            if (replacement is { } next)
+            {
+                if (_retiredFrame is not null)
+                {
+                    _freeBuffers.Enqueue(_retiredFrame);
+                }
+                _retiredFrame = _currentFrame;
+                _currentFrame = next.Pixels;
+                _currentFrameIndex = next.Index;
+                advanced = true;
+                Monitor.PulseAll(_gate);
+            }
+
+            if (_decoderCompleted &&
+                _decodedFrames.Count == 0 &&
+                _currentFrameIndex < targetFrameIndex &&
+                !advanced)
+            {
+                _finished = true;
+                return false;
+            }
+
+            pixels = _currentFrame;
+            frameIndex = _currentFrameIndex;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Time base for playback. A host-decoded movie runs on whatever clock it is
     /// given, but the audio that belongs to it comes from the guest, which does
     /// not advance at wall-clock rate on a slow frame. Following the audio keeps
@@ -212,13 +344,43 @@ internal sealed class MediaFramePlayback : IDisposable
             return 0;
         }
 
-        var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
+        var wallSeconds = CurrentWallPlaybackSecondsLocked();
         if (!_followGuestAudioClock || !GuestAudioClock.IsRunning)
         {
             return wallSeconds;
         }
 
-        return Math.Clamp(GuestAudioClock.PlayedSeconds - _audioStartSeconds, 0, wallSeconds);
+        return Math.Clamp(CurrentAudioPlaybackSecondsLocked(), 0, wallSeconds);
+    }
+
+    private double CurrentAudioPlaybackSecondsLocked()
+    {
+        var pausedAudioSeconds = _pausedAudioSeconds;
+        if (_paused)
+        {
+            pausedAudioSeconds += Math.Max(
+                0,
+                GuestAudioClock.PlayedSeconds - _pauseAudioStartSeconds);
+        }
+
+        return Math.Max(
+            0,
+            GuestAudioClock.PlayedSeconds - _audioStartSeconds - pausedAudioSeconds);
+    }
+
+    private double CurrentWallPlaybackSecondsLocked()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var pausedTicks = _pausedWallTicks;
+        if (_paused)
+        {
+            pausedTicks += Math.Max(0, now - _pauseStartTimestamp);
+        }
+
+        return Math.Max(
+            0,
+            (now - _playbackStartTimestamp - pausedTicks) /
+            (double)Stopwatch.Frequency);
     }
 
     private static readonly bool _traceClockSkew = string.Equals(
@@ -247,11 +409,12 @@ internal sealed class MediaFramePlayback : IDisposable
         }
 
         _lastSkewTraceTimestamp = now;
-        var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
-        var audioSeconds = GuestAudioClock.PlayedSeconds - _audioStartSeconds;
+        var wallSeconds = CurrentWallPlaybackSecondsLocked();
+        var audioSeconds = CurrentAudioPlaybackSecondsLocked();
+        var playbackSeconds = CurrentPlaybackSecondsLocked();
         Console.Error.WriteLine(
             $"[PERF][MOVIE] wall_s={wallSeconds:F2} audio_s={audioSeconds:F2} " +
-            $"playback_s={CurrentPlaybackSecondsLocked():F2} " +
+            $"playback_s={playbackSeconds:F2} " +
             $"skew_s={wallSeconds - audioSeconds:F2} frame={_currentFrameIndex} " +
             $"audio_running={GuestAudioClock.IsRunning}");
     }

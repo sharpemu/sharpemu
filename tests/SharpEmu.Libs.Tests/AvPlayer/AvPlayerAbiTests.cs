@@ -13,15 +13,88 @@ public sealed class AvPlayerAbiTests
 {
     [Theory]
     [InlineData(Generation.Gen4, false, 108UL)]
-    [InlineData(Generation.Gen5, false, 112UL)]
+    [InlineData(Generation.Gen5, false, 108UL)]
     [InlineData(Generation.Gen4, true, 164UL)]
-    [InlineData(Generation.Gen5, true, 168UL)]
+    [InlineData(Generation.Gen5, true, 116UL)]
     public void InitAutoStartOffsetMatchesGeneration(
         Generation generation,
         bool extended,
         ulong expected)
     {
         Assert.Equal(expected, AvPlayerExports.GetAutoStartOffset(generation, extended));
+    }
+
+    [Theory]
+    [InlineData(Generation.Gen4, false, 104UL)]
+    [InlineData(Generation.Gen5, false, 104UL)]
+    [InlineData(Generation.Gen4, true, 600UL)]
+    [InlineData(Generation.Gen5, true, 552UL)]
+    public void InitVideoBufferCountOffsetMatchesGeneration(
+        Generation generation,
+        bool extended,
+        ulong expected)
+    {
+        Assert.Equal(
+            expected,
+            AvPlayerExports.GetOutputVideoFrameBufferCountOffset(
+                generation,
+                extended));
+    }
+
+    [Theory]
+    [InlineData(-1, 2)]
+    [InlineData(0, 2)]
+    [InlineData(1, 2)]
+    [InlineData(2, 2)]
+    [InlineData(7, 7)]
+    [InlineData(16, 16)]
+    [InlineData(17, 2)]
+    public void VideoBufferCountUsesTheDocumentedRange(int requested, int expected)
+    {
+        Assert.Equal(
+            expected,
+            AvPlayerExports.NormalizeOutputVideoFrameBufferCount(requested));
+    }
+
+    [Theory]
+    [InlineData(0u, true)]
+    [InlineData(1u, true)]
+    [InlineData(2u, false)]
+    [InlineData(uint.MaxValue, false)]
+    public void AvSyncModeRejectsUnknownValues(uint mode, bool expected)
+    {
+        Assert.Equal(expected, AvPlayerExports.IsValidAvSyncMode(mode));
+    }
+
+    [Fact]
+    public void DefaultSyncUsesDeliveredAudioAsTheVideoClock()
+    {
+        Assert.Equal(
+            0,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: true,
+                deliveredAudioFrameCount: 0,
+                internalClockSeconds: 10,
+                framesPerSecond: 60));
+        Assert.Equal(
+            1,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: true,
+                deliveredAudioFrameCount: 1,
+                internalClockSeconds: 10,
+                framesPerSecond: 60));
+    }
+
+    [Fact]
+    public void DefaultVideoOnlySyncUsesTheInternalClock()
+    {
+        Assert.Equal(
+            90,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: false,
+                deliveredAudioFrameCount: 0,
+                internalClockSeconds: 3,
+                framesPerSecond: 30));
     }
 
     [Theory]
@@ -143,5 +216,56 @@ public sealed class AvPlayerAbiTests
                 guestEndOfStream: false,
                 completedTicks,
                 completedTicks + (Stopwatch.Frequency * 2)));
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    public void PendingFallbackCompletionWaitsForLoopingToStop(
+        bool completionPending,
+        bool looping,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AvPlayerExports.ShouldCompleteGuestPlaybackAfterFallback(
+                completionPending,
+                looping));
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    public void FallbackPresentationFollowsGuestPlaybackState(
+        bool started,
+        bool paused,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AvPlayerExports.ShouldPresentFallback(started, paused));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, true, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, false, true, false)]
+    public void CompletedFallbackCannotCreateFrozenPoster(
+        bool fallbackAttempted,
+        bool fallbackRunning,
+        bool hasPresentation,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AvPlayerExports.ShouldCreateFallbackPoster(
+                fallbackAttempted,
+                fallbackRunning,
+                hasPresentation));
     }
 }
