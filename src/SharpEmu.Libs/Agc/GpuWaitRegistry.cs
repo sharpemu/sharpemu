@@ -19,6 +19,11 @@ namespace SharpEmu.Libs.Agc;
 /// </summary>
 internal static class GpuWaitRegistry
 {
+    private static readonly bool _highDwordWaitWakeEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_HIGH_DWORD_WAKE"),
+        "0",
+        StringComparison.Ordinal);
+
     internal enum VirtualLabelEngine : byte
     {
         Pfp,
@@ -459,28 +464,38 @@ internal static class GpuWaitRegistry
     public static bool LatchSatisfiedByValue(object memory, ulong address, ulong value)
     {
         memory = Canonicalize(memory)!;
-        var latchedAny = false;
         lock (_gate)
         {
-            if (!_waiters.TryGetValue(address, out var list))
+            return LatchSatisfiedByValueLocked(memory, address, value);
+        }
+    }
+
+    private static bool LatchSatisfiedByValueLocked(
+        object memory,
+        ulong address,
+        ulong value,
+        bool include64BitWaiters = true)
+    {
+        if (!_waiters.TryGetValue(address, out var list))
+        {
+            return false;
+        }
+
+        var latchedAny = false;
+        for (var index = 0; index < list.Count; index++)
+        {
+            var waiter = list[index];
+            if (waiter.Latched ||
+                (!include64BitWaiters && waiter.Is64Bit) ||
+                !ReferenceEquals(waiter.Memory, memory) ||
+                !Compare(waiter, value))
             {
-                return false;
+                continue;
             }
 
-            for (var i = 0; i < list.Count; i++)
-            {
-                var waiter = list[i];
-                if (waiter.Latched ||
-                    !ReferenceEquals(waiter.Memory, memory) ||
-                    !Compare(waiter, value))
-                {
-                    continue;
-                }
-
-                waiter.Latched = true;
-                list[i] = waiter;
-                latchedAny = true;
-            }
+            waiter.Latched = true;
+            list[index] = waiter;
+            latchedAny = true;
         }
 
         return latchedAny;
@@ -671,7 +686,11 @@ internal static class GpuWaitRegistry
 
     /// <summary>Records the value a label producer wrote, for the deadlock
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
-    public static bool RecordProduced(object memory, ulong address, ulong value)
+    public static bool RecordProduced(
+        object memory,
+        ulong address,
+        ulong value,
+        bool hasHighDword = false)
     {
         memory = Canonicalize(memory)!;
         lock (_gate)
@@ -691,9 +710,27 @@ internal static class GpuWaitRegistry
             _lastProduced[(memory, address)] = value;
             _labelFrameIds[(memory, address)] = System.Threading.Volatile.Read(ref _currentFrameId);
             _virtualLabels.Remove((memory, address));
-        }
+            if (hasHighDword)
+            {
+                var highAddress = address + sizeof(uint);
+                _lastProduced[(memory, highAddress)] = unchecked((uint)(value >> 32));
+                _virtualLabels.Remove((memory, highAddress));
+            }
 
-        return LatchSatisfiedByValue(memory, address, value);
+            var latched = LatchSatisfiedByValueLocked(memory, address, value);
+            if (hasHighDword && _highDwordWaitWakeEnabled)
+            {
+                // The high half is complete only for a 32-bit wait at address
+                // plus four. A 64-bit wait there also needs the next dword.
+                latched |= LatchSatisfiedByValueLocked(
+                    memory,
+                    address + sizeof(uint),
+                    unchecked((uint)(value >> 32)),
+                    include64BitWaiters: false);
+            }
+
+            return latched;
+        }
     }
 
     /// <summary>

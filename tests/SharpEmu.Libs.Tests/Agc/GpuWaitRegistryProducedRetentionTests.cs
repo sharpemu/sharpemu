@@ -341,6 +341,73 @@ public sealed class GpuWaitRegistryProducedRetentionTests
         GpuWaitRegistry.Clear();
     }
 
+    [Fact]
+    public void CpuVisible64BitWriteLatchesHighDwordWait()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var waiter = NewWaiter(memory, WatchedLabel + sizeof(uint));
+        waiter.ReferenceValue = 2;
+        GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
+
+        Assert.True(GpuWaitRegistry.RecordProduced(
+            memory,
+            WatchedLabel,
+            1UL | (2UL << 32),
+            hasHighDword: true));
+
+        var resumed = Assert.Single(
+            Assert.IsType<List<GpuWaitRegistry.WaitingDcb>>(
+                GpuWaitRegistry.CollectSatisfied(memory, static (_, _) => 0)));
+        Assert.Equal(WatchedLabel + sizeof(uint), resumed.WaitAddress);
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void CpuVisible64BitWriteDoesNotLatchOverlapping64BitWait()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var waiter = NewWaiter(memory, WatchedLabel + sizeof(uint));
+        waiter.Is64Bit = true;
+        waiter.ReferenceValue = 2;
+        waiter.Mask = ulong.MaxValue;
+        GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
+
+        Assert.False(GpuWaitRegistry.RecordProduced(
+            memory,
+            WatchedLabel,
+            1UL | (2UL << 32),
+            hasHighDword: true));
+        Assert.Null(GpuWaitRegistry.CollectSatisfied(memory, static (_, _) => 0));
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void HighDwordWriteIsAvailableToDelayedWaiter()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        GpuWaitRegistry.RecordProduced(
+            memory,
+            WatchedLabel,
+            1UL | (2UL << 32),
+            hasHighDword: true);
+
+        var waiter = NewWaiter(memory, WatchedLabel + sizeof(uint));
+        waiter.ReferenceValue = 2;
+        GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
+
+        var resumed = Assert.Single(
+            Assert.IsType<List<GpuWaitRegistry.WaitingDcb>>(
+                GpuWaitRegistry.CollectDeadlockBroken(
+                    memory,
+                    nowTicks: 1_000_000,
+                    minAgeTicks: 1)));
+        Assert.Equal(WatchedLabel + sizeof(uint), resumed.WaitAddress);
+        GpuWaitRegistry.Clear();
+    }
+
     private static GpuWaitRegistry.WaitingDcb NewWaiter(object memory, ulong address) => new()
     {
         WaitAddress = address,

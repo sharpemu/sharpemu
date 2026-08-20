@@ -1110,18 +1110,14 @@ public static class AmprExports
             return false;
         }
 
-        // GPU WAIT_REG_MEM often watches these APR completion labels
-        // (e.g. 0x20505xxx DEADBEEF/counter fences). Without
-        // RecordProduced the wait sits producerless after the guest recycles
-        // the dword, and CollectDeadlockBroken cannot replay the wake.
-        _ = GpuWaitRegistry.RecordProduced(ctx.Memory, address, value);
-        if ((address & 4ul) == 0)
-        {
-            // 32-bit GPU waits use the low dword; also latch that view when the
-            // address is dword-aligned so a u32 compare against ref sees it.
-            _ = GpuWaitRegistry.RecordProduced(
-                ctx.Memory, address, unchecked((uint)value));
-        }
+        // GPU waits can watch either dword of this 64-bit completion label.
+        // Publish both halves as one write so each waiter sees the correct
+        // address and value.
+        _ = GpuWaitRegistry.RecordProduced(
+            ctx.Memory,
+            address,
+            value,
+            hasHighDword: true);
 
         TraceAmpr(ctx, "complete_write_address", address, value, 0);
         return true;
