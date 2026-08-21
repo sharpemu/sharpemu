@@ -1702,6 +1702,9 @@ public static partial class AgcExports
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
         public bool HasActiveSubmission { get; set; }
         public bool IsSuspended { get; set; }
+        public bool IsFaulted { get; set; }
+        public string? FaultReason { get; set; }
+        public bool FaultedSubmissionReported { get; set; }
 
         // Set when parsing stops on an INDIRECT_BUFFER packet so the caller can
         // continue into the buffer it links to.
@@ -4954,6 +4957,12 @@ public static partial class AgcExports
         Dictionary<ulong, SubmittedIndexSnapshot>? indexSnapshots,
         Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots)
     {
+        if (state.IsFaulted)
+        {
+            ReportFaultedSubmissionRejected(state, submissionId);
+            return;
+        }
+
         state.PendingSubmissions.Enqueue(new SubmittedDcbState.PendingSubmission(
             commandAddress,
             dwordCount,
@@ -4964,11 +4973,31 @@ public static partial class AgcExports
         PumpSubmittedQueue(ctx, gpuState, state);
     }
 
+    private static void ReportFaultedSubmissionRejected(
+        SubmittedDcbState state,
+        ulong submissionId)
+    {
+        if (state.FaultedSubmissionReported)
+        {
+            return;
+        }
+
+        state.FaultedSubmissionReported = true;
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] agc.queue_submit_rejected queue={state.QueueName} " +
+            $"submission={submissionId} reason='{state.FaultReason}'");
+    }
+
     private static void PumpSubmittedQueue(
         CpuContext ctx,
         SubmittedGpuState gpuState,
         SubmittedDcbState state)
     {
+        if (state.IsFaulted)
+        {
+            return;
+        }
+
         if (state.IsSuspended)
         {
             // An explicit new submission supersedes a ring-tail park — the
@@ -5002,13 +5031,19 @@ public static partial class AgcExports
             state.ActiveVertexSnapshots = submission.VertexSnapshots;
             state.RingChunkBase = state.IsForceSubmittedRing ? 0 : submission.CommandAddress;
             state.FollowedChunkAdvance = false;
-            state.IsSuspended = ParseSubmittedDcb(
+            var isSuspended = ParseSubmittedDcb(
                 ctx,
                 gpuState,
                 state,
                 submission.CommandAddress,
                 submission.DwordCount,
                 submission.TracePackets);
+            if (state.IsFaulted)
+            {
+                return;
+            }
+
+            state.IsSuspended = isSuspended;
             if (state.IsSuspended)
             {
                 return;
@@ -5075,9 +5110,8 @@ public static partial class AgcExports
         }
     }
 
-    // Returns true only when parsing stopped on an unsatisfied WAIT_REG_MEM.
-    // Malformed packets are dropped as completed so one bad submission cannot
-    // permanently wedge all later work on the same hardware queue.
+    // Returns true when parsing stops on a wait or a terminal queue fault.
+    // Unsupported synchronization packets must not let later GPU work run.
     private static bool ParseSubmittedDcb(
         CpuContext ctx,
         SubmittedGpuState gpuState,
@@ -8075,6 +8109,11 @@ public static partial class AgcExports
         bool tracePackets)
     {
         var state = waiter.State as SubmittedDcbState ?? gpuState.Graphics;
+        if (state.IsFaulted)
+        {
+            return;
+        }
+
         // Any resume ends a ring-tail park; SuspendOnUnwrittenRingWord re-arms
         // it if the continued parse parks again.
         state.RingTailParkAddress = 0;
@@ -8116,13 +8155,19 @@ public static partial class AgcExports
             state.QueueName,
             state.ActiveSubmissionId);
         GuestGpu.Current.RequireGpuLabelDependency(waiter.Dependency);
-        if (ParseSubmittedDcb(
+        var isSuspended = ParseSubmittedDcb(
             ctx,
             gpuState,
             state,
             waiter.ResumeAddress,
             remainingDwords,
-            tracePackets))
+            tracePackets);
+        if (state.IsFaulted)
+        {
+            return;
+        }
+
+        if (isSuspended)
         {
             state.IsSuspended = true;
             return;
@@ -17756,6 +17801,14 @@ GuestImageWriteTracker.Track(
             {
                 for (uint i = 0; i < bufferCount; i++)
                 {
+                    if (gpuState.Graphics.IsFaulted)
+                    {
+                        ReportFaultedSubmissionRejected(
+                            gpuState.Graphics,
+                            gpuState.Graphics.ActiveSubmissionId);
+                        break;
+                    }
+
                     if (!ctx.TryReadUInt64(addressArray + i * 8, out var commandAddress) ||
                         commandAddress == 0 ||
                         !ctx.TryReadUInt32(sizeArray + i * 4, out var dwordCount) ||
@@ -17771,7 +17824,13 @@ GuestImageWriteTracker.Track(
                             $"addr=0x{commandAddress:X16} dwords={dwordCount}");
                     }
 
-                    ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
+                    ParseSubmittedDcb(
+                        ctx,
+                        gpuState,
+                        gpuState.Graphics,
+                        commandAddress,
+                        dwordCount,
+                        tracePackets);
                 }
 
                 DrainResumableDcbs(ctx, gpuState, tracePackets);

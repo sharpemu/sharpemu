@@ -23,9 +23,11 @@ public static partial class AgcExports
             !TryReadUInt32(ctx, packetAddress + (2 * sizeof(uint)), out var addressHigh) ||
             !TryReadUInt32(ctx, packetAddress + (3 * sizeof(uint)), out var control))
         {
-            StopMemSemaphoreQueue(
+            StopSubmittedQueue(
+                ctx,
                 state,
                 packetAddress,
+                ItMemSemaphore,
                 "malformed MEM_SEMAPHORE packet");
             return true;
         }
@@ -35,9 +37,11 @@ public static partial class AgcExports
             packet.Address == 0 ||
             (packet.Address & (sizeof(ulong) - 1)) != 0)
         {
-            StopMemSemaphoreQueue(
+            StopSubmittedQueue(
+                ctx,
                 state,
                 packetAddress,
+                ItMemSemaphore,
                 $"unsupported MEM_SEMAPHORE selection={packet.Selection} " +
                 $"address=0x{packet.Address:X16}");
             return true;
@@ -95,9 +99,11 @@ public static partial class AgcExports
 
         if (!_gpuWaitSuspendEnabled)
         {
-            StopMemSemaphoreQueue(
+            StopSubmittedQueue(
+                ctx,
                 state,
                 packetAddress,
+                ItMemSemaphore,
                 "MEM_SEMAPHORE wait requires queue suspension");
             return true;
         }
@@ -158,14 +164,4 @@ public static partial class AgcExports
         return true;
     }
 
-    private static void StopMemSemaphoreQueue(
-        SubmittedDcbState state,
-        ulong packetAddress,
-        string reason)
-    {
-        Console.Error.WriteLine(
-            $"[LOADER][ERROR] agc.queue_stopped queue={state.QueueName} " +
-            $"submission={state.ActiveSubmissionId} packet=0x{packetAddress:X16} " +
-            $"op=0x{ItMemSemaphore:X2} reason='{reason}'");
-    }
 }

@@ -609,6 +609,40 @@ internal static class GpuWaitRegistry
     }
 
     /// <summary>
+    /// Removes all waiters owned by one queue state in one guest memory.
+    /// A stopped queue must not resume when a later label changes.
+    /// </summary>
+    public static int RemoveAllByState(object memory, object state)
+    {
+        memory = Canonicalize(memory)!;
+        var removed = 0;
+        lock (_gate)
+        {
+            foreach (var address in _waiters.Keys.ToArray())
+            {
+                var list = _waiters[address];
+                for (var index = list.Count - 1; index >= 0; index--)
+                {
+                    var waiter = list[index];
+                    if (ReferenceEquals(waiter.Memory, memory) &&
+                        ReferenceEquals(waiter.State, state))
+                    {
+                        list.RemoveAt(index);
+                        removed++;
+                    }
+                }
+
+                if (list.Count == 0)
+                {
+                    _waiters.Remove(address);
+                }
+            }
+        }
+
+        return removed;
+    }
+
+    /// <summary>
     /// Removes and returns waiters carrying a <see cref="WaitingDcb.RetryDeadlineTicks"/>
     /// that has elapsed. Used for indirect-dispatch dimension retries: the caller
     /// resumes them so a genuinely empty dispatch (dims that never become non-zero)

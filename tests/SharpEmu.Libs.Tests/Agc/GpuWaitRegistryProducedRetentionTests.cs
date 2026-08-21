@@ -408,6 +408,34 @@ public sealed class GpuWaitRegistryProducedRetentionTests
         GpuWaitRegistry.Clear();
     }
 
+    [Fact]
+    public void RemoveAllByState_LeavesOtherQueuesAndMemoriesRegistered()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var otherMemory = new object();
+        var stoppedState = new object();
+        var otherState = new object();
+        var first = NewWaiter(memory, WatchedLabel);
+        first.State = stoppedState;
+        var second = NewWaiter(memory, WatchedLabel + sizeof(uint));
+        second.State = stoppedState;
+        var otherQueue = NewWaiter(memory, WatchedLabel + 8);
+        otherQueue.State = otherState;
+        var otherGuest = NewWaiter(otherMemory, WatchedLabel + 12);
+        otherGuest.State = stoppedState;
+        GpuWaitRegistry.Register(first.WaitAddress, first);
+        GpuWaitRegistry.Register(second.WaitAddress, second);
+        GpuWaitRegistry.Register(otherQueue.WaitAddress, otherQueue);
+        GpuWaitRegistry.Register(otherGuest.WaitAddress, otherGuest);
+
+        Assert.Equal(2, GpuWaitRegistry.RemoveAllByState(memory, stoppedState));
+        Assert.Equal(2, GpuWaitRegistry.Count);
+        Assert.Equal(1, GpuWaitRegistry.CountForMemory(memory));
+        Assert.Equal(1, GpuWaitRegistry.CountForMemory(otherMemory));
+        GpuWaitRegistry.Clear();
+    }
+
     private static GpuWaitRegistry.WaitingDcb NewWaiter(object memory, ulong address) => new()
     {
         WaitAddress = address,
