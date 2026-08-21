@@ -50,6 +50,9 @@ internal static class GpuWaitRegistry
         public uint ControlValue;
         public bool Is64Bit;
         public bool IsStandard;
+        // MEM_SEMAPHORE is a counting wait. Only one signal can release one
+        // waiter, so generic label comparisons must not latch this entry.
+        public bool IsMemSemaphore;
         public object? Memory;
         public string? QueueName;
         public ulong SubmissionId;
@@ -275,6 +278,11 @@ internal static class GpuWaitRegistry
                     if (!satisfied)
                     {
                         var waiter = list[i];
+                        if (waiter.IsMemSemaphore)
+                        {
+                            continue;
+                        }
+
                         ulong? value;
                         GuestGpuLabelDependency dependency = default;
                         var waitCachePolicy = (waiter.ControlValue >> 25) & 0x3u;
@@ -486,6 +494,7 @@ internal static class GpuWaitRegistry
         {
             var waiter = list[index];
             if (waiter.Latched ||
+                waiter.IsMemSemaphore ||
                 (!include64BitWaiters && waiter.Is64Bit) ||
                 !ReferenceEquals(waiter.Memory, memory) ||
                 !Compare(waiter, value))
@@ -499,6 +508,54 @@ internal static class GpuWaitRegistry
         }
 
         return latchedAny;
+    }
+
+    /// <summary>
+    /// Commits one semaphore signal and assigns its token to the oldest waiter.
+    /// The caller holds the semaphore counter lock while this method holds the
+    /// waiter lock, so registration cannot race the counter update.
+    /// </summary>
+    internal static bool CommitMemSemaphoreSignal(
+        object memory,
+        ulong address,
+        Func<bool, bool> commitCounter,
+        out bool waiterAssigned)
+    {
+        memory = Canonicalize(memory)!;
+        waiterAssigned = false;
+        lock (_gate)
+        {
+            var waiterIndex = -1;
+            if (_waiters.TryGetValue(address, out var list))
+            {
+                for (var index = 0; index < list.Count; index++)
+                {
+                    var waiter = list[index];
+                    if (!waiter.Latched &&
+                        waiter.IsMemSemaphore &&
+                        ReferenceEquals(waiter.Memory, memory))
+                    {
+                        waiterIndex = index;
+                        break;
+                    }
+                }
+            }
+
+            if (!commitCounter(waiterIndex >= 0))
+            {
+                return false;
+            }
+
+            if (waiterIndex >= 0)
+            {
+                var waiter = list![waiterIndex];
+                waiter.Latched = true;
+                list[waiterIndex] = waiter;
+                waiterAssigned = true;
+            }
+
+            return true;
+        }
     }
 
     /// <summary>
@@ -832,6 +889,7 @@ internal static class GpuWaitRegistry
             {
                 var waiter = list[index];
                 if (waiter.Latched ||
+                    waiter.IsMemSemaphore ||
                     !ReferenceEquals(waiter.Memory, memory) ||
                     !TryReadVirtualLocked(
                         memory,
@@ -1004,6 +1062,7 @@ internal static class GpuWaitRegistry
                 {
                     var waiter = list[i];
                     if (!ReferenceEquals(waiter.Memory, memory) ||
+                        waiter.IsMemSemaphore ||
                         nowTicks - waiter.RegisteredTicks < minAgeTicks ||
                         !_lastProduced.TryGetValue((memory, address), out var produced) ||
                         !Compare(waiter, produced))
