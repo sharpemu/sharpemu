@@ -378,6 +378,32 @@ public static class NetExports
         }
     }
 
+    [SysAbiExport(
+        Nid = "oBr313PppNE",
+        ExportName = "sendto",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSendTo(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixSendTo(ctx)
+            : SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+    }
+
+    [SysAbiExport(
+        Nid = "lUk6wrGXyMw",
+        ExportName = "recvfrom",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixReceiveFrom(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixReceiveFrom(ctx)
+            : SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+    }
+
     /// <summary>
     /// Formats a binary address as text. Pure conversion with no socket state,
     /// so it behaves identically to the console version for AF_INET/AF_INET6.
