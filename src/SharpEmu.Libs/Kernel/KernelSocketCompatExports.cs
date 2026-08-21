@@ -13,12 +13,25 @@ internal static class KernelSocketCompatExports
 {
     private sealed class EmulatedSocketState
     {
+        public int Family;
+        public int Type;
+        public int Protocol;
         public TcpClient? Client;
         public NetworkStream? Stream;
         public IPAddress BoundAddress = IPAddress.Any;
         public int BoundPort;
         public bool Bound;
         public bool Connected;
+        public bool ReuseAddress;
+        public bool KeepAlive;
+        public bool Broadcast;
+        public bool ReusePort;
+        public bool IPv6Only;
+        public bool NoDelay;
+        public int SendBufferSize;
+        public int ReceiveBufferSize;
+        public int SendLowWater = 1;
+        public int ReceiveLowWater = 1;
     }
 
     private static readonly object Gate = new();
@@ -30,6 +43,58 @@ internal static class KernelSocketCompatExports
         {
             return Sockets.ContainsKey(fd);
         }
+    }
+
+    internal static bool TryGetReadEventState(
+        int fd,
+        ulong lowWater,
+        out bool ready,
+        out ulong availableBytes,
+        out ushort eventFlags)
+    {
+        ready = false;
+        availableBytes = 0;
+        eventFlags = 0;
+
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var state))
+            {
+                return false;
+            }
+
+            if (!state.Connected || state.Client is null)
+            {
+                return true;
+            }
+
+            try
+            {
+                var socket = state.Client.Client;
+                var readSignaled = socket.Poll(0, SelectMode.SelectRead);
+                availableBytes = unchecked((ulong)Math.Max(0, socket.Available));
+                if (readSignaled && availableBytes == 0)
+                {
+                    ready = true;
+                    eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+                }
+                else
+                {
+                    ready = availableBytes >= Math.Max(1UL, lowWater);
+                }
+            }
+            catch (SocketException)
+            {
+                ready = true;
+                eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     internal static bool TryCloseSocketFd(int fd)
@@ -123,6 +188,100 @@ internal static class KernelSocketCompatExports
         return true;
     }
 
+    internal static int PosixSetSocketOption(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var level = unchecked((int)ctx[CpuRegister.Rsi]);
+        var option = unchecked((int)ctx[CpuRegister.Rdx]);
+        var valueAddress = ctx[CpuRegister.Rcx];
+        var valueLength = unchecked((int)ctx[CpuRegister.R8]);
+
+        if (valueAddress == 0)
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        if (valueLength < sizeof(int))
+        {
+            return PosixSocketFailure(ctx, 22);
+        }
+
+        Span<byte> valueBytes = stackalloc byte[sizeof(int)];
+        if (!ctx.Memory.TryRead(valueAddress, valueBytes))
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        var value = BinaryPrimitives.ReadInt32LittleEndian(valueBytes);
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var state))
+            {
+                return PosixSocketFailure(ctx, 9);
+            }
+
+            if (!TrySetSocketOptionLocked(state, level, option, value))
+            {
+                LogNet($"setsockopt unsupported: fd={fd} level=0x{level:X} option=0x{option:X}");
+                return PosixSocketFailure(ctx, 22);
+            }
+        }
+
+        LogNet($"setsockopt: fd={fd} level=0x{level:X} option=0x{option:X} value={value}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static int PosixGetSocketOption(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var level = unchecked((int)ctx[CpuRegister.Rsi]);
+        var option = unchecked((int)ctx[CpuRegister.Rdx]);
+        var valueAddress = ctx[CpuRegister.Rcx];
+        var lengthAddress = ctx[CpuRegister.R8];
+        if (valueAddress == 0 || lengthAddress == 0)
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        Span<byte> lengthBytes = stackalloc byte[sizeof(int)];
+        if (!ctx.Memory.TryRead(lengthAddress, lengthBytes))
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        if (BinaryPrimitives.ReadInt32LittleEndian(lengthBytes) < sizeof(int))
+        {
+            return PosixSocketFailure(ctx, 22);
+        }
+
+        int value;
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var state))
+            {
+                return PosixSocketFailure(ctx, 9);
+            }
+
+            if (!TryGetSocketOptionLocked(state, level, option, out value))
+            {
+                return PosixSocketFailure(ctx, 22);
+            }
+        }
+
+        Span<byte> valueBytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(valueBytes, value);
+        BinaryPrimitives.WriteInt32LittleEndian(lengthBytes, sizeof(int));
+        if (!ctx.Memory.TryWrite(valueAddress, valueBytes) ||
+            !ctx.Memory.TryWrite(lengthAddress, lengthBytes))
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "TU-d9PfIHPM",
         ExportName = "socket",
@@ -130,10 +289,18 @@ internal static class KernelSocketCompatExports
         LibraryName = "libKernel")]
     public static int Socket(CpuContext ctx)
     {
+        var family = unchecked((int)ctx[CpuRegister.Rdi]);
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var protocol = unchecked((int)ctx[CpuRegister.Rdx]);
         var fd = KernelMemoryCompatExports.AllocateGuestFileDescriptor();
         lock (Gate)
         {
-            Sockets[fd] = new EmulatedSocketState();
+            Sockets[fd] = new EmulatedSocketState
+            {
+                Family = family,
+                Type = type,
+                Protocol = protocol,
+            };
         }
 
         ctx[CpuRegister.Rax] = unchecked((ulong)fd);
@@ -203,6 +370,7 @@ internal static class KernelSocketCompatExports
             state.BoundAddress = ipAddress;
             state.BoundPort = port;
             state.Bound = true;
+            ApplyConnectedSocketOptions(state);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -373,6 +541,120 @@ internal static class KernelSocketCompatExports
         {
             return Sockets.TryGetValue(fd, out state);
         }
+    }
+
+    private static bool TrySetSocketOptionLocked(
+        EmulatedSocketState state,
+        int level,
+        int option,
+        int value)
+    {
+        switch (level, option)
+        {
+            case (0xFFFF, 0x0004):
+                state.ReuseAddress = value != 0;
+                break;
+            case (0xFFFF, 0x0008):
+                state.KeepAlive = value != 0;
+                break;
+            case (0xFFFF, 0x0020):
+                state.Broadcast = value != 0;
+                break;
+            case (0xFFFF, 0x0200):
+                state.ReusePort = value != 0;
+                break;
+            case (0xFFFF, 0x1001) when value > 0:
+                state.SendBufferSize = value;
+                break;
+            case (0xFFFF, 0x1002) when value > 0:
+                state.ReceiveBufferSize = value;
+                break;
+            case (0xFFFF, 0x1003) when value > 0:
+                state.SendLowWater = value;
+                break;
+            case (0xFFFF, 0x1004) when value > 0:
+                state.ReceiveLowWater = value;
+                break;
+            case (41, 27) when state.Family == 28:
+                state.IPv6Only = value != 0;
+                break;
+            case (6, 1) when state.Type == 1:
+                state.NoDelay = value != 0;
+                break;
+            default:
+                return false;
+        }
+
+        ApplyConnectedSocketOptions(state);
+        return true;
+    }
+
+    private static bool TryGetSocketOptionLocked(
+        EmulatedSocketState state,
+        int level,
+        int option,
+        out int value)
+    {
+        value = (level, option) switch
+        {
+            (0xFFFF, 0x0004) => state.ReuseAddress ? 1 : 0,
+            (0xFFFF, 0x0008) => state.KeepAlive ? 1 : 0,
+            (0xFFFF, 0x0020) => state.Broadcast ? 1 : 0,
+            (0xFFFF, 0x0200) => state.ReusePort ? 1 : 0,
+            (0xFFFF, 0x1001) => state.SendBufferSize,
+            (0xFFFF, 0x1002) => state.ReceiveBufferSize,
+            (0xFFFF, 0x1003) => state.SendLowWater,
+            (0xFFFF, 0x1004) => state.ReceiveLowWater,
+            (41, 27) when state.Family == 28 => state.IPv6Only ? 1 : 0,
+            (6, 1) when state.Type == 1 => state.NoDelay ? 1 : 0,
+            _ => -1,
+        };
+        return value >= 0;
+    }
+
+    private static void ApplyConnectedSocketOptions(EmulatedSocketState state)
+    {
+        if (state.Client is null)
+        {
+            return;
+        }
+
+        var socket = state.Client.Client;
+        try
+        {
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, state.ReuseAddress);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, state.KeepAlive);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, state.Broadcast);
+            if (state.SendBufferSize > 0)
+            {
+                socket.SendBufferSize = state.SendBufferSize;
+            }
+
+            if (state.ReceiveBufferSize > 0)
+            {
+                socket.ReceiveBufferSize = state.ReceiveBufferSize;
+            }
+            if (socket.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                socket.DualMode = !state.IPv6Only;
+            }
+
+            if (socket.SocketType == SocketType.Stream)
+            {
+                socket.NoDelay = state.NoDelay;
+            }
+        }
+        catch (SocketException)
+        {
+            // The guest option remains stored when the host cannot apply it.
+        }
+    }
+
+    private static int PosixSocketFailure(CpuContext ctx, int errno)
+    {
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = ulong.MaxValue;
+        return -1;
     }
 
     private static bool TryParseGuestSockaddrIn(

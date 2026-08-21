@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Network;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -12,11 +13,14 @@ namespace SharpEmu.Libs.Kernel;
 public static class KernelEventQueueCompatExports
 {
     private const int KernelEventSize = 0x20;
+    public const short KernelEventFilterRead = -1;
     public const short KernelEventFilterGraphics = -14;
     public const short KernelEventFilterUser = -11;
     public const short KernelEventFilterAmpr = -16;
     public const short KernelEventFilterAmprSystem = -17;
     public const ushort KernelEventFlagClear = 0x20;
+    public const ushort KernelEventFlagEof = 0x8000;
+    private const int ReadEventPollPeriodMilliseconds = 10;
 
     private static readonly object _eventQueueGate = new();
     private static readonly Dictionary<ulong, EventQueueState> _eventQueues = new();
@@ -29,6 +33,13 @@ public static class KernelEventQueueCompatExports
     private static long _nextEventRegistrationGeneration;
     private static long _nextEventQueueGeneration;
     private static long _nextEventQueueRuntimeId;
+    private static int _readEventRegistrationCount;
+    private static int _readEventPollActive;
+    private static readonly Timer _readEventPollTimer = new(
+        PollReadEvents,
+        null,
+        Timeout.Infinite,
+        Timeout.Infinite);
 
     private sealed record EventQueueRuntimeIdentity(ulong Id);
 
@@ -54,7 +65,16 @@ public static class KernelEventQueueCompatExports
         short Filter,
         ulong UserData,
         ushort Flags,
+        ulong LowWater,
         ulong Generation);
+
+    private readonly record struct ReadEventPollTarget(
+        ulong EqueueHandle,
+        ulong EqueueGeneration,
+        int FileDescriptor,
+        ulong UserData,
+        ulong LowWater,
+        ulong RegistrationGeneration);
 
     internal readonly record struct KernelEventRegistrationToken(
         ulong EqueueHandle,
@@ -311,7 +331,12 @@ public static class KernelEventQueueCompatExports
 
             state.Deleted = true;
             _pendingEvents.Remove(handle);
-            _registeredEvents.Remove(handle);
+            if (_registeredEvents.Remove(handle, out var registrations))
+            {
+                _readEventRegistrationCount -= registrations.Values.Count(
+                    registration => registration.Filter == KernelEventFilterRead);
+                UpdateReadEventPollTimerLocked();
+            }
             Monitor.PulseAll(_eventQueueGate);
         }
 
@@ -324,6 +349,69 @@ public static class KernelEventQueueCompatExports
             handle,
             $"generation={state.Generation}");
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "VHCS3rCd0PM",
+        ExportName = "sceKernelAddReadEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAddReadEvent(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var fileDescriptor = unchecked((int)ctx[CpuRegister.Rsi]);
+        var lowWater = Math.Max(1UL, ctx[CpuRegister.Rdx]);
+        var userData = ctx[CpuRegister.Rcx];
+
+        if (!TryGetDescriptorReadiness(
+                fileDescriptor,
+                lowWater,
+                out _,
+                out _,
+                out _))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var registered = RegisterEvent(
+            handle,
+            unchecked((uint)fileDescriptor),
+            KernelEventFilterRead,
+            userData,
+            flags: 0,
+            lowWater);
+        if (registered)
+        {
+            RefreshReadEvents(handle);
+        }
+
+        TraceEventQueue(
+            ctx,
+            "add_read",
+            handle,
+            $"fd={fileDescriptor} low_water={lowWater} user_data=0x{userData:X16}");
+        return registered
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+    }
+
+    [SysAbiExport(
+        Nid = "JxJ4tfgKlXA",
+        ExportName = "sceKernelDeleteReadEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDeleteReadEvent(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var fileDescriptor = unchecked((int)ctx[CpuRegister.Rsi]);
+        var deleted = DeleteRegisteredEvent(
+            handle,
+            unchecked((uint)fileDescriptor),
+            KernelEventFilterRead);
+        TraceEventQueue(ctx, "delete_read", handle, $"fd={fileDescriptor}");
+        return deleted
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
@@ -569,6 +657,7 @@ public static class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        RefreshReadEvents(handle);
         var deliveredCount = DequeueEvents(
             ctx,
             state,
@@ -818,7 +907,8 @@ public static class KernelEventQueueCompatExports
         ulong ident,
         short filter,
         ulong userData,
-        ushort flags = KernelEventFlagClear)
+        ushort flags = KernelEventFlagClear,
+        ulong lowWater = 0)
     {
         lock (_eventQueueGate)
         {
@@ -834,13 +924,23 @@ public static class KernelEventQueueCompatExports
                 _registeredEvents[handle] = events;
             }
 
+            var key = (ident, filter);
+            var isNewReadRegistration =
+                filter == KernelEventFilterRead &&
+                !events.ContainsKey(key);
             events[(ident, filter)] = new KernelEventRegistration(
                 ident,
                 filter,
                 userData,
                 flags,
+                lowWater,
                 unchecked((ulong)Interlocked.Increment(
                     ref _nextEventRegistrationGeneration)));
+            if (isNewReadRegistration)
+            {
+                _readEventRegistrationCount++;
+                UpdateReadEventPollTimerLocked();
+            }
             return true;
         }
     }
@@ -967,9 +1067,15 @@ public static class KernelEventQueueCompatExports
         lock (_eventQueueGate)
         {
             if (!_registeredEvents.TryGetValue(handle, out var events) ||
-                !events.Remove((ident, filter)))
+                !events.Remove((ident, filter), out var registration))
             {
                 return false;
+            }
+
+            if (registration.Filter == KernelEventFilterRead)
+            {
+                _readEventRegistrationCount--;
+                UpdateReadEventPollTimerLocked();
             }
 
             if (_pendingEvents.TryGetValue(handle, out var pending))
@@ -1336,6 +1442,190 @@ public static class KernelEventQueueCompatExports
         return count;
     }
 
+    private static void PollReadEvents(object? state)
+    {
+        _ = state;
+        if (Interlocked.Exchange(ref _readEventPollActive, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            RefreshReadEvents(handle: null);
+        }
+        finally
+        {
+            Volatile.Write(ref _readEventPollActive, 0);
+        }
+    }
+
+    private static void RefreshReadEvents(ulong? handle)
+    {
+        List<ReadEventPollTarget>? targets = null;
+        lock (_eventQueueGate)
+        {
+            if (_readEventRegistrationCount == 0)
+            {
+                return;
+            }
+
+            foreach (var (equeueHandle, registrations) in _registeredEvents)
+            {
+                if (handle.HasValue && equeueHandle != handle.Value)
+                {
+                    continue;
+                }
+
+                if (!_eventQueues.TryGetValue(equeueHandle, out var state) ||
+                    state.Deleted)
+                {
+                    continue;
+                }
+
+                foreach (var registration in registrations.Values)
+                {
+                    if (registration.Filter != KernelEventFilterRead)
+                    {
+                        continue;
+                    }
+
+                    (targets ??= []).Add(new ReadEventPollTarget(
+                        equeueHandle,
+                        state.Generation,
+                        unchecked((int)registration.Ident),
+                        registration.UserData,
+                        Math.Max(1UL, registration.LowWater),
+                        registration.Generation));
+                }
+            }
+        }
+
+        if (targets is null)
+        {
+            return;
+        }
+
+        foreach (var target in targets)
+        {
+            var exists = TryGetDescriptorReadiness(
+                target.FileDescriptor,
+                target.LowWater,
+                out var ready,
+                out var availableBytes,
+                out var eventFlags);
+            EventQueueState? wakeState = null;
+            lock (_eventQueueGate)
+            {
+                if (!_eventQueues.TryGetValue(target.EqueueHandle, out var state) ||
+                    state.Deleted ||
+                    state.Generation != target.EqueueGeneration ||
+                    !_registeredEvents.TryGetValue(
+                        target.EqueueHandle,
+                        out var registrations) ||
+                    !registrations.TryGetValue(
+                        (unchecked((uint)target.FileDescriptor), KernelEventFilterRead),
+                        out var registration) ||
+                    registration.Generation != target.RegistrationGeneration)
+                {
+                    continue;
+                }
+
+                if (!exists)
+                {
+                    registrations.Remove((registration.Ident, registration.Filter));
+                    _readEventRegistrationCount--;
+                    if (_pendingEvents.TryGetValue(target.EqueueHandle, out var staleQueue))
+                    {
+                        _ = staleQueue.Remove(registration.Ident, registration.Filter);
+                    }
+                    UpdateReadEventPollTimerLocked();
+                    continue;
+                }
+
+                if (!ready)
+                {
+                    if (_pendingEvents.TryGetValue(target.EqueueHandle, out var inactiveQueue))
+                    {
+                        _ = inactiveQueue.Remove(registration.Ident, registration.Filter);
+                    }
+                    continue;
+                }
+
+                if (!_pendingEvents.TryGetValue(target.EqueueHandle, out var queue))
+                {
+                    queue = new KernelEventDeque();
+                    _pendingEvents[target.EqueueHandle] = queue;
+                }
+
+                QueueOrUpdateEvent(
+                    queue,
+                    new KernelQueuedEvent(
+                        registration.Ident,
+                        registration.Filter,
+                        eventFlags,
+                        0,
+                        availableBytes,
+                        registration.UserData));
+                Monitor.PulseAll(_eventQueueGate);
+                wakeState = state;
+            }
+
+            if (wakeState is not null)
+            {
+                WakeEventQueue(
+                    wakeState,
+                    _logEqueue
+                        ? $"source=read-ready fd={target.FileDescriptor} " +
+                          $"available={availableBytes} flags=0x{eventFlags:X4}"
+                        : null);
+            }
+        }
+    }
+
+    private static bool TryGetDescriptorReadiness(
+        int fileDescriptor,
+        ulong lowWater,
+        out bool ready,
+        out ulong availableBytes,
+        out ushort eventFlags)
+    {
+        if (KernelSocketCompatExports.TryGetReadEventState(
+                fileDescriptor,
+                lowWater,
+                out ready,
+                out availableBytes,
+                out eventFlags) ||
+            KernelMemoryCompatExports.TryGetFileReadEventState(
+                fileDescriptor,
+                lowWater,
+                out ready,
+                out availableBytes,
+                out eventFlags) ||
+            NetExports.TryGetReadEventState(
+                fileDescriptor,
+                lowWater,
+                out ready,
+                out availableBytes,
+                out eventFlags))
+        {
+            return true;
+        }
+
+        ready = false;
+        availableBytes = 0;
+        eventFlags = 0;
+        return false;
+    }
+
+    private static void UpdateReadEventPollTimerLocked()
+    {
+        var period = _readEventRegistrationCount > 0
+            ? ReadEventPollPeriodMilliseconds
+            : Timeout.Infinite;
+        _readEventPollTimer.Change(period, period);
+    }
+
     private static void QueueOrUpdateEvent(
         KernelEventDeque queue,
         KernelQueuedEvent queuedEvent)
@@ -1347,7 +1637,7 @@ public static class KernelEventQueueCompatExports
             return;
         }
 
-        queue[pendingIndex] = queuedEvent.Filter == KernelEventFilterUser
+        queue[pendingIndex] = queuedEvent.Filter is KernelEventFilterUser or KernelEventFilterRead
             ? queuedEvent
             : queuedEvent with
         {

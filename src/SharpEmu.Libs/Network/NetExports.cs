@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Network;
 
@@ -42,6 +43,48 @@ public static class NetExports
     private sealed record NetPool(string Name, int Size, int Flags);
 
     private sealed record ResolverContext(string Name, int PoolId, int Flags, int LastError);
+
+    internal static bool TryGetReadEventState(
+        int socketId,
+        ulong lowWater,
+        out bool ready,
+        out ulong availableBytes,
+        out ushort eventFlags)
+    {
+        ready = false;
+        availableBytes = 0;
+        eventFlags = 0;
+        if (!_sockets.TryGetValue(socketId, out var socket))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readSignaled = socket.Poll(0, SelectMode.SelectRead);
+            availableBytes = unchecked((ulong)Math.Max(0, socket.Available));
+            if (readSignaled && availableBytes == 0)
+            {
+                ready = true;
+                eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+            }
+            else
+            {
+                ready = availableBytes >= Math.Max(1UL, lowWater);
+            }
+        }
+        catch (SocketException)
+        {
+            ready = true;
+            eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     [SysAbiExport(
         Nid = "Nlev7Lg8k3A",
@@ -193,7 +236,13 @@ public static class NetExports
         ExportName = "setsockopt",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSetsockopt(CpuContext ctx) => NetSetsockopt(ctx);
+    public static int PosixSetsockopt(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixSetSocketOption(ctx)
+            : NetSetsockopt(ctx);
+    }
 
     /// <summary>
     /// Reads back the socket options this backend actually tracks: SO_NBIO,
@@ -213,6 +262,11 @@ public static class NetExports
     public static int PosixGetsockopt(CpuContext ctx)
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (KernelSocketCompatExports.IsEmulatedSocketFd(id))
+        {
+            return KernelSocketCompatExports.PosixGetSocketOption(ctx);
+        }
+
         var level = unchecked((int)ctx[CpuRegister.Rsi]);
         var option = unchecked((int)ctx[CpuRegister.Rdx]);
         var valueAddress = ctx[CpuRegister.Rcx];

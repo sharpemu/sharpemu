@@ -2256,6 +2256,23 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        if (KernelSocketCompatExports.TryReadSocketFd(
+                ctx,
+                fd,
+                bufferAddress,
+                requested,
+                out var socketBytesRead,
+                out var socketReadError))
+        {
+            if (socketReadError != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return (int)socketReadError;
+            }
+
+            ctx[CpuRegister.Rax] = socketBytesRead;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         FileStream? stream;
         HostMovieBridge.BinkGuestCompletionShim completionShim = default;
         var useBinkCompletionShim = false;
@@ -2501,6 +2518,21 @@ public static partial class KernelMemoryCompatExports
             {
                 Console.Error.Write(text);
                 Console.Error.Flush();
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (KernelSocketCompatExports.TryWriteSocketFd(
+                ctx,
+                fd,
+                payload,
+                out var socketWriteError))
+        {
+            if (socketWriteError != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return (int)socketWriteError;
             }
 
             ctx[CpuRegister.Rax] = unchecked((ulong)requested);
