@@ -137,6 +137,15 @@ internal sealed record VulkanOrderedGuestFlipWait(
     int VideoOutHandle,
     int DisplayBufferIndex);
 
+internal static class VulkanGuestFlipSourcePolicy
+{
+    public static bool CanCapture(
+        bool registered,
+        bool materialized,
+        bool hasQueuedWriter) =>
+        registered && (materialized || hasQueuedWriter);
+}
+
 internal static class VulkanVertexBindingPlanner
 {
     public static int BuildUniqueSourceIndices(
@@ -2028,7 +2037,10 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_closed ||
                 _thread is null ||
-                !_availableGuestImages.ContainsKey(address))
+                !VulkanGuestFlipSourcePolicy.CanCapture(
+                    _availableGuestImages.ContainsKey(address),
+                    _guestImageExtents.ContainsKey(address),
+                    _guestImageWorkSequences.ContainsKey(address)))
             {
                 return false;
             }
