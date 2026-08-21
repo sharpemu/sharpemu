@@ -14380,6 +14380,16 @@ private static long _indirectDrawProbeCount;
         SubmittedDcbState state,
         ComputeDispatch dispatch)
     {
+        // A zero-size indirect dispatch does no work. Return before shader
+        // evaluation copies resource data. Some command streams contain many
+        // such dispatches, and unnecessary copies can stop progress for seconds.
+        if (dispatch.GroupCountX == 0 ||
+            dispatch.GroupCountY == 0 ||
+            dispatch.GroupCountZ == 0)
+        {
+            return;
+        }
+
         if (!TryGetShaderAddress(
                 state.ShRegisters,
                 ComputePgmLo,
