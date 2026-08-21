@@ -63,10 +63,9 @@ public static partial class AgcExports
         }
 
         var usesPfpReturn = !usesAsyncEncoding && packet.EngineSelection == 1;
-        if (packet.ReturnsData)
-        {
-            SetAtomicReturnPending(state, usesPfpReturn, pending: true);
-        }
+        var returnSequence = packet.ReturnsData
+            ? BeginAtomicReturn(state, usesPfpReturn)
+            : 0;
 
         void ApplyAtomic()
         {
@@ -98,6 +97,7 @@ public static partial class AgcExports
                     SetAtomicReturnValue(
                         state,
                         usesPfpReturn,
+                        returnSequence,
                         priorValue);
                 }
 
@@ -137,7 +137,8 @@ public static partial class AgcExports
                     $"src=0x{packet.SourceData:X16} cmp=0x{packet.CompareData:X16} " +
                     $"prior=0x{priorValue:X16} new=0x{newValue:X16} " +
                     $"compare_passed={comparePassed} cache={packet.CachePolicy} " +
-                    $"loop_cycles={packet.LoopIntervalCycles}");
+                    $"loop_cycles={packet.LoopIntervalCycles} " +
+                    $"return_sequence={returnSequence}");
             }
         }
 
@@ -145,7 +146,6 @@ public static partial class AgcExports
         {
             if (!_gpuWaitSuspendEnabled)
             {
-                SetAtomicReturnPending(state, usesPfpReturn, pending: false);
                 StopSubmittedQueue(
                     ctx,
                     state,
@@ -214,37 +214,41 @@ public static partial class AgcExports
         EnsureGpuWaitMonitor(ctx, gpuState);
     }
 
-    private static void SetAtomicReturnPending(
+    private static ulong BeginAtomicReturn(
         SubmittedDcbState state,
-        bool usesPfpReturn,
-        bool pending)
+        bool usesPfpReturn)
     {
         if (usesPfpReturn)
         {
-            state.AtomicReturnPfpPending = pending;
+            state.AtomicReturnPfpPending = true;
+            return ++state.AtomicReturnPfpSequence;
         }
-        else
-        {
-            state.AtomicReturnMePending = pending;
-        }
+
+        state.AtomicReturnMePending = true;
+        return ++state.AtomicReturnMeSequence;
     }
 
     private static void SetAtomicReturnValue(
         SubmittedDcbState state,
         bool usesPfpReturn,
+        ulong sequence,
         ulong value)
     {
         if (usesPfpReturn)
         {
             state.AtomicReturnPfpData = value;
             state.AtomicReturnPfpValid = true;
-            state.AtomicReturnPfpPending = false;
+            state.AtomicReturnPfpCompletedSequence = sequence;
+            state.AtomicReturnPfpPending =
+                sequence < state.AtomicReturnPfpSequence;
         }
         else
         {
             state.AtomicReturnMeData = value;
             state.AtomicReturnMeValid = true;
-            state.AtomicReturnMePending = false;
+            state.AtomicReturnMeCompletedSequence = sequence;
+            state.AtomicReturnMePending =
+                sequence < state.AtomicReturnMeSequence;
         }
     }
 

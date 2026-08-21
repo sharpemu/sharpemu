@@ -22,8 +22,10 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
     private const ulong SourceAddress = BaseAddress + 0x8100;
     private const ulong DestinationAddress = BaseAddress + 0x8200;
     private const ulong ResultAddress = BaseAddress + 0x8300;
+    private const ulong SecondResultAddress = BaseAddress + 0x8400;
 
     private const uint ItNop = 0x10;
+    private const uint ItAtomicMem = 0x1E;
     private const uint ItWriteData = 0x37;
     private const uint ItCopyData = 0x40;
     private const uint RWaitMem32 = 0x0A;
@@ -113,7 +115,105 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
     }
 
     [Fact]
-    public void AtomicReturnCopy_StopsCurrentAndLaterQueueWork()
+    public void AtomicReturnCopy_UsesGraphicsMeReturnValue()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, SourceAddress, 5);
+        WriteAtomic32(
+            memory,
+            GraphicsCommandAddress,
+            operation: 15,
+            command: 0,
+            SourceAddress,
+            source: 3);
+        WriteCopyData(
+            memory,
+            GraphicsCommandAddress + (9 * sizeof(uint)),
+            control: 6u | (2u << 8),
+            source: 0,
+            destination: DestinationAddress);
+
+        SubmitDcb(ctx, memory, GraphicsCommandAddress, 15);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => ReadUInt32(memory, DestinationAddress) == 5,
+            TimeSpan.FromSeconds(5)));
+        Assert.Equal(8u, ReadUInt32(memory, SourceAddress));
+    }
+
+    [Fact]
+    public void AtomicReturnCopies_KeepTheirComputePacketOrder()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, SourceAddress, 10);
+        WriteAtomic32(
+            memory,
+            ComputeCommandAddress,
+            operation: 15,
+            command: 0,
+            SourceAddress,
+            source: 1);
+        WriteCopyData(
+            memory,
+            ComputeCommandAddress + (9 * sizeof(uint)),
+            control: 6u | (2u << 8),
+            source: 0,
+            destination: DestinationAddress);
+        WriteAtomic32(
+            memory,
+            ComputeCommandAddress + (15 * sizeof(uint)),
+            operation: 15,
+            command: 0,
+            SourceAddress,
+            source: 2);
+        WriteCopyData(
+            memory,
+            ComputeCommandAddress + (24 * sizeof(uint)),
+            control: 6u | (2u << 8),
+            source: 0,
+            destination: SecondResultAddress);
+
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 30, owner: 5);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => ReadUInt32(memory, SecondResultAddress) == 11,
+            TimeSpan.FromSeconds(5)));
+        Assert.Equal(10u, ReadUInt32(memory, DestinationAddress));
+        Assert.Equal(13u, ReadUInt32(memory, SourceAddress));
+    }
+
+    [Fact]
+    public void AtomicReturnCopy_Uses64BitComputeReturnValue()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt64(memory, SourceAddress, 0x1_0000_0005);
+        WriteAtomic64(
+            memory,
+            ComputeCommandAddress,
+            operation: 0x2F,
+            command: 0,
+            SourceAddress,
+            source: 3);
+        WriteCopyData(
+            memory,
+            ComputeCommandAddress + (9 * sizeof(uint)),
+            control: 6u | (2u << 8) | (1u << 16),
+            source: 0,
+            destination: DestinationAddress);
+
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 15, owner: 6);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => ReadUInt64(memory, DestinationAddress) == 0x1_0000_0005,
+            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0x1_0000_0008UL, ReadUInt64(memory, SourceAddress));
+    }
+
+    [Fact]
+    public void AtomicReturnCopy_WithoutAtomicStopsCurrentAndLaterQueueWork()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
@@ -132,6 +232,50 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
         WriteWriteData(memory, LaterComputeCommandAddress, ResultAddress, 0x2222_2222);
         SubmitAcb(ctx, memory, LaterComputeCommandAddress, 5, owner: 4);
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
+    }
+
+    private static void WriteAtomic32(
+        FakeCpuMemory memory,
+        ulong commandAddress,
+        uint operation,
+        uint command,
+        ulong targetAddress,
+        uint source)
+    {
+        WriteDwords(
+            memory,
+            commandAddress,
+            Pm4Header(9, ItAtomicMem),
+            operation | (command << 8),
+            unchecked((uint)targetAddress),
+            unchecked((uint)(targetAddress >> 32)),
+            source,
+            0,
+            0,
+            0,
+            400);
+    }
+
+    private static void WriteAtomic64(
+        FakeCpuMemory memory,
+        ulong commandAddress,
+        uint operation,
+        uint command,
+        ulong targetAddress,
+        ulong source)
+    {
+        WriteDwords(
+            memory,
+            commandAddress,
+            Pm4Header(9, ItAtomicMem),
+            operation | (command << 8),
+            unchecked((uint)targetAddress),
+            unchecked((uint)(targetAddress >> 32)),
+            unchecked((uint)source),
+            unchecked((uint)(source >> 32)),
+            0,
+            0,
+            400);
     }
 
     private static uint WriteWaitThenResult(

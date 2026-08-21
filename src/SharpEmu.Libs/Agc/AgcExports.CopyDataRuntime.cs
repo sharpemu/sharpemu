@@ -38,7 +38,7 @@ public static partial class AgcExports
             destinationLow,
             destinationHigh,
             usesAsyncEncoding: !ReferenceEquals(state, gpuState.Graphics));
-        if (!packet.IsSupported || packet.SourceIsAtomicReturn)
+        if (!packet.IsSupported)
         {
             StopSubmittedQueue(
                 ctx,
@@ -47,6 +47,22 @@ public static partial class AgcExports
                 ItCopyData,
                 $"unsupported COPY_DATA src_sel={packet.SourceSelection} " +
                 $"dst_sel={packet.DestinationSelection} bits={(packet.Is64Bit ? 64 : 32)}");
+            return true;
+        }
+
+        var atomicReturnSequence = packet.SourceIsAtomicReturn
+            ? state.AtomicReturnMeSequence
+            : 0;
+        if (packet.SourceIsAtomicReturn &&
+            atomicReturnSequence == 0 &&
+            !state.AtomicReturnMeValid)
+        {
+            StopSubmittedQueue(
+                ctx,
+                state,
+                packetAddress,
+                ItCopyData,
+                "COPY_DATA atomic return is unavailable");
             return true;
         }
 
@@ -66,10 +82,40 @@ public static partial class AgcExports
 
         void ApplyCopy()
         {
+            ulong atomicReturnData = 0;
+            var atomicReturnDataValid = !packet.SourceIsAtomicReturn;
+            if (packet.SourceIsAtomicReturn)
+            {
+                lock (gpuState.Gate)
+                {
+                    atomicReturnData = state.AtomicReturnMeData;
+                    atomicReturnDataValid =
+                        state.AtomicReturnMeValid &&
+                        state.AtomicReturnMeCompletedSequence >= atomicReturnSequence;
+                }
+
+                if (!atomicReturnDataValid)
+                {
+                    StopSubmittedQueueFromOrderedAction(
+                        ctx,
+                        gpuState,
+                        state,
+                        packetAddress,
+                        ItCopyData,
+                        $"COPY_DATA atomic return is not ready sequence={atomicReturnSequence}");
+                    return;
+                }
+            }
+
             InvalidateDcbWindowIfOverlaps(
                 packet.DestinationAddress,
                 checked((ulong)packet.ByteCount));
-            var copied = TryApplyCopyData(ctx.Memory, packet, out var value);
+            var copied = TryApplyCopyData(
+                ctx.Memory,
+                packet,
+                atomicReturnData,
+                atomicReturnDataValid,
+                out var value);
             if (copied)
             {
                 GpuWaitRegistry.RecordProduced(
@@ -101,7 +147,8 @@ public static partial class AgcExports
                     $"bytes={packet.ByteCount} value=0x{value:X16} copied={copied} " +
                     $"src_cache={packet.SourceCachePolicy} " +
                     $"dst_cache={packet.DestinationCachePolicy} " +
-                    $"confirm={packet.WriteConfirm}");
+                    $"confirm={packet.WriteConfirm} " +
+                    $"atomic_return_sequence={atomicReturnSequence}");
             }
         }
 

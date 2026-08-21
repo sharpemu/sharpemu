@@ -1708,9 +1708,13 @@ public static partial class AgcExports
         public ulong AtomicReturnMeData { get; set; }
         public bool AtomicReturnMeValid { get; set; }
         public bool AtomicReturnMePending { get; set; }
+        public ulong AtomicReturnMeSequence { get; set; }
+        public ulong AtomicReturnMeCompletedSequence { get; set; }
         public ulong AtomicReturnPfpData { get; set; }
         public bool AtomicReturnPfpValid { get; set; }
         public bool AtomicReturnPfpPending { get; set; }
+        public ulong AtomicReturnPfpSequence { get; set; }
+        public ulong AtomicReturnPfpCompletedSequence { get; set; }
 
         // Set when parsing stops on an INDIRECT_BUFFER packet so the caller can
         // continue into the buffer it links to.
