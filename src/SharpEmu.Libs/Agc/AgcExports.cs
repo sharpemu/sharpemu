@@ -1303,12 +1303,6 @@ public static partial class AgcExports
     private static int _depthMetadataTraceCount;
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
-    // ACQUIRE_MEM does not update an image when CPU image tracking is off.
-    // Do not add an empty ordered action. Set the option to 0 to add this action.
-    private static readonly bool _skipNoopAcquireMem = !string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_SKIP_NOOP_ACQUIRE_MEM"),
-        "0",
-        StringComparison.Ordinal);
     private static readonly bool _traceDraws = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
@@ -1598,46 +1592,14 @@ public static partial class AgcExports
         ulong BaseAddress,
         ulong SizeBytes,
         uint PollInterval,
-        uint GcrControl)
+        AcquireMemGcrControl GcrControl)
     {
-        // GFX10 GCR_CNTL invalidation controls. The host has no separate GLI,
-        // GLM, GLK, GLV, GL1 and GL2 caches; they all converge on the guest
-        // memory snapshots used to build Vulkan resources.
-        private const uint GliInvalidateMask = 0x3u;
-        private const int Gl1RangeShift = 2;
-        private const uint Gl1RangeMask = 0x3u;
-        private const uint GlmInvalidate = 1u << 5;
-        private const uint GlkInvalidate = 1u << 7;
-        private const uint GlvInvalidate = 1u << 8;
-        private const uint Gl1Invalidate = 1u << 9;
-        private const uint Gl2Discard = 1u << 13;
-        private const uint Gl2Invalidate = 1u << 14;
-        private const int Gl2RangeShift = 11;
-        private const uint Gl2RangeMask = 0x3u;
+        public AgcGpuCacheSemantics Semantics =>
+            GcrControl.ToSemantics(SizeBytes == 0);
 
-        public bool InvalidatesGuestResources =>
-            (GcrControl & (GliInvalidateMask |
-                           GlmInvalidate |
-                           GlkInvalidate |
-                           GlvInvalidate |
-                           Gl1Invalidate |
-                           Gl2Discard |
-                           Gl2Invalidate)) != 0;
+        public bool InvalidatesGuestResources => GcrControl.HasResourceOperation;
 
-        // sceAgc encodes its all-memory sentinel with a zero COHER_SIZE. GFX10
-        // can also request ALL independently in GLI_INV, GL1_RANGE or
-        // GL2_RANGE; in the host's unified resource cache, any invalidated
-        // domain with ALL scope expands the operation to all tracked images.
-        public bool CoversAllGuestMemory =>
-            SizeBytes == 0 ||
-            (GcrControl & GliInvalidateMask) == 1u ||
-            ((GcrControl & (GlmInvalidate |
-                            GlkInvalidate |
-                            GlvInvalidate |
-                            Gl1Invalidate)) != 0 &&
-             ((GcrControl >> Gl1RangeShift) & Gl1RangeMask) == 0) ||
-            ((GcrControl & (Gl2Discard | Gl2Invalidate)) != 0 &&
-             ((GcrControl >> Gl2RangeShift) & Gl2RangeMask) == 0);
+        public bool CoversAllGuestMemory => Semantics.CoversAllMemory;
     }
 
     // Keep submitted geometry stable after the guest reuses its memory.
@@ -1735,6 +1697,10 @@ public static partial class AgcExports
         public bool PendingAcquireInvalidation { get; set; }
         public ulong PendingAcquireBase { get; set; }
         public ulong PendingAcquireSize { get; set; }
+        public AgcGpuCacheDomain PendingAcquireDomains { get; set; }
+        public AgcGpuCacheAction PendingAcquireActions { get; set; }
+        public uint PendingAcquireCbDbControl { get; set; }
+        public uint PendingAcquireGcrControl { get; set; }
 
         // Growing ring: never follows the chunk-advance sentinel (builders jump
         // to non-contiguous chunks), parks on the first not-yet-written word instead.
@@ -6417,14 +6383,20 @@ public static partial class AgcExports
                 TraceAgc(
                     $"agc.acquire_mem_skip_no_invalidate queue={state.QueueName} " +
                     $"submission={state.ActiveSubmissionId} packet=0x{packetAddress:X16} " +
-                    $"gcr=0x{acquire.GcrControl:X8}");
+                    $"gcr=0x{acquire.GcrControl.Raw:X8}");
             }
 
             return;
         }
 
         var size = acquire.CoversAllGuestMemory ? ulong.MaxValue : acquire.SizeBytes;
-        NotePendingAcquireInvalidation(state, acquire.BaseAddress, size);
+        NotePendingAcquireInvalidation(
+            state,
+            acquire.BaseAddress,
+            size,
+            acquire.Semantics,
+            acquire.CbDbControl,
+            acquire.GcrControl.Raw);
 
         if (tracePacket)
         {
@@ -6434,7 +6406,8 @@ public static partial class AgcExports
                 $"engine={acquire.Engine} cbdb=0x{acquire.CbDbControl:X8} " +
                 $"base=0x{acquire.BaseAddress:X16} size=0x{acquire.SizeBytes:X16} " +
                 $"scope={(acquire.CoversAllGuestMemory ? "all" : "range")} " +
-                $"poll={acquire.PollInterval} gcr=0x{acquire.GcrControl:X8} " +
+                $"poll={acquire.PollInterval} gcr=0x{acquire.GcrControl.Raw:X8} " +
+                $"domains={acquire.Semantics.Domains} actions={acquire.Semantics.Actions} " +
                 $"pending_base=0x{state.PendingAcquireBase:X16} " +
                 $"pending_size=0x{state.PendingAcquireSize:X16}");
         }
@@ -6443,8 +6416,15 @@ public static partial class AgcExports
     private static void NotePendingAcquireInvalidation(
         SubmittedDcbState state,
         ulong baseAddress,
-        ulong sizeBytes)
+        ulong sizeBytes,
+        AgcGpuCacheSemantics semantics,
+        uint cbDbControl,
+        uint gcrControl)
     {
+        state.PendingAcquireDomains |= semantics.Domains;
+        state.PendingAcquireActions |= semantics.Actions;
+        state.PendingAcquireCbDbControl |= cbDbControl;
+        state.PendingAcquireGcrControl |= gcrControl;
         if (!state.PendingAcquireInvalidation)
         {
             state.PendingAcquireInvalidation = true;
@@ -6486,14 +6466,17 @@ public static partial class AgcExports
 
         var baseAddress = state.PendingAcquireBase;
         var sizeBytes = state.PendingAcquireSize;
+        var domains = state.PendingAcquireDomains;
+        var actions = state.PendingAcquireActions;
+        var cbDbControl = state.PendingAcquireCbDbControl;
+        var gcrControl = state.PendingAcquireGcrControl;
         state.PendingAcquireInvalidation = false;
         state.PendingAcquireBase = 0;
         state.PendingAcquireSize = 0;
-
-        if (_skipNoopAcquireMem && !SharpEmu.HLE.GuestImageWriteTracker.Enabled)
-        {
-            return;
-        }
+        state.PendingAcquireDomains = AgcGpuCacheDomain.None;
+        state.PendingAcquireActions = AgcGpuCacheAction.None;
+        state.PendingAcquireCbDbControl = 0;
+        state.PendingAcquireGcrControl = 0;
 
         var queueName = state.QueueName;
         var submissionId = state.ActiveSubmissionId;
@@ -6512,7 +6495,44 @@ public static partial class AgcExports
             }
         }
 
-        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(ApplyAcquire, debugName);
+        var semantics = new AgcGpuCacheSemantics(
+            domains,
+            actions,
+            CoversAllMemory: sizeBytes == ulong.MaxValue);
+        var operation = semantics.ToGuestOperation(
+            baseAddress,
+            sizeBytes,
+            cbDbControl,
+            gcrControl);
+        if (tracePacket || _logGpuCacheOperations)
+        {
+            TraceUniqueGpuCacheOperation(
+                "acquire_mem_flush",
+                state,
+                cbDbControl,
+                gcrControl,
+                baseAddress,
+                sizeBytes,
+                semantics,
+                nextConsumer: "submission_boundary");
+        }
+
+        if (!_gpuCacheHostEffectsEnabled)
+        {
+            if (Interlocked.Increment(ref _gpuCacheHostEffectsDisabledReportCount) == 1)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][INFO] AGC host cache effects disabled. " +
+                    "Packet decode and logging remain active.");
+            }
+
+            return;
+        }
+
+        var sequence = GuestGpu.Current.SubmitGuestCacheOperation(
+            operation,
+            ApplyAcquire,
+            debugName);
         if (sequence == 0)
         {
             ApplyAcquire();
@@ -6566,7 +6586,7 @@ public static partial class AgcExports
             BaseAddress: baseUnits << 8,
             SizeBytes: sizeUnits << 8,
             PollInterval: pollInterval & 0xFFFFu,
-            GcrControl: gcrControl & 0x7FFFFu);
+            GcrControl: new AcquireMemGcrControl(gcrControl & 0x7FFFFu));
     }
 
     private static void ResetSubmittedParserState(SubmittedDcbState state)
@@ -8256,7 +8276,7 @@ public static partial class AgcExports
         ulong packetAddress,
         bool tracePacket)
     {
-        if (!TryReadUInt32(ctx, packetAddress + 4, out _) ||
+        if (!TryReadUInt32(ctx, packetAddress + 4, out var releaseControl) ||
             !TryReadUInt32(ctx, packetAddress + 8, out var control) ||
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
@@ -8266,6 +8286,8 @@ public static partial class AgcExports
             return;
         }
 
+        var cacheControl = DecodeStandardReleaseMemCacheControl(releaseControl);
+        var cacheSemantics = cacheControl.GcrControl.ToSemantics();
         var (destination, dataSelection) = DecodeStandardReleaseMemControl(control);
         var interruptSelection = (control >> 24) & 0x7u;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
@@ -8279,6 +8301,18 @@ public static partial class AgcExports
         var writesGuestMemory = destination is 0 or 1 &&
                                 destinationAddress != 0 &&
                                 writeLength != 0;
+
+        if (tracePacket || _logGpuCacheOperations)
+        {
+            TraceUniqueGpuCacheOperation(
+                "release_mem_standard",
+                state,
+                cbDbAction: 0,
+                cacheControl.GcrControl.Raw,
+                baseAddress: 0,
+                sizeBytes: ulong.MaxValue,
+                cacheSemantics);
+        }
 
         SubmitOrderedGpuSideEffect(
             ctx,
@@ -8384,7 +8418,7 @@ public static partial class AgcExports
         ulong packetAddress,
         bool tracePacket)
     {
-        if (!TryReadUInt32(ctx, packetAddress + 4, out _) ||
+        if (!TryReadUInt32(ctx, packetAddress + 4, out var actionControl) ||
             !TryReadUInt32(ctx, packetAddress + 8, out var control) ||
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
@@ -8394,6 +8428,13 @@ public static partial class AgcExports
             return;
         }
 
+        var cacheControl = DecodeAgcReleaseMemCacheControl(actionControl, control);
+        var gcrSemantics = cacheControl.GcrControl.ToSemantics();
+        var actionSemantics = cacheControl.ActionSemantics;
+        var cacheSemantics = new AgcGpuCacheSemantics(
+            gcrSemantics.Domains | actionSemantics.Domains,
+            gcrSemantics.Actions | actionSemantics.Actions,
+            gcrSemantics.CoversAllMemory || actionSemantics.CoversAllMemory);
         var dataSelection = (control >> 16) & 0xFFu;
         var interrupt = (control >> 24) & 0xFFu;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
@@ -8404,6 +8445,19 @@ public static partial class AgcExports
             2 or 3 => (ulong)sizeof(ulong),
             _ => 0UL,
         };
+        if (tracePacket || _logGpuCacheOperations)
+        {
+            TraceUniqueGpuCacheOperation(
+                "release_mem",
+                state,
+                cacheControl.RawAction,
+                cacheControl.GcrControl.Raw,
+                baseAddress: 0,
+                sizeBytes: ulong.MaxValue,
+                cacheSemantics,
+                completionAction: cacheControl.ActionName);
+        }
+
         SubmitOrderedGpuSideEffect(
             ctx,
             gpuState,

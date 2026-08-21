@@ -87,6 +87,37 @@ internal sealed record VulkanOrderedGuestAction(
     Action Action,
     string DebugName);
 
+internal sealed record VulkanGuestCacheOperation(
+    GuestGpuCacheOperation Operation,
+    Action ApplyHostState,
+    string DebugName);
+
+internal readonly record struct VulkanGuestCacheBarrier(
+    PipelineStageFlags DestinationStages,
+    AccessFlags DestinationAccess);
+
+internal static class VulkanGuestCacheBarrierPlanner
+{
+    private const GuestGpuCacheDomain ShaderDomains =
+        GuestGpuCacheDomain.Instruction |
+        GuestGpuCacheDomain.Scalar |
+        GuestGpuCacheDomain.Vector |
+        GuestGpuCacheDomain.ShaderL1 |
+        GuestGpuCacheDomain.ShaderL2;
+
+    public static VulkanGuestCacheBarrier Resolve(GuestGpuCacheOperation operation)
+    {
+        var hasNonShaderDomain = (operation.Domains & ~ShaderDomains) != 0;
+        return hasNonShaderDomain || operation.Domains == GuestGpuCacheDomain.None
+            ? new VulkanGuestCacheBarrier(
+                PipelineStageFlags.AllCommandsBit,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit)
+            : new VulkanGuestCacheBarrier(
+                PipelineStageFlags.AllGraphicsBit | PipelineStageFlags.ComputeShaderBit,
+                AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
+    }
+}
+
 internal sealed record VulkanGpuLabelSignal(
     Action<GuestGpuLabelDependency> PublishGpu,
     Action? PublishHost,
@@ -1777,6 +1808,25 @@ internal static unsafe partial class VulkanVideoPresenter
     }
 
     /// <summary>
+    /// Enqueues a GPU cache dependency at its position in the guest queue.
+    /// This operation does not make guest data visible to the CPU.
+    /// </summary>
+    public static long SubmitGuestCacheOperation(
+        GuestGpuCacheOperation operation,
+        Action applyHostState,
+        string debugName)
+    {
+        ArgumentNullException.ThrowIfNull(applyHostState);
+        lock (_gate)
+        {
+            return _closed || _thread is null
+                ? 0
+                : EnqueueGuestWorkLocked(
+                    new VulkanGuestCacheOperation(operation, applyHostState, debugName));
+        }
+    }
+
+    /// <summary>
     /// Enqueues a GPU-only label marker. The callback receives the last Vulkan
     /// timeline token for the current logical guest queue. A return value of
     /// zero tells AGC to use the CPU-visible compatibility path.
@@ -3159,6 +3209,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static bool IsPrioritySyncGuestWork(object work) => work is
         VulkanOrderedGuestAction or
+        VulkanGuestCacheOperation or
         VulkanGpuLabelSignal or
         VulkanOrderedGuestFlip or
         VulkanOrderedGuestFlipWait;
@@ -6538,6 +6589,40 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return true;
+        }
+
+        private void ExecuteGuestCacheOperation(VulkanGuestCacheOperation work)
+        {
+            CloseOpenTranslatedRenderPass();
+            var commandBuffer = BeginBatchedGuestCommands();
+            var plan = VulkanGuestCacheBarrierPlanner.Resolve(work.Operation);
+            var barrier = new MemoryBarrier
+            {
+                SType = StructureType.MemoryBarrier,
+                SrcAccessMask = AccessFlags.MemoryWriteBit,
+                DstAccessMask = plan.DestinationAccess,
+            };
+            _vk.CmdPipelineBarrier(
+                commandBuffer,
+                PipelineStageFlags.AllCommandsBit,
+                plan.DestinationStages,
+                0,
+                1,
+                &barrier,
+                0,
+                null,
+                0,
+                null);
+            work.ApplyHostState();
+            if (_traceVulkanShaderEnabled)
+            {
+                TraceVulkanShader(
+                    $"vk.guest_cache_operation queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} " +
+                    $"work_sequence={_activeGuestWorkSequence} " +
+                    $"domains={work.Operation.Domains} actions={work.Operation.Actions} " +
+                    $"name='{work.DebugName}'");
+            }
         }
 
         private void ExecuteGpuLabelSignal(VulkanGpuLabelSignal work)
@@ -16863,6 +16948,13 @@ internal static unsafe partial class VulkanVideoPresenter
                             }
 
                             break;
+                        case VulkanGuestCacheOperation cacheOperation:
+                            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.OrderedAction))
+                            {
+                                ExecuteGuestCacheOperation(cacheOperation);
+                            }
+
+                            break;
                         case VulkanGpuLabelSignal gpuLabelSignal:
                             ExecuteGpuLabelSignal(gpuLabelSignal);
                             break;
@@ -20907,6 +20999,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"image_write addr=0x{imageWrite.Address:X16} {queuePart}",
                 VulkanOrderedGuestAction action =>
                     $"ordered_action name={action.DebugName} {queuePart}",
+                VulkanGuestCacheOperation operation =>
+                    $"cache_operation name={operation.DebugName} " +
+                    $"domains={operation.Operation.Domains} " +
+                    $"actions={operation.Operation.Actions} {queuePart}",
                 VulkanOrderedGuestFlip flip =>
                     $"ordered_flip version={flip.Version} " +
                     $"buf={flip.DisplayBufferIndex} addr=0x{flip.Address:X16} {queuePart}",

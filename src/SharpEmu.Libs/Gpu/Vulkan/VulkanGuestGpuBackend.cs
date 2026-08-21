@@ -368,6 +368,15 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
+    public long SubmitGuestCacheOperation(
+        GuestGpuCacheOperation operation,
+        Action applyHostState,
+        string debugName) =>
+        VulkanVideoPresenter.SubmitGuestCacheOperation(
+            operation,
+            applyHostState,
+            debugName);
+
     public long SubmitGpuLabelSignal(
         Action<GuestGpuLabelDependency> publishGpu,
         Action? publishHost,

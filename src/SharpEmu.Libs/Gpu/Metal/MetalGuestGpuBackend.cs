@@ -388,6 +388,15 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
+    public long SubmitGuestCacheOperation(
+        GuestGpuCacheOperation operation,
+        Action applyHostState,
+        string debugName)
+    {
+        _ = operation;
+        return MetalVideoPresenter.SubmitOrderedGuestAction(applyHostState, debugName);
+    }
+
     public long SubmitGpuLabelSignal(
         Action<GuestGpuLabelDependency> publishGpu,
         Action? publishHost,

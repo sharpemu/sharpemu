@@ -225,6 +225,15 @@ internal interface IGuestGpuBackend
     long SubmitOrderedGuestAction(Action action, string debugName);
 
     /// <summary>
+    /// Enqueues a guest cache operation without CPU materialization. The
+    /// callback updates host resource state after the queue dependency.
+    /// </summary>
+    long SubmitGuestCacheOperation(
+        GuestGpuCacheOperation operation,
+        Action applyHostState,
+        string debugName);
+
+    /// <summary>
     /// Enqueues a GPU-only label marker. The callback receives the producer
     /// queue timeline. Returns zero when the backend cannot preserve GPU-only
     /// visibility.
