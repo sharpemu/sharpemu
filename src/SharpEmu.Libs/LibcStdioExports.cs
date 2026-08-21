@@ -15,6 +15,14 @@ public static class LibcStdioExports
     private const int MaxModeLength = 16;
     private const int ReadChunkSize = 1024 * 1024;
     private const ulong GuestFileObjectSize = 0x100;
+    private const int Enoent = 2;
+    private const int Eio = 5;
+    private const int Ebadf = 9;
+    private const int Enomem = 12;
+    private const int Eacces = 13;
+    private const int Efault = 14;
+    private const int Einval = 22;
+    private const int Erofs = 30;
 
     private static readonly ConcurrentDictionary<ulong, FileStream> _fileHandles = new();
 
@@ -59,14 +67,33 @@ public static class LibcStdioExports
 
         if (pathAddress == 0 || modeAddress == 0 ||
             !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, pathAddress, MaxPathLength, out var guestPath) ||
-            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode) ||
-            !TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                Efault);
+        }
+
+        if (string.IsNullOrEmpty(guestPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
+        if (!TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval);
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
             if (_traceStdio)
@@ -75,8 +102,10 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] fopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> PERMISSION_DENIED (read-only path)");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Erofs);
         }
 
         try
@@ -107,8 +136,10 @@ public static class LibcStdioExports
                     out var handle))
             {
                 stream.Dispose();
-                ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                return FilePointerFailure(
+                    ctx,
+                    OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN,
+                    Enomem);
             }
 
             _fileHandles[handle] = stream;
@@ -122,7 +153,8 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {
@@ -130,10 +162,7 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] fopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> FAILED {ex.GetType().Name}: {ex.Message}");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return FilePointerFailure(ctx, ex);
         }
     }
 
@@ -645,13 +674,35 @@ public static class LibcStdioExports
         var modeAddress = ctx[CpuRegister.Rsi];
         var handle = ctx[CpuRegister.Rdx];
 
-        if (pathAddress == 0 || modeAddress == 0 || handle == 0 ||
+        if (pathAddress == 0 || modeAddress == 0 ||
             !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, pathAddress, MaxPathLength, out var guestPath) ||
-            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode) ||
-            !TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                Efault);
+        }
+
+        if (handle == 0)
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Ebadf);
+        }
+
+        if (string.IsNullOrEmpty(guestPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
+        if (!TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval);
         }
 
         if (_fileHandles.TryRemove(handle, out var previousStream))
@@ -660,10 +711,17 @@ public static class LibcStdioExports
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Erofs);
         }
 
         try
@@ -690,7 +748,8 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {
@@ -698,10 +757,7 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] freopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> FAILED {ex.GetType().Name}: {ex.Message}");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return FilePointerFailure(ctx, ex);
         }
     }
 
@@ -808,6 +864,36 @@ public static class LibcStdioExports
             default:
                 return false;
         }
+    }
+
+    private static int FilePointerFailure(
+        CpuContext ctx,
+        OrbisGen2Result diagnosticResult,
+        int errno)
+    {
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)diagnosticResult;
+    }
+
+    private static int FilePointerFailure(CpuContext ctx, Exception exception)
+    {
+        return exception switch
+        {
+            UnauthorizedAccessException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Eacces),
+            FileNotFoundException or DirectoryNotFoundException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
+                Enoent),
+            ArgumentException or NotSupportedException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval),
+            _ => FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Eio),
+        };
     }
 
     private static bool TryGetSeekOrigin(int whence, out SeekOrigin origin)
