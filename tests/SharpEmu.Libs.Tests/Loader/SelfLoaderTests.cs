@@ -14,6 +14,7 @@ public sealed class SelfLoaderTests
     private const uint Ps5SelfMagic = 0x5414F5EE;
     private const int SelfHeaderSize = 0x20;
     private const int ElfHeaderSize = 0x40;
+    private const int ProgramHeaderSize = 0x38;
 
     [Theory]
     [InlineData(Ps4SelfMagic, (byte)0x00, 0x0000_0101u, (ushort)0x22)]
@@ -127,6 +128,16 @@ public sealed class SelfLoaderTests
         Assert.Empty(image.MappedRegions);
     }
 
+    [Fact]
+    public void Load_RecordsImportedModulesWithoutSymbolRelocations()
+    {
+        var imageData = CreateElfWithImportedModule("libExample.PS5");
+
+        var image = new SelfLoader().Load(imageData, new VirtualMemory());
+
+        Assert.Equal(["libExample.PS5"], image.ImportedModuleNames);
+    }
+
     private static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)
     {
         var imageData = new byte[SelfHeaderSize + ElfHeaderSize];
@@ -164,5 +175,67 @@ public sealed class SelfLoaderTests
         BinaryPrimitives.WriteUInt64LittleEndian(header[0x20..], ElfHeaderSize);
         BinaryPrimitives.WriteUInt16LittleEndian(header[0x34..], ElfHeaderSize);
         BinaryPrimitives.WriteUInt16LittleEndian(header[0x36..], 0x38);
+    }
+
+    private static byte[] CreateElfWithImportedModule(string moduleName)
+    {
+        const int dynamicOffset = 0x200;
+        const int stringTableOffset = 0x280;
+        const long dtNull = 0;
+        const long dtSceNeededModule = 0x6100000F;
+        const long dtSceStrTab = 0x61000035;
+        const long dtSceStrSize = 0x61000037;
+
+        var stringBytes = System.Text.Encoding.ASCII.GetBytes("\0" + moduleName + "\0");
+        var imageData = new byte[0x400];
+        WriteMinimalElfHeader(imageData.AsSpan(0, ElfHeaderSize));
+        BinaryPrimitives.WriteUInt64LittleEndian(imageData.AsSpan(0x20), ElfHeaderSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(imageData.AsSpan(0x36), ProgramHeaderSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(imageData.AsSpan(0x38), 2);
+
+        WriteProgramHeader(
+            imageData.AsSpan(ElfHeaderSize, ProgramHeaderSize),
+            type: 1,
+            fileOffset: 0,
+            virtualAddress: 0,
+            fileSize: (ulong)imageData.Length,
+            memorySize: (ulong)imageData.Length);
+        WriteProgramHeader(
+            imageData.AsSpan(ElfHeaderSize + ProgramHeaderSize, ProgramHeaderSize),
+            type: 2,
+            fileOffset: dynamicOffset,
+            virtualAddress: dynamicOffset,
+            fileSize: 0x40,
+            memorySize: 0x40);
+
+        WriteDynamicEntry(imageData.AsSpan(dynamicOffset), dtSceStrTab, stringTableOffset);
+        WriteDynamicEntry(imageData.AsSpan(dynamicOffset + 0x10), dtSceStrSize, (ulong)stringBytes.Length);
+        WriteDynamicEntry(imageData.AsSpan(dynamicOffset + 0x20), dtSceNeededModule, 1);
+        WriteDynamicEntry(imageData.AsSpan(dynamicOffset + 0x30), dtNull, 0);
+        stringBytes.CopyTo(imageData.AsSpan(stringTableOffset));
+        return imageData;
+    }
+
+    private static void WriteProgramHeader(
+        Span<byte> header,
+        uint type,
+        ulong fileOffset,
+        ulong virtualAddress,
+        ulong fileSize,
+        ulong memorySize)
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(header, type);
+        BinaryPrimitives.WriteUInt32LittleEndian(header[0x04..], 5);
+        BinaryPrimitives.WriteUInt64LittleEndian(header[0x08..], fileOffset);
+        BinaryPrimitives.WriteUInt64LittleEndian(header[0x10..], virtualAddress);
+        BinaryPrimitives.WriteUInt64LittleEndian(header[0x20..], fileSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(header[0x28..], memorySize);
+        BinaryPrimitives.WriteUInt64LittleEndian(header[0x30..], 0x1000);
+    }
+
+    private static void WriteDynamicEntry(Span<byte> entry, long tag, ulong value)
+    {
+        BinaryPrimitives.WriteInt64LittleEndian(entry, tag);
+        BinaryPrimitives.WriteUInt64LittleEndian(entry[0x08..], value);
     }
 }

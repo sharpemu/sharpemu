@@ -56,6 +56,8 @@ public sealed class SelfLoader : ISelfLoader
     private const long DtSceStrSize = 0x61000037;
     private const long DtSceSymTab = 0x61000039;
     private const long DtSceSymTabSize = 0x6100003F;
+    private const long DtSceNeededModule = 0x6100000F;
+    private const long DtSceNeededModuleNext = 0x61000045;
 
     private const uint RelocationTypeNone = 0;
     private const uint RelocationTypeAbsolute64 = 1;
@@ -259,7 +261,8 @@ public sealed class SelfLoader : ISelfLoader
             imageBase,
             _moduleManager,
             tlsModuleId,
-            out var importedRelocations);
+            out var importedRelocations,
+            out var importedModuleNames);
         var effectiveImportStubs = importStubs.Count == 0
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
@@ -331,7 +334,8 @@ public sealed class SelfLoader : ISelfLoader
             applicationInfo.Version,
             tlsModuleId,
             tlsInfo.MemorySize,
-            tlsInfo.StaticOffset);
+            tlsInfo.StaticOffset,
+            importedModuleNames);
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
@@ -573,9 +577,11 @@ public sealed class SelfLoader : ISelfLoader
         ulong imageBase,
         IModuleManager? moduleManager,
         uint tlsModuleId,
-        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations)
+        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations,
+        out IReadOnlyList<string> importedModuleNames)
     {
         importedRelocations = Array.Empty<ImportedSymbolRelocation>();
+        importedModuleNames = Array.Empty<string>();
         if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex))
         {
             return EmptyImportStubs;
@@ -666,15 +672,21 @@ public sealed class SelfLoader : ISelfLoader
 
         byte[] stringTable = Array.Empty<byte>();
         byte[] symbolTable = Array.Empty<byte>();
+        if (dynamicInfo.StrTabOffset != 0 && dynamicInfo.StrTabSize != 0 &&
+            !TryLoadTableBytes(
+                elfData,
+                virtualMemory,
+                imageBase,
+                dynamicInfo.StrTabOffset,
+                dynamicInfo.StrTabSize,
+                out stringTable))
+        {
+            return EmptyImportStubs;
+        }
+
         if (maxSymbolIndex != 0)
         {
-            if (!TryLoadTableBytes(
-                    elfData,
-                    virtualMemory,
-                    imageBase,
-                    dynamicInfo.StrTabOffset,
-                    dynamicInfo.StrTabSize,
-                    out stringTable))
+            if (stringTable.Length == 0)
             {
                 return EmptyImportStubs;
             }
@@ -693,6 +705,8 @@ public sealed class SelfLoader : ISelfLoader
                 return EmptyImportStubs;
             }
         }
+
+        importedModuleNames = ReadImportedModuleNames(dynamicTable, stringTable);
 
         var descriptors = new List<RelocationDescriptor>(256);
         var orderedImportNids = new List<string>(128);
@@ -1983,6 +1997,39 @@ public sealed class SelfLoader : ISelfLoader
             initArraySize,
             preInitArrayOffset,
             preInitArraySize);
+    }
+
+    private static IReadOnlyList<string> ReadImportedModuleNames(
+        ReadOnlySpan<byte> dynamicTable,
+        ReadOnlySpan<byte> stringTable)
+    {
+        if (stringTable.IsEmpty)
+        {
+            return Array.Empty<string>();
+        }
+
+        var names = new List<string>();
+        for (var offset = 0; offset + DynamicEntrySize <= dynamicTable.Length; offset += DynamicEntrySize)
+        {
+            var tag = BinaryPrimitives.ReadInt64LittleEndian(dynamicTable.Slice(offset, sizeof(long)));
+            var value = BinaryPrimitives.ReadUInt64LittleEndian(dynamicTable.Slice(offset + sizeof(long), sizeof(ulong)));
+            if (tag == DtNull)
+            {
+                break;
+            }
+
+            if (tag is not (DtSceNeededModule or DtSceNeededModuleNext) ||
+                !TryReadNullTerminatedAscii(stringTable, (uint)value, out var name) ||
+                string.IsNullOrWhiteSpace(name) ||
+                names.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            names.Add(name);
+        }
+
+        return names.Count == 0 ? Array.Empty<string>() : names;
     }
 
     private static bool IsSupportedRelocationType(uint relocationType)

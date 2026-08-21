@@ -160,7 +160,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, image, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var initializerResult = RunAllInitializers(
             image,
@@ -627,6 +627,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     private List<LoadedModuleImage> LoadAdjacentSceModules(
         string ebootPath,
+        SelfImage mainImage,
         IDictionary<ulong, string> importStubs,
         IDictionary<string, ulong> runtimeSymbols)
     {
@@ -639,21 +640,19 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         var moduleDirectories = new[]
         {
-            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true),
-            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true),
-            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true),
-            // Retail packages may keep application PRX files beside eboot.bin
-            // (for example, native middleware shipped at the app root). Index
-            // those modules too so their imports are available when the guest
-            // requests them through sceKernelLoadStartModule.
-            (Path: ebootDirectory, StartAtBoot: false),
+            // A linked PRX can be beside eboot.bin. Load only the app-root modules
+            // named by the main image at boot. Map the other app-root modules so
+            // sceKernelLoadStartModule can start them later.
+            (Path: ebootDirectory, StartAtBoot: true, LinkedOnly: true),
+            (Path: ebootDirectory, StartAtBoot: false, LinkedOnly: false),
+            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true, LinkedOnly: false),
+            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true, LinkedOnly: false),
+            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true, LinkedOnly: false),
             // Unity native plugins are loaded later through sceKernelLoadStartModule. Map
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.
-            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false),
+            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false, LinkedOnly: false),
         }
-        .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
-        .Select(group => group.First())
         .Where(entry => Directory.Exists(entry.Path))
         .ToArray();
 
@@ -666,6 +665,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             .SelectMany(directory => Directory
                 .EnumerateFiles(directory.Path)
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .Where(path => !directory.LinkedOnly || IsMainImageLinkedModule(path, mainImage.ImportedModuleNames))
                 .Select(path => (Path: path, directory.StartAtBoot)))
             .Where(entry =>
             {
@@ -750,6 +750,28 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         Console.Error.WriteLine(
             $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
         return loadedImages;
+    }
+
+    private static bool IsMainImageLinkedModule(string modulePath, IReadOnlyList<string> importedModuleNames)
+    {
+        var fileName = Path.GetFileName(modulePath);
+        var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(modulePath);
+        if (string.IsNullOrWhiteSpace(fileName) || string.IsNullOrWhiteSpace(fileNameWithoutExtension))
+        {
+            return false;
+        }
+
+        for (var i = 0; i < importedModuleNames.Count; i++)
+        {
+            var importedName = importedModuleNames[i];
+            if (string.Equals(importedName, fileName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(importedName, fileNameWithoutExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void InstallNativePluginCompatibilityHooks(
