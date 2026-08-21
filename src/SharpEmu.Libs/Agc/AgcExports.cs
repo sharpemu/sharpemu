@@ -74,9 +74,10 @@ public static partial class AgcExports
         ItDrawIndexIndirect, ItDrawIndex2, ItIndexType, ItDrawIndexAuto,
         ItNumInstances, ItDrawIndexMultiAuto, ItDrawIndexOffset2, ItWriteData,
         ItAtomicMem, ItMemSemaphore, ItCopyData,
-        ItDispatchDirect, ItDispatchIndirect, ItCondExec, ItWaitRegMem,
+        ItDispatchDirect, ItDispatchIndirect, ItSetPredication, ItCondExec,
+        ItWaitRegMem,
         ItIndirectBuffer, ItCondWrite, ItEventWrite, ItReleaseMem, ItDmaData,
-        ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
+        ItRewind, ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
     ];
 
     private const uint RZero = 0x00;
