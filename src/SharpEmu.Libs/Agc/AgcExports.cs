@@ -1691,6 +1691,8 @@ public static partial class AgcExports
         // continue into the buffer it links to.
         public ulong PendingChainAddress { get; set; }
         public uint PendingChainDwords { get; set; }
+        public (ulong Address, uint Dwords, ulong RingChunkBase)?
+            IndirectCallReturn { get; set; }
 
         // Base of the ring chunk currently being parsed; advances by RingChunkBytes.
         public ulong RingChunkBase { get; set; }
@@ -5099,6 +5101,7 @@ public static partial class AgcExports
             state.ActiveVertexSnapshots = submission.VertexSnapshots;
             state.RingChunkBase = state.IsForceSubmittedRing ? 0 : submission.CommandAddress;
             state.FollowedChunkAdvance = false;
+            state.IndirectCallReturn = null;
             var isSuspended = ParseSubmittedDcb(
                 ctx,
                 gpuState,
@@ -5272,7 +5275,16 @@ public static partial class AgcExports
             var chainDwords = state.PendingChainDwords;
             if (chainAddress == 0 || chainDwords == 0 || chainDwords > 1_000_000)
             {
-                return false;
+                if (state.IndirectCallReturn is not { } returnTarget)
+                {
+                    return false;
+                }
+
+                state.IndirectCallReturn = null;
+                commandAddress = returnTarget.Address;
+                dwordCount = returnTarget.Dwords;
+                state.RingChunkBase = returnTarget.RingChunkBase;
+                continue;
             }
 
             commandAddress = chainAddress;
@@ -5443,6 +5455,26 @@ public static partial class AgcExports
                 // decided not to take. Only a populated one redirects the stream.
                 if (chainAddress != 0 && chainLength != 0)
                 {
+                    var jumpMode = (chainDwords >> 20) & 0x1u;
+                    if (jumpMode == 0 && offset + length < dwordCount)
+                    {
+                        if (state.IndirectCallReturn is not null)
+                        {
+                            StopSubmittedQueue(
+                                ctx,
+                                state,
+                                currentAddress,
+                                ItIndirectBuffer,
+                                "nested indirect calls are not supported by AGC");
+                            return true;
+                        }
+
+                        state.IndirectCallReturn = (
+                            currentAddress + ((ulong)length * sizeof(uint)),
+                            dwordCount - (offset + length),
+                            state.RingChunkBase);
+                    }
+
                     state.PendingChainAddress = chainAddress;
                     state.PendingChainDwords = chainLength;
                     state.RingChunkBase = chainAddress;
@@ -5450,10 +5482,10 @@ public static partial class AgcExports
                         $"agc.dcb_chain queue={state.QueueName} " +
                         $"submission={state.ActiveSubmissionId} " +
                         $"packet=0x{currentAddress:X16} " +
+                        $"mode={(jumpMode == 0 ? "call" : "chain")} " +
                         $"target=0x{chainAddress:X16} dwords={chainLength}");
 
-                    // The link is a jump, not a call: whatever follows it in this
-                    // buffer is unreachable padding.
+                    // A call keeps the parent continuation. A chain replaces it.
                     return false;
                 }
 
@@ -18107,18 +18139,25 @@ GuestImageWriteTracker.Track(
     public static int DcbJump(CpuContext ctx)
     {
         var dcb = ctx[CpuRegister.Rdi];
-        var target = ctx[CpuRegister.Rsi];
-        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
-        if (dcb == 0)
+        var mode = (uint)ctx[CpuRegister.Rsi];
+        var cachePolicy = (uint)ctx[CpuRegister.Rdx];
+        var target = ctx[CpuRegister.Rcx];
+        var sizeDwords = (uint)ctx[CpuRegister.R8];
+        if (dcb == 0 || mode > 1 || cachePolicy > 3)
         {
             return ReturnPointer(ctx, 0);
         }
+
+        var control = 0x0F20_0000u |
+                      ((cachePolicy & 0x3u) << 28) |
+                      ((mode & 0x1u) << 20) |
+                      (sizeDwords & 0xFFFFFu);
 
         if (!TryAllocateCommandDwords(ctx, dcb, 4, out var cmd) ||
             !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
             !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
             !ctx.TryWriteUInt32(cmd + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
-            !ctx.TryWriteUInt32(cmd + 12, sizeDwords & 0xFFFFF))
+            !ctx.TryWriteUInt32(cmd + 12, control))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -18225,7 +18264,31 @@ GuestImageWriteTracker.Track(
         ExportName = "sceAgcAcbJump",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int AcbJump(CpuContext ctx) => DcbJump(ctx);
+    public static int AcbJump(CpuContext ctx)
+    {
+        var acb = ctx[CpuRegister.Rdi];
+        var target = ctx[CpuRegister.Rsi];
+        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
+        if (acb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        const uint chainMode = 1;
+        var control = 0x0F20_0000u |
+                      (chainMode << 20) |
+                      (sizeDwords & 0xFFFFFu);
+        if (!TryAllocateCommandDwords(ctx, acb, 4, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 12, control))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
 
     // Sony SetCf* range writer — SET_CONTEXT_REG packet (same shape as SH range).
     [SysAbiExport(

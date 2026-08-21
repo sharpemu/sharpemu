@@ -49,6 +49,7 @@ public static partial class AgcExports
         state.CurrentIndexSnapshot = null;
         state.ActiveVertexSnapshots = null;
         state.CurrentVertexSnapshot = null;
+        state.IndirectCallReturn = null;
         state.AtomicReturnMePending = false;
         state.AtomicReturnPfpPending = false;
         state.RingTailParkAddress = 0;

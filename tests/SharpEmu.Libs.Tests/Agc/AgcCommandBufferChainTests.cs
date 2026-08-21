@@ -26,7 +26,7 @@ public sealed class AgcCommandBufferChainCollection
 public sealed class AgcCommandBufferChainTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
-    private const int MemorySize = 0x4000;
+    private const int MemorySize = 0x14000;
 
     private const ulong HandleOutAddress = BaseAddress + 0x100;
     private const ulong EventsAddress = BaseAddress + 0x200;
@@ -108,6 +108,116 @@ public sealed class AgcCommandBufferChainTests
         }
     }
 
+    [Fact]
+    public void DcbJump_EncodesModeCachePolicyAndSize()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 0; // call
+        ctx[CpuRegister.Rdx] = 2; // bypass
+        ctx[CpuRegister.Rcx] = SecondLinkAddress;
+        ctx[CpuRegister.R8] = 0x123;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbJump(ctx));
+        Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
+        Assert.Equal(0x2F20_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    [Fact]
+    public void AcbJump_AlwaysEncodesChainMode()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = SecondLinkAddress;
+        ctx[CpuRegister.Rdx] = 0x123;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbJump(ctx));
+        Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
+        Assert.Equal(0x0F30_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    [Fact]
+    public void SubmittedDcb_ReturnsToParentAfterIndirectCall()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var equeue = CreateEqueue(ctx, memory);
+
+        try
+        {
+            RegisterGraphicsCompletion(equeue);
+            WriteUInt32(memory, SecondLinkAddress, 0x8000_0000u);
+            var callDwords = WriteJump(
+                ctx,
+                memory,
+                FirstLinkAddress,
+                mode: 0,
+                SecondLinkAddress,
+                targetDwords: 1);
+            var waitDwords = WriteUnsatisfiedWait(
+                ctx,
+                memory,
+                FirstLinkAddress + (callDwords * sizeof(uint)));
+
+            SubmitDcb(ctx, memory, FirstLinkAddress, callDwords + waitDwords);
+
+            Assert.NotEqual(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                WaitEqueue(ctx, memory, equeue));
+        }
+        finally
+        {
+            DeleteEqueue(ctx, equeue);
+        }
+    }
+
+    [Fact]
+    public void SubmittedDcb_IndirectCallRestoresParentRingBase()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        try
+        {
+            WriteUInt32(memory, SecondLinkAddress, 0x8000_0000u);
+            var continuation = FirstLinkAddress + 0x10000;
+            _ = WriteUnsatisfiedWait(ctx, memory, continuation);
+            var callDwords = WriteJump(
+                ctx,
+                memory,
+                FirstLinkAddress,
+                mode: 0,
+                SecondLinkAddress,
+                targetDwords: 1);
+            var sentinelDwords = WriteChain(
+                ctx,
+                memory,
+                FirstLinkAddress + (callDwords * sizeof(uint)),
+                target: 1,
+                targetDwords: 0);
+
+            SubmitDcb(
+                ctx,
+                memory,
+                FirstLinkAddress,
+                callDwords + sentinelDwords);
+
+            Assert.NotNull(GpuWaitRegistry.SnapshotAt(memory, WaitLabelAddress));
+        }
+        finally
+        {
+            GpuWaitRegistry.Clear();
+        }
+    }
+
     // A chain whose target is never satisfied must not be mistaken for a completed
     // submission: without the redirect the empty first link completes immediately.
     [Fact]
@@ -148,11 +258,22 @@ public sealed class AgcCommandBufferChainTests
         ulong linkAddress,
         ulong target,
         uint targetDwords)
+        => WriteJump(ctx, memory, linkAddress, 1, target, targetDwords);
+
+    private static uint WriteJump(
+        CpuContext ctx,
+        FakeCpuMemory memory,
+        ulong linkAddress,
+        uint mode,
+        ulong target,
+        uint targetDwords)
     {
         PointCommandBufferAt(memory, linkAddress);
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
-        ctx[CpuRegister.Rsi] = target;
-        ctx[CpuRegister.Rdx] = targetDwords;
+        ctx[CpuRegister.Rsi] = mode;
+        ctx[CpuRegister.Rdx] = 0; // LRU
+        ctx[CpuRegister.Rcx] = target;
+        ctx[CpuRegister.R8] = targetDwords;
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbJump(ctx));
         Assert.Equal(linkAddress, ctx[CpuRegister.Rax]);
         return 4;
@@ -225,6 +346,13 @@ public sealed class AgcCommandBufferChainTests
         Span<byte> buffer = stackalloc byte[8];
         Assert.True(memory.TryRead(address, buffer));
         return BinaryPrimitives.ReadUInt64LittleEndian(buffer);
+    }
+
+    private static uint ReadUInt32(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> buffer = stackalloc byte[4];
+        Assert.True(memory.TryRead(address, buffer));
+        return BinaryPrimitives.ReadUInt32LittleEndian(buffer);
     }
 
     private static void WriteUInt64(FakeCpuMemory memory, ulong address, ulong value)
