@@ -15,6 +15,70 @@ public sealed class AgcWaitRegMemTests
     private const ulong PacketAddress = BaseAddress + 0x400;
     private const ulong StackAddress = BaseAddress + 0x800;
 
+    [Theory]
+    [InlineData(1u, 0x0000_0115u)]
+    [InlineData(2u, 0x0000_0015u)]
+    public void CbCondWrite_EmitsDocumentedPacketLayout(
+        uint writeSpace,
+        uint expectedControl)
+    {
+        var memory = CreateMemory(out var ctx);
+        var writeAddress = BaseAddress + 0xD04;
+        var readAddress = BaseAddress + 0xC04;
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 5;
+        ctx[CpuRegister.Rdx] = writeSpace;
+        ctx[CpuRegister.Rcx] = writeAddress;
+        ctx[CpuRegister.R8] = 0xCAFE_BABE;
+        ctx[CpuRegister.R9] = readAddress;
+        WriteUInt32(memory, StackAddress + 8, 0x1122_3344);
+        WriteUInt32(memory, StackAddress + 16, 0xFFFF_00FF);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbCondWrite(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(0xC007_4500u, ReadUInt32(memory, PacketAddress));
+        Assert.Equal(expectedControl, ReadUInt32(memory, PacketAddress + 4));
+        Assert.Equal((uint)readAddress, ReadUInt32(memory, PacketAddress + 8));
+        Assert.Equal(1u, ReadUInt32(memory, PacketAddress + 12));
+        Assert.Equal(0x1122_3344u, ReadUInt32(memory, PacketAddress + 16));
+        Assert.Equal(0xFFFF_00FFu, ReadUInt32(memory, PacketAddress + 20));
+        Assert.Equal((uint)writeAddress, ReadUInt32(memory, PacketAddress + 24));
+        Assert.Equal(1u, ReadUInt32(memory, PacketAddress + 28));
+        Assert.Equal(0xCAFE_BABEu, ReadUInt32(memory, PacketAddress + 32));
+        Assert.Equal(PacketAddress + 36, ReadUInt64(memory, CommandBufferAddress + 0x10));
+    }
+
+    [Fact]
+    public void CbCondWriteGetSize_ReturnsNineDwords()
+    {
+        _ = CreateMemory(out var ctx);
+
+        Assert.Equal(9 * sizeof(uint), AgcExports.CbCondWriteGetSize(ctx));
+        Assert.Equal(9u * sizeof(uint), ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void CbCondWrite_AllowsNullAddressForScratchWrite()
+    {
+        var memory = CreateMemory(out var ctx);
+        var readAddress = BaseAddress + 0xC04;
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 5;
+        ctx[CpuRegister.Rdx] = 2;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 1;
+        ctx[CpuRegister.R9] = readAddress;
+        WriteUInt32(memory, StackAddress + 8, 0x1122_3344);
+        WriteUInt32(memory, StackAddress + 16, uint.MaxValue);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbCondWrite(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 24));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 28));
+    }
+
     [Fact]
     public void DcbWaitRegMem32_EmitsGen5PacketLayout()
     {
@@ -52,7 +116,7 @@ public sealed class AgcWaitRegMemTests
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
         ctx[CpuRegister.Rsi] = 1;
         ctx[CpuRegister.Rdx] = 6;
-        ctx[CpuRegister.Rcx] = 3;
+        ctx[CpuRegister.Rcx] = 4;
         ctx[CpuRegister.R8] = 1;
         ctx[CpuRegister.R9] = waitAddress;
         WriteUInt64(memory, StackAddress + 8, 0x1122_3344_5566_7788);
@@ -67,9 +131,65 @@ public sealed class AgcWaitRegMemTests
         Assert.Equal(0xAABB_CCDDu, ReadUInt32(memory, PacketAddress + 16));
         Assert.Equal(0x5566_7788u, ReadUInt32(memory, PacketAddress + 20));
         Assert.Equal(0x1122_3344u, ReadUInt32(memory, PacketAddress + 24));
-        Assert.Equal(0x0200_0156u, ReadUInt32(memory, PacketAddress + 28));
+        Assert.Equal(0x0200_0096u, ReadUInt32(memory, PacketAddress + 28));
         Assert.Equal(0x32u, ReadUInt32(memory, PacketAddress + 32));
     }
+
+    [Theory]
+    [InlineData(1u, 2u, 0xFFFF_FFFFu, 1u, true)]
+    [InlineData(2u, 2u, 0xFFFF_FFFFu, 2u, true)]
+    [InlineData(0x12u, 0x2u, 0xFu, 3u, true)]
+    [InlineData(0x12u, 0x22u, 0xFu, 3u, false)]
+    [InlineData(0x12u, 0x22u, 0xFu, 4u, true)]
+    [InlineData(4u, 5u, 0xFFFF_FFFFu, 5u, false)]
+    [InlineData(6u, 6u, 0xFFFF_FFFFu, 5u, true)]
+    public void ConditionalComparison_AppliesMaskOnlyToObservedValue(
+        uint value,
+        uint reference,
+        uint mask,
+        uint compareFunction,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            AgcExports.CompareConditionalValue(value, reference, mask, compareFunction));
+
+    [Theory]
+    [InlineData(0u, true)]
+    [InlineData(1u, true)]
+    [InlineData(2u, false)]
+    [InlineData(3u, false)]
+    [InlineData(4u, true)]
+    [InlineData(5u, false)]
+    public void WaitOperationValidation_AcceptsOnlyDocumentedValues(
+        uint operation,
+        bool expected) =>
+        Assert.Equal(expected, AgcExports.IsValidWaitOperation(operation));
+
+    [Theory]
+    [InlineData(0u, false, true)]
+    [InlineData(1u, false, true)]
+    [InlineData(4u, false, false)]
+    [InlineData(4u, true, true)]
+    public void ConditionalWait_UsesScratchState(
+        uint operation,
+        bool scratchEnabled,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            AgcExports.ShouldExecuteWaitOperation(operation, scratchEnabled));
+
+    [Theory]
+    [InlineData(0x0400_0013u, false, 0u)]
+    [InlineData(0x0400_0113u, false, 1u)]
+    [InlineData(0x0400_0053u, false, 4u)]
+    [InlineData(0x0200_0013u, true, 0u)]
+    [InlineData(0x0200_0113u, true, 1u)]
+    [InlineData(0x0200_0093u, true, 4u)]
+    public void WaitOperationDecoder_ReadsGen5ControlFields(
+        uint control,
+        bool is64Bit,
+        uint expected) =>
+        Assert.Equal(expected, AgcExports.DecodeWaitOperation(control, is64Bit));
 
     [Fact]
     public void WaitRegMemPatchFunctions_UseGen5Fields()

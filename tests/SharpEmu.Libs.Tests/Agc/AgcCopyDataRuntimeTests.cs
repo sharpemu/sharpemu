@@ -291,7 +291,7 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             unchecked((uint)(waitAddress >> 32)),
             uint.MaxValue,
             reference,
-            0x0400_0053,
+            0x0400_0013,
             0,
             Pm4Header(5, ItWriteData),
             2u << 8,

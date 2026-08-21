@@ -56,6 +56,7 @@ public static partial class AgcExports
     private const uint ItCondExec = 0x22;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
+    private const uint ItCondWrite = 0x45;
     private const uint ItEventWrite = 0x46;
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
@@ -74,7 +75,7 @@ public static partial class AgcExports
         ItNumInstances, ItDrawIndexMultiAuto, ItDrawIndexOffset2, ItWriteData,
         ItAtomicMem, ItMemSemaphore, ItCopyData,
         ItDispatchDirect, ItDispatchIndirect, ItCondExec, ItWaitRegMem,
-        ItIndirectBuffer, ItEventWrite, ItReleaseMem, ItDmaData,
+        ItIndirectBuffer, ItCondWrite, ItEventWrite, ItReleaseMem, ItDmaData,
         ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
     ];
 
@@ -1650,6 +1651,7 @@ public static partial class AgcExports
         public uint InstanceCount { get; set; } = 1;
         public uint DrawIndexOffset { get; set; }
         public bool PredicateSkip { get; set; }
+        public bool ConditionalWaitEnabled { get; set; }
         public string QueueName { get; set; } = "graphics";
         // Ident this queue's end-of-pipe completion interrupt is published under.
         // The graphics queue keeps 0; a compute queue takes the owner handle it
@@ -3780,6 +3782,70 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "FuVbkyKlf+s",
+        ExportName = "sceAgcCbCondWriteGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbCondWriteGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 9u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
+        Nid = "7toV+elXqNM",
+        ExportName = "sceAgcCbCondWrite",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbCondWrite(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var compareFunction = (uint)ctx[CpuRegister.Rsi];
+        var writeSpace = (uint)ctx[CpuRegister.Rdx];
+        var writeAddress = ctx[CpuRegister.Rcx];
+        var writeValue = (uint)ctx[CpuRegister.R8];
+        var readAddress = ctx[CpuRegister.R9];
+        var stackAddress = ctx[CpuRegister.Rsp];
+        if (!TryReadUInt32(ctx, stackAddress + sizeof(ulong), out var reference) ||
+            !TryReadUInt32(ctx, stackAddress + (2 * sizeof(ulong)), out var mask) ||
+            commandBufferAddress == 0 ||
+            compareFunction > 6 ||
+            writeSpace is not 1 and not 2 ||
+            readAddress == 0 ||
+            (writeSpace == 1 &&
+             (writeAddress == 0 || writeAddress % sizeof(uint) != 0)) ||
+            readAddress % sizeof(uint) != 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        var control = 0x10u |
+                      compareFunction |
+                      (writeSpace == 1 ? 0x100u : 0u);
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 9, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(9, ItCondWrite, RZero)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, control) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, (uint)readAddress & ~0x3u) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(readAddress >> 32) & 0xFFFFu) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, reference) ||
+            !TryWriteUInt32(ctx, commandAddress + 20, mask) ||
+            !TryWriteUInt32(ctx, commandAddress + 24, (uint)writeAddress & ~0x3u) ||
+            !TryWriteUInt32(ctx, commandAddress + 28, (uint)(writeAddress >> 32) & 0xFFFFu) ||
+            !TryWriteUInt32(ctx, commandAddress + 32, writeValue))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.cb_cond_write buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} compare={compareFunction} " +
+            $"space={writeSpace} read=0x{readAddress:X16} " +
+            $"ref=0x{reference:X8} mask=0x{mask:X8} " +
+            $"write=0x{writeAddress:X16} data=0x{writeValue:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
         Nid = "VmW0Tdpy420",
         ExportName = "sceAgcDcbWaitRegMem",
         Target = Generation.Gen5,
@@ -3803,7 +3869,7 @@ public static partial class AgcExports
         if (commandBufferAddress == 0 ||
             size > 1 ||
             compareFunction > 7 ||
-            operation > 4 ||
+            !IsValidWaitOperation(operation) ||
             cachePolicy > 3)
         {
             return ReturnPointer(ctx, 0);
@@ -5444,6 +5510,16 @@ public static partial class AgcExports
                     tracePackets);
             }
 
+            if (op == ItCondWrite && length >= 9)
+            {
+                ApplySubmittedCondWrite(
+                    ctx,
+                    gpuState,
+                    state,
+                    currentAddress,
+                    tracePackets);
+            }
+
             if (op == ItAtomicMem &&
                 HandleSubmittedAtomicMem(
                     ctx,
@@ -6024,7 +6100,7 @@ public static partial class AgcExports
             ItDrawIndexAuto or
             ItDrawIndexMultiAuto or
             ItDrawIndexOffset2 ||
-        op is ItAtomicMem or ItMemSemaphore or ItCopyData ||
+        op is ItAtomicMem or ItMemSemaphore or ItCopyData or ItCondWrite ||
         op == ItDmaData ||
         (op == ItNop && register == RDmaData && length >= 7) ||
         (op == ItNop && register == RFlip && length >= 6) ||
@@ -6609,6 +6685,7 @@ public static partial class AgcExports
         state.IndexSize = 0;
         state.InstanceCount = 1;
         state.DrawIndexOffset = 0;
+        state.ConditionalWaitEnabled = false;
     }
 
     private static void ApplySubmittedPredication(
@@ -7671,6 +7748,29 @@ public static partial class AgcExports
             return false;
         }
 
+        var waitOperation = DecodeWaitOperation(controlValue, is64Bit);
+        if (!IsValidWaitOperation(waitOperation))
+        {
+            TraceAgc(
+                $"agc.dcb.wait_reject addr=0x{waitAddress:X16} " +
+                $"operation={waitOperation} bits={(is64Bit ? 64 : 32)} " +
+                $"standard={isStandard} packet=0x{packetAddress:X16} " +
+                "reason=invalid-operation");
+            return false;
+        }
+
+        if (!ShouldExecuteWaitOperation(waitOperation, state.ConditionalWaitEnabled))
+        {
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.conditional_wait_skipped addr=0x{waitAddress:X16} " +
+                    $"packet=0x{packetAddress:X16} scratch=0");
+            }
+
+            return false;
+        }
+
         // COMPARE_FUNC=0 is the hardware "always" condition. Reserved 7 is
         // also fail-open; neither condition may register a waiter. Validate
         // the watched memory before any read so null/malformed packets cannot
@@ -7802,6 +7902,146 @@ public static partial class AgcExports
         }
 
         return true;
+    }
+
+    private static void ApplySubmittedCondWrite(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        bool tracePacket)
+    {
+        if (!TryReadUInt32(ctx, packetAddress + 4, out var control) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var readLow) ||
+            !TryReadUInt32(ctx, packetAddress + 12, out var readHigh) ||
+            !TryReadUInt32(ctx, packetAddress + 16, out var reference) ||
+            !TryReadUInt32(ctx, packetAddress + 20, out var mask) ||
+            !TryReadUInt32(ctx, packetAddress + 24, out var writeLow) ||
+            !TryReadUInt32(ctx, packetAddress + 28, out var writeHigh) ||
+            !TryReadUInt32(ctx, packetAddress + 32, out var writeValue))
+        {
+            return;
+        }
+
+        var compareFunction = control & 0x7u;
+        var pollsMemory = (control & (1u << 4)) != 0;
+        var writesMemory = (control & (1u << 8)) != 0;
+        var readAddress = ((ulong)(readHigh & 0xFFFFu) << 32) |
+                          (readLow & 0xFFFF_FFFCu);
+        var writeAddress = ((ulong)(writeHigh & 0xFFFFu) << 32) |
+                           (writeLow & 0xFFFF_FFFCu);
+        if (!pollsMemory ||
+            compareFunction == 7 ||
+            readAddress == 0 ||
+            (writesMemory && writeAddress == 0))
+        {
+            TraceAgc(
+                $"agc.dcb.cond_write_reject packet=0x{packetAddress:X16} " +
+                $"compare={compareFunction} poll_memory={pollsMemory} " +
+                $"read=0x{readAddress:X16}");
+            return;
+        }
+
+        var readSucceeded = false;
+        var conditionPassed = false;
+        var wroteData = false;
+        var observed = 0u;
+
+        void TraceResult()
+        {
+            if (!tracePacket)
+            {
+                return;
+            }
+
+            TraceAgc(
+                $"agc.dcb.cond_write packet=0x{packetAddress:X16} " +
+                $"read=0x{readAddress:X16} value=0x{observed:X8} " +
+                $"ref=0x{reference:X8} mask=0x{mask:X8} compare={compareFunction} " +
+                $"read_ok={readSucceeded} pass={conditionPassed} " +
+                $"space={(writesMemory ? "gl2" : "scratch")} " +
+                $"write=0x{writeAddress:X16} data=0x{writeValue:X8} wrote={wroteData}");
+        }
+
+        void ApplyCondition()
+        {
+            readSucceeded = TryReadLiveUInt32(ctx, readAddress, out observed);
+            conditionPassed = readSucceeded &&
+                CompareConditionalValue(observed, reference, mask, compareFunction);
+            if (!conditionPassed)
+            {
+                TraceResult();
+                return;
+            }
+
+            if (writesMemory)
+            {
+                InvalidateDcbWindowIfOverlaps(writeAddress, sizeof(uint));
+                wroteData = TryWriteUInt32(ctx, writeAddress, writeValue);
+                if (wroteData)
+                {
+                    GpuWaitRegistry.RecordProduced(
+                        ctx.Memory,
+                        writeAddress,
+                        writeValue);
+                }
+
+                TraceResult();
+                return;
+            }
+
+            state.ConditionalWaitEnabled = writeValue != 0;
+            TraceResult();
+        }
+
+        if (writesMemory)
+        {
+            SubmitOrderedGpuSideEffect(
+                ctx,
+                gpuState,
+                state,
+                ApplyCondition,
+                $"cond_write dst=0x{writeAddress:X16}",
+                packetAddress,
+                writeAddress,
+                sizeof(uint));
+            return;
+        }
+
+        // The parser needs the CP scratch result before it handles the next wait.
+        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(
+            ApplyCondition,
+            $"cond_write scratch read=0x{readAddress:X16}");
+        if (sequence == 0)
+        {
+            ApplyCondition();
+        }
+        else if (!GuestGpu.Current.WaitForGuestWork(sequence))
+        {
+            TraceAgc(
+                $"agc.dcb.cond_write_wait_failed packet=0x{packetAddress:X16} " +
+                $"sequence={sequence}");
+        }
+    }
+
+    internal static bool CompareConditionalValue(
+        uint value,
+        uint reference,
+        uint mask,
+        uint compareFunction)
+    {
+        var maskedValue = value & mask;
+        return compareFunction switch
+        {
+            0 => true,
+            1 => maskedValue < reference,
+            2 => maskedValue <= reference,
+            3 => maskedValue == reference,
+            4 => maskedValue != reference,
+            5 => maskedValue >= reference,
+            6 => maskedValue > reference,
+            _ => true,
+        };
     }
 
     /// <summary>
@@ -16666,6 +16906,19 @@ GuestImageWriteTracker.Track(
         ((operation & 0x6u) << 5) |
         ((cachePolicy & 0x3u) << 25);
 
+    internal static bool IsValidWaitOperation(uint operation) =>
+        operation is 0 or 1 or 4;
+
+    internal static bool ShouldExecuteWaitOperation(
+        uint operation,
+        bool conditionalWaitEnabled) =>
+        operation != 4 || conditionalWaitEnabled;
+
+    internal static uint DecodeWaitOperation(uint control, bool is64Bit) =>
+        is64Bit
+            ? ((control >> 8) & 0x1u) | ((control >> 5) & 0x6u)
+            : ((control >> 8) & 0x3u) | ((control >> 4) & 0xCu);
+
     private static uint Pm4Length(uint header) =>
         ((header >> 16) & 0x3FFFu) + 2u;
 
@@ -16774,6 +17027,19 @@ GuestImageWriteTracker.Track(
             DropCurrentDcbWindow();
         }
 
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        if (!ctx.Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+        return true;
+    }
+
+    private static bool TryReadLiveUInt32(CpuContext ctx, ulong address, out uint value)
+    {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, buffer))
         {

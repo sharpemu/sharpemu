@@ -166,7 +166,7 @@ public sealed class AgcCommandBufferChainTests
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
         ctx[CpuRegister.Rsi] = 0;      // 32-bit compare
         ctx[CpuRegister.Rdx] = 3;      // equal
-        ctx[CpuRegister.Rcx] = 4;      // memory space
+        ctx[CpuRegister.Rcx] = 0;      // ME wait
         ctx[CpuRegister.R8] = 2;
         ctx[CpuRegister.R9] = WaitLabelAddress;
         WriteUInt64(memory, StackAddress + 8, 1);           // reference the label never reaches
