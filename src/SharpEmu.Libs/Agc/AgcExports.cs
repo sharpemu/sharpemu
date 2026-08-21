@@ -117,6 +117,10 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_HOST_MIRROR"),
         "0",
         StringComparison.Ordinal);
+    private static readonly bool _gpuLabelHostMirrorRetirementEnabled = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_HOST_MIRROR_RETIRE"),
+        "0",
+        StringComparison.Ordinal);
     // Async-compute ring tracking, env-gated. Off by default; only
     // validated against Ghost of Yotei.
     private static readonly bool _forceSubmitOrphanPreamblesEnabled = string.Equals(
@@ -7210,10 +7214,11 @@ public static partial class AgcExports
             destinationAddress,
             byteCount,
             debugName);
+        GpuWaitRegistry.VirtualLabelPublication publication = default;
 
         void Publish(GuestGpuLabelDependency dependency)
         {
-            GpuWaitRegistry.RecordVirtualProducedRange(
+            publication = GpuWaitRegistry.RecordVirtualProducedRange(
                 ctx.Memory,
                 destinationAddress,
                 values,
@@ -7241,17 +7246,34 @@ public static partial class AgcExports
 
         void PublishHost()
         {
+            if (!GpuWaitRegistry.IsCurrentVirtualPublication(
+                    ctx.Memory,
+                    publication))
+            {
+                return;
+            }
+
+            var wroteAll = true;
             for (var index = 0; index < values.Length; index++)
             {
-                TryWriteUInt32(
+                wroteAll &= TryWriteUInt32(
                     ctx,
                     destinationAddress + ((ulong)index * sizeof(uint)),
                     values[index]);
             }
 
-            // Invalidate after the full write. A parser that drops its cached
-            // window must only fall back after the new value is in memory.
-            InvalidateDcbWindowIfOverlaps(destinationAddress, byteCount);
+            if (wroteAll)
+            {
+                // Invalidate after the full write. A parser that drops its
+                // cached window must only see the complete new value.
+                InvalidateDcbWindowIfOverlaps(destinationAddress, byteCount);
+                if (_gpuLabelHostMirrorRetirementEnabled)
+                {
+                    GpuWaitRegistry.RetireVirtualPublication(
+                        ctx.Memory,
+                        publication);
+                }
+            }
         }
 
         if (GuestGpu.Current.SubmitGpuLabelSignal(

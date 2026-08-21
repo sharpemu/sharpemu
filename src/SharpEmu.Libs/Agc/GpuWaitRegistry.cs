@@ -45,6 +45,11 @@ internal static class GpuWaitRegistry
         Cpu,
     }
 
+    public readonly record struct VirtualLabelPublication(
+        ulong Address,
+        uint DwordCount,
+        ulong Generation);
+
     public struct WaitingDcb
     {
         public ulong CommandBufferAddress;
@@ -1075,7 +1080,7 @@ internal static class GpuWaitRegistry
     /// Publishes one GPU-visible label packet as a single state transition.
     /// Waiters cannot observe a mixture of dwords from two publications.
     /// </summary>
-    public static void RecordVirtualProducedRange(
+    public static VirtualLabelPublication RecordVirtualProducedRange(
         object memory,
         ulong address,
         ReadOnlySpan<uint> values,
@@ -1086,7 +1091,7 @@ internal static class GpuWaitRegistry
     {
         if (values.IsEmpty)
         {
-            return;
+            return default;
         }
 
         memory = Canonicalize(memory)!;
@@ -1131,6 +1136,78 @@ internal static class GpuWaitRegistry
                     memory,
                     address + checked((ulong)index * sizeof(uint)));
             }
+
+            return new VirtualLabelPublication(address, dwordCount, generation);
+        }
+    }
+
+    /// <summary>
+    /// Returns true when all dwords still belong to one virtual publication.
+    /// A delayed host mirror must not replace a newer label value.
+    /// </summary>
+    public static bool IsCurrentVirtualPublication(
+        object memory,
+        VirtualLabelPublication publication)
+    {
+        if (publication.Generation == 0 || publication.DwordCount == 0)
+        {
+            return false;
+        }
+
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            for (uint index = 0; index < publication.DwordCount; index++)
+            {
+                var address = publication.Address + ((ulong)index * sizeof(uint));
+                if (!_virtualLabels.TryGetValue((memory, address), out var value) ||
+                    value.Generation != publication.Generation ||
+                    value.PublicationAddress != publication.Address ||
+                    value.DwordCount != publication.DwordCount)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Removes a virtual publication after its host mirror becomes visible.
+    /// A newer publication at the same address stays current.
+    /// </summary>
+    public static bool RetireVirtualPublication(
+        object memory,
+        VirtualLabelPublication publication)
+    {
+        if (publication.Generation == 0 || publication.DwordCount == 0)
+        {
+            return false;
+        }
+
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            for (uint index = 0; index < publication.DwordCount; index++)
+            {
+                var address = publication.Address + ((ulong)index * sizeof(uint));
+                if (!_virtualLabels.TryGetValue((memory, address), out var value) ||
+                    value.Generation != publication.Generation ||
+                    value.PublicationAddress != publication.Address ||
+                    value.DwordCount != publication.DwordCount)
+                {
+                    return false;
+                }
+            }
+
+            for (uint index = 0; index < publication.DwordCount; index++)
+            {
+                var address = publication.Address + ((ulong)index * sizeof(uint));
+                _virtualLabels.Remove((memory, address));
+            }
+
+            return true;
         }
     }
 
@@ -1143,7 +1220,7 @@ internal static class GpuWaitRegistry
         ulong address,
         uint value,
         GuestGpuLabelDependency dependency) =>
-        RecordVirtualProducedRange(
+        _ = RecordVirtualProducedRange(
             memory,
             address,
             new[] { value },

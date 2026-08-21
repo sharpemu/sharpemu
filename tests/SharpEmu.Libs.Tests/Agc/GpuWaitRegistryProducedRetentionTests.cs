@@ -613,6 +613,110 @@ public sealed class GpuWaitRegistryProducedRetentionTests
         GpuWaitRegistry.Clear();
     }
 
+    [Fact]
+    public void NewerVirtualValueReplacesPublicationIdentity()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var oldPublication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [1],
+            new GuestGpuLabelDependency(5, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+        var newPublication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [2],
+            new GuestGpuLabelDependency(6, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+
+        Assert.False(GpuWaitRegistry.IsCurrentVirtualPublication(
+            memory,
+            oldPublication));
+        Assert.True(GpuWaitRegistry.IsCurrentVirtualPublication(
+            memory,
+            newPublication));
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void CpuVisibleWriteInvalidatesVirtualPublicationIdentity()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var publication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [1],
+            new GuestGpuLabelDependency(5, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 2);
+
+        Assert.False(GpuWaitRegistry.IsCurrentVirtualPublication(
+            memory,
+            publication));
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void HostMirrorRetiresItsCurrentVirtualPublication()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var publication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [1, 0],
+            new GuestGpuLabelDependency(5, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+
+        Assert.True(GpuWaitRegistry.RetireVirtualPublication(
+            memory,
+            publication));
+        Assert.False(GpuWaitRegistry.TryReadVirtual(
+            memory,
+            WatchedLabel,
+            is64Bit: true,
+            out _,
+            out _));
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void OldHostMirrorCannotRetireANewerVirtualPublication()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var oldPublication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [1],
+            new GuestGpuLabelDependency(5, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+        var newPublication = GpuWaitRegistry.RecordVirtualProducedRange(
+            memory,
+            WatchedLabel,
+            [2],
+            new GuestGpuLabelDependency(6, 0),
+            cachePolicy: 0,
+            engine: GpuWaitRegistry.VirtualLabelEngine.Pfp);
+
+        Assert.False(GpuWaitRegistry.RetireVirtualPublication(
+            memory,
+            oldPublication));
+        Assert.True(GpuWaitRegistry.IsCurrentVirtualPublication(
+            memory,
+            newPublication));
+        GpuWaitRegistry.Clear();
+    }
+
     private static GpuWaitRegistry.WaitingDcb NewWaiter(object memory, ulong address) => new()
     {
         WaitAddress = address,
