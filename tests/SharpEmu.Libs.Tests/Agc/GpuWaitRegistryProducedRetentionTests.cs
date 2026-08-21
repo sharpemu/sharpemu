@@ -436,6 +436,183 @@ public sealed class GpuWaitRegistryProducedRetentionTests
         GpuWaitRegistry.Clear();
     }
 
+    [Fact]
+    public void DelayedSubmissionReplaysAProducedValueAfterReset()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var generation = GpuWaitRegistry.BeginSubmission(memory);
+        try
+        {
+            GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+            GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 0);
+            var waiter = NewWaiter(memory, WatchedLabel);
+            waiter.SubmissionPublicationGeneration = generation;
+
+            var result = GpuWaitRegistry.RegisterIfUnsatisfied(
+                waiter,
+                static (_, _) => 0,
+                out var value,
+                out _);
+
+            Assert.Equal(
+                GpuWaitRegistry.WaitRegistrationResult.SatisfiedByHistory,
+                result);
+            Assert.Equal(1UL, value);
+            Assert.Equal(0, GpuWaitRegistry.Count);
+        }
+        finally
+        {
+            GpuWaitRegistry.EndSubmission(memory, generation);
+            GpuWaitRegistry.Clear();
+        }
+    }
+
+    [Fact]
+    public void NewSubmissionDoesNotReplayAnOlderProducedValue()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 0);
+        var generation = GpuWaitRegistry.BeginSubmission(memory);
+        try
+        {
+            var waiter = NewWaiter(memory, WatchedLabel);
+            waiter.SubmissionPublicationGeneration = generation;
+
+            var result = GpuWaitRegistry.RegisterIfUnsatisfied(
+                waiter,
+                static (_, _) => 0,
+                out var value,
+                out _);
+
+            Assert.Equal(GpuWaitRegistry.WaitRegistrationResult.Registered, result);
+            Assert.Equal(0UL, value);
+            Assert.Equal(1, GpuWaitRegistry.Count);
+        }
+        finally
+        {
+            GpuWaitRegistry.EndSubmission(memory, generation);
+            GpuWaitRegistry.Clear();
+        }
+    }
+
+    [Fact]
+    public void ActiveSubmissionRetainsAProducedValueAcrossLabelReuse()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var generation = GpuWaitRegistry.BeginSubmission(memory);
+        try
+        {
+            GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+            for (var index = 0; index < 256; index++)
+            {
+                GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 0);
+            }
+
+            var waiter = NewWaiter(memory, WatchedLabel);
+            waiter.SubmissionPublicationGeneration = generation;
+            var result = GpuWaitRegistry.RegisterIfUnsatisfied(
+                waiter,
+                static (_, _) => 0,
+                out var value,
+                out _);
+
+            Assert.Equal(
+                GpuWaitRegistry.WaitRegistrationResult.SatisfiedByHistory,
+                result);
+            Assert.Equal(1UL, value);
+        }
+        finally
+        {
+            GpuWaitRegistry.EndSubmission(memory, generation);
+            GpuWaitRegistry.Clear();
+        }
+    }
+
+    [Fact]
+    public void Replayed64BitValueUsesDwordsFromOnePublication()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var generation = GpuWaitRegistry.BeginSubmission(memory);
+        try
+        {
+            const ulong published = 0x0000_0002_0000_0001UL;
+            GpuWaitRegistry.RecordProduced(
+                memory,
+                WatchedLabel,
+                published,
+                hasHighDword: true);
+            GpuWaitRegistry.RecordProduced(
+                memory,
+                WatchedLabel,
+                0,
+                hasHighDword: true);
+            var waiter = NewWaiter(memory, WatchedLabel);
+            waiter.Is64Bit = true;
+            waiter.Mask = ulong.MaxValue;
+            waiter.ReferenceValue = published;
+            waiter.SubmissionPublicationGeneration = generation;
+
+            var result = GpuWaitRegistry.RegisterIfUnsatisfied(
+                waiter,
+                static (_, _) => 0,
+                out var value,
+                out _);
+
+            Assert.Equal(
+                GpuWaitRegistry.WaitRegistrationResult.SatisfiedByHistory,
+                result);
+            Assert.Equal(published, value);
+        }
+        finally
+        {
+            GpuWaitRegistry.EndSubmission(memory, generation);
+            GpuWaitRegistry.Clear();
+        }
+    }
+
+    [Fact]
+    public void PublicationHistoryEndsWithItsLastSubmission()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+        var first = GpuWaitRegistry.BeginSubmission(memory);
+        var second = GpuWaitRegistry.BeginSubmission(memory);
+
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+        Assert.Equal(
+            1,
+            GpuWaitRegistry.GetPublicationHistoryCountForTests(
+                memory,
+                WatchedLabel));
+
+        GpuWaitRegistry.EndSubmission(memory, first);
+        Assert.Equal(
+            1,
+            GpuWaitRegistry.GetPublicationHistoryCountForTests(
+                memory,
+                WatchedLabel));
+
+        GpuWaitRegistry.EndSubmission(memory, second);
+        Assert.Equal(
+            0,
+            GpuWaitRegistry.GetPublicationHistoryCountForTests(
+                memory,
+                WatchedLabel));
+
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+        Assert.Equal(
+            0,
+            GpuWaitRegistry.GetPublicationHistoryCountForTests(
+                memory,
+                WatchedLabel));
+        GpuWaitRegistry.Clear();
+    }
+
     private static GpuWaitRegistry.WaitingDcb NewWaiter(object memory, ulong address) => new()
     {
         WaitAddress = address,

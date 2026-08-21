@@ -24,6 +24,14 @@ internal static class GpuWaitRegistry
         "0",
         StringComparison.Ordinal);
 
+    internal enum WaitRegistrationResult : byte
+    {
+        Unreadable,
+        Satisfied,
+        SatisfiedByHistory,
+        Registered,
+    }
+
     internal enum VirtualLabelEngine : byte
     {
         Pfp,
@@ -59,6 +67,9 @@ internal static class GpuWaitRegistry
         public object? Memory;
         public string? QueueName;
         public ulong SubmissionId;
+        // A delayed parser can reach this wait after the producer publishes
+        // and resets the label. Only newer publications can satisfy it.
+        public ulong SubmissionPublicationGeneration;
         // Stopwatch timestamp captured at registration. Stale waiters remain
         // registered; this only controls one-shot diagnostics.
         public long RegisteredTicks;
@@ -102,7 +113,13 @@ internal static class GpuWaitRegistry
         VirtualLabelVisibility Visibility);
     private static readonly Dictionary<(object, ulong), VirtualLabelValue>
         _virtualLabels = new();
-    private static ulong _nextVirtualLabelGeneration;
+    // An active submission retains all newer publications until its parser
+    // completes. No history is needed when no submission can observe it.
+    private static readonly Dictionary<(object, ulong), List<VirtualLabelValue>>
+        _virtualLabelHistory = new();
+    private static readonly Dictionary<object, SortedDictionary<ulong, int>>
+        _activeSubmissionGenerations = new();
+    private static ulong _nextLabelPublicationGeneration;
 
   
     private static object? Canonicalize(object? memory)
@@ -134,14 +151,13 @@ internal static class GpuWaitRegistry
         memory = Canonicalize(memory)!;
         lock (_gate)
         {
-            if (!_labelFrameIds.TryGetValue((memory, address), out var frameId))
-            {
-                return true; // never written — treat as fresh (not stale)
-            }
-
-            return frameId >= System.Threading.Volatile.Read(ref _currentFrameId);
+            return IsLabelFreshLocked(memory, address);
         }
     }
+
+    private static bool IsLabelFreshLocked(object memory, ulong address) =>
+        !_labelFrameIds.TryGetValue((memory, address), out var frameId) ||
+        frameId >= System.Threading.Volatile.Read(ref _currentFrameId);
 
     public static int Count
     {
@@ -243,13 +259,147 @@ internal static class GpuWaitRegistry
         waiter.Memory = Canonicalize(waiter.Memory);
         lock (_gate)
         {
-            if (!_waiters.TryGetValue(address, out var list))
+            RegisterLocked(address, waiter);
+        }
+    }
+
+    internal static int GetPublicationHistoryCountForTests(
+        object memory,
+        ulong address)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            return _virtualLabelHistory.TryGetValue(
+                (memory, address),
+                out var history)
+                ? history.Count
+                : 0;
+        }
+    }
+
+    private static void RegisterLocked(ulong address, WaitingDcb waiter)
+    {
+        if (!_waiters.TryGetValue(address, out var list))
+        {
+            list = new List<WaitingDcb>();
+            _waiters.Add(address, list);
+        }
+
+        list.Add(waiter);
+    }
+
+    /// <summary>
+    /// Reads and registers one wait while holding the publication lock. A
+    /// producer cannot publish and reset the label between these operations.
+    /// </summary>
+    public static WaitRegistrationResult RegisterIfUnsatisfied(
+        WaitingDcb waiter,
+        Func<ulong, bool, ulong?> readValue,
+        out ulong currentValue,
+        out GuestGpuLabelDependency dependency)
+    {
+        currentValue = 0;
+        dependency = default;
+        waiter.Memory = Canonicalize(waiter.Memory);
+        if (waiter.Memory is null)
+        {
+            return WaitRegistrationResult.Unreadable;
+        }
+
+        lock (_gate)
+        {
+            ulong? value;
+            var waitCachePolicy = (waiter.ControlValue >> 25) & 0x3u;
+            if (waitCachePolicy <= 2 &&
+                TryReadVirtualLocked(
+                    waiter.Memory,
+                    waiter.WaitAddress,
+                    waiter.Is64Bit,
+                    out var virtualValue,
+                    out dependency,
+                    waitCachePolicy,
+                    waiter.Mask))
             {
-                list = new List<WaitingDcb>();
-                _waiters.Add(address, list);
+                value = virtualValue;
+            }
+            else
+            {
+                value = readValue(waiter.WaitAddress, waiter.Is64Bit);
             }
 
-            list.Add(waiter);
+            if (value is null)
+            {
+                return WaitRegistrationResult.Unreadable;
+            }
+
+            currentValue = value.Value;
+            if (Compare(waiter, currentValue) &&
+                IsLabelFreshLocked(waiter.Memory, waiter.WaitAddress))
+            {
+                return WaitRegistrationResult.Satisfied;
+            }
+
+            if (TryFindSubmittedPublicationLocked(
+                    waiter,
+                    out var submittedValue,
+                    out var submittedDependency))
+            {
+                currentValue = submittedValue;
+                dependency = submittedDependency;
+                return WaitRegistrationResult.SatisfiedByHistory;
+            }
+
+            RegisterLocked(waiter.WaitAddress, waiter);
+            return WaitRegistrationResult.Registered;
+        }
+    }
+
+    public static ulong BeginSubmission(object memory)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            var generation = _nextLabelPublicationGeneration;
+            if (!_activeSubmissionGenerations.TryGetValue(memory, out var active))
+            {
+                active = new SortedDictionary<ulong, int>();
+                _activeSubmissionGenerations.Add(memory, active);
+            }
+
+            active[generation] = active.TryGetValue(generation, out var count)
+                ? count + 1
+                : 1;
+            return generation;
+        }
+    }
+
+    public static void EndSubmission(object memory, ulong generation)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            if (!_activeSubmissionGenerations.TryGetValue(memory, out var active) ||
+                !active.TryGetValue(generation, out var count))
+            {
+                return;
+            }
+
+            if (count == 1)
+            {
+                active.Remove(generation);
+            }
+            else
+            {
+                active[generation] = count - 1;
+            }
+
+            if (active.Count == 0)
+            {
+                _activeSubmissionGenerations.Remove(memory);
+            }
+
+            PrunePublicationHistoryLocked(memory);
         }
     }
 
@@ -296,7 +446,8 @@ internal static class GpuWaitRegistry
                                 waiter.Is64Bit,
                                 out var virtualValue,
                                 out dependency,
-                                waitCachePolicy))
+                                waitCachePolicy,
+                                waiter.Mask))
                         {
                             value = virtualValue;
                         }
@@ -823,7 +974,100 @@ internal static class GpuWaitRegistry
                     include64BitWaiters: false);
             }
 
+            var generation = ++_nextLabelPublicationGeneration;
+            var dwordCount = hasHighDword ? 2u : 1u;
+            AppendPublicationHistoryLocked(
+                memory,
+                address,
+                new VirtualLabelValue(
+                    unchecked((uint)value),
+                    default,
+                    generation,
+                    address,
+                    dwordCount,
+                    CachePolicy: 0,
+                    VirtualLabelEngine.Pfp,
+                    VirtualLabelVisibility.Cpu));
+            if (hasHighDword)
+            {
+                AppendPublicationHistoryLocked(
+                    memory,
+                    address + sizeof(uint),
+                    new VirtualLabelValue(
+                        unchecked((uint)(value >> 32)),
+                        default,
+                        generation,
+                        address,
+                        dwordCount,
+                        CachePolicy: 0,
+                        VirtualLabelEngine.Pfp,
+                        VirtualLabelVisibility.Cpu));
+            }
+
             return latched;
+        }
+    }
+
+    private static void AppendPublicationHistoryLocked(
+        object memory,
+        ulong dwordAddress,
+        VirtualLabelValue published)
+    {
+        if (!_activeSubmissionGenerations.TryGetValue(memory, out var active) ||
+            active.Count == 0)
+        {
+            return;
+        }
+
+        if (!_virtualLabelHistory.TryGetValue(
+                (memory, dwordAddress),
+                out var history))
+        {
+            history = new List<VirtualLabelValue>(4);
+            _virtualLabelHistory.Add((memory, dwordAddress), history);
+        }
+
+        history.Add(published);
+        var oldestGeneration = active.First().Key;
+        history.RemoveAll(value => value.Generation <= oldestGeneration);
+    }
+
+    private static void PrunePublicationHistoryLocked(object memory)
+    {
+        var hasActive = _activeSubmissionGenerations.TryGetValue(memory, out var active) &&
+                        active.Count != 0;
+        var oldestGeneration = hasActive ? active!.First().Key : 0UL;
+        List<(object, ulong)>? empty = null;
+        foreach (var (key, history) in _virtualLabelHistory)
+        {
+            if (!ReferenceEquals(key.Item1, memory))
+            {
+                continue;
+            }
+
+            if (hasActive)
+            {
+                history.RemoveAll(value => value.Generation <= oldestGeneration);
+            }
+            else
+            {
+                history.Clear();
+            }
+
+            if (history.Count == 0)
+            {
+                (empty ??= []).Add(key);
+            }
+        }
+
+        if (empty is null)
+        {
+            return;
+        }
+
+        foreach (var key in empty)
+        {
+            _virtualLabelHistory.Remove(key);
         }
     }
 
@@ -853,12 +1097,12 @@ internal static class GpuWaitRegistry
                 PruneUnwatchedVirtualLocked();
             }
 
-            var generation = ++_nextVirtualLabelGeneration;
+            var generation = ++_nextLabelPublicationGeneration;
             var dwordCount = checked((uint)values.Length);
             for (var index = 0; index < values.Length; index++)
             {
                 var dwordAddress = address + checked((ulong)index * sizeof(uint));
-                _virtualLabels[(memory, dwordAddress)] = new VirtualLabelValue(
+                var published = new VirtualLabelValue(
                     values[index],
                     dependency,
                     generation,
@@ -867,6 +1111,8 @@ internal static class GpuWaitRegistry
                     cachePolicy,
                     engine,
                     visibility);
+                _virtualLabels[(memory, dwordAddress)] = published;
+                AppendPublicationHistoryLocked(memory, dwordAddress, published);
                 _lastProduced[(memory, dwordAddress)] = values[index];
                 _labelFrameIds[(memory, dwordAddress)] =
                     System.Threading.Volatile.Read(ref _currentFrameId);
@@ -934,7 +1180,8 @@ internal static class GpuWaitRegistry
                         waiter.Is64Bit,
                         out var virtualValue,
                         out var virtualDependency,
-                        (waiter.ControlValue >> 25) & 0x3u) ||
+                        (waiter.ControlValue >> 25) & 0x3u,
+                        waiter.Mask) ||
                     !Compare(waiter, virtualValue))
                 {
                     continue;
@@ -977,7 +1224,8 @@ internal static class GpuWaitRegistry
         bool is64Bit,
         out ulong value,
         out GuestGpuLabelDependency dependency,
-        uint? requiredCachePolicy = null)
+        uint? requiredCachePolicy = null,
+        ulong? requiredMask = null)
     {
         value = 0;
         dependency = default;
@@ -998,6 +1246,12 @@ internal static class GpuWaitRegistry
         value = low.Value;
         dependency = low.Dependency;
         if (!is64Bit)
+        {
+            return true;
+        }
+
+        if ((requiredMask.GetValueOrDefault(ulong.MaxValue) &
+             0xFFFF_FFFF_0000_0000UL) == 0)
         {
             return true;
         }
@@ -1038,6 +1292,85 @@ internal static class GpuWaitRegistry
         value |= (ulong)high.Value << 32;
         dependency = dependency.Merge(high.Dependency);
         return true;
+    }
+
+    private static bool TryFindSubmittedPublicationLocked(
+        in WaitingDcb waiter,
+        out ulong value,
+        out GuestGpuLabelDependency dependency)
+    {
+        value = 0;
+        dependency = default;
+        if (waiter.Memory is null ||
+            !_virtualLabelHistory.TryGetValue(
+                (waiter.Memory, waiter.WaitAddress),
+                out var lowHistory))
+        {
+            return false;
+        }
+
+        var waitCachePolicy = (waiter.ControlValue >> 25) & 0x3u;
+        if (waitCachePolicy > 2)
+        {
+            return false;
+        }
+
+        for (var index = lowHistory.Count - 1; index >= 0; index--)
+        {
+            var low = lowHistory[index];
+            if (low.Generation <= waiter.SubmissionPublicationGeneration)
+            {
+                continue;
+            }
+
+            var candidate = (ulong)low.Value;
+            var candidateDependency = low.Dependency;
+            if (waiter.Is64Bit &&
+                (waiter.Mask & 0xFFFF_FFFF_0000_0000UL) != 0)
+            {
+                if (!_virtualLabelHistory.TryGetValue(
+                        (waiter.Memory, waiter.WaitAddress + sizeof(uint)),
+                        out var highHistory))
+                {
+                    continue;
+                }
+
+                var foundHigh = false;
+                foreach (var high in highHistory)
+                {
+                    if (high.Generation != low.Generation ||
+                        high.PublicationAddress != low.PublicationAddress ||
+                        high.DwordCount != low.DwordCount ||
+                        high.CachePolicy != low.CachePolicy ||
+                        high.Engine != low.Engine ||
+                        high.Visibility != low.Visibility)
+                    {
+                        continue;
+                    }
+
+                    candidate |= (ulong)high.Value << 32;
+                    candidateDependency = candidateDependency.Merge(high.Dependency);
+                    foundHigh = true;
+                    break;
+                }
+
+                if (!foundHigh)
+                {
+                    continue;
+                }
+            }
+
+            if (!Compare(waiter, candidate))
+            {
+                continue;
+            }
+
+            value = candidate;
+            dependency = candidateDependency;
+            return true;
+        }
+
+        return false;
     }
 
     private static void PruneUnwatchedVirtualLocked()
@@ -1115,7 +1448,8 @@ internal static class GpuWaitRegistry
                             waiter.Is64Bit,
                             out var virtualValue,
                             out var dependency,
-                            waitCachePolicy) &&
+                            waitCachePolicy,
+                            waiter.Mask) &&
                         Compare(waiter, virtualValue))
                     {
                         waiter.Dependency = waiter.Dependency.Merge(dependency);
@@ -1193,6 +1527,8 @@ internal static class GpuWaitRegistry
             _labelFrameIds.Clear();
             _currentFrameId = 0;
             _virtualLabels.Clear();
+            _virtualLabelHistory.Clear();
+            _activeSubmissionGenerations.Clear();
         }
     }
 }

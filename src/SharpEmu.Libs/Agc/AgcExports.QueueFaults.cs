@@ -27,9 +27,24 @@ public static partial class AgcExports
         state.FaultReason = reason;
         var removedWaiters = GpuWaitRegistry.RemoveAllByState(ctx.Memory, state);
         var droppedSubmissions = state.PendingSubmissions.Count;
+        if (state.HasActiveSubmission)
+        {
+            GpuWaitRegistry.EndSubmission(
+                ctx.Memory,
+                state.ActiveSubmissionPublicationGeneration);
+        }
+
+        foreach (var pending in state.PendingSubmissions)
+        {
+            GpuWaitRegistry.EndSubmission(
+                ctx.Memory,
+                pending.PublicationGeneration);
+        }
+
         state.PendingSubmissions.Clear();
         state.IsSuspended = false;
         state.HasActiveSubmission = false;
+        state.ActiveSubmissionPublicationGeneration = 0;
         state.ActiveIndexSnapshots = null;
         state.CurrentIndexSnapshot = null;
         state.ActiveVertexSnapshots = null;

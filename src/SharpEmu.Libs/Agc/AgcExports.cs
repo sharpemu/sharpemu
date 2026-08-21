@@ -1632,7 +1632,8 @@ public static partial class AgcExports
             ulong SubmissionId,
             bool TracePackets,
             Dictionary<ulong, SubmittedIndexSnapshot>? IndexSnapshots,
-            Dictionary<ulong, SubmittedVertexSnapshot>? VertexSnapshots);
+            Dictionary<ulong, SubmittedVertexSnapshot>? VertexSnapshots,
+            ulong PublicationGeneration);
 
         public Dictionary<uint, uint> CxRegisters { get; } = new();
         public Dictionary<uint, uint> ShRegisters { get; } = new();
@@ -1659,6 +1660,7 @@ public static partial class AgcExports
         // sceAgcDriverAddEqEvent.
         public ulong CompletionEventId { get; set; }
         public ulong ActiveSubmissionId { get; set; }
+        public ulong ActiveSubmissionPublicationGeneration { get; set; }
         public Dictionary<ulong, SubmittedIndexSnapshot>? ActiveIndexSnapshots { get; set; }
         public SubmittedIndexSnapshot? CurrentIndexSnapshot { get; set; }
         public Dictionary<ulong, SubmittedVertexSnapshot>? ActiveVertexSnapshots { get; set; }
@@ -5016,13 +5018,15 @@ public static partial class AgcExports
             return;
         }
 
+        var publicationGeneration = GpuWaitRegistry.BeginSubmission(ctx.Memory);
         state.PendingSubmissions.Enqueue(new SubmittedDcbState.PendingSubmission(
             commandAddress,
             dwordCount,
             submissionId,
             tracePackets,
             indexSnapshots,
-            vertexSnapshots));
+            vertexSnapshots,
+            publicationGeneration));
         PumpSubmittedQueue(ctx, gpuState, state);
     }
 
@@ -5069,6 +5073,10 @@ public static partial class AgcExports
             // double-run the tail once the game's own re-parse reaches it.
             state.RingTailParkAddress = 0;
             state.IsSuspended = false;
+            GpuWaitRegistry.EndSubmission(
+                ctx.Memory,
+                state.ActiveSubmissionPublicationGeneration);
+            state.ActiveSubmissionPublicationGeneration = 0;
             state.HasActiveSubmission = false;
             state.ActiveIndexSnapshots = null;
             state.ActiveVertexSnapshots = null;
@@ -5080,6 +5088,8 @@ public static partial class AgcExports
         {
             state.HasActiveSubmission = true;
             state.ActiveSubmissionId = submission.SubmissionId;
+            state.ActiveSubmissionPublicationGeneration =
+                submission.PublicationGeneration;
             state.ActiveIndexSnapshots = submission.IndexSnapshots;
             state.ActiveVertexSnapshots = submission.VertexSnapshots;
             state.RingChunkBase = state.IsForceSubmittedRing ? 0 : submission.CommandAddress;
@@ -5103,6 +5113,10 @@ public static partial class AgcExports
             }
 
             state.HasActiveSubmission = false;
+            GpuWaitRegistry.EndSubmission(
+                ctx.Memory,
+                state.ActiveSubmissionPublicationGeneration);
+            state.ActiveSubmissionPublicationGeneration = 0;
             state.ActiveIndexSnapshots = null;
             state.ActiveVertexSnapshots = null;
             NotifySubmittedDcbCompleted(gpuState, state, submission.SubmissionId);
@@ -7339,8 +7353,8 @@ public static partial class AgcExports
             SelectExportUserDataRegister(nggRegisters) == GsUserDataRegister);
 
         var queue = new SubmittedDcbState();
-        queue.PendingSubmissions.Enqueue(new(0x1000, 8, 11, false));
-        queue.PendingSubmissions.Enqueue(new(0x2000, 16, 12, true));
+        queue.PendingSubmissions.Enqueue(new(0x1000, 8, 11, false, null, null, 0));
+        queue.PendingSubmissions.Enqueue(new(0x2000, 16, 12, true, null, null, 0));
         System.Diagnostics.Debug.Assert(
             queue.PendingSubmissions.Dequeue().SubmissionId == 11);
         System.Diagnostics.Debug.Assert(
@@ -7397,7 +7411,7 @@ public static partial class AgcExports
         queue.CxRegisters.Add(1, 2);
         queue.ShRegisters.Add(3, 4);
         queue.UcRegisters.Add(5, 6);
-        queue.PendingSubmissions.Enqueue(new(0x3000, 2, 8, false));
+        queue.PendingSubmissions.Enqueue(new(0x3000, 2, 8, false, null, null, 0));
         ResetSubmittedParserState(queue);
         System.Diagnostics.Debug.Assert(queue.CxRegisters.Count == 0);
         System.Diagnostics.Debug.Assert(queue.ShRegisters.Count == 0);
@@ -7812,39 +7826,6 @@ public static partial class AgcExports
             return false;
         }
 
-        ulong currentValue = 0;
-        GuestGpuLabelDependency currentDependency = default;
-        var waitCachePolicy = (controlValue >> 25) & 0x3u;
-        bool hasCurrent;
-        if (waitCachePolicy <= 2 &&
-            GpuWaitRegistry.TryReadVirtual(
-                ctx.Memory,
-                waitAddress,
-                is64Bit,
-                out currentValue,
-                out currentDependency,
-                waitCachePolicy))
-        {
-            hasCurrent = true;
-        }
-        else if (is64Bit)
-        {
-            hasCurrent = TryReadUInt64(ctx, waitAddress, out currentValue);
-        }
-        else if (TryReadUInt32(ctx, waitAddress, out var current32))
-        {
-            currentValue = current32;
-            hasCurrent = true;
-        }
-        else
-        {
-            hasCurrent = false;
-        }
-
-        TraceSubmittedWait(
-            waitAddress, currentValue, mask, reference, compareFunction,
-            is64Bit ? 64 : 32, tracePacket);
-
         var waiter = new GpuWaitRegistry.WaitingDcb
         {
             CommandBufferAddress = commandAddress,
@@ -7861,24 +7842,62 @@ public static partial class AgcExports
             Memory = ctx.Memory,
             QueueName = state.QueueName,
             SubmissionId = state.ActiveSubmissionId,
+            SubmissionPublicationGeneration =
+                state.ActiveSubmissionPublicationGeneration,
             RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
             State = state,
         };
 
-        if (hasCurrent && GpuWaitRegistry.Compare(waiter, currentValue))
+        ulong? ReadGuestLabel(ulong address, bool read64Bit)
         {
-            // Value satisfies the condition, but only bypass if the label was
-            // written in the current frame. A stale label from a previous frame
-            // means the producer hasn't written yet this frame — must wait.
-            if (GpuWaitRegistry.IsLabelFresh(ctx.Memory, waitAddress))
+            if (read64Bit)
             {
-                GuestGpu.Current.RequireGpuLabelDependency(currentDependency);
-                return false; // satisfied by current-frame write — keep parsing
+                return TryReadUInt64(ctx, address, out var value64)
+                    ? value64
+                    : null;
             }
+
+            return TryReadUInt32(ctx, address, out var value32)
+                ? value32
+                : null;
         }
 
         if (!_gpuWaitSuspendEnabled)
         {
+            var waitCachePolicy = (controlValue >> 25) & 0x3u;
+            ulong currentValue = 0;
+            GuestGpuLabelDependency currentDependency = default;
+            var hasCurrent = waitCachePolicy <= 2 &&
+                             GpuWaitRegistry.TryReadVirtual(
+                                 ctx.Memory,
+                                 waitAddress,
+                                 is64Bit,
+                                 out currentValue,
+                                 out currentDependency,
+                                 waitCachePolicy);
+            if (!hasCurrent)
+            {
+                var current = ReadGuestLabel(waitAddress, is64Bit);
+                hasCurrent = current.HasValue;
+                currentValue = current.GetValueOrDefault();
+            }
+
+            TraceSubmittedWait(
+                waitAddress,
+                currentValue,
+                mask,
+                reference,
+                compareFunction,
+                is64Bit ? 64 : 32,
+                tracePacket);
+            if (hasCurrent &&
+                GpuWaitRegistry.Compare(waiter, currentValue) &&
+                GpuWaitRegistry.IsLabelFresh(ctx.Memory, waitAddress))
+            {
+                GuestGpu.Current.RequireGpuLabelDependency(currentDependency);
+                return false;
+            }
+
             if (hasCurrent)
             {
                 ForceSatisfyGpuWait(ctx, waiter, currentValue);
@@ -7887,12 +7906,31 @@ public static partial class AgcExports
             return false;
         }
 
-        if (!hasCurrent)
+        var registration = GpuWaitRegistry.RegisterIfUnsatisfied(
+            waiter,
+            ReadGuestLabel,
+            out var observedValue,
+            out var observedDependency);
+        TraceSubmittedWait(
+            waitAddress,
+            observedValue,
+            mask,
+            reference,
+            compareFunction,
+            is64Bit ? 64 : 32,
+            tracePacket);
+        if (registration is GpuWaitRegistry.WaitRegistrationResult.Satisfied or
+            GpuWaitRegistry.WaitRegistrationResult.SatisfiedByHistory)
+        {
+            GuestGpu.Current.RequireGpuLabelDependency(observedDependency);
+            return false;
+        }
+
+        if (registration == GpuWaitRegistry.WaitRegistrationResult.Unreadable)
         {
             return false; // cannot evaluate the label — do not stall the DCB
         }
 
-        GpuWaitRegistry.Register(waitAddress, waiter);
         var gpuState = _submittedGpuStates.GetValue(
             CanonicalMemory(ctx.Memory),
             static _ => new SubmittedGpuState());
@@ -7904,12 +7942,12 @@ public static partial class AgcExports
             commandAddress,
             packetAddress,
             stale: false,
-            currentValue);
+            observedValue);
         if (tracePacket)
         {
             TraceAgc(
                 $"agc.dcb.suspended addr=0x{waitAddress:X16} ref=0x{reference:X16} " +
-                $"mask=0x{mask:X16} cur=0x{currentValue:X16} cmp={compareFunction}");
+                $"mask=0x{mask:X16} cur=0x{observedValue:X16} cmp={compareFunction}");
         }
 
         return true;
@@ -8440,6 +8478,10 @@ public static partial class AgcExports
         {
             state.IsSuspended = false;
             state.HasActiveSubmission = false;
+            GpuWaitRegistry.EndSubmission(
+                waiter.Memory ?? ctx.Memory,
+                state.ActiveSubmissionPublicationGeneration);
+            state.ActiveSubmissionPublicationGeneration = 0;
             state.ActiveIndexSnapshots = null;
             state.ActiveVertexSnapshots = null;
             NotifySubmittedDcbCompleted(gpuState, state, waiter.SubmissionId);
@@ -8482,6 +8524,10 @@ public static partial class AgcExports
         }
 
         state.HasActiveSubmission = false;
+        GpuWaitRegistry.EndSubmission(
+            waiter.Memory ?? ctx.Memory,
+            state.ActiveSubmissionPublicationGeneration);
+        state.ActiveSubmissionPublicationGeneration = 0;
         state.ActiveIndexSnapshots = null;
         state.ActiveVertexSnapshots = null;
         NotifySubmittedDcbCompleted(gpuState, state, waiter.SubmissionId);
