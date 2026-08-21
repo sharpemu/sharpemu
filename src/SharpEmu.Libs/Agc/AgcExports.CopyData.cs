@@ -8,6 +8,8 @@ namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
+    private const uint ItCopyData = 0x40;
+
     internal readonly record struct CopyDataPacket(
         bool UsesAsyncEncoding,
         uint SourceSelection,
