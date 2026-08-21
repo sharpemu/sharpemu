@@ -3115,10 +3115,18 @@ public static partial class AgcExports
             dataSelection > 3 ||
             gdsOffset != 0 ||
             gdsSize > 2 ||
-            interrupt > 3)
+            interrupt > 6 ||
+            (interrupt >= 4 && gcrControl != 0) ||
+            (interrupt == 5 &&
+             (destinationAddress == 0 || destinationAddress % sizeof(uint) != 0)) ||
+            (interrupt == 6 &&
+             (destinationAddress == 0 || destinationAddress % sizeof(ulong) != 0)))
         {
             return ReturnPointer(ctx, 0);
         }
+
+        var packetAddressValue = interrupt == 4 ? 0UL : destinationAddress;
+        var packetData = interrupt == 4 ? 0UL : data;
 
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RReleaseMem)) ||
@@ -3127,11 +3135,11 @@ public static partial class AgcExports
                 ctx,
                 commandAddress + 8,
                 gcrControl | (dataSelection << 16) | (interrupt << 24)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)destinationAddress) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(destinationAddress >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, (uint)data) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, (uint)(data >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, interruptContextId))
+            !TryWriteUInt32(ctx, commandAddress + 12, (uint)packetAddressValue) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(packetAddressValue >> 32)) ||
+            !TryWriteUInt32(ctx, commandAddress + 20, (uint)packetData) ||
+            !TryWriteUInt32(ctx, commandAddress + 24, (uint)(packetData >> 32)) ||
+            !TryWriteUInt32(ctx, commandAddress + 28, interruptContextId & 0x07FF_FFFFu))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -3139,7 +3147,10 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
-        TrackCbReleaseMemTarget(ctx, commandBufferAddress, destinationAddress);
+        if (interrupt is 0 or 2 or 3 && dataSelection != 0)
+        {
+            TrackCbReleaseMemTarget(ctx, commandBufferAddress, destinationAddress);
+        }
         RecordRingChunkWriter(commandAddress);
         return ReturnPointer(ctx, commandAddress);
     }
@@ -8521,7 +8532,8 @@ public static partial class AgcExports
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
             !TryReadUInt32(ctx, packetAddress + 20, out var dataLo) ||
-            !TryReadUInt32(ctx, packetAddress + 24, out var dataHi))
+            !TryReadUInt32(ctx, packetAddress + 24, out var dataHi) ||
+            !TryReadUInt32(ctx, packetAddress + 28, out var interruptContextId))
         {
             return;
         }
@@ -8532,15 +8544,24 @@ public static partial class AgcExports
         var interruptSelection = (control >> 24) & 0x7u;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
+        var isAsyncCompute = state.QueueName.StartsWith("acb.", StringComparison.Ordinal);
+        var staticDecision = EvaluateQueuedInterrupt(
+            interruptSelection,
+            isAsyncCompute,
+            dataSelection,
+            conditionReadable: false,
+            conditionValue: 0,
+            data);
         var writeLength = dataSelection switch
         {
             1 => (ulong)sizeof(uint),
             2 or 3 or 4 => (ulong)sizeof(ulong),
             _ => 0UL,
         };
-        var writesGuestMemory = destination is 0 or 1 &&
-                                destinationAddress != 0 &&
-                                writeLength != 0;
+        var expectsGuestMemoryWrite = staticDecision.WritesData &&
+                                      destination is 0 or 1 &&
+                                      writeLength != 0;
+        var writesGuestMemory = expectsGuestMemoryWrite && destinationAddress != 0;
 
         if (tracePacket || _logGpuCacheOperations)
         {
@@ -8560,6 +8581,18 @@ public static partial class AgcExports
             state,
             () =>
             {
+                var conditionReadable = TryReadQueuedInterruptCondition(
+                    ctx,
+                    interruptSelection,
+                    destinationAddress,
+                    out var conditionValue);
+                var interruptDecision = EvaluateQueuedInterrupt(
+                    interruptSelection,
+                    isAsyncCompute,
+                    dataSelection,
+                    conditionReadable,
+                    conditionValue,
+                    data);
                 if (writesGuestMemory)
                 {
                     InvalidateDcbWindowIfOverlaps(destinationAddress, writeLength);
@@ -8583,9 +8616,12 @@ public static partial class AgcExports
                 if (wroteData && dataSelection is 1 or 2)
                 {
                     GpuWaitRegistry.RecordProduced(
-                        ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                        ctx.Memory,
+                        destinationAddress,
+                        dataSelection == 1 ? dataLo : data,
+                        hasHighDword: dataSelection == 2);
                 }
-                else if (!wroteData && dataSelection is 1 or 2)
+                else if (expectsGuestMemoryWrite && !wroteData && dataSelection is 1 or 2)
                 {
                     // See ApplySubmittedReleaseMem: a dropped label write strands
                     // every waiter on this label permanently.
@@ -8597,10 +8633,10 @@ public static partial class AgcExports
                 // driver's completion refcount signals on an exact zero
                 // crossing, and an unrequested kevent drives it negative and
                 // permanently loses the frame-graph kick.
-                var wokenQueues = interruptSelection != 0
+                var wokenQueues = interruptDecision.RaisesInterrupt
                     ? KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
                         KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                        data)
+                        interruptContextId & 0x07FF_FFFFu)
                     : 0;
 
                 if (tracePacket)
@@ -8609,7 +8645,12 @@ public static partial class AgcExports
                         $"agc.dcb.release_mem_standard dst_sel={destination} " +
                         $"dst=0x{destinationAddress:X16} data_sel={dataSelection} " +
                         $"data=0x{data:X16} wrote={wroteData} " +
-                        $"int={interruptSelection} woken={wokenQueues}");
+                        $"event=0x{cacheControl.EventType:X2} " +
+                        $"event_index={cacheControl.EventIndex} " +
+                        $"cache={cacheControl.CachePolicy} " +
+                        $"gcr=0x{cacheControl.GcrControl.Raw:X4} " +
+                        $"int={interruptSelection} condition_read={conditionReadable} " +
+                        $"condition=0x{conditionValue:X16} woken={wokenQueues}");
                 }
             },
             $"release_mem_standard dst=0x{destinationAddress:X16} data=0x{data:X16}",
@@ -8651,6 +8692,56 @@ public static partial class AgcExports
             Destination: (control >> 16) & 0x3u,
             DataSelection: (control >> 29) & 0x7u);
 
+    internal readonly record struct QueuedInterruptDecision(
+        bool WritesData,
+        bool RaisesInterrupt);
+
+    internal static QueuedInterruptDecision EvaluateQueuedInterrupt(
+        uint interrupt,
+        bool isAsyncCompute,
+        uint dataSelection,
+        bool conditionReadable,
+        ulong conditionValue,
+        ulong data)
+    {
+        var writesData = dataSelection != 0 && interrupt switch
+        {
+            0 or 2 or 3 => true,
+            1 => isAsyncCompute,
+            _ => false,
+        };
+        var raisesInterrupt = interrupt switch
+        {
+            1 or 2 or 4 => true,
+            5 => conditionReadable &&
+                 unchecked((uint)conditionValue) <= unchecked((uint)data),
+            6 => conditionReadable && conditionValue <= data,
+            _ => false,
+        };
+        return new QueuedInterruptDecision(writesData, raisesInterrupt);
+    }
+
+    private static bool TryReadQueuedInterruptCondition(
+        CpuContext ctx,
+        uint interrupt,
+        ulong address,
+        out ulong value)
+    {
+        value = 0;
+        if (interrupt == 5)
+        {
+            if (!TryReadLiveUInt32(ctx, address, out var value32))
+            {
+                return false;
+            }
+
+            value = value32;
+            return true;
+        }
+
+        return interrupt == 6 && TryReadLiveUInt64(ctx, address, out value);
+    }
+
     private static void ApplySubmittedReleaseMem(
         CpuContext ctx,
         SubmittedGpuState gpuState,
@@ -8663,7 +8754,8 @@ public static partial class AgcExports
             !TryReadUInt32(ctx, packetAddress + 12, out var destinationLo) ||
             !TryReadUInt32(ctx, packetAddress + 16, out var destinationHi) ||
             !TryReadUInt32(ctx, packetAddress + 20, out var dataLo) ||
-            !TryReadUInt32(ctx, packetAddress + 24, out var dataHi))
+            !TryReadUInt32(ctx, packetAddress + 24, out var dataHi) ||
+            !TryReadUInt32(ctx, packetAddress + 28, out var interruptContextId))
         {
             return;
         }
@@ -8679,12 +8771,22 @@ public static partial class AgcExports
         var interrupt = (control >> 24) & 0xFFu;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
+        var isAsyncCompute = state.QueueName.StartsWith("acb.", StringComparison.Ordinal);
+        var staticDecision = EvaluateQueuedInterrupt(
+            interrupt,
+            isAsyncCompute,
+            dataSelection,
+            conditionReadable: false,
+            conditionValue: 0,
+            data);
         var writeLength = dataSelection switch
         {
             1 => (ulong)sizeof(uint),
             2 or 3 => (ulong)sizeof(ulong),
             _ => 0UL,
         };
+        var expectsGuestMemoryWrite = staticDecision.WritesData && writeLength != 0;
+        var writesGuestMemory = expectsGuestMemoryWrite && destinationAddress != 0;
         if (tracePacket || _logGpuCacheOperations)
         {
             TraceUniqueGpuCacheOperation(
@@ -8704,8 +8806,24 @@ public static partial class AgcExports
             state,
             () =>
             {
-                InvalidateDcbWindowIfOverlaps(destinationAddress, writeLength);
-                var wroteData = dataSelection switch
+                var conditionReadable = TryReadQueuedInterruptCondition(
+                    ctx,
+                    interrupt,
+                    destinationAddress,
+                    out var conditionValue);
+                var interruptDecision = EvaluateQueuedInterrupt(
+                    interrupt,
+                    isAsyncCompute,
+                    dataSelection,
+                    conditionReadable,
+                    conditionValue,
+                    data);
+                if (writesGuestMemory)
+                {
+                    InvalidateDcbWindowIfOverlaps(destinationAddress, writeLength);
+                }
+
+                var wroteData = writesGuestMemory && dataSelection switch
                 {
                     1 => TryWriteUInt32(ctx, destinationAddress, dataLo),
                     2 => ctx.TryWriteUInt64(destinationAddress, data),
@@ -8725,9 +8843,12 @@ public static partial class AgcExports
                 if (wroteData && dataSelection is 1 or 2)
                 {
                     GpuWaitRegistry.RecordProduced(
-                        ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                        ctx.Memory,
+                        destinationAddress,
+                        dataSelection == 1 ? dataLo : data,
+                        hasHighDword: dataSelection == 2);
                 }
-                else if (!wroteData && dataSelection is 1 or 2)
+                else if (expectsGuestMemoryWrite && !wroteData && dataSelection is 1 or 2)
                 {
                     // A label write that fails is not a benign miss: this packet
                     // is the producer a suspended WAIT_REG_MEM is waiting for, and
@@ -8738,10 +8859,10 @@ public static partial class AgcExports
                 }
 
                 // Same interrupt gating as the standard form above.
-                var wokenQueues = interrupt != 0
+                var wokenQueues = interruptDecision.RaisesInterrupt
                     ? KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
                         KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                        data)
+                        interruptContextId & 0x07FF_FFFFu)
                     : 0;
 
                 if (tracePacket)
@@ -8749,13 +8870,18 @@ public static partial class AgcExports
                     TraceAgc(
                         $"agc.dcb.release_mem dst=0x{destinationAddress:X16} " +
                         $"data_sel={dataSelection} data=0x{data:X16} wrote={wroteData} " +
-                        $"int={interrupt} woken={wokenQueues}");
+                        $"completion={cacheControl.ActionName} " +
+                        $"action=0x{cacheControl.RawAction:X2} " +
+                        $"cache={cacheControl.CachePolicy} " +
+                        $"gcr=0x{cacheControl.GcrControl.Raw:X4} " +
+                        $"int={interrupt} condition_read={conditionReadable} " +
+                        $"condition=0x{conditionValue:X16} woken={wokenQueues}");
                 }
             },
             $"release_mem dst=0x{destinationAddress:X16} data=0x{data:X16}",
             packetAddress,
-            dataSelection is 1 or 2 or 3 ? destinationAddress : 0,
-            writeLength);
+            writesGuestMemory ? destinationAddress : 0,
+            writesGuestMemory ? writeLength : 0);
     }
 
     private static void ApplySubmittedRegisters(
@@ -17048,6 +17174,19 @@ GuestImageWriteTracker.Track(
         }
 
         value = BinaryPrimitives.ReadUInt32LittleEndian(buffer);
+        return true;
+    }
+
+    private static bool TryReadLiveUInt64(CpuContext ctx, ulong address, out ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
+        if (!ctx.Memory.TryRead(address, buffer))
+        {
+            value = 0;
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt64LittleEndian(buffer);
         return true;
     }
 

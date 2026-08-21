@@ -79,6 +79,69 @@ public sealed class AgcWaitRegMemTests
         Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 28));
     }
 
+    [Theory]
+    [InlineData(4u, false)]
+    [InlineData(5u, true)]
+    [InlineData(6u, true)]
+    public void CbReleaseMem_EncodesQueuedInterruptModes(
+        uint interrupt,
+        bool preservesCondition)
+    {
+        var memory = CreateMemory(out var ctx);
+        var conditionAddress = BaseAddress + 0xC08;
+        const ulong data = 0x1122_3344_5566_7788UL;
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = 0;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 0;
+        ctx[CpuRegister.R9] = conditionAddress;
+        WriteUInt64(memory, StackAddress + 8, 2);
+        WriteUInt64(memory, StackAddress + 16, data);
+        WriteUInt64(memory, StackAddress + 24, 0);
+        WriteUInt64(memory, StackAddress + 32, 0);
+        WriteUInt64(memory, StackAddress + 40, interrupt);
+        WriteUInt64(memory, StackAddress + 48, 0xFFFF_FFFF);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(0xC006_1060u, ReadUInt32(memory, PacketAddress));
+        Assert.Equal((2u << 16) | (interrupt << 24), ReadUInt32(memory, PacketAddress + 8));
+        Assert.Equal(
+            preservesCondition ? (uint)conditionAddress : 0u,
+            ReadUInt32(memory, PacketAddress + 12));
+        Assert.Equal(
+            preservesCondition ? (uint)(conditionAddress >> 32) : 0u,
+            ReadUInt32(memory, PacketAddress + 16));
+        Assert.Equal(
+            preservesCondition ? unchecked((uint)data) : 0u,
+            ReadUInt32(memory, PacketAddress + 20));
+        Assert.Equal(
+            preservesCondition ? (uint)(data >> 32) : 0u,
+            ReadUInt32(memory, PacketAddress + 24));
+        Assert.Equal(0x07FF_FFFFu, ReadUInt32(memory, PacketAddress + 28));
+    }
+
+    [Fact]
+    public void CbReleaseMem_RejectsContextInterruptWithCacheOperations()
+    {
+        var memory = CreateMemory(out var ctx);
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rdx] = 1;
+        ctx[CpuRegister.R9] = BaseAddress + 0xC08;
+        WriteUInt64(memory, StackAddress + 8, 0);
+        WriteUInt64(memory, StackAddress + 16, 0);
+        WriteUInt64(memory, StackAddress + 24, 0);
+        WriteUInt64(memory, StackAddress + 32, 0);
+        WriteUInt64(memory, StackAddress + 40, 4);
+        WriteUInt64(memory, StackAddress + 48, 1);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
+    }
+
     [Fact]
     public void DcbWaitRegMem32_EmitsGen5PacketLayout()
     {
@@ -190,6 +253,43 @@ public sealed class AgcWaitRegMemTests
         bool is64Bit,
         uint expected) =>
         Assert.Equal(expected, AgcExports.DecodeWaitOperation(control, is64Bit));
+
+    [Theory]
+    [InlineData(0u, false, 1u, false, 0UL, 0UL, true, false)]
+    [InlineData(1u, false, 1u, false, 0UL, 0UL, false, true)]
+    [InlineData(1u, true, 1u, false, 0UL, 0UL, true, true)]
+    [InlineData(1u, true, 0u, false, 0UL, 0UL, false, true)]
+    [InlineData(2u, false, 2u, false, 0UL, 0UL, true, true)]
+    [InlineData(3u, false, 1u, false, 0UL, 0UL, true, false)]
+    [InlineData(4u, false, 2u, false, 0UL, 0UL, false, true)]
+    [InlineData(5u, false, 1u, false, 0UL, 1UL, false, false)]
+    [InlineData(5u, false, 1u, true, 2UL, 3UL, false, true)]
+    [InlineData(5u, false, 1u, true, 4UL, 3UL, false, false)]
+    [InlineData(5u, false, 1u, true, 0x1_0000_0002UL, 3UL, false, true)]
+    [InlineData(6u, false, 2u, true, 2UL, 3UL, false, true)]
+    [InlineData(6u, false, 2u, true, 4UL, 3UL, false, false)]
+    [InlineData(7u, false, 1u, true, 0UL, 0UL, false, false)]
+    public void QueuedInterruptDecision_FollowsDocumentedModes(
+        uint interrupt,
+        bool isAsyncCompute,
+        uint dataSelection,
+        bool conditionReadable,
+        ulong conditionValue,
+        ulong data,
+        bool expectedWrite,
+        bool expectedInterrupt)
+    {
+        var decision = AgcExports.EvaluateQueuedInterrupt(
+            interrupt,
+            isAsyncCompute,
+            dataSelection,
+            conditionReadable,
+            conditionValue,
+            data);
+
+        Assert.Equal(expectedWrite, decision.WritesData);
+        Assert.Equal(expectedInterrupt, decision.RaisesInterrupt);
+    }
 
     [Fact]
     public void WaitRegMemPatchFunctions_UseGen5Fields()
