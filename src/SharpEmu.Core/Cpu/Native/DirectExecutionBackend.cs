@@ -190,6 +190,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly IModuleManager _moduleManager;
 
+	private readonly object _tlsPatchRangeGate = new();
+
+	private readonly HashSet<TlsPatchScanRange> _scannedTlsPatchRanges = [];
+
 	private nint _tlsHandlerAddress;
 
 	private nint _tlsBaseAddress;
@@ -3047,35 +3051,102 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
-	private unsafe void PatchTlsPatterns()
+	internal readonly record struct TlsPatchScanRange(ulong Start, ulong End);
+
+	private readonly record struct TlsPatchCounts(
+		int Loads,
+		int Stores,
+		int StackCanaries,
+		int Sse4aBlends)
 	{
-        // Large Gen5 executables can keep valid code well past the first 32 MiB.
-        // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
-        const ulong MaxScanBytes = 134217728uL;
+		public int Total => Loads + Stores + StackCanaries + Sse4aBlends;
 
-		// _entryPoint can be a separate bootstrap allocation, not the main module —
-		// always also scan the standard PS5/PS4 image base.
-		const ulong Ps5MainImageBase = 0x0000000800000000UL;
-		const ulong Ps4MainImageBase = 0x0000000000400000UL;
-		ulong scanStart = _entryPoint;
-		if (VirtualQuery((void*)_entryPoint, out var entryRegion, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
-			entryRegion.AllocationBase != 0 &&
-			entryRegion.AllocationBase <= _entryPoint)
-		{
-			scanStart = entryRegion.AllocationBase;
-		}
-
-		PatchTlsPatternsInRange(scanStart, scanStart + MaxScanBytes, announce: true);
-
-		// Scan both windows unconditionally; overlap is safe, patched bytes just stop matching.
-		var mainImageBase = _entryPoint >= Ps5MainImageBase ? Ps5MainImageBase : Ps4MainImageBase;
-		if (mainImageBase < scanStart)
-		{
-			PatchTlsPatternsInRange(mainImageBase, mainImageBase + MaxScanBytes, announce: false);
-		}
+		public static TlsPatchCounts operator +(TlsPatchCounts left, TlsPatchCounts right) =>
+			new(
+				left.Loads + right.Loads,
+				left.Stores + right.Stores,
+				left.StackCanaries + right.StackCanaries,
+				left.Sse4aBlends + right.Sse4aBlends);
 	}
 
-	private unsafe void PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd, bool announce)
+	internal static IReadOnlyList<TlsPatchScanRange> BuildTlsPatchScanRanges(
+		IReadOnlyList<VirtualMemoryRegion> regions)
+	{
+		ArgumentNullException.ThrowIfNull(regions);
+
+		var candidates = new List<TlsPatchScanRange>(regions.Count);
+		for (var index = 0; index < regions.Count; index++)
+		{
+			var region = regions[index];
+			if ((region.Protection & ProgramHeaderFlags.Execute) == 0 ||
+				region.MemorySize < MinTlsPatchInstructionBytes ||
+				region.MemorySize > ulong.MaxValue - region.VirtualAddress)
+			{
+				continue;
+			}
+
+			candidates.Add(new TlsPatchScanRange(
+				region.VirtualAddress,
+				region.VirtualAddress + region.MemorySize));
+		}
+
+		candidates.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+		var ranges = new List<TlsPatchScanRange>(candidates.Count);
+		for (var index = 0; index < candidates.Count; index++)
+		{
+			var candidate = candidates[index];
+			if (ranges.Count == 0 || candidate.Start > ranges[^1].End)
+			{
+				ranges.Add(candidate);
+				continue;
+			}
+
+			var previous = ranges[^1];
+			ranges[^1] = new TlsPatchScanRange(
+				previous.Start,
+				Math.Max(previous.End, candidate.End));
+		}
+
+		return ranges;
+	}
+
+	private unsafe void PatchTlsPatterns()
+	{
+		if (_cpuContext is null || !TryGetVirtualMemory(_cpuContext, out var virtualMemory))
+		{
+			Console.Error.WriteLine("[LOADER][WARNING] TLS patch scan skipped: guest memory is unavailable.");
+			return;
+		}
+
+		var ranges = BuildTlsPatchScanRanges(virtualMemory.SnapshotRegions());
+		var counts = default(TlsPatchCounts);
+		var scannedRanges = 0;
+		var reusedRanges = 0;
+		ulong scannedBytes = 0;
+		lock (_tlsPatchRangeGate)
+		{
+			for (var index = 0; index < ranges.Count; index++)
+			{
+				var range = ranges[index];
+				if (!_scannedTlsPatchRanges.Add(range))
+				{
+					reusedRanges++;
+					continue;
+				}
+
+				counts += PatchTlsPatternsInRange(range.Start, range.End);
+				scannedRanges++;
+				scannedBytes += range.End - range.Start;
+			}
+		}
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
+			$"{counts.StackCanaries} stack-canary accesses, {counts.Sse4aBlends} SSE4a EXTRQ blends " +
+			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
+	}
+
+	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
 	{
 		ulong num = rangeStart;
 		ulong num2 = rangeEnd;
@@ -3150,11 +3221,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		if (announce || num3 + num4 + num9 + sse4aPatchCount > 0)
-		{
-			Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends" +
-				(announce ? string.Empty : $" (lazy-commit rescan 0x{rangeStart:X16}-0x{rangeEnd:X16})"));
-		}
+		return new TlsPatchCounts(num3, num9, num4, sse4aPatchCount);
 	}
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)

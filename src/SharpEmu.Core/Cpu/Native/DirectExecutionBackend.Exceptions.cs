@@ -1623,7 +1623,14 @@ public sealed partial class DirectExecutionBackend
 			return;
 		}
 
-		PatchTlsPatternsInRange(committedBase, committedBase + committedSize, announce: false);
+		var counts = PatchTlsPatternsInRange(committedBase, committedBase + committedSize);
+		if (counts.Total != 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
+				$"{counts.StackCanaries} stack-canary accesses, {counts.Sse4aBlends} SSE4a EXTRQ blends " +
+				$"(lazy-commit rescan 0x{committedBase:X16}-0x{committedBase + committedSize:X16})");
+		}
 	}
 
 	private static bool ShouldTraceLazyCommit(int traceIndex)
