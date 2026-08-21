@@ -700,6 +700,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
     internal static bool IsGpuLabelTimelineRequested(string? setting) =>
         !string.Equals(setting, "0", StringComparison.Ordinal);
+
+    internal static GuestGpuLabelDependency ResolveGpuLabelSubmissionDependency(
+        GuestGpuLabelDependency requiredDependency,
+        GuestGpuLabelDependency priorQueueDependency) =>
+        requiredDependency.Merge(priorQueueDependency);
     // Diagnostic: skip compute dispatches whose GroupCountZ is at least this,
     // to isolate a specific tall dispatch (e.g. Demon's Souls' 27x15x72 froxel
     // shader that hangs the Metal queue) without needing its ASLR-varying
@@ -5959,6 +5964,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 var physicalCompute = useComputeQueue && _useDedicatedComputeQueue;
                 var submitQueue = physicalCompute ? _computeQueue : _queue;
                 var dependency = TakeRequiredGpuLabelDependency(_activeGuestQueue.Name);
+                if (_gpuLabelTimelineEnabled &&
+                    _lastSubmittedGpuLabelDependencyByGuestQueue.TryGetValue(
+                        _activeGuestQueue.Name,
+                        out var priorQueueDependency))
+                {
+                    // A guest queue is serial. Keep its order when host work moves
+                    // between the graphics queue and the compute queue.
+                    dependency = ResolveGpuLabelSubmissionDependency(
+                        dependency,
+                        priorQueueDependency);
+                }
                 var submitInfo = new SubmitInfo
                 {
                     SType = StructureType.SubmitInfo,
