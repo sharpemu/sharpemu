@@ -20,6 +20,14 @@ public static class KernelPthreadCompatExports
     private const int MutexObjectSize = 0x100;
     private const int MutexAttrObjectSize = 0x40;
     private const int CondObjectSize = 0x100;
+    private const int CondAttrObjectSize = 0x40;
+    private const int ClockRealtime = 0;
+    private const int ClockMonotonic = 4;
+    private const int PthreadProcessPrivate = 0;
+    private const int PthreadProcessShared = 1;
+    private const int PosixOutOfMemory = 12;
+    private const int PosixBadAddress = 14;
+    private const int PosixInvalidArgument = 22;
     private const int PthreadOnceUninitialized = 0;
     private const int PthreadOnceInProgress = 1;
     private const int PthreadOnceDone = 2;
@@ -29,7 +37,7 @@ public static class KernelPthreadCompatExports
     private static readonly Dictionary<ulong, PthreadMutexAttrState> _mutexAttrStates = new();
     private static readonly Dictionary<ulong, PthreadCondState> _condStates = new();
     private static readonly Dictionary<ulong, object> _onceGates = new();
-    private static readonly HashSet<ulong> _condAttrStates = new();
+    private static readonly Dictionary<ulong, PthreadCondAttrState> _condAttrStates = new();
     private static readonly bool _tracePthreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
     private static readonly bool _tracePthreadConds =
@@ -136,6 +144,8 @@ public static class KernelPthreadCompatExports
         public LinkedList<PthreadCondWaiter> WaiterQueue { get; } = new();
         public ulong SignalEpoch { get; set; }
         public int Waiters { get; set; }
+        public int ClockId { get; init; } = ClockRealtime;
+        public int ProcessShared { get; init; } = PthreadProcessPrivate;
     }
 
     private sealed class PthreadCondWaiter
@@ -153,6 +163,8 @@ public static class KernelPthreadCompatExports
     }
 
     private readonly record struct PthreadMutexAttrState(int Type, int Protocol);
+
+    private readonly record struct PthreadCondAttrState(int ClockId, int ProcessShared);
 
     static KernelPthreadCompatExports()
     {
@@ -455,14 +467,16 @@ public static class KernelPthreadCompatExports
         ExportName = "scePthreadCondInit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadCondInit(CpuContext ctx) => PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
+    public static int PthreadCondInit(CpuContext ctx) =>
+        PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], posixErrors: false);
 
     [SysAbiExport(
         Nid = "0TyVk4MSLt0",
         ExportName = "pthread_cond_init",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadCondInit(CpuContext ctx) => PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
+    public static int PosixPthreadCondInit(CpuContext ctx) =>
+        PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], posixErrors: true);
 
     [SysAbiExport(
         Nid = "g+PZd2hiacg",
@@ -538,9 +552,9 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var deltaSeconds = seconds - now.ToUnixTimeSeconds();
-        var nowNanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100L;
+        var clockId = ResolveCondClockId(ctx, ctx[CpuRegister.Rdi]);
+        KernelRuntimeCompatExports.GetClockTime(clockId, out var nowSeconds, out var nowNanoseconds);
+        var deltaSeconds = seconds - nowSeconds;
         uint timeoutUsec;
         if (deltaSeconds < 0)
         {
@@ -589,20 +603,15 @@ public static class KernelPthreadCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PthreadCondattrInit(CpuContext ctx)
-    {
-        var attrAddress = ctx[CpuRegister.Rdi];
-        if (attrAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+        => PthreadCondattrInitCore(ctx, ctx[CpuRegister.Rdi], posixErrors: false);
 
-        lock (_stateGate)
-        {
-            _condAttrStates.Add(attrAddress);
-        }
-
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    [SysAbiExport(
+        Nid = "mKoTx03HRWA",
+        ExportName = "pthread_condattr_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrInit(CpuContext ctx)
+        => PthreadCondattrInitCore(ctx, ctx[CpuRegister.Rdi], posixErrors: true);
 
     [SysAbiExport(
         Nid = "waPcxYiR3WA",
@@ -610,20 +619,63 @@ public static class KernelPthreadCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PthreadCondattrDestroy(CpuContext ctx)
-    {
-        var attrAddress = ctx[CpuRegister.Rdi];
-        if (attrAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+        => PthreadCondattrDestroyCore(ctx, ctx[CpuRegister.Rdi], posixErrors: false);
 
-        lock (_stateGate)
-        {
-            _condAttrStates.Remove(attrAddress);
-        }
+    [SysAbiExport(
+        Nid = "dJcuQVn6-Iw",
+        ExportName = "pthread_condattr_destroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrDestroy(CpuContext ctx)
+        => PthreadCondattrDestroyCore(ctx, ctx[CpuRegister.Rdi], posixErrors: true);
 
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
+    [SysAbiExport(
+        Nid = "cTDYxTUNPhM",
+        ExportName = "pthread_condattr_getclock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrGetclock(CpuContext ctx)
+        => PthreadCondattrGetValueCore(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            ctx[CpuRegister.Rsi],
+            getClock: true);
+
+    [SysAbiExport(
+        Nid = "EjllaAqAPZo",
+        ExportName = "pthread_condattr_setclock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrSetclock(CpuContext ctx)
+        => PthreadCondattrSetValueCore(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            unchecked((int)ctx[CpuRegister.Rsi]),
+            setClock: true);
+
+    [SysAbiExport(
+        Nid = "h0qUqSuOmC8",
+        ExportName = "pthread_condattr_getpshared",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrGetpshared(CpuContext ctx)
+        => PthreadCondattrGetValueCore(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            ctx[CpuRegister.Rsi],
+            getClock: false);
+
+    [SysAbiExport(
+        Nid = "3BpP850hBT4",
+        ExportName = "pthread_condattr_setpshared",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondattrSetpshared(CpuContext ctx)
+        => PthreadCondattrSetValueCore(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            unchecked((int)ctx[CpuRegister.Rsi]),
+            setClock: false);
 
     [SysAbiExport(
         Nid = "14bOACANTBo",
@@ -1201,6 +1253,163 @@ public static class KernelPthreadCompatExports
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
+    private static int PthreadCondattrInitCore(CpuContext ctx, ulong attrAddress, bool posixErrors)
+    {
+        if (attrAddress == 0)
+        {
+            return CondAttrInvalidArgument(posixErrors);
+        }
+
+        if (!TryAllocateOpaqueObject(ctx, CondAttrObjectSize, out var handle))
+        {
+            return posixErrors
+                ? PosixOutOfMemory
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var initialState = new PthreadCondAttrState(ClockRealtime, PthreadProcessPrivate);
+        if (!WriteCondAttrObject(ctx, handle, initialState))
+        {
+            FreeOpaqueObject(ctx, handle);
+            return posixErrors
+                ? PosixBadAddress
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        lock (_stateGate)
+        {
+            _condAttrStates[attrAddress] = initialState;
+            _condAttrStates[handle] = initialState;
+        }
+
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, attrAddress, handle))
+        {
+            lock (_stateGate)
+            {
+                _condAttrStates.Remove(attrAddress);
+                _condAttrStates.Remove(handle);
+            }
+
+            FreeOpaqueObject(ctx, handle);
+            return posixErrors
+                ? PosixBadAddress
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int PthreadCondattrDestroyCore(CpuContext ctx, ulong attrAddress, bool posixErrors)
+    {
+        if (!TryResolveCondAttrState(ctx, attrAddress, out var resolvedAddress, out _))
+        {
+            return CondAttrInvalidArgument(posixErrors);
+        }
+
+        lock (_stateGate)
+        {
+            _condAttrStates.Remove(resolvedAddress);
+            if (resolvedAddress != attrAddress)
+            {
+                _condAttrStates.Remove(attrAddress);
+            }
+        }
+
+        FreeOpaqueObject(ctx, resolvedAddress);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int PthreadCondattrGetValueCore(
+        CpuContext ctx,
+        ulong attrAddress,
+        ulong valueAddress,
+        bool getClock)
+    {
+        if (valueAddress == 0 ||
+            !TryResolveCondAttrState(ctx, attrAddress, out _, out var state))
+        {
+            return PosixInvalidArgument;
+        }
+
+        var value = getClock ? state.ClockId : state.ProcessShared;
+        return TryWriteUInt32(ctx, valueAddress, unchecked((uint)value))
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : PosixBadAddress;
+    }
+
+    private static int PthreadCondattrSetValueCore(
+        CpuContext ctx,
+        ulong attrAddress,
+        int value,
+        bool setClock)
+    {
+        if ((setClock && value is not ClockRealtime and not ClockMonotonic) ||
+            (!setClock && value is not PthreadProcessPrivate and not PthreadProcessShared) ||
+            !TryResolveCondAttrState(ctx, attrAddress, out var resolvedAddress, out var state))
+        {
+            return PosixInvalidArgument;
+        }
+
+        var updatedState = setClock
+            ? state with { ClockId = value }
+            : state with { ProcessShared = value };
+        lock (_stateGate)
+        {
+            _condAttrStates[resolvedAddress] = updatedState;
+            if (resolvedAddress != attrAddress)
+            {
+                _condAttrStates[attrAddress] = updatedState;
+            }
+        }
+
+        return WriteCondAttrObject(ctx, resolvedAddress, updatedState)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : PosixBadAddress;
+    }
+
+    private static bool TryResolveCondAttrState(
+        CpuContext ctx,
+        ulong attrAddress,
+        out ulong resolvedAddress,
+        out PthreadCondAttrState state)
+    {
+        resolvedAddress = 0;
+        state = default;
+        if (attrAddress == 0)
+        {
+            return false;
+        }
+
+        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, attrAddress, out var pointedHandle) &&
+            pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_condAttrStates.TryGetValue(pointedHandle, out state))
+                {
+                    resolvedAddress = pointedHandle;
+                    return true;
+                }
+            }
+        }
+
+        lock (_stateGate)
+        {
+            if (_condAttrStates.TryGetValue(attrAddress, out state))
+            {
+                resolvedAddress = attrAddress;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int CondAttrInvalidArgument(bool posixErrors) =>
+        posixErrors
+            ? PosixInvalidArgument
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+
     private static ulong ResolveMutexHandle(CpuContext ctx, ulong mutexAddress)
     {
         if (mutexAddress == 0)
@@ -1501,6 +1710,10 @@ public static class KernelPthreadCompatExports
         TryWriteUInt32(ctx, address, unchecked((uint)state.Type)) &&
         TryWriteUInt32(ctx, address + 4, unchecked((uint)state.Protocol));
 
+    private static bool WriteCondAttrObject(CpuContext ctx, ulong address, PthreadCondAttrState state) =>
+        TryWriteUInt32(ctx, address, unchecked((uint)state.ClockId)) &&
+        TryWriteUInt32(ctx, address + 4, unchecked((uint)state.ProcessShared));
+
     private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
@@ -1508,21 +1721,42 @@ public static class KernelPthreadCompatExports
         return ctx.Memory.TryWrite(address, bytes);
     }
 
-    private static int PthreadCondInitCore(CpuContext ctx, ulong condAddress)
+    private static int PthreadCondInitCore(
+        CpuContext ctx,
+        ulong condAddress,
+        ulong attrAddress,
+        bool posixErrors)
     {
         if (condAddress == 0)
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return posixErrors
+                ? PosixInvalidArgument
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var attrState = new PthreadCondAttrState(ClockRealtime, PthreadProcessPrivate);
+        if (attrAddress != 0 &&
+            !TryResolveCondAttrState(ctx, attrAddress, out _, out attrState))
+        {
+            return posixErrors
+                ? PosixInvalidArgument
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         if (!TryAllocateOpaqueObject(ctx, CondObjectSize, out var handle))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return posixErrors
+                ? PosixOutOfMemory
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         lock (_stateGate)
         {
-            var state = new PthreadCondState();
+            var state = new PthreadCondState
+            {
+                ClockId = attrState.ClockId,
+                ProcessShared = attrState.ProcessShared,
+            };
             _condStates[condAddress] = state;
             _condStates[handle] = state;
         }
@@ -1536,10 +1770,23 @@ public static class KernelPthreadCompatExports
             }
             FreeOpaqueObject(ctx, handle);
 
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            return posixErrors
+                ? PosixBadAddress
+                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int ResolveCondClockId(CpuContext ctx, ulong condAddress)
+    {
+        var resolvedAddress = ResolveCondHandle(ctx, condAddress);
+        lock (_stateGate)
+        {
+            return _condStates.TryGetValue(resolvedAddress, out var state)
+                ? state.ClockId
+                : ClockRealtime;
+        }
     }
 
     private static int PthreadCondDestroyCore(CpuContext ctx, ulong condAddress)

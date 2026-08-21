@@ -207,8 +207,20 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        long seconds;
-        long nanoseconds;
+        GetClockTime(clockId, out var seconds, out var nanoseconds);
+
+        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
+            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static void GetClockTime(int clockId, out long seconds, out long nanoseconds)
+    {
         if (clockId == 0)
         {
             var now = DateTimeOffset.UtcNow;
@@ -217,7 +229,8 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
+            var processStartCounter = _processStartCounter;
+            var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
             if (_stopwatchTicksAreNanoseconds)
             {
                 // Constant divisors let the JIT strength-reduce the division;
@@ -231,15 +244,6 @@ public static class KernelRuntimeCompatExports
                 nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
             }
         }
-
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(

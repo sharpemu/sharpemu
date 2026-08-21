@@ -2553,15 +2553,14 @@ public static partial class KernelMemoryCompatExports
         LibraryName = "libKernel")]
     public static int ClockGettime(CpuContext ctx)
     {
+        var clockId = unchecked((int)ctx[CpuRegister.Rdi]);
         var timespecAddress = ctx[CpuRegister.Rsi];
         if (timespecAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var now = DateTimeOffset.UtcNow;
-        var seconds = now.ToUnixTimeSeconds();
-        var nanoseconds = (now.Ticks % TimeSpan.TicksPerSecond) * 100;
+        KernelRuntimeCompatExports.GetClockTime(clockId, out var seconds, out var nanoseconds);
         if (!ctx.TryWriteUInt64(timespecAddress, unchecked((ulong)seconds)) ||
             !ctx.TryWriteUInt64(timespecAddress + sizeof(long), unchecked((ulong)nanoseconds)))
         {
@@ -2589,9 +2588,8 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        // clock_gettime above is backed by DateTimeOffset.UtcNow, whose tick is
-        // 100 ns, so that is the honest resolution to report rather than the 1 ns
-        // a caller might otherwise assume it can rely on.
+        // The realtime clock has a 100 ns tick. Report that conservative value
+        // for every supported clock.
         const ulong ResolutionNanoseconds = 100;
         if (!ctx.TryWriteUInt64(timespecAddress, 0) ||
             !ctx.TryWriteUInt64(timespecAddress + sizeof(long), ResolutionNanoseconds))
