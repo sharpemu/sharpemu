@@ -1154,12 +1154,20 @@ public static class KernelPthreadExtendedCompatExports
         PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: false);
 
     [SysAbiExport(
+        Nid = "bIHoZCTomsI",
+        ExportName = "scePthreadRwlockTrywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTrywrlock(CpuContext ctx) =>
+        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+
+    [SysAbiExport(
         Nid = "XhWHn6P5R7U",
         ExportName = "pthread_rwlock_trywrlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PosixPthreadRwlockTrywrlock(CpuContext ctx) =>
-        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+        PthreadRwlockTrywrlock(ctx);
 
     /// <summary>
     /// Non-blocking counterpart of <see cref="PthreadRwlockLockCore"/>: acquires
