@@ -35,7 +35,27 @@ public sealed class AgcAtomicMemTests
         Assert.Equal(0x1122_3344_5566_7788UL, packet.SourceData);
         Assert.Equal(0x99AA_BBCC_DDEE_FF00UL, packet.CompareData);
         Assert.Equal(400u, packet.LoopIntervalCycles);
+        Assert.Equal(0u, packet.EngineSelection);
         Assert.True(packet.IsSupported);
+        Assert.True(packet.HasValidEngine(usesAsyncEncoding: false));
+    }
+
+    [Fact]
+    public void Decoder_RejectsGraphicsReservedEngineSelection()
+    {
+        var packet = AgcExports.DecodeAtomicMemPacket(
+            0x4Fu | (2u << 8) | (2u << 30),
+            unchecked((uint)AtomicAddress),
+            (uint)(AtomicAddress >> 32),
+            1,
+            0,
+            0,
+            0,
+            400);
+
+        Assert.True(packet.IsSupported);
+        Assert.False(packet.HasValidEngine(usesAsyncEncoding: false));
+        Assert.False(packet.HasValidEngine(usesAsyncEncoding: true));
     }
 
     [Fact]
@@ -157,6 +177,21 @@ public sealed class AgcAtomicMemTests
             compare: 0xAABB_CCDD_0000_1234);
 
         Assert.Equal(0x1234UL, AgcExports.GetAtomicLoopReferenceValue(packet));
+    }
+
+    [Fact]
+    public void AtomicLoopWait_UsesExactEquality()
+    {
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            ReferenceValue = 5,
+            Mask = uint.MaxValue,
+            CompareFunction = 3,
+            RequiresExactEquality = true,
+        };
+
+        Assert.True(GpuWaitRegistry.Compare(waiter, 5));
+        Assert.False(GpuWaitRegistry.Compare(waiter, 6));
     }
 
     private static AgcExports.AtomicMemPacket Packet(

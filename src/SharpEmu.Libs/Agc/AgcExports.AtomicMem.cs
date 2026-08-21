@@ -8,6 +8,7 @@ namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
+    private const uint ItAtomicMem = 0x1E;
     private static readonly object _gpuAtomicMemoryGate = new();
 
     internal readonly record struct AtomicMemPacket(
@@ -17,7 +18,8 @@ public static partial class AgcExports
         ulong Address,
         ulong SourceData,
         ulong CompareData,
-        uint LoopIntervalCycles)
+        uint LoopIntervalCycles,
+        uint EngineSelection)
     {
         public uint BaseOperation => RawOperation & 0x1Fu;
         public bool Is64Bit => (RawOperation & 0x20u) != 0;
@@ -37,6 +39,8 @@ public static partial class AgcExports
             Address != 0 && (Address & (ulong)(ByteCount - 1)) == 0;
         public bool IsSupported =>
             IsIntegerOperation && HasValidCommand && IsAligned;
+        public bool HasValidEngine(bool usesAsyncEncoding) =>
+            usesAsyncEncoding ? EngineSelection == 0 : EngineSelection <= 1;
     }
 
     internal static AtomicMemPacket DecodeAtomicMemPacket(
@@ -55,7 +59,8 @@ public static partial class AgcExports
             addressLow | ((ulong)addressHigh << 32),
             sourceLow | ((ulong)sourceHigh << 32),
             compareLow | ((ulong)compareHigh << 32),
-            loopControl & 0x1FFFu);
+            loopControl & 0x1FFFu,
+            (control >> 30) & 0x3u);
 
     internal static bool TryApplyAtomicMem(
         ICpuMemory memory,

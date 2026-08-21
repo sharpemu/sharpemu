@@ -34,6 +34,8 @@ public static partial class AgcExports
         state.CurrentIndexSnapshot = null;
         state.ActiveVertexSnapshots = null;
         state.CurrentVertexSnapshot = null;
+        state.AtomicReturnMePending = false;
+        state.AtomicReturnPfpPending = false;
         state.RingTailParkAddress = 0;
 
         Console.Error.WriteLine(
@@ -41,5 +43,27 @@ public static partial class AgcExports
             $"submission={state.ActiveSubmissionId} packet=0x{packetAddress:X16} " +
             $"op=0x{opcode:X2} waiters={removedWaiters} " +
             $"pending={droppedSubmissions} reason='{reason}'");
+    }
+
+    /// <summary>
+    /// Stops a queue when an ordered GPU action fails after packet parsing.
+    /// </summary>
+    private static void StopSubmittedQueueFromOrderedAction(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint opcode,
+        string reason)
+    {
+        lock (gpuState.Gate)
+        {
+            StopSubmittedQueue(
+                ctx,
+                state,
+                packetAddress,
+                opcode,
+                reason);
+        }
     }
 }

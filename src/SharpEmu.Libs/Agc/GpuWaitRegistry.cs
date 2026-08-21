@@ -50,6 +50,9 @@ internal static class GpuWaitRegistry
         public uint ControlValue;
         public bool Is64Bit;
         public bool IsStandard;
+        // ATOMIC_MEM loops require an exact comparison. An ordinary label wait
+        // can use a compatibility mode that treats equality as reached.
+        public bool RequiresExactEquality;
         // MEM_SEMAPHORE is a counting wait. Only one signal can release one
         // waiter, so generic label comparisons must not latch this entry.
         public bool IsMemSemaphore;
@@ -1161,6 +1164,11 @@ internal static class GpuWaitRegistry
     {
         var masked = value & waiter.Mask;
         var reference = waiter.ReferenceValue & waiter.Mask;
+        if (waiter.RequiresExactEquality)
+        {
+            return masked == reference;
+        }
+
         return waiter.CompareFunction switch
         {
             0 => true,
