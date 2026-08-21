@@ -34,9 +34,15 @@ public sealed class SaveDataExportsTests : IDisposable
     private const ulong TransactionOut = Base + 0xE00;
     private const ulong StaleR8 = Base + 0xE08;
     private const ulong StaleR9 = Base + 0xE10;
+    private const ulong PrepareParam = Base + 0xE20;
+    private const ulong CommitParam = Base + 0xE60;
+    private const ulong SecondMountParam = Base + 0xF00;
+    private const ulong SecondMountResult = Base + 0xF80;
+    private const ulong SecondDirNamePtr = Base + 0x1000;
 
     private const int NoEvent = unchecked((int)0x809F0008);
     private const int ParameterError = unchecked((int)0x809F0000);
+    private const int ResourceBusy = unchecked((int)0x809F001B);
     private const uint MountModeCreate = 1u << 2;
 
     private readonly FakeCpuMemory _memory = new(Base, 0x10000);
@@ -81,16 +87,21 @@ public sealed class SaveDataExportsTests : IDisposable
         return _ctx;
     }
 
-    private int Mount(uint mountMode = MountModeCreate)
+    private int Mount(
+        uint mountMode = MountModeCreate,
+        string dirName = DirName,
+        ulong mountParam = MountParam,
+        ulong mountResult = MountResult,
+        ulong dirNamePointer = DirNamePtr)
     {
-        WriteAscii(DirNamePtr, DirName);
+        WriteAscii(dirNamePointer, dirName);
         Span<byte> param = stackalloc byte[0x30];
         param.Clear();
         BinaryPrimitives.WriteInt32LittleEndian(param, UserId);
-        BinaryPrimitives.WriteUInt64LittleEndian(param[0x08..], DirNamePtr);
+        BinaryPrimitives.WriteUInt64LittleEndian(param[0x08..], dirNamePointer);
         BinaryPrimitives.WriteUInt32LittleEndian(param[0x20..], mountMode);
-        Assert.True(_memory.TryWrite(MountParam, param));
-        return SaveDataExports.SaveDataMount3(Reg(rdi: MountParam, rsi: MountResult));
+        Assert.True(_memory.TryWrite(mountParam, param));
+        return SaveDataExports.SaveDataMount3(Reg(rdi: mountParam, rsi: mountResult));
     }
 
     [Fact]
@@ -148,11 +159,31 @@ public sealed class SaveDataExportsTests : IDisposable
     {
         Assert.Equal(0, Mount());
         WriteAscii(MountPointStr, MountPoint);
-        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rdi: MountPointStr)));
+        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rsi: MountPointStr)));
 
         Assert.Equal(0, SaveDataExports.SaveDataIsMounted(Reg(rsi: EventOut)));
         Assert.True(_ctx.TryReadUInt32(EventOut, out var mounted));
         Assert.Equal(0u, mounted);
+    }
+
+    [Fact]
+    public void Mount_UsesDistinctSlotsForConcurrentDirectories()
+    {
+        Assert.Equal(0, Mount());
+        Assert.Equal(
+            0,
+            Mount(
+                dirName: "SAVE0001",
+                mountParam: SecondMountParam,
+                mountResult: SecondMountResult,
+                dirNamePointer: SecondDirNamePtr));
+
+        var first = new byte[16];
+        var second = new byte[16];
+        Assert.True(_memory.TryRead(MountResult, first));
+        Assert.True(_memory.TryRead(SecondMountResult, second));
+        Assert.Equal(MountPoint, Encoding.ASCII.GetString(first).TrimEnd('\0'));
+        Assert.Equal("/savedata1", Encoding.ASCII.GetString(second).TrimEnd('\0'));
     }
 
     [Fact]
@@ -230,18 +261,19 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
-    public void CreateTransactionResource_WithoutOutPointer_DoesNotProbeStaleRegisters()
+    public void CreateTransactionResource_ReturnsResourceAndDoesNotWriteStaleRegisters()
     {
         const uint sentinel = 0xA5A5A5A5;
         Assert.True(_ctx.TryWriteUInt32(TransactionOut, sentinel));
         Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
         Assert.True(_ctx.TryWriteUInt32(StaleR9, sentinel));
 
-        var ctx = Reg(rdi: UserId, rdx: 0, rcx: TransactionOut);
+        var ctx = Reg(rdi: 0x02000000, rdx: TransactionOut, rcx: StaleR8);
         ctx[CpuRegister.R8] = StaleR8;
         ctx[CpuRegister.R9] = StaleR9;
 
-        Assert.Equal(0, SaveDataExports.SaveDataCreateTransactionResource(ctx));
+        var resource = SaveDataExports.SaveDataCreateTransactionResource(ctx);
+        Assert.True(resource > 0);
         Assert.True(_ctx.TryReadUInt32(TransactionOut, out var rcxValue));
         Assert.True(_ctx.TryReadUInt32(StaleR8, out var r8Value));
         Assert.True(_ctx.TryReadUInt32(StaleR9, out var r9Value));
@@ -251,41 +283,68 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
-    public void CreateTransactionResource_WithOutPointerFlag_WritesOnlyRcx()
+    public void CreateTransactionResource_ReturnsDistinctResources()
     {
-        const uint sentinel = 0xA5A5A5A5;
-        Assert.True(_ctx.TryWriteUInt32(TransactionOut, 0));
-        Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
-        Assert.True(_ctx.TryWriteUInt32(StaleR9, sentinel));
+        var first = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x1000));
+        var second = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x2000));
 
-        var ctx = Reg(rdi: UserId, rdx: 1, rcx: TransactionOut);
-        ctx[CpuRegister.R8] = StaleR8;
-        ctx[CpuRegister.R9] = StaleR9;
-
-        Assert.Equal(0, SaveDataExports.SaveDataCreateTransactionResource(ctx));
-        Assert.True(_ctx.TryReadUInt32(TransactionOut, out var resource));
-        Assert.True(_ctx.TryReadUInt32(StaleR8, out var r8Value));
-        Assert.True(_ctx.TryReadUInt32(StaleR9, out var r9Value));
-        Assert.NotEqual(0u, resource);
-        Assert.Equal(sentinel, r8Value);
-        Assert.Equal(sentinel, r9Value);
+        Assert.True(first > 0);
+        Assert.True(second > 0);
+        Assert.NotEqual(first, second);
     }
 
     [Fact]
-    public void CreateTransactionResource_WithLegacyOutPointer_WritesOnlyRdx()
+    public void Prepare_ReadsResourceFromParameterStructure()
     {
-        const uint sentinel = 0xA5A5A5A5;
-        Assert.True(_ctx.TryWriteUInt32(TransactionOut, 0));
-        Assert.True(_ctx.TryWriteUInt32(StaleR8, sentinel));
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+        var resource = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x2000));
+        Assert.True(resource > 0);
+
+        Span<byte> param = stackalloc byte[0x28];
+        param.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(param, resource);
+        BinaryPrimitives.WriteUInt32LittleEndian(param[0x04..], 2);
+        Assert.True(_memory.TryWrite(PrepareParam, param));
 
         Assert.Equal(
             0,
-            SaveDataExports.SaveDataCreateTransactionResource(
-                Reg(rdi: UserId, rdx: TransactionOut, rcx: StaleR8)));
+            SaveDataExports.SaveDataPrepare(
+                Reg(rdi: MountPointStr, rsi: PrepareParam, rdx: 4)));
+    }
 
-        Assert.True(_ctx.TryReadUInt32(TransactionOut, out var resource));
-        Assert.True(_ctx.TryReadUInt32(StaleR8, out var rcxValue));
-        Assert.NotEqual(0u, resource);
-        Assert.Equal(sentinel, rcxValue);
+    [Fact]
+    public void Commit_ReleasesOnlyTheNamedPreparedResource()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+        var first = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x1000));
+        var second = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x1000));
+
+        Prepare(first);
+        Prepare(second);
+
+        Span<byte> commit = stackalloc byte[0x28];
+        commit.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(commit, first);
+        BinaryPrimitives.WriteUInt32LittleEndian(commit[0x04..], 0);
+        Assert.True(_memory.TryWrite(CommitParam, commit));
+
+        Assert.Equal(0, SaveDataExports.SaveDataCommit(Reg(rdi: CommitParam)));
+        Assert.Equal(0, SaveDataExports.SaveDataDeleteTransactionResource(Reg(rdi: unchecked((uint)first))));
+        Assert.Equal(
+            ResourceBusy,
+            SaveDataExports.SaveDataDeleteTransactionResource(Reg(rdi: unchecked((uint)second))));
+    }
+
+    private void Prepare(int resource)
+    {
+        Span<byte> param = stackalloc byte[0x28];
+        param.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(param, resource);
+        Assert.True(_memory.TryWrite(PrepareParam, param));
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataPrepare(Reg(rdi: MountPointStr, rsi: PrepareParam)));
     }
 }

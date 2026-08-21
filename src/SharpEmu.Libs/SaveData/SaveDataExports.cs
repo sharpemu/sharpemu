@@ -15,7 +15,12 @@ public static class SaveDataExports
     private const int OrbisSaveDataErrorExists = unchecked((int)0x809F0007);
     private const int OrbisSaveDataErrorNotFound = unchecked((int)0x809F0008);
     private const int OrbisSaveDataErrorInternal = unchecked((int)0x809F000B);
+    private const int OrbisSaveDataErrorMountBusy = unchecked((int)0x809F0003);
+    private const int OrbisSaveDataErrorMountFull = unchecked((int)0x809F000C);
     private const int OrbisSaveDataErrorMemoryNotReady = unchecked((int)0x809F0012);
+    private const int OrbisSaveDataErrorResourceFull = unchecked((int)0x809F001A);
+    private const int OrbisSaveDataErrorResourceBusy = unchecked((int)0x809F001B);
+    private const int OrbisSaveDataErrorResourceInvalid = unchecked((int)0x809F001C);
     private const int SaveDataTitleIdSize = 10;
     private const int SaveDataDirNameSize = 32;
     private const int SaveDataParamSize = 0x530;
@@ -32,11 +37,15 @@ public static class SaveDataExports
     private const uint MountModeCreate = 1u << 2;
     private const uint MountModeCreate2 = 1u << 5;
     private const int MountResultSize = 0x40;
+    private const int SaveDataMountMaxCount = 16;
+    private const int TransactionResourceMaxCount = 16;
     // Emulator guard against corrupt or misread sizes, not a platform limit.
     private const ulong SaveDataMemoryMaxSize = 64UL * 1024 * 1024;
     private static readonly object _stateGate = new();
     private static readonly object _memoryGate = new();
     private static readonly HashSet<int> _preparedTransactionResources = [];
+    private static readonly HashSet<int> _transactionResources = [];
+    private static int _nextTransactionResource = 1;
     private static string? _titleId;
     private static int _legacySaveMigrationChecked;
 
@@ -46,6 +55,8 @@ public static class SaveDataExports
         {
             _titleId = string.IsNullOrWhiteSpace(titleId) ? null : SanitizePathSegment(titleId.Trim());
             _preparedTransactionResources.Clear();
+            _transactionResources.Clear();
+            _nextTransactionResource = 1;
         }
 
         lock (_eventGate)
@@ -180,7 +191,8 @@ public static class SaveDataExports
     public static int SaveDataMount5(CpuContext ctx) => SaveDataMount3(ctx);
 
     [SysAbiExport(Nid = "BMR4F-Uek3E", ExportName = "sceSaveDataUmount", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
-    public static int SaveDataUmount(CpuContext ctx) => SaveDataUmount2(ctx);
+    public static int SaveDataUmount(CpuContext ctx) =>
+        UmountSaveData(ctx, ctx[CpuRegister.Rdi], 0);
 
     [SysAbiExport(Nid = "ieP6jP138Qo", ExportName = "sceSaveDataIsMounted", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataIsMounted(CpuContext ctx)
@@ -707,8 +719,7 @@ public static class SaveDataExports
             !ctx.TryReadUInt64(mountAddress + 0x10, out var blocks) ||
             !ctx.TryReadUInt64(mountAddress + 0x18, out var systemBlocks) ||
             !TryReadUInt32(ctx, mountAddress + 0x20, out var mountMode) ||
-            !TryReadUInt32(ctx, mountAddress + 0x24, out var resource) ||
-            !TryReadUInt32(ctx, mountAddress + 0x28, out var mode) ||
+            !TryReadInt32(ctx, mountAddress + 0x28, out var resource) ||
             dirNameAddress == 0 ||
             !TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
         {
@@ -725,7 +736,6 @@ public static class SaveDataExports
             systemBlocks,
             mountMode,
             resource,
-            mode,
             resultAddress);
     }
 
@@ -738,8 +748,7 @@ public static class SaveDataExports
         ulong blocks,
         ulong systemBlocks,
         uint mountMode,
-        uint resource,
-        uint mode,
+        int resource,
         ulong resultAddress)
     {
         if (userId < 0 || string.IsNullOrWhiteSpace(titleId) || string.IsNullOrWhiteSpace(dirName))
@@ -772,12 +781,26 @@ public static class SaveDataExports
                 Directory.CreateDirectory(savePath);
             }
 
-            const string mountPoint = "/savedata0";
-            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
+            string mountPoint;
             lock (_mountGate)
             {
+                if (_mounts.Values.Any(entry =>
+                        string.Equals(entry.DirName, dirName, StringComparison.Ordinal)))
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorMountBusy);
+                }
+
+                var slot = Enumerable.Range(0, SaveDataMountMaxCount)
+                    .FirstOrDefault(index => !_mounts.ContainsKey($"/savedata{index}"), -1);
+                if (slot < 0)
+                {
+                    return SetReturn(ctx, OrbisSaveDataErrorMountFull);
+                }
+
+                mountPoint = $"/savedata{slot}";
                 _mounts[mountPoint] = new MountEntry(savePath, dirName, userId);
             }
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
 
             Span<byte> result = stackalloc byte[MountResultSize];
             result.Clear();
@@ -790,7 +813,7 @@ public static class SaveDataExports
 
             TraceSaveData(
                 $"{operation} user={userId} title={sanitizedTitleId} dir={dirName} blocks={blocks} " +
-                $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} mode={mode} " +
+                $"system_blocks={systemBlocks} mount_mode=0x{mountMode:X} resource={resource} " +
                 $"mount_point={mountPoint} created={!existed} root='{savePath}'");
             return SetReturn(ctx, 0);
         }
@@ -843,7 +866,6 @@ public static class SaveDataExports
             0,
             MountModeReadOnly,
             0,
-            0,
             resultAddress);
     }
 
@@ -854,7 +876,6 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataTransferringMountPs4(CpuContext ctx) => SaveDataTransferringMount(ctx);
 
-    private static int _nextTransactionResource;
     [SysAbiExport(
         Nid = "gjRZNnw0JPE",
         ExportName = "sceSaveDataCreateTransactionResource",
@@ -862,64 +883,21 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataCreateTransactionResource(CpuContext ctx)
     {
-        // Demon's Souls first-run call:
-        // RDI = 0xC0000, RSI = RDX + 8, RDX = resource output.
-        // Writing integer handle 1 makes the title dereference [1 + 8],
-        // causing the repeatable access violation at guest address 0x9.
-        var desWorkSize = ctx[CpuRegister.Rdi];
-        var desWorkAddress = ctx[CpuRegister.Rsi];
-        var desResourceAddress = ctx[CpuRegister.Rdx];
-
-        if (desWorkSize == 0xC0000 &&
-            desResourceAddress != 0 &&
-            desResourceAddress <= ulong.MaxValue - sizeof(ulong) &&
-            desWorkAddress == desResourceAddress + sizeof(ulong))
+        var size = unchecked((uint)ctx[CpuRegister.Rdi]);
+        int resource;
+        lock (_stateGate)
         {
-            if (!ctx.TryWriteUInt64(desResourceAddress, 0))
+            if (_transactionResources.Count >= TransactionResourceMaxCount)
             {
-                return SetReturn(
-                    ctx,
-                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return SetReturn(ctx, OrbisSaveDataErrorResourceFull);
             }
 
-            TraceSaveData(
-                $"create_transaction_resource_des_guard " +
-                $"work_size=0x{desWorkSize:X} " +
-                $"work=0x{desWorkAddress:X} " +
-                $"resource_addr=0x{desResourceAddress:X} resource=0x0");
-
-            return SetReturn(ctx, 0);
-        }
-        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
-        var reserved = ctx[CpuRegister.Rsi];
-
-        var id = (uint)Interlocked.Increment(ref _nextTransactionResource);
-
-        // A small RDX value is a flag, and RCX contains the output address.
-        // A larger RDX value is the output address for the older ABI.
-        var resourceAddress = 0UL;
-        var selectedAddress = SelectTransactionResourceAddress(
-            ctx[CpuRegister.Rdx],
-            ctx[CpuRegister.Rcx]);
-        if (selectedAddress != 0 && TryWriteUInt32(ctx, selectedAddress, id))
-        {
-            resourceAddress = selectedAddress;
+            resource = _nextTransactionResource++;
+            _transactionResources.Add(resource);
         }
 
-        TraceSaveData(
-            $"create_transaction_resource user={userId} reserved=0x{reserved:X} resource_addr=0x{resourceAddress:X} id={id}");
-
-        return SetReturn(ctx, 0);
-    }
-
-    internal static ulong SelectTransactionResourceAddress(ulong rdx, ulong rcx)
-    {
-        if (rdx == 0)
-        {
-            return 0;
-        }
-
-        return rdx <= ushort.MaxValue ? rcx : rdx;
+        TraceSaveData($"create_transaction_resource size=0x{size:X} resource={resource}");
+        return SetReturn(ctx, resource);
     }
 
     [SysAbiExport(
@@ -932,6 +910,17 @@ public static class SaveDataExports
         var resource = unchecked((int)ctx[CpuRegister.Rdi]);
         lock (_stateGate)
         {
+            if (!_transactionResources.Contains(resource))
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorResourceInvalid);
+            }
+
+            if (_preparedTransactionResources.Contains(resource))
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorResourceBusy);
+            }
+
+            _transactionResources.Remove(resource);
             _preparedTransactionResources.Remove(resource);
         }
 
@@ -946,21 +935,37 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataUmount2(CpuContext ctx)
     {
-        // rdi: SceSaveDataMountPoint* (16-byte mount point string) for umount2.
-        var mountPointAddress = ctx[CpuRegister.Rdi];
+        var mode = unchecked((uint)ctx[CpuRegister.Rdi]);
+        return UmountSaveData(ctx, ctx[CpuRegister.Rsi], mode);
+    }
+
+    private static int UmountSaveData(CpuContext ctx, ulong mountPointAddress, uint mode)
+    {
+        if (mountPointAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
         if (mountPointAddress != 0 && TryReadFixedAscii(ctx, mountPointAddress, 16, out var mountPoint) &&
             !string.IsNullOrEmpty(mountPoint))
         {
+            var removed = false;
             lock (_mountGate)
             {
-                _mounts.Remove(mountPoint);
+                removed = _mounts.Remove(mountPoint);
+            }
+
+            if (!removed)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorNotFound);
             }
 
             KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
-            TraceSaveData($"umount2 mount='{mountPoint}'");
+            TraceSaveData($"umount mount='{mountPoint}' mode=0x{mode:X}");
+            return SetReturn(ctx, 0);
         }
 
-        return SetReturn(ctx, 0);
+        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     private static bool TryReadSearchCond(CpuContext ctx, ulong address, out SearchCond cond)
@@ -1288,13 +1293,15 @@ public static class SaveDataExports
     public static int SaveDataPrepare(CpuContext ctx)
     {
         var mountPointAddress = ctx[CpuRegister.Rdi];
-        var resource = unchecked((int)ctx[CpuRegister.Rdx]);
-        if (mountPointAddress == 0)
+        var paramAddress = ctx[CpuRegister.Rsi];
+        if (mountPointAddress == 0 || paramAddress == 0)
         {
             return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
-        if (!TryReadFixedAscii(ctx, mountPointAddress, 16, out var mountPoint))
+        if (!TryReadFixedAscii(ctx, mountPointAddress, 16, out var mountPoint) ||
+            !TryReadInt32(ctx, paramAddress, out var resource) ||
+            !TryReadUInt32(ctx, paramAddress + 0x04, out var prepareMode))
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -1306,13 +1313,15 @@ public static class SaveDataExports
 
         lock (_stateGate)
         {
-            if (resource != 0)
+            if (!_transactionResources.Contains(resource))
             {
-                _preparedTransactionResources.Add(resource);
+                return ctx.SetReturn(OrbisSaveDataErrorResourceInvalid);
             }
+
+            _preparedTransactionResources.Add(resource);
         }
 
-        TraceSaveData($"prepare mount_point={mountPoint} resource={resource}");
+        TraceSaveData($"prepare mount_point={mountPoint} resource={resource} mode=0x{prepareMode:X}");
         return ctx.SetReturn(0);
     }
 
@@ -1329,12 +1338,23 @@ public static class SaveDataExports
             return ctx.SetReturn(OrbisSaveDataErrorParameter);
         }
 
-        lock (_stateGate)
+        if (!TryReadInt32(ctx, commitAddress, out var resource) ||
+            !TryReadUInt32(ctx, commitAddress + 0x04, out var commitMode))
         {
-            _preparedTransactionResources.Clear();
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceSaveData($"commit commit=0x{commitAddress:X16}");
+        lock (_stateGate)
+        {
+            if (!_transactionResources.Contains(resource))
+            {
+                return ctx.SetReturn(OrbisSaveDataErrorResourceInvalid);
+            }
+
+            _preparedTransactionResources.Remove(resource);
+        }
+
+        TraceSaveData($"commit resource={resource} mode=0x{commitMode:X}");
         return ctx.SetReturn(0);
     }
 
