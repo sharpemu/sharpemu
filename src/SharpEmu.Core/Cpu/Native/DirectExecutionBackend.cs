@@ -1679,6 +1679,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Console.Error.WriteLine($"[LOADER][DEBUG] TryResolveDirectImportTarget: {nid} not in HLE table, checking runtime symbols...");
 		}
 
+		var hasCatalogSymbol = Aerolib.Instance.TryGetByNid(nid, out var symbolByNid);
+		if (hasCatalogSymbol &&
+			IsLibcFileObjectExport(symbolByNid.ExportName) &&
+			!PreferLleForLibcExport(symbolByNid.ExportName))
+		{
+			// HLE FILE objects and native FILE objects use different layouts.
+			// Do not mix them unless all libc exports use LLE.
+			return false;
+		}
+
 		if (TryResolveRuntimeSymbolAddress(nid, out var directValue) && IsDirectImportTargetUsable(directValue))
 		{
 			targetAddress = directValue;
@@ -1690,7 +1700,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return true;
 		}
 
-		if (Aerolib.Instance.TryGetByNid(nid, out var symbolByNid))
+		if (hasCatalogSymbol)
 		{
 			if (!PreferLleForLibcExport(symbolByNid.ExportName))
 			{
@@ -1828,6 +1838,73 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			"memmove" or
 			"memset" or
 			"memcmp" => true,
+			_ => false,
+		};
+	}
+
+	internal static bool IsLibcFileObjectExport(string exportName)
+	{
+		return exportName switch
+		{
+			"_Fgpos" or
+			"_Flocale" or
+			"_Fsetlocale" or
+			"_Fspos" or
+			"_Lockfilelock" or
+			"_Unlockfilelock" or
+			"clearerr" or
+			"fdopen" or
+			"fclose" or
+			"feof" or
+			"ferror" or
+			"fflush" or
+			"fgetc" or
+			"fgetpos" or
+			"fgets" or
+			"fgetwc" or
+			"fgetws" or
+			"fileno" or
+			"fopen" or
+			"fopen_s" or
+			"fprintf" or
+			"fprintf_s" or
+			"fputc" or
+			"fputs" or
+			"fputwc" or
+			"fputws" or
+			"fread" or
+			"freopen" or
+			"freopen_s" or
+			"fscanf" or
+			"fscanf_s" or
+			"fseek" or
+			"fsetpos" or
+			"ftell" or
+			"fwide" or
+			"fwrite" or
+			"fwprintf" or
+			"fwprintf_s" or
+			"fwscanf" or
+			"fwscanf_s" or
+			"getc" or
+			"getw" or
+			"getwc" or
+			"putc" or
+			"putw" or
+			"putwc" or
+			"rewind" or
+			"setbuf" or
+			"setvbuf" or
+			"ungetc" or
+			"ungetwc" or
+			"vfprintf" or
+			"vfprintf_s" or
+			"vfscanf" or
+			"vfscanf_s" or
+			"vfwprintf" or
+			"vfwprintf_s" or
+			"vfwscanf" or
+			"vfwscanf_s" => true,
 			_ => false,
 		};
 	}
