@@ -12,6 +12,24 @@ namespace SharpEmu.Libs.Tests.Agc;
 public sealed class AgcRegisterDefaultsTests
 {
     [Fact]
+    public void GetRegisterDefaults2_Version7_ReturnsExactTessellationDefault()
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = 7;
+
+        var result = AgcExports.GetRegisterDefaults2(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(489u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(127u, ReadUInt32(memory, address + 0x38));
+
+        var contextTable = ReadUInt64(memory, address);
+        AssertRegister(memory, ReadUInt64(memory, contextTable + (52 * 8)), 0x02D4, 0x88101010);
+    }
+
+    [Fact]
     public void GetRegisterDefaults2_Version8_ReturnsExactPublicLayout()
     {
         var memory = new SparseGuestAddressSpace();
