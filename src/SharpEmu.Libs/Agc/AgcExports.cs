@@ -17030,9 +17030,9 @@ GuestImageWriteTracker.Track(
 
             ulong primaryAddress = 0;
             ulong internalAddress = 0;
-            var built = version == RegisterDefaultsVersion8
-                ? TryBuildCompactRegisterDefaults(ctx, PublicRegisterDefaultsVersion8, out primaryAddress) &&
-                  TryBuildCompactRegisterDefaults(ctx, InternalRegisterDefaultsVersion8, out internalAddress)
+            var built = TrySelectCompactRegisterDefaults(version, out var publicDefaults, out var internalDefaults)
+                ? TryBuildCompactRegisterDefaults(ctx, publicDefaults, out primaryAddress) &&
+                  TryBuildCompactRegisterDefaults(ctx, internalDefaults, out internalAddress)
                 : TryBuildRegisterDefaults(
                       ctx,
                       PrimaryRegisterDefaults,
@@ -17056,6 +17056,30 @@ GuestImageWriteTracker.Track(
             allocation = new RegisterDefaultsAllocation(primaryAddress, internalAddress);
             allocations.Add(version, allocation);
             return true;
+        }
+    }
+
+    private static bool TrySelectCompactRegisterDefaults(
+        uint version,
+        out CompactRegisterDefaults publicDefaults,
+        out CompactRegisterDefaults internalDefaults)
+    {
+        switch (version)
+        {
+            case RegisterDefaultsVersion8:
+                publicDefaults = PublicRegisterDefaultsVersion8;
+                internalDefaults = InternalRegisterDefaultsVersion8;
+                return true;
+            case RegisterDefaultsVersion10:
+            case RegisterDefaultsVersion12:
+                // The AGC version table maps version 12 to the version 10 dataset.
+                publicDefaults = PublicRegisterDefaultsVersion10;
+                internalDefaults = InternalRegisterDefaultsVersion10;
+                return true;
+            default:
+                publicDefaults = null!;
+                internalDefaults = null!;
+                return false;
         }
     }
 

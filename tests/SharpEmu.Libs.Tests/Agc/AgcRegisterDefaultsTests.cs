@@ -59,6 +59,52 @@ public sealed class AgcRegisterDefaultsTests
         Assert.Equal(22u, ReadUInt32(memory, address + 0x38));
     }
 
+    [Theory]
+    [InlineData(10u)]
+    [InlineData(12u)]
+    public void GetRegisterDefaults2_Version10Family_ReturnsExactPublicLayout(uint version)
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = version;
+
+        var result = AgcExports.GetRegisterDefaults2(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.NotEqual(0UL, address);
+        Assert.Equal(482u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(159u, ReadUInt32(memory, address + 0x24));
+        Assert.Equal(55u, ReadUInt32(memory, address + 0x28));
+        Assert.Equal(0u, ReadUInt32(memory, address + 0x2C));
+        Assert.Equal(128u, ReadUInt32(memory, address + 0x38));
+
+        var contextTable = ReadUInt64(memory, address);
+        AssertRegister(memory, ReadUInt64(memory, contextTable + (1 * 8)), 0x0109, 0x00000010);
+        AssertRegister(memory, ReadUInt64(memory, contextTable + (7 * 8)), 0x0001, 0x11000100);
+    }
+
+    [Theory]
+    [InlineData(10u)]
+    [InlineData(12u)]
+    public void GetRegisterDefaults2Internal_Version10Family_ReturnsAllTables(uint version)
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = version;
+
+        var result = AgcExports.GetRegisterDefaults2Internal(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(9u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(15u, ReadUInt32(memory, address + 0x24));
+        Assert.Equal(1u, ReadUInt32(memory, address + 0x28));
+        Assert.Equal(6u, ReadUInt32(memory, address + 0x2C));
+        Assert.NotEqual(0UL, ReadUInt64(memory, address + 0x18));
+        Assert.Equal(28u, ReadUInt32(memory, address + 0x38));
+    }
+
     [Fact]
     public void GetRegisterDefaults2_CachesEachRequestedVersionSeparately()
     {
