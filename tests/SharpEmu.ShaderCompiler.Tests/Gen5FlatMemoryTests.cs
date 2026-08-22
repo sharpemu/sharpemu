@@ -14,6 +14,52 @@ public sealed class Gen5FlatMemoryTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint SEndpgm = 0xBF810000;
 
+    [Fact]
+    public void SadU32CompilesToUnsignedMinMaxDifferenceAndAdd()
+    {
+        var sad = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Vop3,
+            "VSadU32",
+            [0, 0],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2)],
+            [Gen5Operand.Vector(3)],
+            null);
+        var end = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [SEndpgm],
+            [],
+            [],
+            null);
+        var scalarRegisters = new uint[256];
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [sad, end]),
+            [],
+            null);
+        var evaluation = new Gen5ShaderEvaluation(
+            scalarRegisters,
+            scalarRegisters,
+            [],
+            []);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                1,
+                1,
+                1,
+                out var compiled,
+                out var error),
+            error);
+        var opcodes = ReadSpirvOpcodes(compiled.Spirv);
+        Assert.Contains((ushort)SpirvOp.ExtInst, opcodes);
+        Assert.Contains((ushort)SpirvOp.ISub, opcodes);
+        Assert.Contains((ushort)SpirvOp.IAdd, opcodes);
+    }
+
     public static TheoryData<uint, string> F16CompareOpcodes => new()
     {
         { 0xC8, "VCmpFF16" },
