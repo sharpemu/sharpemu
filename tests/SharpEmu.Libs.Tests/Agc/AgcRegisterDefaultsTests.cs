@@ -124,6 +124,76 @@ public sealed class AgcRegisterDefaultsTests
     }
 
     [Fact]
+    public void GetRegisterDefaults2_Version11_ReturnsExactLayout()
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = 11;
+
+        var result = AgcExports.GetRegisterDefaults2(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(488u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(162u, ReadUInt32(memory, address + 0x24));
+        Assert.Equal(56u, ReadUInt32(memory, address + 0x28));
+        Assert.Equal(0u, ReadUInt32(memory, address + 0x2C));
+        Assert.Equal(137u, ReadUInt32(memory, address + 0x38));
+    }
+
+    [Fact]
+    public void GetRegisterDefaults2_Version13_UsesVersion11ByDefault()
+    {
+        const string variable = "SHARPEMU_AGC_VERSION13_DEFAULTS";
+        var original = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+            var memory = new SparseGuestAddressSpace();
+            var ctx = new CpuContext(memory, Generation.Gen5);
+            ctx[CpuRegister.Rdi] = 13;
+
+            var result = AgcExports.GetRegisterDefaults2(ctx);
+            var address = ctx[CpuRegister.Rax];
+
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+            Assert.Equal(488u, ReadUInt32(memory, address + 0x20));
+            Assert.Equal(137u, ReadUInt32(memory, address + 0x38));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, original);
+        }
+    }
+
+    [Fact]
+    public void GetRegisterDefaults2_Version13_UsesLegacyLayoutWhenRequested()
+    {
+        const string variable = "SHARPEMU_AGC_VERSION13_DEFAULTS";
+        var original = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "legacy");
+            var memory = new SparseGuestAddressSpace();
+            var ctx = new CpuContext(memory, Generation.Gen5);
+            ctx[CpuRegister.Rdi] = 13;
+
+            var result = AgcExports.GetRegisterDefaults2(ctx);
+            var address = ctx[CpuRegister.Rax];
+
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+            Assert.Equal(0u, ReadUInt32(memory, address + 0x20));
+            Assert.Equal(0u, ReadUInt32(memory, address + 0x24));
+            Assert.Equal(0u, ReadUInt32(memory, address + 0x28));
+            Assert.Equal(127u, ReadUInt32(memory, address + 0x38));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, original);
+        }
+    }
+
+    [Fact]
     public void GetRegisterDefaults2_CachesEachRequestedVersionSeparately()
     {
         var memory = new SparseGuestAddressSpace();

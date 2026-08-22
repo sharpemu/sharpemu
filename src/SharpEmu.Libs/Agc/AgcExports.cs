@@ -1192,6 +1192,7 @@ public static partial class AgcExports
     private const uint RegisterDefaultsVersion7 = 7;
     private const uint RegisterDefaultsVersion8 = 8;
     private const uint RegisterDefaultsVersion10 = 10;
+    private const uint RegisterDefaultsVersion11 = 11;
     private const uint RegisterDefaultsVersion12 = 12;
     private const uint RegisterDefaultsVersion13 = 13;
     private const int RegisterDefaultsSize = 0x40;
@@ -17005,6 +17006,7 @@ GuestImageWriteTracker.Track(
             RegisterDefaultsVersion7 or
             RegisterDefaultsVersion8 or
             RegisterDefaultsVersion10 or
+            RegisterDefaultsVersion11 or
             RegisterDefaultsVersion12 or
             RegisterDefaultsVersion13;
     }
@@ -17080,11 +17082,30 @@ GuestImageWriteTracker.Track(
                 publicDefaults = PublicRegisterDefaultsVersion10;
                 internalDefaults = InternalRegisterDefaultsVersion10;
                 return true;
+            case RegisterDefaultsVersion11:
+                publicDefaults = PublicRegisterDefaultsVersion11;
+                internalDefaults = InternalRegisterDefaultsVersion11;
+                return true;
+            case RegisterDefaultsVersion13 when !IsLegacyVersion13RegisterDefaultsRequested():
+                // The exact version 13 data is not available. The available
+                // open-source table uses version 11 for newer requests. Local
+                // Astro Bot tests found no regression with this fallback.
+                publicDefaults = PublicRegisterDefaultsVersion11;
+                internalDefaults = InternalRegisterDefaultsVersion11;
+                return true;
             default:
                 publicDefaults = null!;
                 internalDefaults = null!;
                 return false;
         }
+    }
+
+    private static bool IsLegacyVersion13RegisterDefaultsRequested()
+    {
+        var value = Environment.GetEnvironmentVariable("SHARPEMU_AGC_VERSION13_DEFAULTS");
+        return string.Equals(value, "legacy", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "generic", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "0", StringComparison.Ordinal);
     }
 
     private static bool TryBuildCompactRegisterDefaults(
