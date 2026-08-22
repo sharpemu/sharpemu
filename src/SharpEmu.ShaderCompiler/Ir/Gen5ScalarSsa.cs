@@ -392,7 +392,7 @@ public sealed class Gen5ScalarSsa
 
         if (instruction.Encoding == Gen5ShaderEncoding.Vopc)
         {
-            return true;
+            return !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal);
         }
 
         return instruction.Encoding == Gen5ShaderEncoding.Vop2 &&

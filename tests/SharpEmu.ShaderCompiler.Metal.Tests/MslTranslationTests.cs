@@ -13,6 +13,50 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 public sealed class MslTranslationTests
 {
     [Fact]
+    public void F16CompareUsesHalfOperands()
+    {
+        var compare = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Vopc,
+            "VCmpLtF16",
+            [],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            [],
+            null);
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [0xBF810000],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [compare, end]),
+            [],
+            null);
+        var scalarRegisters = new uint[256];
+        var evaluation = new Gen5ShaderEvaluation(
+            scalarRegisters,
+            scalarRegisters,
+            [],
+            []);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                1,
+                1,
+                1,
+                out var shader,
+                out var error),
+            error);
+        Assert.Contains("as_type<half>", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(" < ", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryFixtureTranslates()
     {
         foreach (var fixture in Gen5ComputeFixtures.All)

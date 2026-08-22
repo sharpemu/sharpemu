@@ -24,6 +24,7 @@ public sealed class Gen5ImplicitVccTests
     {
         Assert.True(Gen5ScalarSsa.WritesVccImplicitly(Vopc(0)));
         Assert.True(Gen5ScalarSsa.WritesVccImplicitly(Vopc(0, "VCmpLtF32")));
+        Assert.False(Gen5ScalarSsa.WritesVccImplicitly(Vopc(0, "VCmpxLtF16")));
     }
 
     [Fact]

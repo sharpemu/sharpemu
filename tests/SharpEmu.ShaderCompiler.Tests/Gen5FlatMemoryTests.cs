@@ -14,6 +14,85 @@ public sealed class Gen5FlatMemoryTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint SEndpgm = 0xBF810000;
 
+    public static TheoryData<uint, string> F16CompareOpcodes => new()
+    {
+        { 0xC8, "VCmpFF16" },
+        { 0xC9, "VCmpLtF16" },
+        { 0xCA, "VCmpEqF16" },
+        { 0xCB, "VCmpLeF16" },
+        { 0xCC, "VCmpGtF16" },
+        { 0xCD, "VCmpLgF16" },
+        { 0xCE, "VCmpGeF16" },
+        { 0xCF, "VCmpOF16" },
+        { 0xD8, "VCmpxFF16" },
+        { 0xD9, "VCmpxLtF16" },
+        { 0xDA, "VCmpxEqF16" },
+        { 0xDB, "VCmpxLeF16" },
+        { 0xDC, "VCmpxGtF16" },
+        { 0xDD, "VCmpxLgF16" },
+        { 0xDE, "VCmpxGeF16" },
+        { 0xDF, "VCmpxOF16" },
+        { 0xE8, "VCmpUF16" },
+        { 0xE9, "VCmpNgeF16" },
+        { 0xEA, "VCmpNlgF16" },
+        { 0xEB, "VCmpNgtF16" },
+        { 0xEC, "VCmpNleF16" },
+        { 0xED, "VCmpNeqF16" },
+        { 0xEE, "VCmpNltF16" },
+        { 0xEF, "VCmpTruF16" },
+        { 0xF8, "VCmpxUF16" },
+        { 0xF9, "VCmpxNgeF16" },
+        { 0xFA, "VCmpxNlgF16" },
+        { 0xFB, "VCmpxNgtF16" },
+        { 0xFC, "VCmpxNleF16" },
+        { 0xFD, "VCmpxNeqF16" },
+        { 0xFE, "VCmpxNltF16" },
+        { 0xFF, "VCmpxTruF16" },
+    };
+
+    [Theory]
+    [MemberData(nameof(F16CompareOpcodes))]
+    public void DecodesF16CompareOpcodes(uint opcode, string expected)
+    {
+        var program = DecodeProgram(
+            (0x3Eu << 25) | (opcode << 17) | (1u << 9) | 256u,
+            SEndpgm);
+
+        Assert.Equal(expected, program.Instructions[0].Opcode);
+        Assert.Equal(
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            program.Instructions[0].Sources);
+    }
+
+    [Fact]
+    public void F16CompareCompilesToOrderedSpirv()
+    {
+        var program = DecodeProgram(
+            (0x3Eu << 25) | (0xC9u << 17) | (1u << 9) | 256u,
+            SEndpgm);
+        var scalarRegisters = new uint[256];
+        var state = new Gen5ShaderState(program, [], null);
+        var evaluation = new Gen5ShaderEvaluation(
+            scalarRegisters,
+            scalarRegisters,
+            [],
+            []);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileComputeShader(
+                state,
+                evaluation,
+                1,
+                1,
+                1,
+                out var compiled,
+                out var error),
+            error);
+        Assert.Contains(
+            (ushort)SpirvOp.FOrdLessThan,
+            ReadSpirvOpcodes(compiled.Spirv));
+    }
+
     [Fact]
     public void FlatLoadUbyteInfersScalarBaseAndCompiles()
     {
@@ -172,6 +251,29 @@ public sealed class Gen5FlatMemoryTests
         }
 
         return opcodes;
+    }
+
+    private static Gen5ShaderProgram DecodeProgram(params uint[] words)
+    {
+        var memory = new TestCpuMemory(ShaderAddress, 0x4000);
+        var shader = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                shader.AsSpan(index * sizeof(uint)),
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(ShaderAddress, shader));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                ShaderAddress,
+                out var program,
+                out var error),
+            error);
+        return program;
     }
 
     private sealed class TestCpuMemory(ulong baseAddress, int size) : ICpuMemory
