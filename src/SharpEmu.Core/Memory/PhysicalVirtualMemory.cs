@@ -982,9 +982,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
     }
 
-    public bool TryCommitRange(ulong address, ulong size)
+    public bool TryEnsureRangeCommitted(ulong address, ulong size)
     {
-        if (size == 0 || ulong.MaxValue - address < size)
+        if (size == 0 || ulong.MaxValue - address < size - 1)
         {
             return false;
         }
@@ -993,7 +993,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(address, size);
-            return region is not null && EnsureRangeCommitted(address, size, region);
+            if (region is null || !EnsureRangeCommitted(address, size, region))
+            {
+                return false;
+            }
+
+            if (region.IsReservedOnly)
+            {
+                TraceVmem(
+                    $"Committed mapped guest range: 0x{address:X16} - 0x{address + size:X16} ({size} bytes)");
+            }
+
+            return true;
         }
         finally
         {

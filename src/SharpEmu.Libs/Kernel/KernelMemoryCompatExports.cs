@@ -3295,6 +3295,11 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
+            if (!KernelVirtualRangeAllocator.TryEnsureRangeCommitted(ctx.Memory, mappedAddress, length))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
             _nextVirtualAddress = Math.Max(_nextVirtualAddress, mappedAddress + length);
             ReplaceMappedRegionRangeLocked(new MappedRegion(
                 mappedAddress,
@@ -3384,6 +3389,11 @@ public static partial class KernelMemoryCompatExports
             if (mappedAddress == 0)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            if (!KernelVirtualRangeAllocator.TryEnsureRangeCommitted(ctx.Memory, mappedAddress, length))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
             _nextVirtualAddress = Math.Max(_nextVirtualAddress, mappedAddress + length);
@@ -4959,12 +4969,6 @@ public static partial class KernelMemoryCompatExports
         if (address == 0 || length == 0 || ulong.MaxValue - address < length - 1)
         {
             return false;
-        }
-
-        if (KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace) &&
-            addressSpace.TryCommitRange(address, length))
-        {
-            return true;
         }
 
         Span<byte> probe = stackalloc byte[1];

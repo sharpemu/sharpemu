@@ -363,6 +363,9 @@ public sealed class AgcRegisterDefaultsTests
             return actualAddress != 0;
         }
 
+        public bool TryEnsureRangeCommitted(ulong address, ulong size) =>
+            size <= int.MaxValue && TryResolve(address, (int)size, out _, out _);
+
         public bool TryProtect(ulong address, ulong size, GuestPageProtection protection) => true;
 
         private bool TryAllocateExact(ulong address, ulong size)
