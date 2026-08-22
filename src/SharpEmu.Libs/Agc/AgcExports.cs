@@ -1192,6 +1192,7 @@ public static partial class AgcExports
     private const uint RegisterDefaultsVersion7 = 7;
     private const uint RegisterDefaultsVersion8 = 8;
     private const uint RegisterDefaultsVersion10 = 10;
+    private const uint RegisterDefaultsVersion12 = 12;
     private const uint RegisterDefaultsVersion13 = 13;
     private const int RegisterDefaultsSize = 0x40;
     private const int RegisterDefaultBlockSize = 16 * 8;
@@ -1382,7 +1383,8 @@ public static partial class AgcExports
     private static readonly Dictionary<(ulong Source, ulong Destination), ulong> _softwarePresenterFingerprints = new();
     private static readonly Dictionary<(ulong Shader, ulong Source, ulong Destination), ulong> _softwareComputeBlitFingerprints = new();
     private static readonly object _registerDefaultsGate = new();
-    private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
+    private static readonly ConditionalWeakTable<object, Dictionary<uint, RegisterDefaultsAllocation>>
+        _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 
     // Unwraps decorator chains so all threads resolve to one shared root —
@@ -1777,6 +1779,17 @@ public static partial class AgcExports
 
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
 
+    private sealed record CompactRegisterDefaults(
+        uint[] Table0Registers,
+        ushort[] Table0PointerOffsets,
+        uint[] Table1Registers,
+        ushort[] Table1PointerOffsets,
+        uint[] Table2Registers,
+        ushort[] Table2PointerOffsets,
+        uint[] Table3Registers,
+        ushort[] Table3PointerOffsets,
+        uint[] Types);
+
     private readonly record struct RegisterDefaultGroup(
         uint Space,
         uint Index,
@@ -1799,6 +1812,14 @@ public static partial class AgcExports
         if (stateAddress == 0 || !IsSupportedRegisterDefaultsVersion(version))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> state = stackalloc byte[2 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(state, version);
+        BinaryPrimitives.WriteUInt32LittleEndian(state[sizeof(uint)..], 0);
+        if (!ctx.Memory.TryWrite(stateAddress, state))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         TraceAgc($"agc.init state=0x{stateAddress:X16} version={version}");
@@ -16968,7 +16989,7 @@ GuestImageWriteTracker.Track(
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryGetRegisterDefaultsAllocation(ctx, out var allocation))
+        if (!TryGetRegisterDefaultsAllocation(ctx, version, out var allocation))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -16984,42 +17005,171 @@ GuestImageWriteTracker.Track(
             RegisterDefaultsVersion7 or
             RegisterDefaultsVersion8 or
             RegisterDefaultsVersion10 or
+            RegisterDefaultsVersion12 or
             RegisterDefaultsVersion13;
     }
 
     private static bool TryGetRegisterDefaultsAllocation(
         CpuContext ctx,
+        uint version,
         out RegisterDefaultsAllocation allocation)
     {
         lock (_registerDefaultsGate)
         {
-            if (_registerDefaultsAllocations.TryGetValue(ctx.Memory, out allocation!))
+            var memory = CanonicalMemory(ctx.Memory);
+            if (!_registerDefaultsAllocations.TryGetValue(memory, out var allocations))
+            {
+                allocations = [];
+                _registerDefaultsAllocations.Add(memory, allocations);
+            }
+
+            if (allocations.TryGetValue(version, out allocation!))
             {
                 return true;
             }
 
-            if (!TryBuildRegisterDefaults(
-                    ctx,
-                    PrimaryRegisterDefaults,
-                    cxTableLength: 78,
-                    shTableLength: 29,
-                    ucTableLength: 20,
-                    out var primaryAddress) ||
-                !TryBuildRegisterDefaults(
-                    ctx,
-                    InternalRegisterDefaults,
-                    cxTableLength: 4,
-                    shTableLength: 15,
-                    ucTableLength: 3,
-                    out var internalAddress))
+            ulong primaryAddress = 0;
+            ulong internalAddress = 0;
+            var built = version == RegisterDefaultsVersion8
+                ? TryBuildCompactRegisterDefaults(ctx, PublicRegisterDefaultsVersion8, out primaryAddress) &&
+                  TryBuildCompactRegisterDefaults(ctx, InternalRegisterDefaultsVersion8, out internalAddress)
+                : TryBuildRegisterDefaults(
+                      ctx,
+                      PrimaryRegisterDefaults,
+                      cxTableLength: 78,
+                      shTableLength: 29,
+                      ucTableLength: 20,
+                      out primaryAddress) &&
+                  TryBuildRegisterDefaults(
+                      ctx,
+                      InternalRegisterDefaults,
+                      cxTableLength: 4,
+                      shTableLength: 15,
+                      ucTableLength: 3,
+                      out internalAddress);
+            if (!built)
             {
                 allocation = null!;
                 return false;
             }
 
             allocation = new RegisterDefaultsAllocation(primaryAddress, internalAddress);
-            _registerDefaultsAllocations.Add(ctx.Memory, allocation);
+            allocations.Add(version, allocation);
             return true;
+        }
+    }
+
+    private static bool TryBuildCompactRegisterDefaults(
+        CpuContext ctx,
+        CompactRegisterDefaults defaults,
+        out ulong address)
+    {
+        address = 0;
+        if (defaults.Types.Length % 3 != 0 ||
+            !ArePointerOffsetsValid(defaults.Table0Registers, defaults.Table0PointerOffsets) ||
+            !ArePointerOffsetsValid(defaults.Table1Registers, defaults.Table1PointerOffsets) ||
+            !ArePointerOffsetsValid(defaults.Table2Registers, defaults.Table2PointerOffsets) ||
+            !ArePointerOffsetsValid(defaults.Table3Registers, defaults.Table3PointerOffsets))
+        {
+            return false;
+        }
+
+        var table0Offset = AlignUp(RegisterDefaultsSize, sizeof(ulong));
+        var table1Offset = table0Offset + (defaults.Table0PointerOffsets.Length * sizeof(ulong));
+        var table2Offset = table1Offset + (defaults.Table1PointerOffsets.Length * sizeof(ulong));
+        var table3Offset = table2Offset + (defaults.Table2PointerOffsets.Length * sizeof(ulong));
+        var registers0Offset = AlignUp(
+            table3Offset + (defaults.Table3PointerOffsets.Length * sizeof(ulong)),
+            sizeof(ulong));
+        var registers1Offset = registers0Offset + (defaults.Table0Registers.Length * sizeof(uint));
+        var registers2Offset = registers1Offset + (defaults.Table1Registers.Length * sizeof(uint));
+        var registers3Offset = registers2Offset + (defaults.Table2Registers.Length * sizeof(uint));
+        var typesOffset = AlignUp(
+            registers3Offset + (defaults.Table3Registers.Length * sizeof(uint)),
+            sizeof(uint));
+        var blobLength = typesOffset + (defaults.Types.Length * sizeof(uint));
+
+        if (!KernelMemoryCompatExports.TryAllocateHleData(ctx, (ulong)blobLength, 0x1000, out address))
+        {
+            return false;
+        }
+
+        var blob = new byte[blobLength];
+        WriteOptionalBlobPointer(blob, 0x00, address, table0Offset, defaults.Table0PointerOffsets.Length);
+        WriteOptionalBlobPointer(blob, 0x08, address, table1Offset, defaults.Table1PointerOffsets.Length);
+        WriteOptionalBlobPointer(blob, 0x10, address, table2Offset, defaults.Table2PointerOffsets.Length);
+        WriteOptionalBlobPointer(blob, 0x18, address, table3Offset, defaults.Table3PointerOffsets.Length);
+        WriteBlobUInt32(blob, 0x20, (uint)(defaults.Table0Registers.Length / 2));
+        WriteBlobUInt32(blob, 0x24, (uint)(defaults.Table1Registers.Length / 2));
+        WriteBlobUInt32(blob, 0x28, (uint)(defaults.Table2Registers.Length / 2));
+        WriteBlobUInt32(blob, 0x2C, (uint)(defaults.Table3Registers.Length / 2));
+        WriteBlobUInt64(blob, 0x30, address + (ulong)typesOffset);
+        WriteBlobUInt32(blob, 0x38, (uint)(defaults.Types.Length / 3));
+
+        WriteCompactPointerTable(blob, table0Offset, address + (ulong)registers0Offset, defaults.Table0PointerOffsets);
+        WriteCompactPointerTable(blob, table1Offset, address + (ulong)registers1Offset, defaults.Table1PointerOffsets);
+        WriteCompactPointerTable(blob, table2Offset, address + (ulong)registers2Offset, defaults.Table2PointerOffsets);
+        WriteCompactPointerTable(blob, table3Offset, address + (ulong)registers3Offset, defaults.Table3PointerOffsets);
+        WriteCompactRegisters(blob, registers0Offset, defaults.Table0Registers);
+        WriteCompactRegisters(blob, registers1Offset, defaults.Table1Registers);
+        WriteCompactRegisters(blob, registers2Offset, defaults.Table2Registers);
+        WriteCompactRegisters(blob, registers3Offset, defaults.Table3Registers);
+        for (var index = 0; index < defaults.Types.Length; index++)
+        {
+            WriteBlobUInt32(blob, typesOffset + (index * sizeof(uint)), defaults.Types[index]);
+        }
+
+        return ctx.Memory.TryWrite(address, blob);
+    }
+
+    private static bool ArePointerOffsetsValid(
+        uint[] registers,
+        ushort[] pointerOffsets)
+    {
+        if (registers.Length % 2 != 0)
+        {
+            return false;
+        }
+
+        if (pointerOffsets.Length == 0)
+        {
+            return registers.Length == 0;
+        }
+
+        return registers.Length != 0 && pointerOffsets.All(offset => offset < registers.Length / 2);
+    }
+
+    private static void WriteOptionalBlobPointer(
+        Span<byte> blob,
+        int fieldOffset,
+        ulong address,
+        int dataOffset,
+        int elementCount) =>
+        WriteBlobUInt64(blob, fieldOffset, elementCount == 0 ? 0 : address + (ulong)dataOffset);
+
+    private static void WriteCompactPointerTable(
+        Span<byte> blob,
+        int tableOffset,
+        ulong registersAddress,
+        ushort[] pointerOffsets)
+    {
+        for (var index = 0; index < pointerOffsets.Length; index++)
+        {
+            WriteBlobUInt64(
+                blob,
+                tableOffset + (index * sizeof(ulong)),
+                registersAddress + ((ulong)pointerOffsets[index] * 2 * sizeof(uint)));
+        }
+    }
+
+    private static void WriteCompactRegisters(
+        Span<byte> blob,
+        int registersOffset,
+        uint[] registers)
+    {
+        for (var index = 0; index < registers.Length; index++)
+        {
+            WriteBlobUInt32(blob, registersOffset + (index * sizeof(uint)), registers[index]);
         }
     }
 
