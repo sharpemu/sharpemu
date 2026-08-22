@@ -97,6 +97,7 @@ public partial class MainWindow : Window
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
+    private readonly DispatcherTimer _libraryLayoutTimer;
 
     private GuiSettings _settings = new();
     private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
@@ -131,6 +132,9 @@ public partial class MainWindow : Window
     private bool _addFolderInProgress;
     private bool _isLibraryGridLayout;
     private GameEntry? _lastSelectedGame;
+    private double _embeddedConsoleHeight = 240;
+    private double _libraryRailRowHeight = 188;
+    private double _libraryGridRowHeight = 216;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
@@ -188,6 +192,15 @@ public partial class MainWindow : Window
             MaybeAutoScroll();
         };
         _consoleFlushTimer.Start();
+        _libraryLayoutTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(120),
+        };
+        _libraryLayoutTimer.Tick += (_, _) =>
+        {
+            _libraryLayoutTimer.Stop();
+            UpdateLibraryLayoutMetrics();
+        };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
@@ -230,9 +243,10 @@ public partial class MainWindow : Window
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         LibraryLayoutButton.Click += (_, _) => ToggleLibraryLayout();
-        LibraryPage.SizeChanged += (_, _) => UpdateLibraryGridHeight();
-        LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryGridHeight();
-        ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        LibraryPage.SizeChanged += (_, _) => ScheduleLibraryLayoutMetricsUpdate();
+        LibrarySelectedDetails.SizeChanged += (_, _) => UpdateLibraryMinimumHeight();
+        MainContent.SizeChanged += (_, _) => ClampEmbeddedConsoleHeight();
+        ConsoleToggle.IsCheckedChanged += (_, _) => UpdateEmbeddedConsoleVisibility();
         WireOptionsNavigation();
         WireGameOptions();
 
@@ -440,13 +454,8 @@ public partial class MainWindow : Window
         _isLibraryGridLayout = grid;
         SetClass(GameList, "gridLayout", grid);
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
-        LibraryPage.RowDefinitions[0].Height = grid
-            ? GridLength.Auto
-            : new GridLength(188);
-        LibraryPage.Margin = grid
-            ? new Thickness(0, 6, 0, 0)
-            : new Thickness(0, 46, 0, 0);
-        UpdateLibraryGridHeight();
+        LibraryPage.Margin = new Thickness(0, 6, 0, 0);
+        UpdateLibraryLayoutMetrics();
         UpdateLibraryLayoutButton();
 
         if (GameList.SelectedItem is { } selected)
@@ -457,18 +466,37 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateLibraryGridHeight()
+    private void UpdateLibraryLayoutMetrics()
     {
-        var pageHeight = LibraryPage.Bounds.Height;
-        if (!_isLibraryGridLayout || pageHeight <= 0)
-        {
-            GameList.MaxHeight = double.PositiveInfinity;
-            return;
-        }
+        var metrics = LibraryLayoutMetrics.Calculate(LibraryPage.Bounds.Width);
+        Resources["LibraryCoverSize"] = metrics.CoverSize;
+        Resources["LibraryTileWidth"] = metrics.ItemWidth;
+        Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
+        Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
+        _libraryRailRowHeight = metrics.RailItemHeight + 16;
+        _libraryGridRowHeight = metrics.GridItemHeight + 16;
 
-        GameList.MaxHeight = Math.Max(
-            0,
-            pageHeight - LibrarySelectedDetails.DesiredSize.Height);
+        GameList.MaxHeight = double.PositiveInfinity;
+        UpdateLibraryMinimumHeight();
+    }
+
+    private void ScheduleLibraryLayoutMetricsUpdate()
+    {
+        _libraryLayoutTimer.Stop();
+        _libraryLayoutTimer.Start();
+    }
+
+    private void UpdateLibraryMinimumHeight()
+    {
+        var detailsHeight = LibrarySelectedDetails.IsVisible
+            ? LibrarySelectedDetails.DesiredSize.Height
+            : 0;
+        var cardRowHeight = _isLibraryGridLayout
+            ? _libraryGridRowHeight
+            : _libraryRailRowHeight;
+        MainContent.RowDefinitions[1].MinHeight =
+            LibraryPage.Margin.Top + detailsHeight + cardRowHeight;
+        ClampEmbeddedConsoleHeight();
     }
 
     private void ToggleLibraryLayout()
@@ -1059,6 +1087,7 @@ public partial class MainWindow : Window
         Interlocked.Increment(ref _libraryScanGeneration);
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
+        _libraryLayoutTimer.Stop();
         _gamepadTimer.Stop();
     }
 
@@ -2140,10 +2169,7 @@ public partial class MainWindow : Window
 
         GameLibraryReconciler.ReconcileVisibleGames(_visibleGames, desired);
 
-        var selectedAfter = selectedPath is null
-            ? null
-            : _visibleGames.FirstOrDefault(game =>
-                game.Path.Equals(selectedPath, GameLibraryPath.Comparison));
+        var selectedAfter = ResolveLibrarySelection(_visibleGames, selectedPath);
         if (!ReferenceEquals(GameList.SelectedItem, selectedAfter))
         {
             GameList.SelectedItem = selectedAfter;
@@ -2164,6 +2190,17 @@ public partial class MainWindow : Window
                 _ = UpdateBackdropAsync(selectedAfter);
             }
         }
+    }
+
+    internal static GameEntry? ResolveLibrarySelection(
+        IReadOnlyList<GameEntry> visibleGames,
+        string? selectedPath)
+    {
+        var selected = selectedPath is null
+            ? null
+            : visibleGames.FirstOrDefault(game =>
+                game.Path.Equals(selectedPath, GameLibraryPath.Comparison));
+        return selected ?? visibleGames.FirstOrDefault();
     }
 
     /// <summary>
@@ -2204,6 +2241,7 @@ public partial class MainWindow : Window
             _sndPreview.Stop();
         }
 
+        UpdateLibraryMinimumHeight();
         UpdateRunButtons();
     }
 
@@ -2539,7 +2577,7 @@ public partial class MainWindow : Window
         _runningGameName = null;
         _runningGameTitleId = null;
         UpdateDiscordPresence();
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        UpdateEmbeddedConsoleVisibility();
         Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
     }
 
@@ -2582,7 +2620,7 @@ public partial class MainWindow : Window
         _emulator?.Dispose();
         _emulator = null;
         _pendingLaunch = null;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        UpdateEmbeddedConsoleVisibility();
 
         var meaningKey = exitCode switch
         {
@@ -2980,6 +3018,59 @@ public partial class MainWindow : Window
         await Clipboard.SetTextAsync(text);
     }
 
+    private void UpdateEmbeddedConsoleVisibility()
+    {
+        var visible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        if (visible == ConsolePanel.IsVisible)
+        {
+            return;
+        }
+
+        if (!visible && ConsolePanel.Bounds.Height >= 120)
+        {
+            _embeddedConsoleHeight = ConsolePanel.Bounds.Height;
+        }
+
+        ConsolePanel.IsVisible = visible;
+        ConsoleSplitter.IsVisible = visible;
+        MainContent.RowDefinitions[2].Height = visible
+            ? new GridLength(8)
+            : new GridLength(0);
+        MainContent.RowDefinitions[3].MinHeight = visible ? 120 : 0;
+        MainContent.RowDefinitions[3].Height = visible
+            ? new GridLength(Math.Min(_embeddedConsoleHeight, MaximumEmbeddedConsoleHeight()))
+            : new GridLength(0);
+    }
+
+    private void ClampEmbeddedConsoleHeight()
+    {
+        if (!ConsolePanel.IsVisible)
+        {
+            return;
+        }
+
+        var maximumHeight = MaximumEmbeddedConsoleHeight();
+        if (MainContent.RowDefinitions[3].ActualHeight > maximumHeight)
+        {
+            MainContent.RowDefinitions[3].Height = new GridLength(maximumHeight);
+        }
+    }
+
+    private double MaximumEmbeddedConsoleHeight()
+    {
+        const double minimumConsoleHeight = 120;
+        const double splitterHeight = 8;
+        var toolbarHeight = ContentToolbar.Bounds.Height +
+            ContentToolbar.Margin.Top +
+            ContentToolbar.Margin.Bottom;
+        return Math.Max(
+            minimumConsoleHeight,
+            MainContent.Bounds.Height -
+            toolbarHeight -
+            MainContent.RowDefinitions[1].MinHeight -
+            splitterHeight);
+    }
+
     private void ShowConsoleWindow()
     {
         if (_consoleWindow is { } window)
@@ -2990,7 +3081,7 @@ public partial class MainWindow : Window
 
         ConsoleSearchBox.Text = string.Empty;
         ConsoleToggle.IsChecked = false;
-        ConsolePanel.IsVisible = false;
+        UpdateEmbeddedConsoleVisibility();
         _consoleWindow = new ConsoleWindow(
             _consoleLines,
             () => { _consoleLines.Clear(); _allConsoleLines.Clear(); },
@@ -2999,7 +3090,7 @@ public partial class MainWindow : Window
         {
             _consoleWindow = null;
             ConsoleToggle.IsChecked = true;
-            ConsolePanel.IsVisible = true;
+            UpdateEmbeddedConsoleVisibility();
         };
         _consoleWindow.Show(this);
     }

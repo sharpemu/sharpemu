@@ -19,6 +19,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
         KeyDown="OnKeyDown">
 
   <Window.Resources>
+    <x:Double x:Key="LibraryCoverSize">148</x:Double>
+    <x:Double x:Key="LibraryTileWidth">160</x:Double>
+    <x:Double x:Key="LibraryRailItemHeight">172</x:Double>
+    <x:Double x:Key="LibraryGridItemHeight">200</x:Double>
     <DataTemplate x:Key="LocalizedChoiceTemplate" x:DataType="local:LocalizedChoice">
       <TextBlock Text="{Binding Label}"
                  HorizontalAlignment="Left"
@@ -105,11 +109,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" MinHeight="160" />
+        <RowDefinition Height="0" />
+        <RowDefinition Height="0" />
+      </Grid.RowDefinitions>
       <!-- Settings use the same opaque neutral surface as contextual
            per-game settings, keeping both views in one visual system -->
       <Border x:Name="OptionsPageSurface"
-              Grid.RowSpan="3"
+              Grid.RowSpan="4"
               Margin="-32,-24,-32,-20"
               Background="{StaticResource GameOptionsMenuBrush}"
               IsVisible="False" />
@@ -156,11 +166,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <Panel Grid.Row="1" x:Name="PagesHost" ZIndex="1">
 
-        <!-- Library page. Covers use a horizontal virtualized rail so the
-             number of realized images stays bounded for large libraries. -->
-        <Grid x:Name="LibraryPage" Margin="0,46,0,0" RowDefinitions="188,*">
+        <!-- Library tiles use the available width and wrap before an item
+             reaches the window edge. -->
+        <Grid x:Name="LibraryPage" Margin="0,6,0,0" RowDefinitions="Auto,*">
           <Panel x:Name="CarouselHost"
-                 Grid.Row="0"
+                 Grid.Row="1"
                  Classes="carouselHost"
                  RenderTransformOrigin="50%,50%">
             <Panel.Transitions>
@@ -229,8 +239,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
                 <StackPanel Spacing="7">
                   <Border Classes="coverShadow libraryGameCard"
-                          Width="148"
-                          Height="148"
+                          Width="{DynamicResource LibraryCoverSize}"
+                          Height="{DynamicResource LibraryCoverSize}"
                           ToolTip.Tip="{Binding Name}"
                           AutomationProperties.Name="{Binding Name}">
                     <Border Classes="coverClip">
@@ -257,8 +267,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </DataTemplate>
               <DataTemplate x:DataType="local:AddFolderTile">
                 <Border Classes="addFolderTile"
-                        Width="148"
-                        Height="148"
+                        Width="{DynamicResource LibraryCoverSize}"
+                        Height="{DynamicResource LibraryCoverSize}"
                         ToolTip.Tip="{Binding [Library.AddFolder],
                                               Source={x:Static local:Localization.Instance},
                                               x:CompileBindings=False}"
@@ -293,48 +303,53 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
           <!-- Selected-game identity and actions share one detail surface so
                the selected title and metadata are never rendered twice. -->
-          <StackPanel x:Name="LibrarySelectedDetails"
-                      Grid.Row="1"
-                      Classes="selectedDetailsHost"
-                      x:DataType="local:GameEntry"
-                      x:CompileBindings="True"
-                      IsVisible="False"
-                      MaxWidth="980"
-                      HorizontalAlignment="Left"
-                      VerticalAlignment="Top"
-                      Margin="4,8,0,0">
-            <StackPanel.Transitions>
+          <Grid x:Name="LibrarySelectedDetails"
+                Grid.Row="0"
+                Classes="selectedDetailsHost"
+                x:DataType="local:GameEntry"
+                x:CompileBindings="True"
+                IsVisible="False"
+                ColumnDefinitions="*,Auto"
+                RowDefinitions="Auto,Auto"
+                ColumnSpacing="20"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Top"
+                Margin="4,0,4,10">
+            <Grid.Transitions>
               <Transitions>
                 <DoubleTransition Property="Opacity"
                                   Duration="0:0:0.16" />
                 <TransformOperationsTransition Property="RenderTransform"
                                                Duration="0:0:0.18" />
               </Transitions>
-            </StackPanel.Transitions>
-            <Border Classes="selectedDetailsDivider" />
-            <TextBlock Classes="selectedGameTitle"
-                       Text="{Binding Name}"
-                       FontWeight="SemiBold"
-                       TextWrapping="Wrap"
-                       TextTrimming="CharacterEllipsis"
-                       MaxLines="2" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <Border Classes="pill" IsVisible="{Binding HasTitleId}">
-                <TextBlock Text="{Binding TitleId}" FontSize="11" FontWeight="SemiBold"
-                           Foreground="{StaticResource MutedBrush}" />
-              </Border>
-              <Border Classes="pill" IsVisible="{Binding HasVersion}">
-                <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
-                           Foreground="{StaticResource MutedBrush}" />
-              </Border>
-              <Border Classes="pill">
-                <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
-                           Foreground="{StaticResource MutedBrush}" />
-              </Border>
+            </Grid.Transitions>
+            <StackPanel Grid.Column="0" Spacing="7" VerticalAlignment="Center">
+              <TextBlock Classes="selectedGameTitle"
+                         Text="{Binding Name}"
+                         FontWeight="SemiBold"
+                         TextWrapping="Wrap"
+                         TextTrimming="CharacterEllipsis"
+                         MaxLines="1" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Border Classes="pill" IsVisible="{Binding HasTitleId}">
+                  <TextBlock Text="{Binding TitleId}" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource MutedBrush}" />
+                </Border>
+                <Border Classes="pill" IsVisible="{Binding HasVersion}">
+                  <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource MutedBrush}" />
+                </Border>
+                <Border Classes="pill">
+                  <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource MutedBrush}" />
+                </Border>
+              </StackPanel>
             </StackPanel>
-            <StackPanel Orientation="Horizontal"
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
                         Spacing="12"
-                        HorizontalAlignment="Left">
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
               <Button x:Name="LaunchButton"
                       Classes="playButton"
                       Content="Launch"
@@ -374,7 +389,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                            Text="terminal" />
               </ToggleButton>
             </StackPanel>
-          </StackPanel>
+            <Border Grid.Row="1"
+                    Grid.ColumnSpan="2"
+                    Classes="selectedDetailsDivider" />
+          </Grid>
 
           <!-- Empty state -->
           <StackPanel x:Name="EmptyState" Grid.RowSpan="2"
@@ -1537,9 +1555,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
       </Panel>
 
+      <GridSplitter x:Name="ConsoleSplitter"
+                    Grid.Row="2"
+                    Height="8"
+                    ResizeDirection="Rows"
+                    ResizeBehavior="PreviousAndNext"
+                    Background="Transparent"
+                    Cursor="SizeNorthSouth"
+                    IsVisible="False" />
+
       <!-- Console (collapsible) -->
-      <Border Grid.Row="2" x:Name="ConsolePanel" Classes="card" Padding="0" Height="240"
-              Margin="0,12,0,0" IsVisible="False">
+      <Border Grid.Row="3" x:Name="ConsolePanel" Classes="card" Padding="0"
+              IsVisible="False">
         <Grid RowDefinitions="Auto,*">
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
             <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle"

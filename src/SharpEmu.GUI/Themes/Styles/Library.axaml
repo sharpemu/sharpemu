@@ -9,20 +9,20 @@ Cover-art library item states and motion.
   <Style Selector="ListBox.tileGrid">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Padding" Value="4,0,28,0" />
-    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Hidden" />
-    <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+    <Setter Property="Padding" Value="4,0,8,0" />
+    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+    <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Visible" />
     <Setter Property="ItemsPanel">
       <ItemsPanelTemplate>
-        <VirtualizingStackPanel Orientation="Horizontal" />
+        <WrapPanel />
       </ItemsPanelTemplate>
     </Setter>
   </Style>
 
   <Style Selector="ListBox.tileGrid.gridLayout">
-    <Setter Property="Padding" Value="4,0,14,0" />
+    <Setter Property="Padding" Value="4,0,8,0" />
     <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
-    <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
+    <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Visible" />
     <Setter Property="ItemsPanel">
       <ItemsPanelTemplate>
         <WrapPanel />
@@ -30,10 +30,10 @@ Cover-art library item states and motion.
     </Setter>
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem">
-    <Setter Property="Width" Value="160" />
-    <Setter Property="Height" Value="172" />
+    <Setter Property="Width" Value="{DynamicResource LibraryTileWidth}" />
+    <Setter Property="Height" Value="{DynamicResource LibraryRailItemHeight}" />
     <Setter Property="Padding" Value="4" />
-    <Setter Property="Margin" Value="0,8,12,8" />
+    <Setter Property="Margin" Value="12,8,0,8" />
     <Setter Property="CornerRadius" Value="9" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
@@ -52,9 +52,8 @@ Cover-art library item states and motion.
       </Transitions>
     </Setter>
   </Style>
-  <!-- The title rides along in the item template so both layouts share one
-       template. The rail hides it because the selected game already names
-       itself in the details below the covers. -->
+  <!-- Both layouts use one item template. The carousel hides the title
+       because the details area shows the selected game name. -->
   <Style Selector="TextBlock.libraryTileName">
     <Setter Property="IsVisible" Value="False" />
     <Setter Property="FontSize" Value="12" />
@@ -66,8 +65,8 @@ Cover-art library item states and motion.
     <Setter Property="IsVisible" Value="True" />
   </Style>
   <Style Selector="ListBox.tileGrid.gridLayout ListBoxItem">
-    <Setter Property="Height" Value="200" />
-    <Setter Property="Margin" Value="0,6,12,10" />
+    <Setter Property="Height" Value="{DynamicResource LibraryGridItemHeight}" />
+    <Setter Property="Margin" Value="12,6,0,10" />
     <Setter Property="VerticalContentAlignment" Value="Top" />
   </Style>
 

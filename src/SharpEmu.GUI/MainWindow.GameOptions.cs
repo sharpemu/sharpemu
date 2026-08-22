@@ -445,7 +445,7 @@ public partial class MainWindow
 
     private void SetGameOptionsPagesSpan(bool coversConsoleRow)
     {
-        Grid.SetRowSpan(PagesHost, coversConsoleRow ? 2 : 1);
+        Grid.SetRowSpan(PagesHost, coversConsoleRow ? 3 : 1);
     }
 
     private Button[] GameOptionsNavigationButtons() =>
