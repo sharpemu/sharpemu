@@ -77,6 +77,59 @@ public sealed class AgcRegisterDefaultsTests
         Assert.Equal(22u, ReadUInt32(memory, address + 0x38));
     }
 
+    [Fact]
+    public void GetRegisterDefaults2_Version9_ReturnsExactPublicLayout()
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = 9;
+
+        var result = AgcExports.GetRegisterDefaults2(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(489u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(160u, ReadUInt32(memory, address + 0x24));
+        Assert.Equal(55u, ReadUInt32(memory, address + 0x28));
+        Assert.Equal(0u, ReadUInt32(memory, address + 0x2C));
+        Assert.Equal(127u, ReadUInt32(memory, address + 0x38));
+
+        var contextTable = ReadUInt64(memory, address);
+        AssertRegister(memory, ReadUInt64(memory, contextTable + (1 * 8)), 0x0109, 0x00000010);
+
+        var shaderTable = ReadUInt64(memory, address + 8);
+        var shaderGroup = ReadUInt64(memory, shaderTable + (12 * 8));
+        AssertRegister(memory, shaderGroup + (2 * 8), 0x0081, 0x00000000);
+
+        var types = ReadUInt64(memory, address + 0x30);
+        Assert.Equal(0x00041031u, ReadUInt32(memory, types + (90 * 12) + 4));
+    }
+
+    [Fact]
+    public void GetRegisterDefaults2Internal_Version9_ReturnsExactLayout()
+    {
+        var memory = new SparseGuestAddressSpace();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = 9;
+
+        var result = AgcExports.GetRegisterDefaults2Internal(ctx);
+        var address = ctx[CpuRegister.Rax];
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(4u, ReadUInt32(memory, address + 0x20));
+        Assert.Equal(14u, ReadUInt32(memory, address + 0x24));
+        Assert.Equal(1u, ReadUInt32(memory, address + 0x28));
+        Assert.Equal(6u, ReadUInt32(memory, address + 0x2C));
+        Assert.Equal(22u, ReadUInt32(memory, address + 0x38));
+
+        var userConfigTable = ReadUInt64(memory, address + 0x10);
+        AssertRegister(memory, ReadUInt64(memory, userConfigTable), 0x0260, 0x00000000);
+
+        var types = ReadUInt64(memory, address + 0x30);
+        Assert.Equal(0x60289246u, ReadUInt32(memory, types + (18 * 12)));
+        Assert.Equal(0x00040402u, ReadUInt32(memory, types + (18 * 12) + 4));
+    }
+
     [Theory]
     [InlineData(10u)]
     [InlineData(12u)]

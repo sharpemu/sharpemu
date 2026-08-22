@@ -1191,6 +1191,7 @@ public static partial class AgcExports
     private const ulong VideoOutPixelFormat2B10G10R10A2Bt2100Pq = 0x8100070400000000;
     private const uint RegisterDefaultsVersion7 = 7;
     private const uint RegisterDefaultsVersion8 = 8;
+    private const uint RegisterDefaultsVersion9 = 9;
     private const uint RegisterDefaultsVersion10 = 10;
     private const uint RegisterDefaultsVersion11 = 11;
     private const uint RegisterDefaultsVersion12 = 12;
@@ -17005,6 +17006,7 @@ GuestImageWriteTracker.Track(
         return version is
             RegisterDefaultsVersion7 or
             RegisterDefaultsVersion8 or
+            RegisterDefaultsVersion9 or
             RegisterDefaultsVersion10 or
             RegisterDefaultsVersion11 or
             RegisterDefaultsVersion12 or
@@ -17075,6 +17077,10 @@ GuestImageWriteTracker.Track(
             case RegisterDefaultsVersion8:
                 publicDefaults = PublicRegisterDefaultsVersion8;
                 internalDefaults = InternalRegisterDefaultsVersion8;
+                return true;
+            case RegisterDefaultsVersion9:
+                publicDefaults = PublicRegisterDefaultsVersion9;
+                internalDefaults = InternalRegisterDefaultsVersion9;
                 return true;
             case RegisterDefaultsVersion10:
             case RegisterDefaultsVersion12:
