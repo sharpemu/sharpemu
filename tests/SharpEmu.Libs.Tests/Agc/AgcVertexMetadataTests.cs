@@ -831,6 +831,66 @@ public sealed class AgcVertexMetadataTests
         Assert.False(merged[0].PerInstance);
     }
 
+    [Fact]
+    public void MergeVertexInputs_UsesCompleteFormatZeroTableForLocations()
+    {
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 20u, Format: 0u, Offset: 0u),
+            (HardwareMapping: 21u, Format: 0u, Offset: 12u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 7, 4, 10, 0, fixture.SharpBase, 16, 12,
+                data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x20, 3, 3, 13, 7, fixture.SharpBase, 16, 0,
+                data, data.Length, false),
+        };
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            CreateVertexFetchProgram(
+                (Pc: 0x10u, VectorData: 4u),
+                (Pc: 0x20u, VectorData: 8u)),
+            discovered);
+
+        Assert.Equal(new uint[] { 1, 0 }, merged.Select(input => input.Location));
+        Assert.Equal(new uint[] { 12, 0 }, merged.Select(input => input.OffsetBytes));
+        Assert.Equal(new uint[] { 10, 13 }, merged.Select(input => input.DataFormat));
+    }
+
+    [Fact]
+    public void MergeVertexInputs_DoesNotRemapIncompleteFormatZeroTable()
+    {
+        var fixture = CreateMetadataFixture(
+            (HardwareMapping: 20u, Format: 0u, Offset: 0u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 5, 4, 10, 0, fixture.SharpBase, 16, 0,
+                data, data.Length, false),
+            new Gen5VertexInputBinding(
+                0x20, 0, 2, 13, 7, fixture.SharpBase + 0x100, 4, 0,
+                data, data.Length, false),
+        };
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            CreateVertexFetchProgram(
+                (Pc: 0x10u, VectorData: 4u),
+                (Pc: 0x20u, VectorData: 8u)),
+            discovered);
+
+        Assert.Same(discovered, merged);
+        Assert.Equal(new uint[] { 5, 0 }, merged.Select(input => input.Location));
+    }
+
     [Theory]
     [InlineData(113u, 5u, 5u, 2u)]  // k16_16SInt — was overridden to RGBA32F
     [InlineData(117u, 5u, 7u, 2u)]  // k16_16Float — 121 was never this value

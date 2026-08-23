@@ -353,27 +353,40 @@ internal static class AgcVertexMetadata
             return discovered;
         }
 
+        var locationAssignments = TryBuildCompleteNoOverrideAddressAssignments(
+            discovered,
+            resources,
+            out var completeLocationAssignments)
+            ? completeLocationAssignments
+            : null;
+
         var merged = new List<Gen5VertexInputBinding>(discovered.Count);
         var changed = false;
         for (var inputIndex = 0; inputIndex < discovered.Count; inputIndex++)
         {
             var input = discovered[inputIndex];
+            var refined = input;
             var resourceIndex = hardwareAssignments[inputIndex];
-            if (resourceIndex < 0)
+            if (resourceIndex >= 0)
             {
-                merged.Add(input);
-                continue;
+                var resource = resources[resourceIndex];
+                if (resource.FormatState != MetadataFormatState.Unknown &&
+                    TryValidateMetadataOffset(input, resource))
+                {
+                    refined = ApplyMetadata(input, resource);
+                }
             }
 
-            var resource = resources[resourceIndex];
-            if (resource.FormatState == MetadataFormatState.Unknown ||
-                !TryValidateMetadataOffset(input, resource))
+            if (locationAssignments is not null)
             {
-                merged.Add(input);
-                continue;
+                var locationResource = resources[locationAssignments[inputIndex]];
+                refined = refined with
+                {
+                    Location = locationResource.Location,
+                    PerInstance = locationResource.PerInstance,
+                };
             }
 
-            var refined = ApplyMetadata(input, resource);
             changed |= refined != input;
             merged.Add(refined);
         }
@@ -464,6 +477,63 @@ internal static class AgcVertexMetadata
         }
 
         return assignments;
+    }
+
+    /// <summary>
+    /// Associates a complete format-0 table by exact byte address. Format 0
+    /// does not override the evaluated format. The locations can be used only
+    /// when every input and every output location is unique.
+    /// </summary>
+    private static bool TryBuildCompleteNoOverrideAddressAssignments(
+        IReadOnlyList<Gen5VertexInputBinding> discovered,
+        IReadOnlyList<MetadataVertexResource> resources,
+        out int[] assignments)
+    {
+        assignments = new int[discovered.Count];
+        Array.Fill(assignments, -1);
+        var resourceUseCounts = new int[resources.Count];
+        for (var inputIndex = 0; inputIndex < discovered.Count; inputIndex++)
+        {
+            var candidateIndex = -1;
+            for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
+            {
+                var candidate = resources[resourceIndex];
+                if (candidate.FormatState != MetadataFormatState.NoOverride ||
+                    !IsCompatibleVertexStream(discovered[inputIndex], candidate) ||
+                    !TryValidateMetadataOffset(discovered[inputIndex], candidate))
+                {
+                    continue;
+                }
+
+                if (candidateIndex >= 0)
+                {
+                    return false;
+                }
+
+                candidateIndex = resourceIndex;
+            }
+
+            if (candidateIndex < 0)
+            {
+                return false;
+            }
+
+            assignments[inputIndex] = candidateIndex;
+            resourceUseCounts[candidateIndex]++;
+        }
+
+        var locations = new HashSet<uint>();
+        for (var inputIndex = 0; inputIndex < assignments.Length; inputIndex++)
+        {
+            var resourceIndex = assignments[inputIndex];
+            if (resourceUseCounts[resourceIndex] != 1 ||
+                !locations.Add(resources[resourceIndex].Location))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsCompatibleVertexStream(
