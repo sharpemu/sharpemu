@@ -5825,6 +5825,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			PendingGuestException? pendingAfterExecutorRelease = null;
 			_activeGuestThreadState = previousGuestThreadState;
 			Volatile.Write(ref thread.HostThreadId, 0);
 			GuestThreadExecution.RestoreGuestThread(previousGuestThreadHandle);
@@ -5835,9 +5836,45 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				{
 					thread.HostThread = null;
 				}
-				thread.ExecutorActive = false;
+				// A signal can arrive after guest code blocks but before this
+				// executor releases the thread. Deliver that signal from the saved
+				// continuation after the thread becomes parked.
+				if (TryReleaseGuestThreadExecutorLocked(thread, out var pending))
+				{
+					pendingAfterExecutorRelease = pending;
+				}
+			}
+
+			if (pendingAfterExecutorRelease is { } pendingException &&
+				!TryRaiseGuestException(
+					thread.Context,
+					thread.ThreadHandle,
+					pendingException.Handler,
+					pendingException.ExceptionType,
+					out var pendingError))
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] Guest exception delivery after executor release failed: " +
+					$"target=0x{thread.ThreadHandle:X16} type=0x{pendingException.ExceptionType:X2} " +
+					$"error={pendingError ?? "unknown"}");
 			}
 		}
+	}
+
+	private bool TryReleaseGuestThreadExecutorLocked(
+		GuestThreadState thread,
+		out PendingGuestException pending)
+	{
+		thread.ExecutorActive = false;
+		if (thread.State == GuestThreadRunState.Blocked &&
+			!thread.ExceptionDeliveryActive &&
+			TryRemovePendingGuestExceptionLocked(thread.ThreadHandle, out pending))
+		{
+			return true;
+		}
+
+		pending = default;
+		return false;
 	}
 
 	private GuestNativeCallExitReason ExecuteBlockedGuestThreadContinuation(
