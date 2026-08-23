@@ -61,6 +61,34 @@ public sealed class GnmTilingDetileTests
         Assert.Equal(0, tailElementY);
     }
 
+    [Fact]
+    public void MipChainPlacement_Standard4KbBc7Atlas_MapsAllSixLevels()
+    {
+        // A 512x512 BC7 layer is a 128x128 grid of 16-byte blocks.
+        // Levels 4 and 5 share the 4 KiB mip-tail block.
+        var ok = GnmTiling.TryGetMipChainPlacement(
+            swizzleMode: 5,
+            elementsWide: 128,
+            elementsHigh: 128,
+            bytesPerElement: 16,
+            resourceMipLevels: 6,
+            out var placements,
+            out var chainSliceBytes);
+
+        Assert.True(ok);
+        Assert.Equal(352_256UL, chainSliceBytes);
+        Assert.Equal(6, placements.Length);
+        Assert.Equal(90_112UL, placements[0].ByteOffset);
+        Assert.Equal(24_576UL, placements[1].ByteOffset);
+        Assert.Equal(8_192UL, placements[2].ByteOffset);
+        Assert.Equal(4_096UL, placements[3].ByteOffset);
+        Assert.False(placements[3].InMipTail);
+        Assert.True(placements[4].InMipTail);
+        Assert.Equal((8, 0), (placements[4].TailElementX, placements[4].TailElementY));
+        Assert.True(placements[5].InMipTail);
+        Assert.Equal((4, 8), (placements[5].TailElementX, placements[5].TailElementY));
+    }
+
     // Independent re-derivation of the 64 KiB RB+ R_X equation (swizzle mode 27,
     // 2 bytes/element) straight from the address-bit table, so the tiled source
     // layout does not depend on TryDetile's own internal factoring.

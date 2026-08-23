@@ -55,6 +55,15 @@ internal readonly record struct DetileParams(
     public bool IsSupported => Equation != DetileEquation.None;
 }
 
+internal readonly record struct TiledMipPlacement(
+    ulong ByteOffset,
+    ulong ByteCount,
+    bool InMipTail,
+    int TailElementX,
+    int TailElementY,
+    int ElementsWide,
+    int ElementsHigh);
+
 /// <summary>
 /// Deswizzles RDNA2 (GFX10) tiled texture surfaces into linear layout so they
 /// can be uploaded to Vulkan. PS5 stores most textures in a swizzled layout
@@ -314,6 +323,41 @@ internal static unsafe class GnmTiling
         tailElementX = 0;
         tailElementY = 0;
         chainSliceBytes = 0;
+        if (!TryGetMipChainPlacement(
+                swizzleMode,
+                elementsWide,
+                elementsHigh,
+                bytesPerElement,
+                resourceMipLevels,
+                out var placements,
+                out chainSliceBytes))
+        {
+            return false;
+        }
+
+        var baseMip = placements[0];
+        byteOffset = baseMip.ByteOffset;
+        inMipTail = baseMip.InMipTail;
+        tailElementX = baseMip.TailElementX;
+        tailElementY = baseMip.TailElementY;
+        return true;
+    }
+
+    /// <summary>
+    /// Gets each mip's position in one GFX10 array slice. Mips outside the tail
+    /// are stored smallest-first. Tail mips share one swizzle block.
+    /// </summary>
+    public static bool TryGetMipChainPlacement(
+        uint swizzleMode,
+        int elementsWide,
+        int elementsHigh,
+        int bytesPerElement,
+        uint resourceMipLevels,
+        out TiledMipPlacement[] placements,
+        out ulong chainSliceBytes)
+    {
+        placements = [];
+        chainSliceBytes = 0;
         if (resourceMipLevels <= 1 ||
             !ShouldDetile(swizzleMode) ||
             elementsWide <= 0 ||
@@ -356,83 +400,118 @@ internal static unsafe class GnmTiling
 
         var firstMipInTail = mipLevels;
         var mipSizes = new ulong[mipLevels];
+        var mipWidths = new int[mipLevels];
+        var mipHeights = new int[mipLevels];
         for (var i = 0; i < mipLevels; i++)
         {
             var mipWidth = Math.Max(elementsWide >> i, 1);
             var mipHeight = Math.Max(elementsHigh >> i, 1);
+            mipWidths[i] = mipWidth;
+            mipHeights[i] = mipHeight;
+        }
+
+        for (var i = 0; i < mipLevels; i++)
+        {
             if (maxMipsInTail > 0 &&
-                mipWidth <= tailWidth &&
-                mipHeight <= tailHeight &&
+                mipWidths[i] <= tailWidth &&
+                mipHeights[i] <= tailHeight &&
                 mipLevels - i <= maxMipsInTail)
             {
                 firstMipInTail = i;
                 break;
             }
+        }
 
+        for (var i = 0; i < firstMipInTail; i++)
+        {
+            var mipWidth = mipWidths[i];
+            var mipHeight = mipHeights[i];
             var alignedWidth = (ulong)(mipWidth + blockWidth - 1) / (ulong)blockWidth * (ulong)blockWidth;
             var alignedHeight = (ulong)(mipHeight + blockHeight - 1) / (ulong)blockHeight * (ulong)blockHeight;
             mipSizes[i] = alignedWidth * alignedHeight * (ulong)bytesPerElement;
         }
 
-        if (firstMipInTail == 0)
+        var offsets = new ulong[mipLevels];
+        var offset = firstMipInTail < mipLevels ? (ulong)blockBytes : 0;
+        for (var i = firstMipInTail - 1; i >= 0; i--)
         {
-            var m = maxMipsInTail - 1;
-            var mipOffset = m > 6 ? 16 << m : m << 8;
-            var mipX = ((mipOffset >> 9) & 1) |
-                       ((mipOffset >> 10) & 2) |
-                       ((mipOffset >> 11) & 4) |
-                       ((mipOffset >> 12) & 8) |
-                       ((mipOffset >> 13) & 16) |
-                       ((mipOffset >> 14) & 32);
-            var mipY = ((mipOffset >> 8) & 1) |
-                       ((mipOffset >> 9) & 2) |
-                       ((mipOffset >> 10) & 4) |
-                       ((mipOffset >> 11) & 8) |
-                       ((mipOffset >> 12) & 16) |
-                       ((mipOffset >> 13) & 32);
-            if ((blockSizeLog2 & 1) != 0)
-            {
-                (mipX, mipY) = (mipY, mipX);
-                if ((bppLog2 & 1) != 0)
-                {
-                    mipY = (mipY << 1) | (mipX & 1);
-                    mipX >>= 1;
-                }
-            }
+            offsets[i] = offset;
+            offset += mipSizes[i];
+        }
 
-            var (microWidth, microHeight) = SquareBlockDimensions(256 >> bppLog2);
-            if (microWidth == 0 || microHeight == 0)
+        chainSliceBytes = offset;
+        placements = new TiledMipPlacement[mipLevels];
+        for (var i = 0; i < mipLevels; i++)
+        {
+            var inTail = i >= firstMipInTail;
+            var tailX = 0;
+            var tailY = 0;
+            if (inTail &&
+                !TryGetThinMipTailLocation(
+                    blockBytes,
+                    bppLog2,
+                    i - firstMipInTail,
+                    out tailX,
+                    out tailY))
             {
+                placements = [];
+                chainSliceBytes = 0;
                 return false;
             }
 
-            tailElementX = mipX * microWidth;
-            tailElementY = mipY * microHeight;
-            if (tailElementX + elementsWide > blockWidth ||
-                tailElementY + elementsHigh > blockHeight)
+            placements[i] = new TiledMipPlacement(
+                inTail ? 0 : offsets[i],
+                inTail ? (ulong)blockBytes : mipSizes[i],
+                inTail,
+                tailX,
+                tailY,
+                mipWidths[i],
+                mipHeights[i]);
+        }
+
+        return true;
+    }
+
+    private static bool TryGetThinMipTailLocation(
+        int blockBytes,
+        int bppLog2,
+        int index,
+        out int x,
+        out int y)
+    {
+        x = 0;
+        y = 0;
+        if ((uint)bppLog2 >= 5 || index < 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<(byte X, byte Y)> locations = blockBytes switch
+        {
+            4096 => bppLog2 switch
             {
-                tailElementX = 0;
-                tailElementY = 0;
-                return false;
-            }
-
-            inMipTail = true;
-            chainSliceBytes = (ulong)blockBytes;
-            return true;
-        }
-
-        byteOffset = firstMipInTail < mipLevels ? (ulong)blockBytes : 0;
-        chainSliceBytes = byteOffset;
-        for (var i = firstMipInTail - 1; i >= 1; i--)
+                0 => [(32, 0), (16, 32), (0, 48), (0, 32), (16, 16), (16, 0), (0, 16), (0, 0)],
+                1 => [(32, 0), (16, 16), (0, 24), (0, 16), (16, 8), (16, 0), (0, 8), (0, 0)],
+                2 => [(16, 0), (8, 16), (0, 24), (0, 16), (8, 8), (8, 0), (0, 8), (0, 0)],
+                3 => [(16, 0), (8, 8), (0, 12), (0, 8), (8, 4), (8, 0), (0, 4), (0, 0)],
+                _ => [(8, 0), (4, 8), (0, 12), (0, 8), (4, 4), (4, 0), (0, 4), (0, 0)],
+            },
+            65536 => bppLog2 switch
+            {
+                0 => [(128, 0), (0, 128), (64, 0), (0, 64), (32, 0), (16, 32), (0, 48), (0, 32), (16, 16), (16, 0), (0, 16), (0, 0)],
+                1 => [(128, 0), (0, 64), (64, 0), (0, 32), (32, 0), (16, 16), (0, 24), (0, 16), (16, 8), (16, 0), (0, 8), (0, 0)],
+                2 => [(64, 0), (0, 64), (32, 0), (0, 32), (16, 0), (8, 16), (0, 24), (0, 16), (8, 8), (8, 0), (0, 8), (0, 0)],
+                3 => [(64, 0), (0, 32), (32, 0), (0, 16), (16, 0), (8, 8), (0, 12), (0, 8), (8, 4), (8, 0), (0, 4), (0, 0)],
+                _ => [(32, 0), (0, 32), (16, 0), (0, 16), (8, 0), (4, 8), (0, 12), (0, 8), (4, 4), (4, 0), (0, 4), (0, 0)],
+            },
+            _ => [],
+        };
+        if ((uint)index >= (uint)locations.Length)
         {
-            byteOffset += mipSizes[i];
+            return false;
         }
 
-        for (var i = 0; i < firstMipInTail; i++)
-        {
-            chainSliceBytes += mipSizes[i];
-        }
-
+        (x, y) = locations[index];
         return true;
     }
 

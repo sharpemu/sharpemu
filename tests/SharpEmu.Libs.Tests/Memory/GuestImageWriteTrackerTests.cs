@@ -209,13 +209,8 @@ public sealed unsafe class GuestImageWriteTrackerTests
     }
 
     [Fact]
-    public void WatchOnlyRangesAreExcludedFromManagedWriteSnapshot()
+    public void WatchOnlyManagedWriteMarksRangeDirty()
     {
-        if (!GuestImageWriteTracker.Enabled)
-        {
-            return;
-        }
-
         var address = AllocateTrackedPages(out var allocation);
         try
         {
@@ -224,9 +219,11 @@ public sealed unsafe class GuestImageWriteTrackerTests
                 TrackedByteCount,
                 source: "test.watch-only",
                 protect: false);
-            // Watch-only must not widen the NotifyManagedWrite hot path.
             GuestImageWriteTracker.NotifyManagedWrite(address, sizeof(uint));
-            Assert.False(GuestImageWriteTracker.ConsumeDirty(address));
+            Assert.True(GuestImageWriteTracker.PeekDirty(address));
+            Assert.True(GuestImageWriteTracker.TryGetWriteGeneration(address, out var generation));
+            Assert.Equal(1, generation);
+            Assert.True(GuestImageWriteTracker.ConsumeDirty(address));
             Assert.True(
                 GuestImageWriteTracker.TryGetProtectionState(
                     address,
@@ -239,6 +236,62 @@ public sealed unsafe class GuestImageWriteTrackerTests
         {
             GuestImageWriteTracker.Untrack(address);
             FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void WatchOnlyManagedWriteIgnoresUnrelatedRange()
+    {
+        const ulong address = 0x0000_0002_0000_0000UL;
+        try
+        {
+            GuestImageWriteTracker.Track(
+                address,
+                TrackedByteCount,
+                source: "test.watch-only",
+                protect: false);
+
+            GuestImageWriteTracker.NotifyManagedWrite(
+                address + (2 * (ulong)TrackedByteCount),
+                sizeof(uint));
+
+            Assert.False(GuestImageWriteTracker.PeekDirty(address));
+            Assert.True(GuestImageWriteTracker.TryGetWriteGeneration(address, out var generation));
+            Assert.Equal(0, generation);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+        }
+    }
+
+    [Fact]
+    public void WatchOnlyManagedWriteMarksEveryOverlappingOwner()
+    {
+        const ulong first = 0x0000_0002_1000_0000UL;
+        var second = first + 2048;
+        try
+        {
+            GuestImageWriteTracker.Track(
+                first,
+                TrackedByteCount,
+                source: "test.watch-only.first",
+                protect: false);
+            GuestImageWriteTracker.Track(
+                second,
+                TrackedByteCount,
+                source: "test.watch-only.second",
+                protect: false);
+
+            GuestImageWriteTracker.NotifyManagedWrite(second, sizeof(uint));
+
+            Assert.True(GuestImageWriteTracker.PeekDirty(first));
+            Assert.True(GuestImageWriteTracker.PeekDirty(second));
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(first);
+            GuestImageWriteTracker.Untrack(second);
         }
     }
 

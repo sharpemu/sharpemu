@@ -444,7 +444,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
         MetalVideoPresenter.GetGuestImageExtents();
 
-    public bool IsTextureContentCached(in TextureContentIdentity identity) =>
+    public bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
         MetalVideoPresenter.IsTextureContentCached(identity);
 
     public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>

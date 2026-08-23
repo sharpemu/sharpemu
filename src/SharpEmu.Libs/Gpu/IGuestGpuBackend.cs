@@ -302,7 +302,7 @@ internal interface IGuestGpuBackend
 
     /// <summary>Whether the backend's texture cache already holds this content; lets
     /// the AGC layer skip copying texels out of guest memory on every draw.</summary>
-    bool IsTextureContentCached(in TextureContentIdentity identity);
+    bool IsTextureContentCached(in TextureCacheLookupIdentity identity);
 
     /// <summary>Guest memory handle for backend self-healing (cache misses re-read
     /// texels directly instead of showing a fallback pattern).</summary>

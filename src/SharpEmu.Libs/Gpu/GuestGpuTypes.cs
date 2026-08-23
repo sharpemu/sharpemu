@@ -43,7 +43,19 @@ internal sealed record GuestDrawTexture(
     // TiledSource; the Vulkan backend detiles them on the GPU. RgbaPixels is
     // empty in that case. Both are neutral (no host graphics-API values).
     byte[]? TiledSource = null,
-    DetileParams? Detile = null);
+    DetileParams? Detile = null,
+    GuestTextureMipUpload[]? MipUploads = null,
+    // Exact guest allocation extent observed by the translator. Host-linear
+    // payloads can be smaller because tiled mip padding is not uploaded.
+    ulong SourceByteCount = 0);
+
+/// <summary>One linear mip range in a texture staging buffer.</summary>
+internal readonly record struct GuestTextureMipUpload(
+    ulong BufferOffset,
+    uint MipLevel,
+    uint Width,
+    uint Height,
+    uint RowLength);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(
@@ -52,9 +64,8 @@ internal readonly record struct GuestSampler(
     uint Word2,
     uint Word3);
 
-/// <summary>Identity of a texture's content in a backend texture cache, keyed
-/// entirely on raw guest descriptor values; the AGC layer uses it to skip texel
-/// copies for content the backend already holds.</summary>
+/// <summary>Identity of texture content in a backend cache. Sampling state is
+/// not part of the content. The backend binds a sampler for each image use.</summary>
 internal readonly record struct TextureContentIdentity(
     ulong Address,
     uint Width,
@@ -64,11 +75,18 @@ internal readonly record struct TextureContentIdentity(
     uint DstSelect,
     uint TileMode,
     uint Pitch,
-    GuestSampler Sampler,
     bool Arrayed = false,
     uint ArrayLayers = 1,
     uint Type = 9,
-    uint Depth = 1);
+    uint Depth = 1,
+    uint ResourceMipLevels = 1);
+
+/// <summary>One content identity as observed through a sampler binding. A new
+/// binding must ship texels once so the backend can detect content that changed
+/// before write tracking became available.</summary>
+internal readonly record struct TextureCacheLookupIdentity(
+    TextureContentIdentity Content,
+    GuestSampler Sampler);
 
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,

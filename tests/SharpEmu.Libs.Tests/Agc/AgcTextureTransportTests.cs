@@ -100,7 +100,27 @@ public sealed class AgcTextureTransportTests
             DstSelect: 0xFAC,
             TileMode: 0,
             Pitch: 8,
-            Sampler: default,
             Type: type,
             Depth: depth);
+
+    [Fact]
+    public void TextureContentIdentity_DoesNotContainSamplerState()
+    {
+        var fields = typeof(TextureContentIdentity)
+            .GetProperties()
+            .Select(static property => property.Name);
+
+        Assert.DoesNotContain(nameof(GuestDrawTexture.Sampler), fields);
+    }
+
+    [Fact]
+    public void TextureCacheLookupIdentity_DistinguishesSamplerBindings()
+    {
+        var content = CreateIdentity(type: 9, depth: 1);
+        var first = new TextureCacheLookupIdentity(content, new GuestSampler(1, 2, 3, 4));
+        var second = new TextureCacheLookupIdentity(content, new GuestSampler(1, 2, 3, 5));
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(first.Content, second.Content);
+    }
 }

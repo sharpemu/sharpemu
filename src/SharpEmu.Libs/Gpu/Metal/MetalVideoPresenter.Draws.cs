@@ -1660,15 +1660,6 @@ internal static partial class MetalVideoPresenter
 
             texture = texture with { RgbaPixels = refreshed };
         }
-        else if (cacheable && TryGetCachedDrawTexture(texture, out var cached))
-        {
-            // Fresh texels for an identity already cached: the content is
-            // unchanged (a guest write would have evicted the entry at drain
-            // start), so skip the redundant texture creation and upload.
-            ownedByCaller = false;
-            return cached;
-        }
-
         // Default-on GPU detile packages the tiled source + resolved DetileParams
         // with empty RgbaPixels so a backend can deswizzle on the GPU. The Metal
         // GPU compute pass (MetalDetilePass / detile_compute.msl) is the intended

@@ -58,6 +58,7 @@ public static unsafe class GuestImageWriteTracker
 
     private static readonly object _gate = new();
     private static readonly Dictionary<ulong, TrackedRange> _rangesByAddress = new();
+    private static readonly Dictionary<ulong, TrackedRange> _watchRangesByAddress = new();
 
     /// <summary>Immutable snapshot read lock-free from the signal handler and
     /// the managed-write pre-visit; rebuilt on every mutation under the gate
@@ -86,6 +87,27 @@ public static unsafe class GuestImageWriteTracker
     }
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
+
+    /// <summary>
+    /// Immutable exact-range index for managed writes. Watch-only texture
+    /// ranges do not enter the fault snapshot because they must not widen the
+    /// native write-fault hot path.
+    /// </summary>
+    private sealed class WatchRangeSnapshot
+    {
+        public static readonly WatchRangeSnapshot Empty = new([], []);
+
+        public readonly TrackedRange[] Ranges;
+        public readonly ulong[] PrefixMaximumEnds;
+
+        public WatchRangeSnapshot(TrackedRange[] ranges, ulong[] prefixMaximumEnds)
+        {
+            Ranges = ranges;
+            PrefixMaximumEnds = prefixMaximumEnds;
+        }
+    }
+
+    private static WatchRangeSnapshot _watchRangeSnapshot = WatchRangeSnapshot.Empty;
 
     private static readonly bool _enabled =
         string.Equals(
@@ -148,14 +170,16 @@ public static unsafe class GuestImageWriteTracker
     {
         protect = false;
         armed = false;
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
-            if (!_rangesByAddress.TryGetValue(address, out var range))
+            if (_rangesByAddress.TryGetValue(address, out var protectedRange))
+            {
+                protect = true;
+                armed = Volatile.Read(ref protectedRange.Armed) != 0;
+                return true;
+            }
+
+            if (!_watchRangesByAddress.TryGetValue(address, out var range))
             {
                 return false;
             }
@@ -226,8 +250,14 @@ public static unsafe class GuestImageWriteTracker
         string source = "unspecified",
         bool protect = true)
     {
-        if (!_enabled || address == 0 || byteCount == 0)
+        if (address == 0 || byteCount == 0 || (protect && !_enabled))
         {
+            return;
+        }
+
+        if (!protect)
+        {
+            TrackWatchOnly(address, byteCount, sourceSequence, source);
             return;
         }
 
@@ -302,11 +332,28 @@ public static unsafe class GuestImageWriteTracker
 
     public static void Untrack(ulong address)
     {
-        if (!_enabled)
+        lock (_gate)
         {
-            return;
-        }
+            if (_rangesByAddress.TryGetValue(address, out var range))
+            {
+                DisarmLocked(range, "untrack");
+                _rangesByAddress.Remove(address);
+                RebuildSnapshotLocked();
+            }
 
+            if (_watchRangesByAddress.Remove(address))
+            {
+                RebuildWatchSnapshotLocked();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes only native write protection for a guest image. A sampled
+    /// texture observer at the same address remains active.
+    /// </summary>
+    public static void UntrackProtected(ulong address)
+    {
         lock (_gate)
         {
             if (_rangesByAddress.TryGetValue(address, out var range))
@@ -319,26 +366,42 @@ public static unsafe class GuestImageWriteTracker
     }
 
     /// <summary>
+    /// Removes only the managed-write observer for a sampled texture. A render
+    /// target at the same address keeps its native write protection.
+    /// </summary>
+    public static void UntrackWatchOnly(ulong address)
+    {
+        lock (_gate)
+        {
+            if (_watchRangesByAddress.Remove(address))
+            {
+                RebuildWatchSnapshotLocked();
+            }
+        }
+    }
+
+    /// <summary>
     /// Returns true when the guest CPU wrote the range since the last call,
     /// clearing the flag. The caller re-arms via <see cref="Rearm"/> after it
     /// finished reading the guest bytes.
     /// </summary>
     public static bool ConsumeDirty(ulong address)
     {
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
-            if (!_rangesByAddress.TryGetValue(address, out var range))
+            var dirty = false;
+            if (_rangesByAddress.TryGetValue(address, out var range))
             {
-                return false;
+                FlushPendingFirstCpuWrite(range);
+                dirty |= Interlocked.Exchange(ref range.Dirty, 0) != 0;
             }
 
-            FlushPendingFirstCpuWrite(range);
-            return Interlocked.Exchange(ref range.Dirty, 0) != 0;
+            if (_watchRangesByAddress.TryGetValue(address, out var watchRange))
+            {
+                dirty |= Interlocked.Exchange(ref watchRange.Dirty, 0) != 0;
+            }
+
+            return dirty;
         }
     }
 
@@ -349,20 +412,19 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static bool PeekDirty(ulong address)
     {
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
-            if (!_rangesByAddress.TryGetValue(address, out var range))
+            if (_rangesByAddress.TryGetValue(address, out var range))
             {
-                return false;
+                FlushPendingFirstCpuWrite(range);
+                if (Volatile.Read(ref range.Dirty) != 0)
+                {
+                    return true;
+                }
             }
 
-            FlushPendingFirstCpuWrite(range);
-            return Volatile.Read(ref range.Dirty) != 0;
+            return _watchRangesByAddress.TryGetValue(address, out var watchRange) &&
+                Volatile.Read(ref watchRange.Dirty) != 0;
         }
     }
 
@@ -391,20 +453,22 @@ public static unsafe class GuestImageWriteTracker
     public static bool TryGetWriteGeneration(ulong address, out long generation)
     {
         generation = 0;
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
-            if (!_rangesByAddress.TryGetValue(address, out var range))
+            var found = false;
+            if (_rangesByAddress.TryGetValue(address, out var range))
             {
-                return false;
+                generation = Volatile.Read(ref range.WriteGeneration);
+                found = true;
             }
 
-            generation = Volatile.Read(ref range.WriteGeneration);
-            return true;
+            if (_watchRangesByAddress.TryGetValue(address, out var watchRange))
+            {
+                generation = unchecked(generation + Volatile.Read(ref watchRange.WriteGeneration));
+                found = true;
+            }
+
+            return found;
         }
     }
 
@@ -418,7 +482,7 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static void NotifyManagedWrite(ulong address, ulong byteCount)
     {
-        if (!_enabled || address == 0 || byteCount == 0)
+        if (address == 0 || byteCount == 0)
         {
             return;
         }
@@ -431,6 +495,13 @@ public static unsafe class GuestImageWriteTracker
         // write, and almost none of them touch tracked texture pages. The
         // bounds live inside the snapshot so they are always consistent with
         // the ranges the per-page visit below would consult.
+        MarkManagedWatchRanges(address, end);
+
+        if (!_enabled)
+        {
+            return;
+        }
+
         var snapshot = Volatile.Read(ref _rangeSnapshot);
         if (snapshot.Ranges.Length == 0 || end <= snapshot.Start || address >= snapshot.End)
         {
@@ -626,14 +697,122 @@ public static unsafe class GuestImageWriteTracker
 
     private static void RebuildSnapshotLocked()
     {
-        // Fault / NotifyManagedWrite hot paths must only see protected ranges.
-        // Watch-only texture-cache registrations used to widen Start..End across
-        // nearly all GPU memory so every managed guest write walked this path.
-        var protectedRanges = _rangesByAddress.Values
-            .Where(static range => range.Protect)
-            .ToArray();
-        Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(protectedRanges));
+        Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(_rangesByAddress.Values.ToArray()));
     }
+
+    private static void TrackWatchOnly(
+        ulong address,
+        ulong byteCount,
+        long sourceSequence,
+        string source)
+    {
+        lock (_gate)
+        {
+            if (_watchRangesByAddress.TryGetValue(address, out var range))
+            {
+                // Several views can share one allocation. Keep the largest
+                // observed extent so a narrower view cannot hide later writes.
+                if (byteCount <= range.ByteCount)
+                {
+                    range.SourceSequence = sourceSequence;
+                    range.Source = source;
+                    return;
+                }
+
+                var generation = Volatile.Read(ref range.WriteGeneration);
+                var dirty = Volatile.Read(ref range.Dirty);
+                range = new TrackedRange
+                {
+                    Address = address,
+                    ByteCount = byteCount,
+                    Start = address,
+                    End = SaturatingEnd(address, byteCount),
+                    Protect = false,
+                    Dirty = dirty,
+                    WriteGeneration = generation,
+                    SourceSequence = sourceSequence,
+                    Source = source,
+                };
+                _watchRangesByAddress[address] = range;
+                RebuildWatchSnapshotLocked();
+                return;
+            }
+
+            _watchRangesByAddress[address] = new TrackedRange
+            {
+                Address = address,
+                ByteCount = byteCount,
+                Start = address,
+                End = SaturatingEnd(address, byteCount),
+                Protect = false,
+                SourceSequence = sourceSequence,
+                Source = source,
+            };
+            RebuildWatchSnapshotLocked();
+        }
+    }
+
+    private static void RebuildWatchSnapshotLocked()
+    {
+        var ranges = _watchRangesByAddress.Values
+            .OrderBy(static range => range.Start)
+            .ToArray();
+        var prefixMaximumEnds = new ulong[ranges.Length];
+        var maximumEnd = 0UL;
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            maximumEnd = Math.Max(maximumEnd, ranges[index].End);
+            prefixMaximumEnds[index] = maximumEnd;
+        }
+
+        Volatile.Write(
+            ref _watchRangeSnapshot,
+            new WatchRangeSnapshot(ranges, prefixMaximumEnds));
+    }
+
+    private static void MarkManagedWatchRanges(ulong address, ulong end)
+    {
+        var snapshot = Volatile.Read(ref _watchRangeSnapshot);
+        var ranges = snapshot.Ranges;
+        if (ranges.Length == 0)
+        {
+            return;
+        }
+
+        var low = 0;
+        var high = ranges.Length;
+        while (low < high)
+        {
+            var middle = low + ((high - low) / 2);
+            if (ranges[middle].Start < end)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        for (var index = low - 1;
+             index >= 0 && snapshot.PrefixMaximumEnds[index] > address;
+             index--)
+        {
+            var range = ranges[index];
+            if (range.End <= address)
+            {
+                continue;
+            }
+
+            if (Interlocked.Exchange(ref range.Dirty, 1) == 0)
+            {
+                Interlocked.Increment(ref range.WriteGeneration);
+            }
+        }
+    }
+
+    private static ulong SaturatingEnd(ulong address, ulong byteCount) =>
+        address > ulong.MaxValue - byteCount ? ulong.MaxValue : address + byteCount;
 
     private static (ulong Start, ulong Length) PageAlign(ulong address, ulong byteCount)
     {
