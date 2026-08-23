@@ -64,6 +64,7 @@ public static partial class AgcExports
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
+    private const uint ItSetUconfigRegIndex = 0x7A;
     private const uint RewindValidBit = 1u << 31;
     private const uint RewindOffloadEnableBit = 1u << 24;
     private const uint ItGetLodStats = 0x8E;
@@ -77,7 +78,8 @@ public static partial class AgcExports
         ItDispatchDirect, ItDispatchIndirect, ItSetPredication, ItCondExec,
         ItWaitRegMem,
         ItIndirectBuffer, ItCondWrite, ItEventWrite, ItReleaseMem, ItDmaData,
-        ItRewind, ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
+        ItRewind, ItSetContextReg, ItSetShReg, ItSetUconfigReg,
+        ItSetUconfigRegIndex, ItGetLodStats,
     ];
 
     private const uint RZero = 0x00;
@@ -3297,19 +3299,50 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var indexSize = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var cachePolicy = (uint)(ctx[CpuRegister.Rdx] & 0xFF);
-        if (commandBufferAddress == 0 || cachePolicy != 0)
+        return DcbSetIndexSizePacket(
+            ctx,
+            commandBufferAddress,
+            indexSize,
+            cachePolicy,
+            perInstanceObjectIdSupport: 0);
+    }
+
+    [SysAbiExport(
+        ExportName = "sceAgcDcbSetIndexSizeGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetIndexSizeGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    private static int DcbSetIndexSizePacket(
+        CpuContext ctx,
+        ulong commandBufferAddress,
+        uint indexSize,
+        uint cachePolicy,
+        uint perInstanceObjectIdSupport)
+    {
+        if (commandBufferAddress == 0 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(3, ItSetUconfigRegIndex, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, 0x2000_0000u | VgtIndexType) ||
+            !TryWriteUInt32(
+                ctx,
+                commandAddress + 8,
+                0x400u |
+                (indexSize & 0x3u) |
+                ((cachePolicy & 0x3u) << 6) |
+                ((perInstanceObjectIdSupport & 0x1u) << 14)))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItIndexType, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, indexSize))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-
-        TraceAgc($"agc.dcb_set_index_size buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} size={indexSize}");
+        TraceAgc(
+            $"agc.dcb_set_index_size buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} size={indexSize & 0x3u} " +
+            $"cache={cachePolicy & 0x3u} instance_id={perInstanceObjectIdSupport & 0x1u}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -5076,12 +5109,12 @@ public static partial class AgcExports
     LibraryName = "libSceAgc")]
     public static int DriverUnknownKRzWekV120(CpuContext ctx)
     {
-        TraceAgc(
-            $"agc.driver_unknown_krz rdi=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"rsi=0x{ctx[CpuRegister.Rsi]:X16} rdx=0x{ctx[CpuRegister.Rdx]:X16} " +
-            $"rcx=0x{ctx[CpuRegister.Rcx]:X16} r8=0x{ctx[CpuRegister.R8]:X16} r9=0x{ctx[CpuRegister.R9]:X16}");
-
-        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+        return DcbSetIndexSizePacket(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            (uint)ctx[CpuRegister.Rsi],
+            (uint)ctx[CpuRegister.Rdx],
+            (uint)ctx[CpuRegister.Rcx]);
     }
     #pragma warning restore SHEM006
 
@@ -9124,12 +9157,17 @@ public static partial class AgcExports
         uint op,
         uint register)
     {
-        if (op is ItSetShReg or ItSetContextReg or ItSetUconfigReg)
+        if (op is ItSetShReg or ItSetContextReg or ItSetUconfigReg or ItSetUconfigRegIndex)
         {
             if (packetLength < 3 ||
                 !TryReadUInt32(ctx, packetAddress + sizeof(uint), out var startRegister))
             {
                 return;
+            }
+
+            if (op == ItSetUconfigRegIndex)
+            {
+                startRegister &= 0x0FFF_FFFFu;
             }
 
             var directDestination = op switch
@@ -9149,7 +9187,7 @@ public static partial class AgcExports
                 }
 
                 directDestination[startRegister + index] = value;
-                if (op == ItSetUconfigReg)
+                if (op is ItSetUconfigReg or ItSetUconfigRegIndex)
                 {
                     ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
                 }
@@ -9255,6 +9293,23 @@ public static partial class AgcExports
             address = gpuState.Graphics.IndexBufferAddress;
             count = gpuState.Graphics.IndexBufferCount;
             offset = gpuState.Graphics.DrawIndexOffset;
+            return true;
+        }
+    }
+
+    internal static bool TryGetGraphicsIndexSizeForTests(
+        CpuContext ctx,
+        out uint indexSize)
+    {
+        indexSize = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            indexSize = gpuState.Graphics.IndexSize;
             return true;
         }
     }
