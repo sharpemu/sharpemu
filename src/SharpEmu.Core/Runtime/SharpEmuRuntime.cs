@@ -39,6 +39,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private readonly ISymbolCatalog _symbolCatalog;
     private readonly CpuExecutionOptions _cpuExecutionOptions;
     private readonly IFileSystem _fileSystem;
+    private readonly object _dynamicModuleGate = new();
     private bool _disposed;
 
     public string? LastExecutionDiagnostics { get; private set; }
@@ -166,6 +167,14 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
         var loadedModuleImages = LoadAdjacentSceModules(ebootPath, image, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
+        var app0Root = Path.GetDirectoryName(normalizedEbootPath) ?? string.Empty;
+        KernelModuleRegistry.ConfigureModuleLoader(modulePath => LoadRequestedAppModule(
+            modulePath,
+            app0Root,
+            image,
+            loadedModuleImages,
+            activeImportStubs,
+            activeRuntimeSymbols));
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,
@@ -647,15 +656,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             // A linked PRX can be beside eboot.bin. Load only the app-root modules
             // named by the main image at boot. Map the other app-root modules so
             // sceKernelLoadStartModule can start them later.
-            (Path: ebootDirectory, StartAtBoot: true, LinkedOnly: true),
-            (Path: ebootDirectory, StartAtBoot: false, LinkedOnly: false),
-            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true, LinkedOnly: false),
-            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true, LinkedOnly: false),
-            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true, LinkedOnly: false),
+            (Path: ebootDirectory, StartAtBoot: true, LinkedOnly: true, SearchOption: SearchOption.TopDirectoryOnly),
+            (Path: ebootDirectory, StartAtBoot: false, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
+            (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
+            (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
+            (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
             // Unity native plugins are loaded later through sceKernelLoadStartModule. Map
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.
-            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false, LinkedOnly: false),
+            (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
         }
         .Where(entry => Directory.Exists(entry.Path))
         .ToArray();
@@ -667,7 +676,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         var allModulePaths = moduleDirectories
             .SelectMany(directory => Directory
-                .EnumerateFiles(directory.Path)
+                .EnumerateFiles(directory.Path, "*", directory.SearchOption)
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .Where(path => !directory.LinkedOnly || IsMainImageLinkedModule(path, mainImage.ImportedModuleNames))
                 .Select(path => (Path: path, directory.StartAtBoot)))
@@ -754,6 +763,154 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         Console.Error.WriteLine(
             $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
         return loadedImages;
+    }
+
+    private KernelModuleRegistry.ModuleLoadResult LoadRequestedAppModule(
+        string guestModulePath,
+        string app0Root,
+        SelfImage mainImage,
+        List<LoadedModuleImage> loadedModuleImages,
+        Dictionary<ulong, string> activeImportStubs,
+        Dictionary<string, ulong> activeRuntimeSymbols)
+    {
+        lock (_dynamicModuleGate)
+        {
+            if (!TryResolveApp0ModulePath(app0Root, guestModulePath, out var modulePath))
+            {
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Runtime module path rejected: '{guestModulePath}'");
+                return KernelModuleRegistry.ModuleLoadResult.Failure(
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            }
+
+            if (KernelModuleRegistry.TryFindByExactPath(modulePath, out var existingModule))
+            {
+                return KernelModuleRegistry.ModuleLoadResult.Success(existingModule.Handle);
+            }
+
+            try
+            {
+                var fileInfo = new FileInfo(modulePath);
+                if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
+                {
+                    return KernelModuleRegistry.ModuleLoadResult.Failure(
+                        (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+                }
+
+                var moduleBytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
+                using (var stream = File.OpenRead(modulePath))
+                {
+                    stream.ReadExactly(moduleBytes);
+                }
+
+                var moduleImage = _selfLoader.LoadAdditional(
+                    moduleBytes.AsSpan(),
+                    _virtualMemory,
+                    _moduleManager,
+                    _fileSystem,
+                    Path.GetDirectoryName(modulePath));
+                var candidateImportStubs = new Dictionary<ulong, string>(activeImportStubs);
+                var candidateRuntimeSymbols = new Dictionary<string, ulong>(activeRuntimeSymbols, StringComparer.Ordinal);
+                _ = MergeImportStubs(candidateImportStubs, moduleImage.ImportStubs, modulePath);
+                _ = MergeRuntimeSymbols(candidateRuntimeSymbols, moduleImage.RuntimeSymbols);
+                InstallNativePluginCompatibilityHooks(candidateImportStubs, moduleImage, modulePath);
+
+                string? installError = null;
+                if (_cpuDispatcher is not CpuDispatcher dispatcher ||
+                    !dispatcher.TryInstallAdditionalModule(
+                        candidateImportStubs,
+                        candidateRuntimeSymbols,
+                        out installError))
+                {
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Runtime module import installation failed: {modulePath} " +
+                        $"({installError ?? "unsupported CPU backend"})");
+                    return KernelModuleRegistry.ModuleLoadResult.Failure(
+                        (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
+                }
+
+                ReplaceDictionary(activeImportStubs, candidateImportStubs);
+                ReplaceDictionary(activeRuntimeSymbols, candidateRuntimeSymbols);
+                var handle = RegisterLoadedModule(
+                    modulePath,
+                    moduleImage,
+                    isMain: false,
+                    isSystemModule: false);
+                loadedModuleImages.Add(new LoadedModuleImage(modulePath, moduleImage, handle, StartAtBoot: false));
+                RebindImportedDataSymbols(mainImage, loadedModuleImages, activeRuntimeSymbols);
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Loaded requested module '{guestModulePath}' as {Path.GetFileName(modulePath)}: " +
+                    $"handle={handle}, imports={moduleImage.ImportStubs.Count}, symbols={moduleImage.RuntimeSymbols.Count}");
+                return KernelModuleRegistry.ModuleLoadResult.Success(handle);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Runtime module load failed: {modulePath} " +
+                    $"({ex.GetType().Name}: {ex.Message})");
+                return KernelModuleRegistry.ModuleLoadResult.Failure(
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            }
+        }
+    }
+
+    private static bool TryResolveApp0ModulePath(
+        string app0Root,
+        string guestModulePath,
+        out string modulePath)
+    {
+        modulePath = string.Empty;
+        if (string.IsNullOrWhiteSpace(app0Root) || string.IsNullOrWhiteSpace(guestModulePath))
+        {
+            return false;
+        }
+
+        var normalizedGuestPath = guestModulePath.Replace('\\', '/');
+        string relativePath;
+        if (normalizedGuestPath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase))
+        {
+            relativePath = normalizedGuestPath[6..];
+        }
+        else if (normalizedGuestPath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase))
+        {
+            relativePath = normalizedGuestPath[5..];
+        }
+        else if (!normalizedGuestPath.StartsWith("/", StringComparison.Ordinal))
+        {
+            relativePath = normalizedGuestPath;
+        }
+        else
+        {
+            return false;
+        }
+
+        var root = Path.GetFullPath(app0Root);
+        var candidate = Path.GetFullPath(
+            Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var rootPrefix = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(rootPrefix, HostPathComparison))
+        {
+            return false;
+        }
+
+        modulePath = candidate;
+        return true;
+    }
+
+    private static StringComparison HostPathComparison => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
+    private static void ReplaceDictionary<TKey, TValue>(
+        IDictionary<TKey, TValue> destination,
+        IReadOnlyDictionary<TKey, TValue> source)
+        where TKey : notnull
+    {
+        destination.Clear();
+        foreach (var entry in source)
+        {
+            destination.Add(entry);
+        }
     }
 
     private static bool IsMainImageLinkedModule(string modulePath, IReadOnlyList<string> importedModuleNames)
@@ -1193,6 +1350,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         _disposed = true;
+        KernelModuleRegistry.ConfigureModuleLoader(null);
 
         if (_cpuDispatcher is IDisposable disposableDispatcher)
         {

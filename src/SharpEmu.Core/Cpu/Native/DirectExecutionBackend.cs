@@ -288,6 +288,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static long _importDispatchBlockEnd;
 
 	private ImportStubEntry[] _importEntries = Array.Empty<ImportStubEntry>();
+	private readonly object _runtimeModuleGate = new object();
 
 	private readonly List<nint> _importHandlerTrampolines = new List<nint>();
 
@@ -307,7 +308,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private KeyValuePair<string, ulong>[] _runtimeSymbolsByAddress = Array.Empty<KeyValuePair<string, ulong>>();
 
-	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
+	private Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
 	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
 
@@ -1340,6 +1341,99 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3})");
 		return num2 == importStubs.Count;
+	}
+
+	internal bool TryInstallAdditionalModule(
+		IReadOnlyDictionary<ulong, string> importStubs,
+		IReadOnlyDictionary<string, ulong> runtimeSymbols,
+		out string? error)
+	{
+		error = null;
+		lock (_runtimeModuleGate)
+		{
+			InitializeRuntimeSymbolIndex(runtimeSymbols);
+
+			var currentEntries = Volatile.Read(ref _importEntries);
+			var knownAddresses = new HashSet<ulong>(currentEntries.Select(entry => entry.Address));
+			var additionalStubs = importStubs
+				.Where(entry => !knownAddresses.Contains(entry.Key))
+				.OrderBy(entry => entry.Key)
+				.ToArray();
+			var allStubAddresses = new HashSet<ulong>(importStubs.Keys);
+			if (additionalStubs.Length != 0)
+			{
+				var combinedEntries = new ImportStubEntry[currentEntries.Length + additionalStubs.Length];
+				Array.Copy(currentEntries, combinedEntries, currentEntries.Length);
+				for (var i = 0; i < additionalStubs.Length; i++)
+				{
+					var (address, nid) = additionalStubs[i];
+					_ = _moduleManager.TryGetExport(nid, out var resolvedExport);
+					combinedEntries[currentEntries.Length + i] = new ImportStubEntry(
+						address,
+						nid,
+						resolvedExport,
+						IsLeafImport(nid),
+						IsNoBlockLeafImport(nid),
+						ShouldSuppressStrlenTrace(nid),
+						IsImportLoopGuardBoundary(nid),
+						StableHash64(nid));
+				}
+
+				// Import trampolines contain an index into this array. Publish the complete
+				// immutable snapshot before any newly patched stub can execute.
+				Volatile.Write(ref _importEntries, combinedEntries);
+			}
+			for (var i = 0; i < currentEntries.Length; i++)
+			{
+				var entry = currentEntries[i];
+				if (TryResolveDirectImportTarget(entry.Nid, out var targetAddress, out _) &&
+					!allStubAddresses.Contains(targetAddress) &&
+					!PatchImportStub((nint)(long)entry.Address, (nint)(long)targetAddress))
+				{
+					error = $"failed to bind existing import at 0x{entry.Address:X16} to the runtime module";
+					return false;
+				}
+			}
+
+			for (var i = 0; i < additionalStubs.Length; i++)
+			{
+				var (address, nid) = additionalStubs[i];
+				if (TryResolveDirectImportTarget(nid, out var targetAddress, out _) &&
+					!allStubAddresses.Contains(targetAddress))
+				{
+					if (!PatchImportStub((nint)(long)address, (nint)(long)targetAddress))
+					{
+						error = $"failed to patch runtime direct import at 0x{address:X16}";
+						return false;
+					}
+
+					continue;
+				}
+
+				if (TryCreateNativeImportIntrinsic(nid, out var intrinsicAddress))
+				{
+					if (!PatchImportStub((nint)(long)address, intrinsicAddress))
+					{
+						error = $"failed to patch runtime intrinsic import at 0x{address:X16}";
+						return false;
+					}
+
+					continue;
+				}
+
+				var importIndex = currentEntries.Length + i;
+				var trampoline = CreateImportHandlerTrampoline(importIndex);
+				if (trampoline == 0 || !PatchImportStub((nint)(long)address, trampoline))
+				{
+					error = $"failed to install runtime import trampoline at 0x{address:X16}";
+					return false;
+				}
+			}
+
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Installed {additionalStubs.Length} runtime module import stub(s).");
+			return true;
+		}
 	}
 
 	private unsafe bool TryCreateNativeImportIntrinsic(string nid, out nint address)

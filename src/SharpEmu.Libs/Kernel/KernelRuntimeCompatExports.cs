@@ -1264,31 +1264,48 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        int handle = 0;
-        if (TryReadUtf8Z(ctx, modulePathAddress, 512, out var modulePath) &&
+        if (!TryReadUtf8Z(ctx, modulePathAddress, 512, out var modulePath) ||
+            string.IsNullOrWhiteSpace(modulePath))
+        {
+            return ReturnModuleLoadError(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        int handle;
+        var hasDirectory = modulePath.Contains('/') || modulePath.Contains('\\');
+        var isApp0Path = modulePath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase) ||
+            modulePath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase);
+        var loadResult = hasDirectory
+            ? KernelModuleRegistry.LoadModule(modulePath)
+            : default;
+        if (loadResult.Succeeded)
+        {
+            handle = loadResult.Handle;
+        }
+        else if (!isApp0Path &&
             KernelModuleRegistry.TryFindByPathOrName(modulePath, out var moduleByPath))
         {
             handle = moduleByPath.Handle;
         }
-        else if (!string.IsNullOrWhiteSpace(modulePath))
-        {
-            handle = KernelModuleRegistry.RegisterSyntheticModule(
-                Path.GetFileName(modulePath),
-                isSystemModule: false);
-        }
-        else if (KernelModuleRegistry.TryGetFirstModule(out var firstModule))
-        {
-            handle = firstModule.Handle;
-        }
         else
         {
-            handle = KernelModuleRegistry.RegisterSyntheticModule("module.sprx", isSystemModule: false);
+            loadResult = hasDirectory
+                ? loadResult
+                : KernelModuleRegistry.LoadModule(modulePath);
+            if (!loadResult.Succeeded)
+            {
+                return ReturnModuleLoadError(ctx, loadResult.Error);
+            }
+
+            handle = loadResult.Handle;
         }
 
         if (KernelModuleRegistry.TryBeginModuleStart(handle, out var moduleToStart))
         {
             var scheduler = GuestThreadExecution.Scheduler;
             string? startError = null;
+            ulong startResult = 0;
             var started = scheduler is not null && scheduler.TryCallGuestFunction(
                 ctx,
                 moduleToStart.InitEntryPoint,
@@ -1296,7 +1313,9 @@ public static class KernelRuntimeCompatExports
                 argumentAddress,
                 0,
                 0,
+                0,
                 $"sceKernelLoadStartModule:{moduleToStart.Name}",
+                out startResult,
                 out startError);
             KernelModuleRegistry.CompleteModuleStart(handle, started);
             if (!started)
@@ -1304,14 +1323,16 @@ public static class KernelRuntimeCompatExports
                 Console.Error.WriteLine(
                     $"[LOADER][ERROR] sceKernelLoadStartModule failed to start '{moduleToStart.Name}' " +
                     $"at 0x{moduleToStart.InitEntryPoint:X16}: {startError ?? "guest scheduler unavailable"}");
-                var error = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
-                if (resultAddress != 0)
-                {
-                    _ = TryWriteInt32(ctx, resultAddress, error);
-                }
+                return ReturnModuleLoadError(
+                    ctx,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP);
+            }
 
-                ctx[CpuRegister.Rax] = unchecked((ulong)(long)error);
-                return error;
+            if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, unchecked((int)startResult)))
+            {
+                return ReturnModuleLoadError(
+                    ctx,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             Console.Error.WriteLine(
@@ -1321,6 +1342,12 @@ public static class KernelRuntimeCompatExports
 
         ctx[CpuRegister.Rax] = unchecked((uint)handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int ReturnModuleLoadError(CpuContext ctx, int error)
+    {
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)error);
+        return error;
     }
 
     [SysAbiExport(

@@ -2292,17 +2292,18 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		if (_runtimeSymbolsByName.TryGetValue(symbolName, out var value) && IsRuntimeSymbolAddressUsable(value))
+		var runtimeSymbolsByName = Volatile.Read(ref _runtimeSymbolsByName);
+		if (runtimeSymbolsByName.TryGetValue(symbolName, out var value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;
 		}
-		if (symbolName.StartsWith("_", StringComparison.Ordinal) && _runtimeSymbolsByName.TryGetValue(symbolName[1..], out value) && IsRuntimeSymbolAddressUsable(value))
+		if (symbolName.StartsWith("_", StringComparison.Ordinal) && runtimeSymbolsByName.TryGetValue(symbolName[1..], out value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;
 		}
-		if (_runtimeSymbolsByName.TryGetValue("_" + symbolName, out value) && IsRuntimeSymbolAddressUsable(value))
+		if (runtimeSymbolsByName.TryGetValue("_" + symbolName, out value) && IsRuntimeSymbolAddressUsable(value))
 		{
 			address = value;
 			return true;

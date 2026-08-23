@@ -1300,9 +1300,10 @@ public sealed partial class DirectExecutionBackend
 
 	private void InitializeRuntimeSymbolIndex(IReadOnlyDictionary<string, ulong> runtimeSymbols)
 	{
-		_runtimeSymbolsByName.Clear();
+		var symbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 		if (runtimeSymbols.Count == 0)
 		{
+			Volatile.Write(ref _runtimeSymbolsByName, symbolsByName);
 			_runtimeSymbolsByAddress = Array.Empty<KeyValuePair<string, ulong>>();
 			return;
 		}
@@ -1313,11 +1314,12 @@ public sealed partial class DirectExecutionBackend
 			if (runtimeSymbol.Value != 0L && !string.IsNullOrWhiteSpace(runtimeSymbol.Key))
 			{
 				list.Add(runtimeSymbol);
-				_runtimeSymbolsByName[runtimeSymbol.Key] = runtimeSymbol.Value;
+				symbolsByName[runtimeSymbol.Key] = runtimeSymbol.Value;
 			}
 		}
 
 		list.Sort((a, b) => a.Value.CompareTo(b.Value));
+		Volatile.Write(ref _runtimeSymbolsByName, symbolsByName);
 		_runtimeSymbolsByAddress = list.ToArray();
 	}
 

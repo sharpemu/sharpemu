@@ -305,6 +305,139 @@ public sealed class KernelRuntimeCompatExportsTests
         Assert.Equal(0UL, context[CpuRegister.Rax]);
     }
 
+    [Fact]
+    public void LoadStartModule_UsesConfiguredLoaderForExactGuestPath()
+    {
+        const ulong pathAddress = MemoryBase + 0x500;
+        const ulong resultAddress = MemoryBase + 0x600;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(pathAddress, Encoding.UTF8.GetBytes("/app0/5/tomb5.prx\0")));
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.R9] = resultAddress;
+        string? requestedPath = null;
+
+        KernelModuleRegistry.Reset();
+        try
+        {
+            KernelModuleRegistry.ConfigureModuleLoader(path =>
+            {
+                requestedPath = path;
+                var handle = KernelModuleRegistry.RegisterModule(
+                    "C:/games/app0/5/tomb5.prx",
+                    0x8100_0000,
+                    0x10_0000,
+                    0x8100_0000,
+                    0,
+                    0,
+                    0,
+                    0,
+                    isMain: false);
+                return KernelModuleRegistry.ModuleLoadResult.Success(handle);
+            });
+
+            var result = KernelRuntimeCompatExports.KernelLoadStartModule(context);
+
+            Assert.Equal(0, result);
+            Assert.Equal("/app0/5/tomb5.prx", requestedPath);
+            Assert.Equal(1UL, context[CpuRegister.Rax]);
+            Span<byte> startResult = stackalloc byte[sizeof(int)];
+            Assert.True(memory.TryRead(resultAddress, startResult));
+            Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(startResult));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
+    public void LoadStartModule_DoesNotCreateSyntheticModuleWhenExactLoadFails()
+    {
+        const ulong pathAddress = MemoryBase + 0x500;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(pathAddress, Encoding.UTF8.GetBytes("/app0/missing.prx\0")));
+        context[CpuRegister.Rdi] = pathAddress;
+
+        KernelModuleRegistry.Reset();
+        try
+        {
+            KernelModuleRegistry.ConfigureModuleLoader(_ =>
+                KernelModuleRegistry.ModuleLoadResult.Failure(
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND));
+
+            var result = KernelRuntimeCompatExports.KernelLoadStartModule(context);
+
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+            Assert.Empty(KernelModuleRegistry.GetModuleHandles(includeSystemModules: true));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
+    public void ModuleRegistry_ExactPathNormalizesEquivalentPaths()
+    {
+        var modulePath = Path.Combine(Path.GetTempPath(), "sharpemu", "app0", "PSNCommon.prx");
+        var equivalentPath = Path.Combine(
+            Path.GetDirectoryName(modulePath)!,
+            ".",
+            Path.GetFileName(modulePath));
+
+        KernelModuleRegistry.Reset();
+        try
+        {
+            var handle = KernelModuleRegistry.RegisterModule(
+                modulePath,
+                0x8100_0000,
+                0x10_0000,
+                0x8100_0000,
+                0,
+                0,
+                0,
+                0,
+                isMain: false);
+
+            Assert.True(KernelModuleRegistry.TryFindByExactPath(equivalentPath, out var module));
+            Assert.Equal(handle, module.Handle);
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
+    [Fact]
+    public void ModuleRegistry_ExactPathDoesNotFallBackToMatchingFileName()
+    {
+        var registeredPath = Path.Combine(Path.GetTempPath(), "sharpemu", "first", "PSNCommon.prx");
+        var differentPath = Path.Combine(Path.GetTempPath(), "sharpemu", "second", "PSNCommon.prx");
+
+        KernelModuleRegistry.Reset();
+        try
+        {
+            _ = KernelModuleRegistry.RegisterModule(
+                registeredPath,
+                0x8100_0000,
+                0x10_0000,
+                0x8100_0000,
+                0,
+                0,
+                0,
+                0,
+                isMain: false);
+
+            Assert.False(KernelModuleRegistry.TryFindByExactPath(differentPath, out _));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
     private static int GetMinutesWest() =>
         unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
 
