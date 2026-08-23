@@ -13,6 +13,8 @@ using SharpEmu.Libs.AppContent;
 using SharpEmu.Libs.SaveData;
 using SharpEmu.Libs.Fiber;
 using SharpEmu.Libs.SystemService;
+using SharpEmu.Libs.Network;
+using SharpEmu.Libs.Np;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -140,6 +142,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         LastBasicBlockTrace = null;
         LastMilestoneLog = null;
         FiberExports.ResetRuntimeState();
+        Http2Exports.ResetRuntimeState();
+        NpAuthExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
