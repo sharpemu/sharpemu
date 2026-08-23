@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
@@ -26,6 +27,38 @@ public sealed class AgcEventQueueTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x2000;
+
+    [Fact]
+    public void DriverGetEqEventType_ReturnsPackedRegisteredEventType()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        const ulong eventAddress = BaseAddress + 0x100;
+        const uint eventType = 0x0706_0001;
+        WriteUInt32(memory, eventAddress, eventType);
+        ctx[CpuRegister.Rdi] = eventAddress;
+
+        var result = AgcExports.DriverGetEqEventType(ctx);
+
+        Assert.Equal(unchecked((int)eventType), result);
+        Assert.Equal(eventType, ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void DriverGetEqContextId_ReturnsLowTwentySevenEventDataBits()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        const ulong eventAddress = BaseAddress + 0x100;
+        const ulong eventData = 0xFFFF_FFFF_FEDC_BA98;
+        WriteUInt64(memory, eventAddress + 0x10, eventData);
+        ctx[CpuRegister.Rdi] = eventAddress;
+
+        var result = AgcExports.DriverGetEqContextId(ctx);
+
+        Assert.Equal(0x06DC_BA98, result);
+        Assert.Equal(0x06DC_BA98UL, ctx[CpuRegister.Rax]);
+    }
 
     [Fact]
     public void TriggerRegisteredEventsByFilter_DifferentIdentThanEventType_WakesGraphicsWaiter()
@@ -515,6 +548,13 @@ public sealed class AgcEventQueueTests
     {
         Span<byte> buffer = stackalloc byte[8];
         BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
+        Assert.True(memory.TryWrite(address, buffer));
+    }
+
+    private static void WriteUInt32(FakeCpuMemory memory, ulong address, uint value)
+    {
+        Span<byte> buffer = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
         Assert.True(memory.TryWrite(address, buffer));
     }
 

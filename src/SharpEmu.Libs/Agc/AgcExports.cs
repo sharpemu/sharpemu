@@ -1328,6 +1328,11 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_AGC_SUBMIT_COMPLETION_EVENT"),
         "1",
         StringComparison.Ordinal);
+    private static readonly bool _traceAgcEqAccessors = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_AGC_EQ_ACCESSORS"),
+        "1",
+        StringComparison.Ordinal);
+    private static long _agcEqAccessorTraceCount;
     // Escape hatch for the cached-texture copy skip (per-draw texel copies
     // are re-enabled unconditionally when set), for A/B-ing rendering issues.
     private static readonly bool _textureCopySkipDisabled = string.Equals(
@@ -4772,6 +4777,85 @@ public static partial class AgcExports
 
         TraceAgc($"agc.driver_delete_eq_event eq=0x{equeue:X16} id=0x{eventId:X16}");
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "5CdQTZIQPxM",
+        ExportName = "sceAgcDriverGetEqEventType",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverGetEqEventType(CpuContext ctx)
+    {
+        var eventAddress = ctx[CpuRegister.Rdi];
+        if (!TryReadUInt32(ctx, eventAddress, out var eventType))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        ctx[CpuRegister.Rax] = eventType;
+        TraceAgcEqAccessor(ctx, "event_type", eventAddress, eventType);
+        return unchecked((int)eventType);
+    }
+
+    [SysAbiExport(
+        Nid = "Zw7uUVPulbw",
+        ExportName = "sceAgcDriverGetEqContextId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverGetEqContextId(CpuContext ctx)
+    {
+        var eventAddress = ctx[CpuRegister.Rdi];
+        if (!TryReadUInt64(ctx, eventAddress + 0x10, out var eventData))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var contextId = (uint)eventData & 0x07FF_FFFFu;
+        ctx[CpuRegister.Rax] = contextId;
+        TraceAgcEqAccessor(ctx, "context_id", eventAddress, contextId);
+        return unchecked((int)contextId);
+    }
+
+    private static void TraceAgcEqAccessor(
+        CpuContext ctx,
+        string accessor,
+        ulong eventAddress,
+        uint result)
+    {
+        if (!_traceAgcEqAccessors)
+        {
+            return;
+        }
+
+        var count = Interlocked.Increment(ref _agcEqAccessorTraceCount);
+        if (count > 64 && (count & (count - 1)) != 0)
+        {
+            return;
+        }
+
+        Span<byte> eventBytes = stackalloc byte[0x20];
+        if (!ctx.Memory.TryRead(eventAddress, eventBytes))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.eq_accessor count={count} " +
+                $"accessor={accessor} event=0x{eventAddress:X16} " +
+                $"result=0x{result:X8} snapshot=unreadable");
+            return;
+        }
+
+        var ident = BinaryPrimitives.ReadUInt64LittleEndian(eventBytes[0x00..]);
+        var filter = BinaryPrimitives.ReadInt16LittleEndian(eventBytes[0x08..]);
+        var flags = BinaryPrimitives.ReadUInt16LittleEndian(eventBytes[0x0A..]);
+        var filterFlags = BinaryPrimitives.ReadUInt32LittleEndian(eventBytes[0x0C..]);
+        var data = BinaryPrimitives.ReadUInt64LittleEndian(eventBytes[0x10..]);
+        var userData = BinaryPrimitives.ReadUInt64LittleEndian(eventBytes[0x18..]);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.eq_accessor count={count} accessor={accessor} " +
+            $"event=0x{eventAddress:X16} result=0x{result:X8} " +
+            $"ident=0x{ident:X16} filter={filter} flags=0x{flags:X4} " +
+            $"fflags=0x{filterFlags:X8} data=0x{data:X16} " +
+            $"udata=0x{userData:X16} thread='{Thread.CurrentThread.Name}' " +
+            $"managed={Environment.CurrentManagedThreadId}");
     }
 
     [SysAbiExport(
