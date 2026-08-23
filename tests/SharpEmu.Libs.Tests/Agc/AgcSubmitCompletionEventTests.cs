@@ -25,6 +25,7 @@ public sealed class AgcSubmitCompletionEventTests
     private const ulong OutCountAddress = BaseAddress + 0x300;
     private const ulong TimeoutAddress = BaseAddress + 0x400;
     private const ulong PacketAddress = BaseAddress + 0x500;
+    private const ulong CommandAddress = BaseAddress + 0x800;
 
     [Fact]
     public void DriverSubmitAcb_DeliversCompletionEventUnderOwnerHandleIdent()
@@ -130,6 +131,52 @@ public sealed class AgcSubmitCompletionEventTests
             Assert.Equal(1u, ReadUInt32(memory, OutCountAddress));
             Assert.Equal(graphicsCompletionIdent, ReadUInt64(memory, EventsAddress + 0x00));
             Assert.Equal(userData, ReadUInt64(memory, EventsAddress + 0x18));
+        }
+        finally
+        {
+            DeleteEqueue(ctx, equeue);
+        }
+    }
+
+    [Fact]
+    public void DriverSubmitDcb_QueuedInterruptDoesNotAddSyntheticCompletionEvent()
+    {
+        const ulong graphicsCompletionIdent = 0;
+        const uint interruptContextId = 7;
+
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var equeue = CreateEqueue(ctx, memory);
+
+        try
+        {
+            Assert.True(KernelEventQueueCompatExports.RegisterEvent(
+                equeue,
+                graphicsCompletionIdent,
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                userData: 0));
+
+            WriteUInt32(memory, CommandAddress + 0x00, 0xC006_1060);
+            WriteUInt32(memory, CommandAddress + 0x04, 0);
+            WriteUInt32(memory, CommandAddress + 0x08, 2u << 24);
+            WriteUInt32(memory, CommandAddress + 0x0C, 0);
+            WriteUInt32(memory, CommandAddress + 0x10, 0);
+            WriteUInt32(memory, CommandAddress + 0x14, 0);
+            WriteUInt32(memory, CommandAddress + 0x18, 0);
+            WriteUInt32(memory, CommandAddress + 0x1C, interruptContextId);
+            WriteUInt64(memory, PacketAddress, CommandAddress);
+            WriteUInt32(memory, PacketAddress + 8, 8);
+
+            ctx[CpuRegister.Rdi] = PacketAddress;
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                AgcExports.DriverSubmitDcb(ctx));
+
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                WaitEqueue(ctx, memory, equeue));
+            Assert.Equal(1u, ReadUInt32(memory, OutCountAddress));
+            Assert.Equal(interruptContextId, ReadUInt64(memory, EventsAddress + 0x10));
         }
         finally
         {
