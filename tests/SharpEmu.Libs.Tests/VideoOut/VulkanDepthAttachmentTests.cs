@@ -86,4 +86,26 @@ public sealed class VulkanDepthAttachmentTests
         Assert.Equal(7u, state.CompareOp);
         Assert.Equal(clearEnable, state.ClearEnable);
     }
+
+    [Fact]
+    public void DepthTargetRenderState_PreservesDepthAndViewportWithoutColorTarget()
+    {
+        var registers = new Dictionary<uint, uint>
+        {
+            [0x200] = 0x36,
+            [0x10F] = BitConverter.SingleToUInt32Bits(512f),
+            [0x110] = BitConverter.SingleToUInt32Bits(512f),
+            [0x111] = BitConverter.SingleToUInt32Bits(-512f),
+            [0x112] = BitConverter.SingleToUInt32Bits(512f),
+        };
+        var depthTarget = Target with { Width = 1024, Height = 1024 };
+
+        var state = AgcExports.CreateDepthTargetRenderState(registers, depthTarget);
+
+        Assert.True(state.Depth.TestEnable);
+        Assert.True(state.Depth.WriteEnable);
+        Assert.Equal(3u, state.Depth.CompareOp);
+        Assert.Equal(0u, state.Blend.WriteMask);
+        Assert.Equal(new GuestViewport(0, 1024, 1024, -1024, 0, 1), state.Viewport);
+    }
 }

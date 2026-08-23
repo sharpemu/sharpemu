@@ -23,6 +23,26 @@ public sealed class VulkanDepthTextureAliasTests
     }
 
     [Fact]
+    public void OneLayerArrayViewCanSampleDepthImage()
+    {
+        var texture = CreateTexture(
+            format: 4,
+            numberType: 7,
+            tileMode: 24,
+            arrayedView: true) with
+        {
+            ArrayLayers = 1,
+        };
+
+        Assert.True(
+            VulkanVideoPresenter.IsCompatibleGuestDepthTextureDescriptor(
+                texture,
+                depthWidth: 1920,
+                depthHeight: 1080,
+                depthGuestFormat: 3));
+    }
+
+    [Fact]
     public void ColorDescriptorAtSameAddressCannotSampleDepthImage()
     {
         var texture = CreateTexture(format: 12, numberType: 7, tileMode: 27);

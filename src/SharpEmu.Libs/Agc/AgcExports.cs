@@ -10762,12 +10762,16 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             pixelUserData[index] = pixelEvaluation.InitialScalarRegisters[index];
         }
 
-        var renderState = ApplyTransparentPremultipliedFillClear(
-            CreateRenderState(
+        var depthTarget = DecodeDepthTarget(state.CxRegisters);
+        var decodedRenderState = renderTargets.Length == 0 && depthTarget is not null
+            ? CreateDepthTargetRenderState(state.CxRegisters, depthTarget)
+            : CreateRenderState(
                 state.CxRegisters,
                 renderTargets,
                 pixelColorExportMasks,
-                renderTargetOutputMappings),
+                renderTargetOutputMappings);
+        var renderState = ApplyTransparentPremultipliedFillClear(
+            decodedRenderState,
             textures,
             vertexInputs,
             pixelEvaluation.InitialScalarRegisters);
@@ -10788,7 +10792,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
-            DecodeDepthTarget(state.CxRegisters),
+            depthTarget,
             guestTargets,
             renderState,
             pixelUserData,
@@ -12045,6 +12049,25 @@ private static long _indirectDrawProbeCount;
             DecodeRasterState(registers),
             DecodeDepthState(registers),
             DecodeBlendConstant(registers));
+    }
+
+    internal static GuestRenderState CreateDepthTargetRenderState(
+        IReadOnlyDictionary<uint, uint> registers,
+        GuestDepthTarget depthTarget)
+    {
+        var target = new RenderTargetDescriptor(
+            Slot: 0,
+            Address: 0,
+            depthTarget.Width,
+            depthTarget.Height,
+            Format: 0,
+            NumberType: 0,
+            ComponentSwap: 0,
+            TileMode: 0);
+        return CreateRenderState(registers, target) with
+        {
+            Blends = [GuestBlendState.Default with { WriteMask = 0 }],
+        };
     }
 
     private static GuestRenderState CreateRenderState(
