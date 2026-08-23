@@ -397,7 +397,7 @@ public sealed class AgcVertexMetadataTests
         var discovered = new[]
         {
             new Gen5VertexInputBinding(
-                0x10, 0, 4, 14, 7, fixture.SharpBase, 16, 0,
+                0x10, 0, 4, 14, 7, fixture.SharpBase, 16, 12,
                 firstData, firstData.Length, false),
             new Gen5VertexInputBinding(
                 0x20, 1, 4, 14, 7, fixture.SharpBase, 16, 0,
@@ -441,7 +441,7 @@ public sealed class AgcVertexMetadataTests
                 0x10, 7, 4, 14, 7, fixture.SharpBase, 16, 0,
                 data, data.Length, false),
             new Gen5VertexInputBinding(
-                0x20, 3, 4, 14, 7, fixture.SharpBase, 16, 0,
+                0x20, 3, 4, 14, 7, fixture.SharpBase, 16, 12,
                 data, data.Length, false, PerInstance: true, AliasPcs: aliasPcs),
         };
         var program = CreateVertexFetchProgram(
@@ -537,7 +537,7 @@ public sealed class AgcVertexMetadataTests
     }
 
     [Fact]
-    public void MergeVertexInputs_PreservesBaseDeltaForMergedCapture()
+    public void MergeVertexInputs_PreservesDiscoveryForDifferentMetadataAddress()
     {
         const ulong memoryBase = 0x1_0000_0000;
         var memory = new FakeCpuMemory(memoryBase, 0x3000);
@@ -577,8 +577,9 @@ public sealed class AgcVertexMetadataTests
             CreateVertexFetchProgram((Pc: 0x10u, VectorData: 4u)),
             discovered);
 
-        Assert.Equal(10u, merged[0].DataFormat);
-        Assert.Equal(0x8Cu, merged[0].OffsetBytes);
+        Assert.Same(discovered, merged);
+        Assert.Equal(14u, merged[0].DataFormat);
+        Assert.Equal(0u, merged[0].OffsetBytes);
         Assert.Equal(captureBase, merged[0].BaseAddress);
         Assert.Same(data, merged[0].Data);
     }
@@ -770,12 +771,12 @@ public sealed class AgcVertexMetadataTests
     [Fact]
     public void MergeVertexInputs_InvalidFormatPreservesFormatAndAppliesOtherMetadata()
     {
-        // Format 0 is the SDK kInvalid sentinel. It means that this entry does
-        // not override the shader-discovered format. The association, offset,
-        // and input-rate fields remain usable.
+        // Format 0 is the SDK kInvalid sentinel. It does not override the
+        // shader-discovered format or offset. An exact association can still
+        // refine the input rate.
         var fixture = CreateMetadataFixture(
             perInstance: true,
-            (HardwareMapping: 4u, Format: 0u, Offset: 12u));
+            (HardwareMapping: 4u, Format: 0u, Offset: 0u));
         var data = new byte[64];
         var discovered = new[]
         {
@@ -796,8 +797,38 @@ public sealed class AgcVertexMetadataTests
         Assert.Equal(13u, merged[0].DataFormat);
         Assert.Equal(7u, merged[0].NumberFormat);
         Assert.Equal(3u, merged[0].ComponentCount);
-        Assert.Equal(12u, merged[0].OffsetBytes);
+        Assert.Equal(0u, merged[0].OffsetBytes);
         Assert.True(merged[0].PerInstance);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_InvalidFormatCannotMoveDiscoveredAttribute()
+    {
+        // An inlined prolog can write a fetch result to a VGPR that another
+        // semantic names as hardware_mapping. A mapping match alone must not
+        // move the attribute from byte 0 to byte 8.
+        var fixture = CreateMetadataFixture(
+            perInstance: true,
+            (HardwareMapping: 13u, Format: 0u, Offset: 8u));
+        var data = new byte[64];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x10, 0, 3, 12, 5, fixture.SharpBase, 40, 0,
+                data, data.Length, false),
+        };
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            fixture.Context,
+            fixture.Scalars,
+            fixture.Tables,
+            CreateVertexFetchProgram((Pc: 0x10u, VectorData: 13u)),
+            discovered);
+
+        Assert.Same(discovered, merged);
+        Assert.Equal(0u, merged[0].OffsetBytes);
+        Assert.Equal(12u, merged[0].DataFormat);
+        Assert.False(merged[0].PerInstance);
     }
 
     [Theory]
