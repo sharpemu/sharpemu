@@ -1299,6 +1299,8 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_SHADER_ADDRESS"));
     private static readonly ulong? _tracePixelShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS"));
+    private static readonly ulong? _traceVertexShaderAddress = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VERTEX_SHADER_ADDRESS"));
     private static readonly bool _traceDepthMetadata = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DEPTH_METADATA"),
         "1",
@@ -9671,7 +9673,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 depthOnlyDraw.PixelShaderAddress,
                 depthOnlyDraw.BaseVertex);
 
-            if (_traceAgcShader)
+            if (_traceAgcShader &&
+                (_traceVertexShaderAddress is not { } traceVertexShaderAddress ||
+                 exportShaderAddress == traceVertexShaderAddress))
             {
                 TraceAgcShader(
                     $"agc.depth_only_draw seq={drawSequence} " +
@@ -9801,6 +9805,35 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     if (rt.Address != 0)
                     {
                         VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
+                    }
+                }
+            }
+
+            // Read diagnostic snapshots before submit. Submit gives the pooled
+            // arrays to the presenter, which can return them while parsing
+            // continues.
+            if (_traceAgcShader &&
+                (_traceVertexShaderAddress is not { } traceVertexShaderAddress ||
+                 exportShaderAddress == traceVertexShaderAddress))
+            {
+                lock (_submitTraceGate)
+                {
+                    var firstTraceTarget = translatedDraw.RenderTargets.FirstOrDefault();
+                    var firstTextureAddress = translatedDraw.Textures.FirstOrDefault()?.Descriptor.Address ?? 0;
+                    if (_tracedShaderDraws.Add(
+                            (exportShaderAddress,
+                             pixelShaderAddress,
+                             firstTraceTarget.Address,
+                             firstTextureAddress,
+                             vertexCount)))
+                    {
+                        TraceTranslatedGuestDraw(
+                            ctx,
+                            gpuState,
+                            state,
+                            translatedDraw,
+                            psInputEna,
+                            psInputAddr);
                     }
                 }
             }
@@ -9997,29 +10030,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     $"es=0x{exportShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
                     $"target=0x{firstTarget.Address:X16}:{firstTarget.Width}x{firstTarget.Height}:fmt{firstTarget.Format}/tile{firstTarget.TileMode} " +
                     $"textures={translatedDraw.Textures.Count}");
-            }
-
-            // Trace-only: gated on the flag so the dedup set and the dump —
-            // which reads pooled buffer data the presenter may already have
-            // recycled (harmless for diagnostics, garbage bytes at worst) —
-            // cost nothing in normal runs.
-            if (_traceAgcShader)
-            {
-                lock (_submitTraceGate)
-                {
-                    var firstTextureAddress = translatedDraw.Textures.FirstOrDefault()?.Descriptor.Address ?? 0;
-                    if (_tracedShaderDraws.Add(
-                            (exportShaderAddress, pixelShaderAddress, firstTarget.Address, firstTextureAddress, vertexCount)))
-                    {
-                        TraceTranslatedGuestDraw(
-                            ctx,
-                            gpuState,
-                            state,
-                            translatedDraw,
-                            psInputEna,
-                            psInputAddr);
-                    }
-                }
             }
 
             return;
@@ -15664,6 +15674,7 @@ GuestImageWriteTracker.Track(
             // constants above can be corrected from evidence, not guessed.
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] agc.constant_fill_descriptor_mismatch " +
+                $"dst=0x{expectedBaseAddress:X16} " +
                 $"word1=0x{word1:X8} word3=0x{word3:X8} stride={stride} " +
                 $"format={unifiedFormat} oob={outOfBoundsSelect} type={type} " +
                 $"dst_sel_x={dstSelectX}");

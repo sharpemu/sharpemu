@@ -4023,7 +4023,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly HashSet<(ulong Address, uint Width, uint Height)> _tracedDepthExtentFallbacks = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height, Format Format)> _tracedTextureUploads = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height, uint Format)> _dumpedTextures = new();
-        private readonly HashSet<(ulong Address, uint Width, uint Height, uint Format)> _tracedTextureUploadContents = new();
+        private readonly Dictionary<
+            (ulong Address, uint Width, uint Height, uint Format),
+            (ulong Hash, long Version)> _tracedTextureUploadContents = new();
         private readonly HashSet<(ulong Address, int ActualSize, ulong ExpectedSize, Format Format)>
             _rejectedGuestImageUploads = new();
         private readonly HashSet<(ulong Address, int Size)> _tracedGlobalBuffers = new();
@@ -9487,6 +9489,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 ? texture.RgbaPixels
                 : CreateFallbackTexturePixels(texture.Format, rowLength, texture.Height, expectedSize);
             var fingerprint = ComputeTextureContentFingerprint(pixels);
+            TraceTextureUploadContents(
+                texture,
+                pixels,
+                rowLength,
+                texture.Width,
+                texture.Height,
+                guestImage.Format,
+                "refresh");
             if ((guestImage.Initialized || guestImage.InitialUploadPending) &&
                 guestImage.CpuContentFingerprint == fingerprint)
             {
@@ -10520,7 +10530,14 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"size={width}x{height} bytes={pixels.Length}");
                 }
                 DumpTextureUpload(texture, pixels, rowLength, width, height);
-                TraceTextureUploadContents(texture, pixels, rowLength, width, height, vkFormat);
+                TraceTextureUploadContents(
+                    texture,
+                    pixels,
+                    rowLength,
+                    width,
+                    height,
+                    vkFormat,
+                    "create");
                 var uploadPixels = texture.Format == 13
                     ? ExpandRgb32Pixels(pixels)
                     : pixels;
@@ -11191,23 +11208,34 @@ internal static unsafe partial class VulkanVideoPresenter
             uint rowLength,
             uint width,
             uint height,
-            Format format)
+            Format format,
+            string source)
         {
             if (!_traceGuestImageAddressFilterEnabled ||
-                !AddressListContains("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS", texture.Address) ||
-                !_tracedTextureUploadContents.Add(
-                    (texture.Address, width, height, texture.Format)))
+                !AddressListContains("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS", texture.Address))
             {
                 return;
             }
 
+            var key = (texture.Address, width, height, texture.Format);
+            var hash = ComputeTextureContentFingerprint(pixels);
+            var version = 1L;
+            if (_tracedTextureUploadContents.TryGetValue(key, out var previous))
+            {
+                if (previous.Hash == hash)
+                {
+                    return;
+                }
+
+                version = previous.Version + 1;
+            }
+            _tracedTextureUploadContents[key] = (hash, version);
+
             var bytesPerPixel = checked((uint)GetTextureBytesPerPixel(texture.Format));
             var nonzeroBytes = 0L;
-            ulong hash = 14695981039346656037UL;
             foreach (var value in pixels)
             {
                 nonzeroBytes += value == 0 ? 0 : 1;
-                hash = (hash ^ value) * 1099511628211UL;
             }
 
             var centerOffset = checked(
@@ -11220,6 +11248,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Console.Error.WriteLine(
                 "[LOADER][TRACE] " +
                 $"vk.texture_upload_contents addr=0x{texture.Address:X16} " +
+                $"version={version} source={source} " +
                 $"size={width}x{height} row={rowLength} format={format} " +
                 $"guest_format={texture.Format} nonzero_bytes={nonzeroBytes}/{pixels.Length} " +
                 $"nonblack_pixels={CountNonblackPixels(pixels, format, bytesPerPixel)}/{(ulong)rowLength * height} " +
