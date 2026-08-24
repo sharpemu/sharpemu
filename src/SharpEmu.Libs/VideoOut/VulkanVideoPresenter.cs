@@ -2224,6 +2224,20 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    // A copy between the sRGB and UNORM views of the same byte layout keeps
+    // the encoded bytes unchanged. A blit performs format conversion instead
+    // and decodes the sRGB source to linear values, which makes an SDR frame
+    // too dark when those values are then presented through a UNORM swapchain.
+    internal static bool CanCopyEncodedSrgbPresentSource(
+        Format sourceFormat,
+        Format swapchainFormat) =>
+        (sourceFormat, swapchainFormat) switch
+        {
+            (Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm) => true,
+            (Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm) => true,
+            _ => false,
+        };
+
     internal static (int Luma, int Chroma) SelectRememberedHostMovieTextureBindings(
         IReadOnlyList<GuestDrawTexture> textures,
         ulong lumaAddress,
@@ -20284,15 +20298,50 @@ internal static unsafe partial class VulkanVideoPresenter
                 sourceWidth != 0 && sourceHeight != 0 &&
                 destinationWidth >= sourceWidth && destinationHeight >= sourceHeight &&
                 destinationWidth % sourceWidth == 0 && destinationHeight % sourceHeight == 0;
-            _vk.CmdBlitImage(
-                _commandBuffer,
-                source.Image,
-                ImageLayout.TransferSrcOptimal,
-                encodeForPresent ? encodeImage : presentationTarget,
-                ImageLayout.TransferDstOptimal,
-                1,
-                &region,
-                isIntegerUpscale ? Filter.Nearest : Filter.Linear);
+            var preserveEncodedSrgb =
+                !encodeForPresent &&
+                CanCopyEncodedSrgbPresentSource(source.Format, _swapchainFormat) &&
+                sourceWidth == destinationWidth &&
+                sourceHeight == destinationHeight;
+            if (preserveEncodedSrgb)
+            {
+                var copy = new ImageCopy
+                {
+                    SrcSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    SrcOffset = new Offset3D(
+                        checked((int)sourceX),
+                        checked((int)sourceY),
+                        0),
+                    DstSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstOffset = new Offset3D(
+                        checked((int)destinationX),
+                        checked((int)destinationY),
+                        0),
+                    Extent = new Extent3D(sourceWidth, sourceHeight, 1),
+                };
+                _vk.CmdCopyImage(
+                    _commandBuffer,
+                    source.Image,
+                    ImageLayout.TransferSrcOptimal,
+                    presentationTarget,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copy);
+            }
+            else
+            {
+                _vk.CmdBlitImage(
+                    _commandBuffer,
+                    source.Image,
+                    ImageLayout.TransferSrcOptimal,
+                    encodeForPresent ? encodeImage : presentationTarget,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &region,
+                    isIntegerUpscale ? Filter.Nearest : Filter.Linear);
+            }
 
             if (encodeForPresent)
             {

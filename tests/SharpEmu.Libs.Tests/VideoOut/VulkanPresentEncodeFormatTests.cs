@@ -52,9 +52,38 @@ public sealed class VulkanPresentEncodeFormatTests
     [InlineData(Format.A2B10G10R10UnormPack32)]
     [InlineData(Format.B10G11R11UfloatPack32)]
     [InlineData(Format.Undefined)]
-    public void NonFloatFlipSourcesKeepTheDirectBlit(Format sourceFormat)
+    public void NonFloatFlipSourcesDoNotNeedLinearFloatEncoding(Format sourceFormat)
     {
         Assert.False(VulkanVideoPresenter.IsLinearFloatPresentSource(sourceFormat));
+    }
+
+    [Theory]
+    [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]
+    public void MatchingSrgbAndUnormLayoutsCanPreserveEncodedBytes(
+        Format sourceFormat,
+        Format swapchainFormat)
+    {
+        Assert.True(
+            VulkanVideoPresenter.CanCopyEncodedSrgbPresentSource(
+                sourceFormat,
+                swapchainFormat));
+    }
+
+    [Theory]
+    [InlineData(Format.B8G8R8A8Srgb, Format.R8G8B8A8Unorm)]
+    [InlineData(Format.R8G8B8A8Srgb, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.B8G8R8A8Unorm, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.R16G16B16A16Sfloat, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Srgb)]
+    public void OtherPresentFormatPairsNeedTheirExistingPath(
+        Format sourceFormat,
+        Format swapchainFormat)
+    {
+        Assert.False(
+            VulkanVideoPresenter.CanCopyEncodedSrgbPresentSource(
+                sourceFormat,
+                swapchainFormat));
     }
 
     // GTA V Enhanced early G-buffer color targets observed as COMPAT failures
