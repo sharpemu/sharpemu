@@ -41,6 +41,11 @@ public static class VideoOutExports
     private const int VideoOutOutputStatusSize = 0x30;
     private const int VideoOutFlipStatusSize = 0x80;
     private const int VideoOutVblankStatusSize = 0x28;
+    private const int VideoOutLatencyControlSize = 0x20;
+    private const uint SceVideoOutLatencyControlWaitByFlipQueueNum = 0;
+    private const uint SceVideoOutLatencyControlWaitByFlipArg = 1;
+    private const uint MaxVideoOutLatencyExtraUsec = 100_000;
+    private const int MaxLatencyHistoryEntries = 256;
     private const ulong SceVideoOutOutputModeDefault = 1;
     private const ulong SceVideoOutOutputMode119_88Hz = 0xF;
     private const ulong SceVideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
@@ -217,6 +222,11 @@ public static class VideoOutExports
         public uint OutputHeight { get; set; } = 1080;
         public uint RefreshRate { get; set; } = 60;
         public float Gamma { get; set; } = 1.0f;
+        public Dictionary<long, long> LatencyStartPoints { get; } = new();
+        public Queue<(long FlipArg, long Timestamp)> LatencyStartPointOrder { get; } = new();
+        public Dictionary<long, long> CompletedLatencyFlipArgs { get; } = new();
+        public Queue<(long FlipArg, long Timestamp)> CompletedLatencyFlipArgOrder { get; } = new();
+        public long LastLatencyFirstSectionUsec { get; set; }
         public VideoOutBufferGroup?[] Groups { get; } = new VideoOutBufferGroup?[MaxDisplayBufferGroups];
         public VideoOutBufferSlot[] BufferSlots { get; } = CreateBufferSlots();
         public List<FlipEventRegistration> FlipEvents { get; } = new();
@@ -354,6 +364,7 @@ public static class VideoOutExports
         lock (_stateGate)
         {
             _ports.Remove(handle);
+            Monitor.PulseAll(_stateGate);
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -501,6 +512,192 @@ public static class VideoOutExports
         port.Gamma = BitConverter.Int32BitsToSingle(
             BinaryPrimitives.ReadInt32LittleEndian(gammaBytes));
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "eb-gvTYQcoY",
+        ExportName = "sceVideoOutLatencyControlWaitBeforeInput",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutLatencyControlWaitBeforeInput(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var controlAddress = ctx[CpuRegister.Rsi];
+        var timeoutAddress = ctx[CpuRegister.Rdx];
+
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        if (controlAddress == 0)
+        {
+            return OrbisVideoOutErrorInvalidAddress;
+        }
+
+        Span<byte> bytes = stackalloc byte[VideoOutLatencyControlSize];
+        if (!ctx.Memory.TryRead(controlAddress, bytes))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var control = BinaryPrimitives.ReadUInt32LittleEndian(bytes[0x00..0x04]);
+        var pad1 = BinaryPrimitives.ReadUInt32LittleEndian(bytes[0x04..0x08]);
+        var target = BinaryPrimitives.ReadInt64LittleEndian(bytes[0x08..0x10]);
+        var extraUsec = BinaryPrimitives.ReadUInt32LittleEndian(bytes[0x10..0x14]);
+        var pad2 = BinaryPrimitives.ReadUInt32LittleEndian(bytes[0x14..0x18]);
+        var reserved = BinaryPrimitives.ReadUInt64LittleEndian(bytes[0x18..0x20]);
+        if (control > SceVideoOutLatencyControlWaitByFlipArg ||
+            target < 0 ||
+            extraUsec > MaxVideoOutLatencyExtraUsec ||
+            pad1 != 0 ||
+            pad2 != 0 ||
+            reserved != 0)
+        {
+            return OrbisVideoOutErrorInvalidValue;
+        }
+
+        uint timeoutUsec = 0;
+        if (timeoutAddress != 0 && !ctx.TryReadUInt32(timeoutAddress, out timeoutUsec))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        var deadline = timeoutAddress == 0
+            ? long.MaxValue
+            : started + (long)Math.Ceiling(timeoutUsec * (double)Stopwatch.Frequency / 1_000_000d);
+
+        lock (_stateGate)
+        {
+            while (true)
+            {
+                if (!_ports.TryGetValue(handle, out var currentPort) ||
+                    !ReferenceEquals(currentPort, port))
+                {
+                    return OrbisVideoOutErrorInvalidHandle;
+                }
+
+                if (IsLatencyTargetReached(port, control, target))
+                {
+                    break;
+                }
+
+                var remainingUsec = RemainingMicroseconds(deadline);
+                if (remainingUsec <= 0)
+                {
+                    if (timeoutAddress != 0)
+                    {
+                        _ = ctx.TryWriteUInt32(timeoutAddress, 0);
+                    }
+
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+                }
+
+                Monitor.Wait(
+                    _stateGate,
+                    timeoutAddress == 0
+                        ? Timeout.Infinite
+                        : Math.Max(1, (int)Math.Min(int.MaxValue, (remainingUsec + 999) / 1000)));
+            }
+        }
+
+        if (extraUsec != 0)
+        {
+            var remainingUsec = RemainingMicroseconds(deadline);
+            if (remainingUsec < extraUsec)
+            {
+                if (remainingUsec > 0)
+                {
+                    Thread.Sleep(TimeSpan.FromMicroseconds(remainingUsec));
+                }
+
+                if (timeoutAddress != 0)
+                {
+                    _ = ctx.TryWriteUInt32(timeoutAddress, 0);
+                }
+
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            }
+
+            Thread.Sleep(TimeSpan.FromMicroseconds(extraUsec));
+        }
+
+        if (timeoutAddress != 0)
+        {
+            _ = ctx.TryWriteUInt32(
+                timeoutAddress,
+                unchecked((uint)Math.Min(uint.MaxValue, RemainingMicroseconds(deadline))));
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "MCJ8SkzsQxY",
+        ExportName = "sceVideoOutLatencyMeasureSetStartPoint",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutLatencyMeasureSetStartPoint(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var flipArg = unchecked((long)ctx[CpuRegister.Rsi]);
+        if (!TryGetPort(handle, out var port))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        lock (_stateGate)
+        {
+            var timestamp = Stopwatch.GetTimestamp();
+            port.LatencyStartPoints[flipArg] = timestamp;
+            port.LatencyStartPointOrder.Enqueue((flipArg, timestamp));
+            PruneTimestampHistory(port.LatencyStartPoints, port.LatencyStartPointOrder);
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool IsLatencyTargetReached(VideoOutPortState port, uint control, long target)
+    {
+        if (control == SceVideoOutLatencyControlWaitByFlipQueueNum)
+        {
+            return port.FlipPendingCount <= target;
+        }
+
+        if (!port.CompletedLatencyFlipArgs.TryGetValue(target, out var completedAt))
+        {
+            return false;
+        }
+
+        return !port.LatencyStartPoints.TryGetValue(target, out var startedAt) ||
+            completedAt >= startedAt;
+    }
+
+    private static long RemainingMicroseconds(long deadline)
+    {
+        if (deadline == long.MaxValue)
+        {
+            return long.MaxValue;
+        }
+
+        var ticks = Math.Max(0, deadline - Stopwatch.GetTimestamp());
+        return (long)Math.Floor(ticks * 1_000_000d / Stopwatch.Frequency);
+    }
+
+    private static void PruneTimestampHistory(
+        Dictionary<long, long> timestamps,
+        Queue<(long FlipArg, long Timestamp)> order)
+    {
+        while (order.Count > MaxLatencyHistoryEntries)
+        {
+            var oldest = order.Dequeue();
+            if (timestamps.TryGetValue(oldest.FlipArg, out var current) &&
+                current == oldest.Timestamp)
+            {
+                timestamps.Remove(oldest.FlipArg);
+            }
+        }
     }
 
     [SysAbiExport(
@@ -1198,6 +1395,16 @@ public static class VideoOutExports
                 return OrbisVideoOutErrorInvalidIndex;
             }
 
+            var submittedAt = Stopwatch.GetTimestamp();
+            if (port.LatencyStartPoints.Remove(flipArg, out var startedAt))
+            {
+                port.LastLatencyFirstSectionUsec = (long)Math.Max(
+                    0,
+                    Math.Floor(
+                        (submittedAt - startedAt) * 1_000_000d /
+                        Stopwatch.Frequency));
+            }
+
             port.FlipPendingCount++;
             if (!submitGpuImage)
             {
@@ -1256,6 +1463,14 @@ public static class VideoOutExports
                 {
                     port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
                 }
+
+                var completedAt = Stopwatch.GetTimestamp();
+                port.CompletedLatencyFlipArgs[flipArg] = completedAt;
+                port.CompletedLatencyFlipArgOrder.Enqueue((flipArg, completedAt));
+                PruneTimestampHistory(
+                    port.CompletedLatencyFlipArgs,
+                    port.CompletedLatencyFlipArgOrder);
+                Monitor.PulseAll(_stateGate);
             }
 
             if (flipEvents is null)
