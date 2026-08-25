@@ -237,7 +237,8 @@ public partial class MainWindow
             {
                 toggle.IsChecked = IsEnvironmentEnabled(
                     effective.EnvironmentToggles,
-                    name);
+                    name,
+                    defaultEnabled: IsDefaultEnabledEnvironment(name));
             }
         }
         finally
@@ -370,7 +371,22 @@ public partial class MainWindow
         var entries = new List<string>(_gameEnvironmentPassthrough);
         foreach (var (name, toggle) in GameEnvironmentToggles())
         {
-            if (toggle.IsChecked == true)
+            if (IsDefaultEnabledEnvironment(name))
+            {
+                var globalEnabled = IsEnvironmentEnabled(
+                    _settings.EnvironmentToggles,
+                    name,
+                    defaultEnabled: true);
+                if (toggle.IsChecked == false)
+                {
+                    entries.Add($"{name}=0");
+                }
+                else if (!globalEnabled)
+                {
+                    entries.Add(name);
+                }
+            }
+            else if (toggle.IsChecked == true)
             {
                 entries.Add(name);
             }
@@ -390,7 +406,8 @@ public partial class MainWindow
 
     private static bool IsEnvironmentEnabled(
         IEnumerable<string> entries,
-        string name)
+        string name,
+        bool defaultEnabled = false)
     {
         foreach (var entry in entries)
         {
@@ -403,8 +420,14 @@ public partial class MainWindow
             return parts.Length == 1 || parts[1] != "0";
         }
 
-        return false;
+        return defaultEnabled;
     }
+
+    private static bool IsDefaultEnabledEnvironment(string name) =>
+        string.Equals(
+            name,
+            "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
+            StringComparison.OrdinalIgnoreCase);
 
     private static bool IsKnownGameEnvironmentEntry(string entry)
     {

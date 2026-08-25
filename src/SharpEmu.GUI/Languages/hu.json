@@ -42,7 +42,7 @@
   "Options.Env.Group.Debug": "Hibakeresés",
   "Options.Env.Group.General": "Általános",
   "Options.Env.RenderDoc.Desc": "Betölti a RenderDoc alkalmazáson belüli API-ját, így képkockák rögzíthetők az emulátorból.\nNyomd meg az F10-et futó játék közben egy képkocka rögzítéséhez; a felvételek a user/logs/capture_logs/<TITLE_ID> mappába kerülnek.\nTelepített RenderDocot igényel. Lassítja a GPU-t és egyes játékokat lefagyaszt, ezért hagyd kikapcsolva, hacsak nem hibakeresel.",
-  "Options.Env.GuestImageCpuSync.Desc": "Újratölti azokat a vendégfelületeket, amelyeket a játék saját CPU-kódja ír felül.\nNormál esetben hagyd kikapcsolva. Kapcsold be azoknál a címeknél, amelyek CPU-val rajzolt felületei sosem jutnak ki a képernyőre.\nTeljesítménybe kerül, és egyes címeknél, például a GTA V-nél regressziót okoz.",
+  "Options.Env.GuestImageCpuSync.Desc": "Szinkronizálja a vendégfelületeket, miután a játék CPU-kódja átírja őket.\nAlapértelmezés szerint engedélyezett, hogy a CPU által írt képek helyesek maradjanak. Csak hibakereséshez vagy a felesleges terhelés csökkentéséhez kapcsold ki.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "GPU parancspuffer-előtagokat is kézbesít, ha a célsor sosem veszi fel őket.\nNormál esetben hagyd kikapcsolva. Kapcsold be azoknál a címeknél, amelyek egy sosem jelző GPU-fence-re várva lefagynak.",
   "Options.Section.Emulation": "EMULÁCIÓ",
   "Options.Section.Logging": "LOGOLÁS",

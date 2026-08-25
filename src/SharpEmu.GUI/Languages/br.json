@@ -42,7 +42,7 @@
   "Options.Env.Group.Debug": "Depuração",
   "Options.Env.Group.General": "Geral",
   "Options.Env.RenderDoc.Desc": "Carrega a API in-application do RenderDoc para capturar frames de dentro do emulador.\nPressione F10 enquanto o jogo roda para capturar um frame; as capturas vão para user/logs/capture_logs/<TITLE_ID>.\nExige o RenderDoc instalado. Deixa a GPU mais lenta e trava alguns títulos, então mantenha desativado a menos que esteja depurando.",
-  "Options.Env.GuestImageCpuSync.Desc": "Recarrega as superfícies do convidado que o próprio código de CPU do jogo reescreve.\nDeixe desativado normalmente. Ative para títulos cujas superfícies desenhadas pela CPU nunca chegam à tela.\nCusta desempenho e causa regressões em alguns títulos, como GTA V.",
+  "Options.Env.GuestImageCpuSync.Desc": "Sincroniza as superfícies do convidado depois que a CPU do jogo as reescreve.\nAtivado por padrão para manter corretas as imagens gravadas pela CPU. Desative apenas para diagnosticar um problema ou reduzir carga desnecessária.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Entrega os preâmbulos do buffer de comandos da GPU mesmo quando a fila de destino nunca os recolhe.\nDeixe desativado normalmente. Ative para títulos que travam esperando por uma fence de GPU que nunca sinaliza.",
   "Options.Section.Emulation": "EMULAÇÃO",
   "Options.Section.Logging": "LOGS",

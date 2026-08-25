@@ -139,4 +139,23 @@ public sealed class PerGameSettingsTests
 
         Assert.Null(perGame.EnvironmentToggles);
     }
+
+    [Fact]
+    public void RemoveInheritedValues_DefaultEnabledOptOut_DoesNotMatchMissingEntry()
+    {
+        var global = new GuiSettings
+        {
+            EnvironmentToggles = [],
+        };
+        var perGame = new PerGameSettings
+        {
+            EnvironmentToggles = ["SHARPEMU_GUEST_IMAGE_CPU_SYNC=0"],
+        };
+
+        perGame.RemoveInheritedValues(global);
+
+        Assert.Equal(
+            ["SHARPEMU_GUEST_IMAGE_CPU_SYNC=0"],
+            perGame.EnvironmentToggles);
+    }
 }

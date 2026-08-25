@@ -13,15 +13,34 @@ namespace SharpEmu.HLE;
 /// draws on the same surface (Chowdren titles memset their fog layers every
 /// frame). Host GPU images are separate storage, so the video backend needs to
 /// know when the guest CPU rewrote a surface to re-upload it. Ranges are
-/// write-protected; the first write faults, the fault handler restores write
-/// access and marks the range dirty, and the video backend consumes the dirty
-/// flag once per flip and re-arms protection after re-uploading.
+/// write-protected; the first write faults, the fault handler removes that
+/// image's page watchers and marks it dirty, and the video backend adds the
+/// watchers again after re-uploading. Shared pages stay protected while any
+/// clean image still watches them.
 /// </summary>
 public static unsafe class GuestImageWriteTracker
 {
+    public readonly record struct ReadSnapshot(
+        ulong Address,
+        long Generation,
+        bool Active);
+
     private const int ProtRead = 0x1;
     private const int ProtWrite = 0x2;
+    private const int ProtExec = 0x4;
     private const int ClockMonotonicRaw = 4;
+    private const ulong TrackingPageSize = 0x1000UL;
+    private const int RangeDisarmed = 0;
+    private const int RangeArmed = 1;
+    private const int RangeInvalidating = 2;
+    private const int RangeArming = 3;
+
+    private sealed class PageState
+    {
+        public ulong Address;
+        public int WriteWatchers;
+        public bool Executable;
+    }
 
     private sealed class TrackedRange
     {
@@ -37,6 +56,8 @@ public static unsafe class GuestImageWriteTracker
         /// so native CPU stores do not fault.
         /// </summary>
         public bool Protect;
+        public bool Executable;
+        public PageState[] Pages = [];
         public int FirstCpuWriteSeen;
         public int PendingFirstCpuWrite;
         public long WriteGeneration;
@@ -46,6 +67,11 @@ public static unsafe class GuestImageWriteTracker
         public long FirstCpuWriteTimestampNanoseconds;
         public ulong FirstCpuWriteAddress;
         public ulong FirstCpuWritePage;
+        public long ProfileArmCount;
+        public long ProfileArmBytes;
+        public long ProfileFaultCount;
+        public long ProfileFaultBytes;
+        public bool ManagedWriter;
         public string Source = "unspecified";
     }
 
@@ -59,6 +85,7 @@ public static unsafe class GuestImageWriteTracker
     private static readonly object _gate = new();
     private static readonly Dictionary<ulong, TrackedRange> _rangesByAddress = new();
     private static readonly Dictionary<ulong, TrackedRange> _watchRangesByAddress = new();
+    private static readonly Dictionary<ulong, PageState> _pagesByAddress = new();
 
     /// <summary>Immutable snapshot read lock-free from the signal handler and
     /// the managed-write pre-visit; rebuilt on every mutation under the gate
@@ -110,9 +137,9 @@ public static unsafe class GuestImageWriteTracker
     private static WatchRangeSnapshot _watchRangeSnapshot = WatchRangeSnapshot.Empty;
 
     private static readonly bool _enabled =
-        string.Equals(
+        !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
-            "1",
+            "0",
             StringComparison.Ordinal);
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
@@ -123,9 +150,22 @@ public static unsafe class GuestImageWriteTracker
         _lifetimeTraceFilter.Addresses.Length != 0 ||
         _lifetimeSourceTraceFilter.Wildcard ||
         _lifetimeSourceTraceFilter.Sources.Length != 0;
+    private static readonly bool _profileEnabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_IMAGE_TRACKER"),
+            "1",
+            StringComparison.Ordinal);
     private static readonly long _lifetimeTraceEpochNanoseconds =
         _enabled && _lifetimeTraceEnabled ? GetMonotonicNanoseconds() : 0;
     private static long _lifetimeTraceSequence;
+    private static long _profileLastReportTimestamp = Stopwatch.GetTimestamp();
+    private static long _profileSnapshotCount;
+    private static long _profileArmCount;
+    private static long _profileArmBytes;
+    private static long _profileFaultCount;
+    private static long _profileFaultBytes;
+    private static long _profileDisarmCount;
+    private static long _profileDisarmBytes;
 
     private const uint PageReadonly = 0x02;
     private const uint PageReadWrite = 0x04;
@@ -175,7 +215,7 @@ public static unsafe class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var protectedRange))
             {
                 protect = true;
-                armed = Volatile.Read(ref protectedRange.Armed) != 0;
+                armed = Volatile.Read(ref protectedRange.Armed) == RangeArmed;
                 return true;
             }
 
@@ -185,7 +225,7 @@ public static unsafe class GuestImageWriteTracker
             }
 
             protect = range.Protect;
-            armed = Volatile.Read(ref range.Armed) != 0;
+            armed = Volatile.Read(ref range.Armed) == RangeArmed;
             return true;
         }
     }
@@ -285,8 +325,13 @@ public static unsafe class GuestImageWriteTracker
                     Start = start,
                     End = start + length,
                     Protect = keepProtect,
+                    Executable = range.Executable || IsExecutableMapping(address),
                     WriteGeneration = writeGeneration,
                 };
+                range.Pages = GetTrackedPagesLocked(
+                    range.Start,
+                    range.End,
+                    range.Executable);
                 _rangesByAddress[address] = range;
                 RebuildSnapshotLocked();
             }
@@ -300,11 +345,16 @@ public static unsafe class GuestImageWriteTracker
                     Start = start,
                     End = start + length,
                     Protect = protect,
+                    Executable = IsExecutableMapping(address),
                     TraceLifetime =
                         ShouldTraceRange(start, start + length) || ShouldTraceSource(source),
                     SourceSequence = sourceSequence,
                     Source = source,
                 };
+                range.Pages = GetTrackedPagesLocked(
+                    range.Start,
+                    range.End,
+                    range.Executable);
                 _rangesByAddress[address] = range;
                 RebuildSnapshotLocked();
             }
@@ -527,18 +577,23 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static void FlushPendingDiagnostics()
     {
-        if (!_enabled || !_lifetimeTraceEnabled)
+        if (!_enabled)
         {
             return;
         }
 
-        lock (_gate)
+        if (_lifetimeTraceEnabled)
         {
-            foreach (var range in _rangesByAddress.Values)
+            lock (_gate)
             {
-                FlushPendingFirstCpuWrite(range);
+                foreach (var range in _rangesByAddress.Values)
+                {
+                    FlushPendingFirstCpuWrite(range);
+                }
             }
         }
+
+        ReportProfileIfDue();
     }
 
     /// <summary>
@@ -554,103 +609,113 @@ public static unsafe class GuestImageWriteTracker
         }
 
         var ranges = Volatile.Read(ref _rangeSnapshot).Ranges;
-        var writableStart = ulong.MaxValue;
-        var writableEnd = 0UL;
+        var faultPage = faultAddress & ~(TrackingPageSize - 1);
+        var faultPageEnd = faultPage + TrackingPageSize;
+        var handled = false;
+        long writableBytes = 0;
+
+        // Invalidate every image whose exact guest byte range contains the
+        // write. Removing that image's watchers from all pages lets a
+        // sequential CPU update continue without one exception per page.
         for (var index = 0; index < ranges.Length; index++)
         {
             var range = ranges[index];
-            if (faultAddress < range.Start || faultAddress >= range.End)
+            var exactEnd = range.Address > ulong.MaxValue - range.ByteCount
+                ? ulong.MaxValue
+                : range.Address + range.ByteCount;
+            if (faultAddress < range.Address || faultAddress >= exactEnd)
             {
                 continue;
             }
 
-            writableStart = Math.Min(writableStart, range.Start);
-            writableEnd = Math.Max(writableEnd, range.End);
+            var previousState = Interlocked.CompareExchange(
+                ref range.Armed,
+                RangeInvalidating,
+                RangeArmed);
+            if (previousState is RangeInvalidating or RangeArming)
+            {
+                handled = true;
+                continue;
+            }
+            if (previousState != RangeArmed)
+            {
+                continue;
+            }
+
+            if (!RemovePageWatchers(range, out var changedBytes))
+            {
+                Volatile.Write(ref range.Armed, RangeDisarmed);
+                return false;
+            }
+
+            writableBytes += changedBytes;
+            if (_profileEnabled)
+            {
+                Interlocked.Increment(ref range.ProfileFaultCount);
+                Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
+            }
+            MarkFaultedRange(range, faultAddress);
+            Volatile.Write(ref range.Armed, RangeDisarmed);
+            handled = true;
         }
 
-        if (writableStart == ulong.MaxValue)
+        // Page protection is coarser than an image's exact byte range. A
+        // boundary page can still have a watcher from an image whose bytes do
+        // not contain this address. Remove that owner too so retrying the same
+        // store cannot fault forever. This is limited to the one shared page;
+        // unrelated overlap chains are not invalidated.
+        if (IsPageStillWatched(ranges, faultPage))
         {
-            return false;
-        }
-
-        // Ranges are page-aligned and may overlap (font atlases and other
-        // suballocations commonly share pages). Unprotecting one range also
-        // makes every overlapping tracked page writable. Expand to the full
-        // transitive overlap and dirty/disarm every owner, otherwise only the
-        // first dictionary entry observes the write and the others retain a
-        // stale cached texture indefinitely.
-        var expanded = true;
-        while (expanded)
-        {
-            expanded = false;
             for (var index = 0; index < ranges.Length; index++)
             {
                 var range = ranges[index];
-                if (range.Start >= writableEnd || range.End <= writableStart)
+                if (range.Start >= faultPageEnd || range.End <= faultPage)
                 {
                     continue;
                 }
 
-                var start = Math.Min(writableStart, range.Start);
-                var end = Math.Max(writableEnd, range.End);
-                if (start != writableStart || end != writableEnd)
+
+                var previousState = Interlocked.CompareExchange(
+                    ref range.Armed,
+                    RangeInvalidating,
+                    RangeArmed);
+                if (previousState is RangeInvalidating or RangeArming)
                 {
-                    writableStart = start;
-                    writableEnd = end;
-                    expanded = true;
+                    handled = true;
+                    continue;
                 }
+                if (previousState != RangeArmed)
+                {
+                    continue;
+                }
+
+                if (!RemovePageWatchers(range, out var changedBytes))
+                {
+                    Volatile.Write(ref range.Armed, RangeDisarmed);
+                    return false;
+                }
+
+                writableBytes += changedBytes;
+                if (_profileEnabled)
+                {
+                    Interlocked.Increment(ref range.ProfileFaultCount);
+                    Interlocked.Add(ref range.ProfileFaultBytes, changedBytes);
+                }
+                MarkFaultedRange(range, faultAddress);
+                Volatile.Write(ref range.Armed, RangeDisarmed);
+                handled = true;
             }
         }
 
-        var needsUnprotect = false;
-        for (var index = 0; index < ranges.Length; index++)
-        {
-            var range = ranges[index];
-            if (range.Start < writableEnd && range.End > writableStart &&
-                Volatile.Read(ref range.Armed) != 0)
-            {
-                needsUnprotect = true;
-                break;
-            }
-        }
-
-        if (needsUnprotect &&
-            !TrySetProtection(writableStart, writableEnd - writableStart, writable: true))
+        if (!handled)
         {
             return false;
         }
 
-        for (var index = 0; index < ranges.Length; index++)
+        if (_profileEnabled)
         {
-            var range = ranges[index];
-            if (range.Start >= writableEnd || range.End <= writableStart)
-            {
-                continue;
-            }
-
-            var wasArmed = Interlocked.Exchange(ref range.Armed, 0) != 0;
-            var wasDirty = Interlocked.Exchange(ref range.Dirty, 1) != 0;
-            // Protected ranges bump generation once per arm/fault cycle.
-            // Watch-only ranges never arm, so bump on the first dirty mark
-            // (NotifyManagedWrite) so cache owners still see a rewrite.
-            if (wasArmed || (!range.Protect && !wasDirty))
-            {
-                Interlocked.Increment(ref range.WriteGeneration);
-            }
-            if (wasArmed &&
-                range.TraceLifetime &&
-                Interlocked.CompareExchange(ref range.FirstCpuWriteSeen, 1, 0) == 0)
-            {
-                // Signal context: capture preallocated scalar fields only.
-                // Formatting and I/O are deferred to a locked safe path.
-                range.FirstCpuWriteTraceSequence =
-                    Interlocked.Increment(ref _lifetimeTraceSequence);
-                range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
-                range.FirstCpuWriteAddress = faultAddress;
-                range.FirstCpuWritePage = faultAddress & ~0xFFFUL;
-                Volatile.Write(ref range.PendingFirstCpuWrite, 1);
-                Volatile.Write(ref range.FirstCpuWriteSeen, 2);
-            }
+            Interlocked.Increment(ref _profileFaultCount);
+            Interlocked.Add(ref _profileFaultBytes, writableBytes);
         }
 
         return true;
@@ -659,17 +724,31 @@ public static unsafe class GuestImageWriteTracker
     private static void ArmLocked(TrackedRange range, string operation)
     {
         FlushPendingFirstCpuWrite(range);
-        if (Interlocked.Exchange(ref range.Armed, 1) == 1)
+        if (Interlocked.CompareExchange(
+                ref range.Armed,
+                RangeArming,
+                RangeDisarmed) != RangeDisarmed)
         {
             return;
         }
 
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
-        var failed = !TrySetProtection(range.Start, range.End - range.Start, writable: false);
+        var failed = !AddPageWatchers(range, out var protectedBytes);
         if (failed)
         {
-            Volatile.Write(ref range.Armed, 0);
+            Volatile.Write(ref range.Armed, RangeDisarmed);
+        }
+        else
+        {
+            Volatile.Write(ref range.Armed, RangeArmed);
+            if (_profileEnabled)
+            {
+                Interlocked.Increment(ref _profileArmCount);
+                Interlocked.Add(ref _profileArmBytes, protectedBytes);
+                Interlocked.Increment(ref range.ProfileArmCount);
+                Interlocked.Add(ref range.ProfileArmBytes, protectedBytes);
+            }
         }
 
         if (range.TraceLifetime)
@@ -683,16 +762,275 @@ public static unsafe class GuestImageWriteTracker
     private static void DisarmLocked(TrackedRange range, string operation)
     {
         FlushPendingFirstCpuWrite(range);
-        var wasArmed = Interlocked.Exchange(ref range.Armed, 0) == 1;
-        if (wasArmed)
+        var wasArmed = Interlocked.CompareExchange(
+            ref range.Armed,
+            RangeDisarmed,
+            RangeArmed) == RangeArmed;
+        if (wasArmed && RemovePageWatchers(range, out var writableBytes))
         {
-            _ = TrySetProtection(range.Start, range.End - range.Start, writable: true);
+            if (_profileEnabled)
+            {
+                Interlocked.Increment(ref _profileDisarmCount);
+                Interlocked.Add(ref _profileDisarmBytes, writableBytes);
+            }
         }
 
         if (range.TraceLifetime)
         {
-            TraceLifetime(range, wasArmed ? operation : $"{operation}-already-disarmed");
+            TraceLifetime(
+                range,
+                wasArmed ? operation : $"{operation}-already-disarmed");
         }
+    }
+
+    /// <summary>
+    /// Registers a range written only through managed HLE memory helpers.
+    /// Those helpers notify the tracker before each write, so page protection
+    /// would duplicate the same observation and add avoidable fault traffic.
+    /// </summary>
+    public static void TrackManagedWriter(
+        ulong address,
+        ulong byteCount,
+        long sourceSequence = 0,
+        string source = "managed-writer")
+    {
+        if (address == 0 || byteCount == 0)
+        {
+            return;
+        }
+
+        TrackWatchOnly(
+            address,
+            byteCount,
+            sourceSequence,
+            source,
+            managedWriter: true);
+    }
+
+    private static PageState[] GetTrackedPagesLocked(
+        ulong start,
+        ulong end,
+        bool executable)
+    {
+        var pageCount = checked((int)((end - start) / TrackingPageSize));
+        var pages = new PageState[pageCount];
+        for (var index = 0; index < pageCount; index++)
+        {
+            var pageAddress = start + (ulong)index * TrackingPageSize;
+            if (!_pagesByAddress.TryGetValue(pageAddress, out var page))
+            {
+                page = new PageState
+                {
+                    Address = pageAddress,
+                    Executable = executable,
+                };
+                _pagesByAddress[pageAddress] = page;
+            }
+            else if (Volatile.Read(ref page.WriteWatchers) == 0)
+            {
+                // A guest mapping can be recycled with different execute
+                // permissions after its previous image owner retired.
+                page.Executable = executable;
+            }
+            else
+            {
+                page.Executable |= executable;
+            }
+
+            pages[index] = page;
+        }
+
+        return pages;
+    }
+
+    private static bool AddPageWatchers(TrackedRange range, out long protectedBytes)
+    {
+        protectedBytes = 0;
+        var runStart = 0UL;
+        var runEnd = 0UL;
+        var runExecutable = false;
+        var processedPages = 0;
+
+        for (var index = 0; index < range.Pages.Length; index++)
+        {
+            var page = range.Pages[index];
+            var watcherCount = Interlocked.Increment(ref page.WriteWatchers);
+            processedPages++;
+            if (watcherCount != 1)
+            {
+                if (!FlushProtectionRun(
+                        ref runStart,
+                        ref runEnd,
+                        runExecutable,
+                        writable: false,
+                        ref protectedBytes))
+                {
+                    _ = RemovePageWatchers(range, processedPages, out _);
+                    return false;
+                }
+                continue;
+            }
+
+            if (runEnd == page.Address && runExecutable == page.Executable)
+            {
+                runEnd += TrackingPageSize;
+                continue;
+            }
+
+            if (!FlushProtectionRun(
+                    ref runStart,
+                    ref runEnd,
+                    runExecutable,
+                    writable: false,
+                    ref protectedBytes))
+            {
+                _ = RemovePageWatchers(range, processedPages, out _);
+                return false;
+            }
+
+            runStart = page.Address;
+            runEnd = page.Address + TrackingPageSize;
+            runExecutable = page.Executable;
+        }
+
+        if (FlushProtectionRun(
+                ref runStart,
+                ref runEnd,
+                runExecutable,
+                writable: false,
+                ref protectedBytes))
+        {
+            return true;
+        }
+
+        _ = RemovePageWatchers(range, processedPages, out _);
+        return false;
+    }
+
+    private static bool RemovePageWatchers(TrackedRange range, out long writableBytes) =>
+        RemovePageWatchers(range, range.Pages.Length, out writableBytes);
+
+    private static bool RemovePageWatchers(
+        TrackedRange range,
+        int pageCount,
+        out long writableBytes)
+    {
+        writableBytes = 0;
+        var runStart = 0UL;
+        var runEnd = 0UL;
+        var runExecutable = false;
+
+        for (var index = 0; index < pageCount; index++)
+        {
+            var page = range.Pages[index];
+            var watcherCount = Interlocked.Decrement(ref page.WriteWatchers);
+            if (watcherCount < 0)
+            {
+                Interlocked.Increment(ref page.WriteWatchers);
+                return false;
+            }
+
+            if (watcherCount != 0)
+            {
+                if (!FlushProtectionRun(
+                        ref runStart,
+                        ref runEnd,
+                        runExecutable,
+                        writable: true,
+                        ref writableBytes))
+                {
+                    return false;
+                }
+                continue;
+            }
+
+            if (runEnd == page.Address && runExecutable == page.Executable)
+            {
+                runEnd += TrackingPageSize;
+                continue;
+            }
+
+            if (!FlushProtectionRun(
+                    ref runStart,
+                    ref runEnd,
+                    runExecutable,
+                    writable: true,
+                    ref writableBytes))
+            {
+                return false;
+            }
+
+            runStart = page.Address;
+            runEnd = page.Address + TrackingPageSize;
+            runExecutable = page.Executable;
+        }
+
+        return FlushProtectionRun(
+            ref runStart,
+            ref runEnd,
+            runExecutable,
+            writable: true,
+            ref writableBytes);
+    }
+
+    private static bool FlushProtectionRun(
+        ref ulong runStart,
+        ref ulong runEnd,
+        bool executable,
+        bool writable,
+        ref long changedBytes)
+    {
+        if (runEnd <= runStart)
+        {
+            return true;
+        }
+
+        var byteCount = runEnd - runStart;
+        if (!TrySetProtection(runStart, byteCount, writable, executable))
+        {
+            return false;
+        }
+
+        changedBytes += (long)byteCount;
+        runStart = 0;
+        runEnd = 0;
+        return true;
+    }
+
+    private static bool IsPageStillWatched(TrackedRange[] ranges, ulong pageAddress)
+    {
+        var pageEnd = pageAddress + TrackingPageSize;
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            if (Volatile.Read(ref range.Armed) != RangeDisarmed &&
+                range.Start < pageEnd && range.End > pageAddress)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void MarkFaultedRange(TrackedRange range, ulong faultAddress)
+    {
+        Interlocked.Exchange(ref range.Dirty, 1);
+        Interlocked.Increment(ref range.WriteGeneration);
+        if (!range.TraceLifetime ||
+            Interlocked.CompareExchange(ref range.FirstCpuWriteSeen, 1, 0) != 0)
+        {
+            return;
+        }
+
+        // Signal context: capture preallocated scalar fields only. Formatting
+        // and I/O are deferred to a locked safe path.
+        range.FirstCpuWriteTraceSequence = Interlocked.Increment(ref _lifetimeTraceSequence);
+        range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
+        range.FirstCpuWriteAddress = faultAddress;
+        range.FirstCpuWritePage = faultAddress & ~(TrackingPageSize - 1);
+        Volatile.Write(ref range.PendingFirstCpuWrite, 1);
+        Volatile.Write(ref range.FirstCpuWriteSeen, 2);
     }
 
     private static void RebuildSnapshotLocked()
@@ -700,11 +1038,49 @@ public static unsafe class GuestImageWriteTracker
         Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(_rangesByAddress.Values.ToArray()));
     }
 
+    /// <summary>
+    /// Arms write observation before a caller copies guest image memory and
+    /// returns the generation that must still be current when the copy ends.
+    /// </summary>
+    public static ReadSnapshot BeginReadSnapshot(
+        ulong address,
+        ulong byteCount,
+        long sourceSequence = 0,
+        string source = "texture-snapshot")
+    {
+        if (!_enabled || address == 0 || byteCount == 0)
+        {
+            return new ReadSnapshot(address, -1, false);
+        }
+
+        if (_profileEnabled)
+        {
+            Interlocked.Increment(ref _profileSnapshotCount);
+        }
+
+        if (!HasManagedWriterCoverage(address, byteCount))
+        {
+            Track(address, byteCount, sourceSequence, source, protect: true);
+        }
+        return TryGetWriteGeneration(address, out var generation)
+            ? new ReadSnapshot(address, generation, true)
+            : new ReadSnapshot(address, -1, false);
+    }
+
+    /// <summary>
+    /// Returns true only when no observed guest write overlapped the snapshot.
+    /// </summary>
+    public static bool IsReadSnapshotStable(in ReadSnapshot snapshot) =>
+        !snapshot.Active ||
+        (TryGetWriteGeneration(snapshot.Address, out var generation) &&
+            generation == snapshot.Generation);
+
     private static void TrackWatchOnly(
         ulong address,
         ulong byteCount,
         long sourceSequence,
-        string source)
+        string source,
+        bool managedWriter = false)
     {
         lock (_gate)
         {
@@ -716,6 +1092,7 @@ public static unsafe class GuestImageWriteTracker
                 {
                     range.SourceSequence = sourceSequence;
                     range.Source = source;
+                    range.ManagedWriter |= managedWriter;
                     return;
                 }
 
@@ -730,6 +1107,7 @@ public static unsafe class GuestImageWriteTracker
                     Protect = false,
                     Dirty = dirty,
                     WriteGeneration = generation,
+                    ManagedWriter = range.ManagedWriter || managedWriter,
                     SourceSequence = sourceSequence,
                     Source = source,
                 };
@@ -745,6 +1123,7 @@ public static unsafe class GuestImageWriteTracker
                 Start = address,
                 End = SaturatingEnd(address, byteCount),
                 Protect = false,
+                ManagedWriter = managedWriter,
                 SourceSequence = sourceSequence,
                 Source = source,
             };
@@ -956,7 +1335,11 @@ public static unsafe class GuestImageWriteTracker
             $"fault=0x{faultAddress:X16} page=0x{faultPage:X16}");
     }
 
-    private static bool TrySetProtection(ulong start, ulong length, bool writable)
+    private static bool TrySetProtection(
+        ulong start,
+        ulong length,
+        bool writable,
+        bool executable)
     {
         if (length == 0)
         {
@@ -968,14 +1351,38 @@ public static unsafe class GuestImageWriteTracker
             return VirtualProtect(
                 (nint)start,
                 (nuint)length,
-                writable ? PageReadWrite : PageReadonly,
+                executable
+                    ? writable
+                        ? HostMemory.PAGE_EXECUTE_READWRITE
+                        : HostMemory.PAGE_EXECUTE_READ
+                    : writable
+                        ? PageReadWrite
+                        : PageReadonly,
                 out _) != 0;
         }
 
+        var protection = ProtRead |
+            (writable ? ProtWrite : 0) |
+            (executable ? ProtExec : 0);
         return Mprotect(
             (nint)start,
             (nuint)length,
-            writable ? ProtRead | ProtWrite : ProtRead) == 0;
+            protection) == 0;
+    }
+
+    private static bool IsExecutableMapping(ulong address)
+    {
+        if (address == 0 ||
+            HostMemory.Query((void*)address, out var info) == 0)
+        {
+            return false;
+        }
+
+        var protection = info.Protect & 0xFFu;
+        return protection is
+            HostMemory.PAGE_EXECUTE or
+            HostMemory.PAGE_EXECUTE_READ or
+            HostMemory.PAGE_EXECUTE_READWRITE;
     }
 
     private static long GetMonotonicNanoseconds()
@@ -989,5 +1396,83 @@ public static unsafe class GuestImageWriteTracker
         return ClockGetTime(ClockMonotonicRaw, &time) == 0
             ? unchecked((time.Seconds * 1_000_000_000L) + time.Nanoseconds)
             : 0;
+    }
+
+    private static void ReportProfileIfDue()
+    {
+        if (!_profileEnabled)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var previous = Volatile.Read(ref _profileLastReportTimestamp);
+        if (now - previous < Stopwatch.Frequency * 5 ||
+            Interlocked.CompareExchange(ref _profileLastReportTimestamp, now, previous) != previous)
+        {
+            return;
+        }
+
+        var snapshots = Interlocked.Exchange(ref _profileSnapshotCount, 0);
+        var arms = Interlocked.Exchange(ref _profileArmCount, 0);
+        var armBytes = Interlocked.Exchange(ref _profileArmBytes, 0);
+        var faults = Interlocked.Exchange(ref _profileFaultCount, 0);
+        var faultBytes = Interlocked.Exchange(ref _profileFaultBytes, 0);
+        var disarms = Interlocked.Exchange(ref _profileDisarmCount, 0);
+        var disarmBytes = Interlocked.Exchange(ref _profileDisarmBytes, 0);
+        int protectedRanges;
+        List<(ulong Address, ulong ByteCount, string Source, long Arms, long ArmBytes, long Faults, long FaultBytes)> hotRanges;
+        lock (_gate)
+        {
+            protectedRanges = _rangesByAddress.Count;
+            hotRanges = new(protectedRanges);
+            foreach (var range in _rangesByAddress.Values)
+            {
+                var rangeArms = Interlocked.Exchange(ref range.ProfileArmCount, 0);
+                var rangeArmBytes = Interlocked.Exchange(ref range.ProfileArmBytes, 0);
+                var rangeFaults = Interlocked.Exchange(ref range.ProfileFaultCount, 0);
+                var rangeFaultBytes = Interlocked.Exchange(ref range.ProfileFaultBytes, 0);
+                if (rangeArms == 0 && rangeFaults == 0)
+                {
+                    continue;
+                }
+
+                hotRanges.Add((
+                    range.Address,
+                    range.ByteCount,
+                    range.Source,
+                    rangeArms,
+                    rangeArmBytes,
+                    rangeFaults,
+                    rangeFaultBytes));
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[PERF][GUEST_IMAGE_TRACKER] snapshots={snapshots} " +
+            $"arms={arms}/{armBytes}B faults={faults}/{faultBytes}B " +
+            $"disarms={disarms}/{disarmBytes}B ranges={protectedRanges}");
+
+        foreach (var range in hotRanges
+                     .OrderByDescending(static range => Math.Max(range.ArmBytes, range.FaultBytes))
+                     .ThenByDescending(static range => range.Faults)
+                     .Take(5))
+        {
+            Console.Error.WriteLine(
+                $"[PERF][GUEST_IMAGE_TRACKER_RANGE] addr=0x{range.Address:X16} " +
+                $"size={range.ByteCount}B source='{range.Source}' " +
+                $"arms={range.Arms}/{range.ArmBytes}B " +
+                $"faults={range.Faults}/{range.FaultBytes}B");
+        }
+    }
+
+    private static bool HasManagedWriterCoverage(ulong address, ulong byteCount)
+    {
+        lock (_gate)
+        {
+            return _watchRangesByAddress.TryGetValue(address, out var range) &&
+                range.ManagedWriter &&
+                range.ByteCount >= byteCount;
+        }
     }
 }

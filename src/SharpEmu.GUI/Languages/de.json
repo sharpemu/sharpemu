@@ -159,7 +159,7 @@
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "Allgemein",
   "Options.Env.RenderDoc.Desc": "Lädt die RenderDoc-In-Application-API, damit Frames aus dem Emulator heraus aufgezeichnet werden können.\nDrücke F10 während das Spiel läuft, um ein Frame aufzuzeichnen; Aufzeichnungen landen in user/logs/capture_logs/<TITLE_ID>.\nErfordert eine RenderDoc-Installation. Verlangsamt die GPU und lässt manche Titel hängen, lass es also aus, wenn du nicht debuggst.",
-  "Options.Env.GuestImageCpuSync.Desc": "Gast-Oberflächen neu hochladen, die der eigene CPU-Code des Spiels überschreibt.\nNormalerweise aus lassen. Für Titel aktivieren, deren CPU-gezeichnete Oberflächen nie auf dem Bildschirm erscheinen.\nKostet Leistung und verursacht bei einigen Titeln wie GTA V Regressionen.",
+  "Options.Env.GuestImageCpuSync.Desc": "Synchronisiert Gast-Oberflächen, nachdem der CPU-Code des Spiels sie überschreibt.\nStandardmäßig aktiviert, damit CPU-geschriebene Bilder korrekt bleiben. Nur zur Fehlersuche oder zur Verringerung unnötiger Last deaktivieren.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Liefert GPU-Befehlspuffer-Präambeln auch dann aus, wenn die Zielwarteschlange sie nie abholt.\nNormalerweise aus lassen. Für Titel aktivieren, die beim Warten auf einen GPU-Fence hängen bleiben, der nie signalisiert.",
   "Common.Save": "Speichern",
   "Common.Cancel": "Abbrechen",

@@ -42,7 +42,7 @@
   "Options.Env.Group.Debug": "Débogage",
   "Options.Env.Group.General": "Général",
   "Options.Env.RenderDoc.Desc": "Charge l'API in-application de RenderDoc afin de capturer des images depuis l'émulateur.\nAppuyez sur F10 pendant le jeu pour capturer une image ; les captures sont écrites dans user/logs/capture_logs/<TITLE_ID>.\nNécessite l'installation de RenderDoc. Ralentit le GPU et bloque certains jeux : laissez cette option désactivée sauf en cas de débogage.",
-  "Options.Env.GuestImageCpuSync.Desc": "Recharger les surfaces invité que le code CPU du jeu réécrit lui-même.\nLaisser désactivé normalement. Activer pour les titres dont les surfaces dessinées par le CPU n'atteignent jamais l'écran.\nCoûte des performances et provoque des régressions sur certains titres, comme GTA V.",
+  "Options.Env.GuestImageCpuSync.Desc": "Synchronise les surfaces invité après leur réécriture par le CPU du jeu.\nActivé par défaut pour garder les images écrites par le CPU correctes. Désactivez-le seulement pour diagnostiquer un problème ou réduire une charge inutile.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Soumettre les préambules de tampon de commandes GPU même quand leur file cible ne les récupère jamais.\nLaisser désactivé normalement. Activer pour les titres qui se figent en attendant une fence GPU qui ne se déclenche jamais.",
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",

@@ -193,7 +193,7 @@
   "Options.Env.Group.Debug": "Hata Ayıklama",
   "Options.Env.Group.General": "Genel",
   "Options.Env.RenderDoc.Desc": "RenderDoc uygulama içi API'sini yükler, böylece kareler emülatörün içinden yakalanabilir.\nOyun çalışırken F10'a basınca bir kare yakalanır; kayıtlar user/logs/capture_logs/<TITLE_ID> altına düşer.\nRenderDoc'un kurulu olmasını gerektirir. GPU'yu yavaşlatır ve bazı oyunları kilitler, hata ayıklamıyorsanız kapalı bırakın.",
-  "Options.Env.GuestImageCpuSync.Desc": "Oyunun kendi CPU kodunun yeniden yazdığı misafir yüzeyleri tekrar yükler.\nNormalde kapalı bırakın. CPU ile çizilen yüzeyleri ekrana ulaşmayan oyunlarda açın.\nPerformansa mal olur ve GTA V gibi bazı oyunlarda soruna yol açar.",
+  "Options.Env.GuestImageCpuSync.Desc": "Oyunun CPU kodu yeniden yazdıktan sonra misafir yüzeylerini eşitler.\nCPU tarafından yazılan görüntüleri doğru tutmak için varsayılan olarak açıktır. Yalnızca bir sorunu tanılamak veya gereksiz yükü azaltmak için kapatın.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Hedef kuyruk onları asla almasa bile GPU komut arabelleği önsözlerini teslim eder.\nNormalde kapalı bırakın. Asla sinyal vermeyen bir GPU fence'ini bekleyerek takılan oyunlarda açın.",
   "Options.DefaultProfile.Label": "Varsayilan profil adi",
   "Options.DefaultProfile.Desc": "Oyun metin girisi istediginde kullanilacak ad. Varsayilan deger Sharp'tir.",

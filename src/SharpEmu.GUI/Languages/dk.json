@@ -159,7 +159,7 @@
   "Options.Env.Group.Debug": "Fejlfinding",
   "Options.Env.Group.General": "Generelt",
   "Options.Env.RenderDoc.Desc": "Indlæser RenderDocs in-application-API, så frames kan optages inde fra emulatoren.\nTryk på F10 mens spillet kører for at optage ét frame; optagelser havner i user/logs/capture_logs/<TITLE_ID>.\nKræver at RenderDoc er installeret. Gør GPU'en langsommere og får nogle titler til at hænge, så lad den være slået fra, medmindre du fejlfinder.",
-  "Options.Env.GuestImageCpuSync.Desc": "Genindlæs gæsteoverflader, som spillets egen CPU-kode omskriver.\nLad den være slået fra normalt. Slå til for titler, hvis CPU-tegnede overflader aldrig når skærmen.\nKoster ydeevne og giver regressioner i nogle titler, såsom GTA V.",
+  "Options.Env.GuestImageCpuSync.Desc": "Synkroniserer gæsteoverflader, efter spillets CPU-kode har skrevet dem om.\nAktiveret som standard for at holde CPU-skrevne billeder korrekte. Deaktiver kun for at diagnosticere et problem eller reducere unødig belastning.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Leverer GPU-kommandobuffer-præambler, selv når målkøen aldrig henter dem.\nLad den være slået fra normalt. Slå til for titler, der hænger og venter på en GPU-fence, der aldrig signalerer.",
   "Common.Save": "Gem",
   "Common.Cancel": "Annuller",

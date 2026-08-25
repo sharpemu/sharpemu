@@ -310,7 +310,7 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
         EnvGuestImageCpuSyncToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
+            SetDefaultEnabledEnvironmentToggle(
                 "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
                 EnvGuestImageCpuSyncToggle.IsChecked == true);
         EnvForceSubmitOrphanPreamblesToggle.IsCheckedChanged += (_, _) =>
@@ -1262,7 +1262,10 @@ public partial class MainWindow : Window
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
         EnvGuestImageCpuSyncToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_GUEST_IMAGE_CPU_SYNC");
+            IsEnvironmentEnabled(
+                _settings.EnvironmentToggles,
+                "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
+                defaultEnabled: true);
         EnvForceSubmitOrphanPreamblesToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES");
         EnvRenderDocToggle.IsChecked =
@@ -1491,6 +1494,20 @@ public partial class MainWindow : Window
         else
         {
             _settings.EnvironmentToggles.Remove(name);
+        }
+    }
+
+    private void SetDefaultEnabledEnvironmentToggle(string name, bool enabled)
+    {
+        _settings.EnvironmentToggles.RemoveAll(entry =>
+            string.Equals(
+                entry.Split('=', 2, StringSplitOptions.TrimEntries)[0],
+                name,
+                StringComparison.OrdinalIgnoreCase));
+
+        if (!enabled)
+        {
+            _settings.EnvironmentToggles.Add($"{name}=0");
         }
     }
 

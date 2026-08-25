@@ -47,7 +47,7 @@
   "Options.Env.Group.Debug": "Silumine",
   "Options.Env.Group.General": "Üldine",
   "Options.Env.RenderDoc.Desc": "Laadib RenderDoc'i rakendusesisese API, et kaadreid saaks hõivata otse emulaatorist.\nVajuta mängu käigus F10 ühe kaadri hõivamiseks; hõivatised salvestatakse kausta user/logs/capture_logs/<TITLE_ID>.\nNõuab paigaldatud RenderDoc'i. Aeglustab GPU-d ja põhjustab mõningate mängude hangumist, seega hoia välja lülitatuna, kui sa ei silu.",
-  "Options.Env.GuestImageCpuSync.Desc": "Laadi uuesti üles mängupinnad, mida selle enda CPU-kood ümber kirjutab.\nTavaliselt jäta välja lülitatuks. Lülita sisse mängude puhul, mille CPU-ga joonistatud pinnad ei jõua kunagi ekraanile.\nVähendab jõudlust ja halvendab mõne mängu töökindlust (nt GTA V).",
+  "Options.Env.GuestImageCpuSync.Desc": "Sünkroonib külalispinnad pärast seda, kui mängu CPU-kood need ümber kirjutab.\nVaikimisi lubatud, et CPU kirjutatud pildid oleksid õiged. Keela ainult vea uurimiseks või tarbetu koormuse vähendamiseks.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Edasta GPU käsupuhvrite preambulid isegi siis, kui nende sihtjärjekord neid kunagi ei võta.\nTavaliselt jäta välja lülitatuks. Lülita sisse mängude puhul, mis hanguvad oodates GPU-fence'i, mis kunagi ei rakendu.",
   "Options.DefaultProfile.Label": "Vaikimisi profiili nimi",
   "Options.DefaultProfile.Desc": "Nimi, mida kasutatakse, kui mäng küsib tekstisisestust. Vaikimisi Sharp.",
