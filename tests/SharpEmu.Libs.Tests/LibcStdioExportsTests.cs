@@ -163,7 +163,7 @@ public sealed class LibcStdioExportsTests
         try
         {
             fixture.Context[CpuRegister.Rdi] = fixture.Handle;
-            fixture.Context[CpuRegister.Rsi] = BaseAddress + 0x2000;
+            fixture.Context[CpuRegister.Rsi] = 0x7FFF_FFFF_FFFF_F000;
 
             var result = LibcStdioExports.Fgetpos(fixture.Context);
 
@@ -227,6 +227,116 @@ public sealed class LibcStdioExportsTests
         }
     }
 
+    [Fact]
+    public async Task Fread_BlocksConcurrentSeekUntilTheReadCompletes()
+    {
+        var contents = Enumerable.Range(0, 64).Select(value => (byte)value).ToArray();
+        var fixture = OpenTemporaryFile("rb", contents);
+        using var writeEntered = new ManualResetEventSlim();
+        using var releaseWrite = new ManualResetEventSlim();
+        try
+        {
+            fixture.Memory.BeforeWrite = (address, _) =>
+            {
+                if (address != DataAddress)
+                {
+                    return;
+                }
+
+                writeEntered.Set();
+                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)));
+            };
+
+            var readContext = CreateContext(fixture.Memory);
+            readContext[CpuRegister.Rdi] = DataAddress;
+            readContext[CpuRegister.Rsi] = 1;
+            readContext[CpuRegister.Rdx] = 32;
+            readContext[CpuRegister.Rcx] = fixture.Handle;
+            var readTask = Task.Run(() => LibcStdioExports.Fread(readContext));
+
+            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)));
+
+            var seekContext = CreateContext(fixture.Memory);
+            seekContext[CpuRegister.Rdi] = fixture.Handle;
+            seekContext[CpuRegister.Rsi] = 48;
+            seekContext[CpuRegister.Rdx] = 0;
+            var seekTask = Task.Run(() => LibcStdioExports.Fseek(seekContext));
+
+            await Task.Delay(100);
+            Assert.False(seekTask.IsCompleted);
+            releaseWrite.Set();
+
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readTask);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await seekTask);
+            var actual = new byte[32];
+            Assert.True(fixture.Memory.TryRead(DataAddress, actual));
+            Assert.True(actual.SequenceEqual(contents.AsSpan(0, 32)));
+        }
+        finally
+        {
+            fixture.Memory.BeforeWrite = null;
+            releaseWrite.Set();
+            fixture.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Fclose_WaitsForAnInFlightReadAndRejectsLaterReads()
+    {
+        var fixture = OpenTemporaryFile("rb", Enumerable.Range(0, 64).Select(value => (byte)value).ToArray());
+        using var writeEntered = new ManualResetEventSlim();
+        using var releaseWrite = new ManualResetEventSlim();
+        try
+        {
+            fixture.Memory.BeforeWrite = (address, _) =>
+            {
+                if (address != DataAddress)
+                {
+                    return;
+                }
+
+                writeEntered.Set();
+                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)));
+            };
+
+            var readContext = CreateContext(fixture.Memory);
+            readContext[CpuRegister.Rdi] = DataAddress;
+            readContext[CpuRegister.Rsi] = 1;
+            readContext[CpuRegister.Rdx] = 32;
+            readContext[CpuRegister.Rcx] = fixture.Handle;
+            var readTask = Task.Run(() => LibcStdioExports.Fread(readContext));
+
+            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)));
+
+            var closeContext = CreateContext(fixture.Memory);
+            closeContext[CpuRegister.Rdi] = fixture.Handle;
+            var closeTask = Task.Run(() => LibcStdioExports.Fclose(closeContext));
+
+            await Task.Delay(100);
+            Assert.False(closeTask.IsCompleted);
+            releaseWrite.Set();
+
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readTask);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await closeTask);
+
+            var lateReadContext = CreateContext(fixture.Memory);
+            lateReadContext[CpuRegister.Rdi] = DataAddress;
+            lateReadContext[CpuRegister.Rsi] = 1;
+            lateReadContext[CpuRegister.Rdx] = 1;
+            lateReadContext[CpuRegister.Rcx] = fixture.Handle;
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                LibcStdioExports.Fread(lateReadContext));
+            Assert.Equal(0UL, lateReadContext[CpuRegister.Rax]);
+        }
+        finally
+        {
+            fixture.Memory.BeforeWrite = null;
+            releaseWrite.Set();
+            fixture.Dispose();
+        }
+    }
+
     private static CpuContext CreateContext(out FakeCpuMemory memory)
     {
         memory = new FakeCpuMemory(BaseAddress, 0x1000);
@@ -235,6 +345,12 @@ public sealed class LibcStdioExportsTests
             FsBase = TlsAddress,
         };
     }
+
+    private static CpuContext CreateContext(StdioCpuMemory memory) =>
+        new(memory, Generation.Gen5)
+        {
+            FsBase = TlsAddress,
+        };
 
     private static int ReadErrno(ICpuMemory memory)
     {
@@ -301,6 +417,8 @@ public sealed class LibcStdioExportsTests
         private readonly byte[] _storage;
         private readonly Dictionary<ulong, byte[]> _allocations = new();
 
+        public Action<ulong, int>? BeforeWrite { get; set; }
+
         public StdioCpuMemory(ulong baseAddress, int size)
         {
             _baseAddress = baseAddress;
@@ -320,6 +438,7 @@ public sealed class LibcStdioExportsTests
 
         public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
         {
+            BeforeWrite?.Invoke(virtualAddress, source.Length);
             if (!TryResolve(virtualAddress, source.Length, out var storage, out var offset))
             {
                 return false;
