@@ -47,7 +47,11 @@ internal sealed record GuestDrawTexture(
     GuestTextureMipUpload[]? MipUploads = null,
     // Exact guest allocation extent observed by the translator. Host-linear
     // payloads can be smaller because tiled mip padding is not uploaded.
-    ulong SourceByteCount = 0);
+    ulong SourceByteCount = 0,
+    // False when the guest changed the backing range while AGC copied it.
+    // Backends must retain an older cached image instead of publishing these
+    // bytes or performing an unprotected recovery read.
+    bool CpuSnapshotStable = true);
 
 /// <summary>One linear mip range in a texture staging buffer.</summary>
 internal readonly record struct GuestTextureMipUpload(

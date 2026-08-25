@@ -2400,11 +2400,11 @@ internal static unsafe partial class VulkanVideoPresenter
     // only for the presenter to discard the bytes on a cache hit — for a
     // scene sampling large textures this was by far the dominant CPU cost
     // (gigabytes/second of allocation, page faults and GC pressure).
-    // ConcurrentDictionary keyed set: reads happen per texture per draw on
-    // the guest submit thread and must not contend with the render thread's
-    // mutations.
+    // The value is the guest-write generation uploaded into the cached image.
+    // Reads happen per texture per draw on the guest submit thread and must
+    // not contend with render-thread mutations.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<
-        TextureCacheLookupIdentity, byte> _cachedTextureIdentities = new();
+        TextureCacheLookupIdentity, long> _cachedTextureIdentities = new();
 
     // Guest memory handle for render-thread self-healing: when a draw whose
     // texel copy was skipped misses the texture cache (eviction, cache
@@ -2415,11 +2415,10 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
         _guestMemory = memory;
 
-    // Flip/acquire wakes: the render drain always scans dirty guest images;
-    // this flag only forces a full-scope pass after a Sync kick (and is the
-    // seam Agc uses instead of enqueueing plane copies on the producer path).
+    // Records an acquire/flip synchronization request. CPU-written textures
+    // are validated at their next guest bind, where AGC supplies correctly
+    // decoded pixels. The render loop must not upload raw tiled guest bytes.
     private static int _cpuWrittenGuestImageSyncRequested;
-    private static long _guestImageCpuSyncTraceCount;
 
     internal static void RequestCpuWrittenGuestImageSync(
         ulong scopeAddress = 0,
@@ -2435,15 +2434,35 @@ internal static unsafe partial class VulkanVideoPresenter
         Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
     }
 
-    internal static bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
-        _cachedTextureIdentities.ContainsKey(identity);
+    internal static bool IsTextureContentCached(in TextureCacheLookupIdentity identity)
+    {
+        if (!_cachedTextureIdentities.TryGetValue(identity, out var uploadedGeneration))
+        {
+            return false;
+        }
+
+        return !SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                identity.Content.Address,
+                out var currentGeneration) ||
+            currentGeneration == uploadedGeneration;
+    }
 
     private static void MarkTextureContentCached(
         in TextureContentIdentity content,
-        in GuestSampler sampler) =>
-        _cachedTextureIdentities.TryAdd(
-            new TextureCacheLookupIdentity(content, sampler),
-            0);
+        in GuestSampler sampler,
+        long uploadedGeneration)
+    {
+        if (uploadedGeneration < 0 &&
+            !SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                content.Address,
+                out uploadedGeneration))
+        {
+            uploadedGeneration = -1;
+        }
+
+        _cachedTextureIdentities[new TextureCacheLookupIdentity(content, sampler)] =
+            uploadedGeneration;
+    }
 
     private static void UnmarkTextureContentCached(in TextureContentIdentity content)
     {
@@ -4181,6 +4200,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public uint MipLevels = 1;
             public GuestTextureMipUpload[]? MipUploads;
             public bool NeedsUpload;
+            public bool RefreshesExistingImage;
             public bool OwnsStorage;
             public bool IsStorage;
             public bool Cached;
@@ -9526,6 +9546,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
 
+                TrackSampledTextureSource(texture);
                 return false;
             }
 
@@ -9553,12 +9574,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 RowLength = rowLength,
                 DstSelect = texture.DstSelect,
                 NeedsUpload = true,
+                RefreshesExistingImage =
+                    guestImage.Initialized || guestImage.InitialUploadPending,
                 SamplerState = texture.Sampler,
                 GuestImage = guestImage,
                 CpuContentFingerprint = fingerprint,
                 UpdatesCpuContent = true,
                 WriteGeneration = texture.WriteGeneration,
             };
+            TrackSampledTextureSource(texture);
             return true;
         }
 
@@ -9843,10 +9867,24 @@ internal static unsafe partial class VulkanVideoPresenter
                 ResourceMipLevels: texture.ResourceMipLevels);
             if (_textureCache.TryGetValue(key, out var cached))
             {
-                if (!TryGetSubmittedTextureFingerprint(texture, out var fingerprint) ||
-                    cached.CpuContentFingerprint == fingerprint)
+                if (!texture.CpuSnapshotStable)
                 {
-                    MarkTextureContentCached(key, texture.Sampler);
+                    return CreateCachedTextureBindingResource(cached, texture.Sampler);
+                }
+
+                var hasSubmittedPixels =
+                    TryGetSubmittedTextureFingerprint(texture, out var fingerprint);
+                if (!hasSubmittedPixels || cached.CpuContentFingerprint == fingerprint)
+                {
+                    if (hasSubmittedPixels)
+                    {
+                        TrackSampledTextureSource(texture);
+                        MarkTextureContentCached(
+                            key,
+                            texture.Sampler,
+                            texture.WriteGeneration);
+                    }
+
                     return CreateCachedTextureBindingResource(cached, texture.Sampler);
                 }
 
@@ -9858,6 +9896,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     FlushBatchedGuestCommands();
                 }
 
+                if (TryRefreshCachedTextureResource(
+                        texture,
+                        cached,
+                        fingerprint,
+                        out var refreshed))
+                {
+                    cached.CpuContentFingerprint = fingerprint;
+                    cached.WriteGeneration = texture.WriteGeneration;
+                    TrackSampledTextureSource(texture);
+                    MarkTextureContentCached(
+                        key,
+                        texture.Sampler,
+                        texture.WriteGeneration);
+                    return refreshed;
+                }
+
                 _textureCache.Remove(key);
                 _deferredTextureDestroys.Enqueue((cached, _submitTimeline));
             }
@@ -9866,6 +9920,13 @@ internal static unsafe partial class VulkanVideoPresenter
             // copy because this identity was marked cached; a miss here is
             // an invalidation race (eviction, cache clear). Self-heal by
             // reading the texels directly rather than rendering a fallback.
+            // An unstable snapshot is different: another read outside the
+            // generation transaction can publish the same torn content.
+            if (!texture.CpuSnapshotStable)
+            {
+                return CreateTextureResource(texture);
+            }
+
             if (texture.RgbaPixels.Length == 0 &&
                 texture.TiledSource is not { Length: > 0 })
             {
@@ -9883,22 +9944,184 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 resource.Cached = true;
                 _textureCache[key] = resource;
-                var sourceByteCount = texture.SourceByteCount != 0
-                    ? texture.SourceByteCount
-                    : (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length);
-                SharpEmu.HLE.GuestImageWriteTracker.Track(
-                    texture.Address,
-                    sourceByteCount,
-                    CurrentGuestWorkSequenceForDiagnostics,
-                    "vulkan.texture-cache",
-                    protect: false);
+                TrackSampledTextureSource(texture);
                 // Publish the cache hit only after write observation is live.
-                // Otherwise the submit thread can skip a copy during the
-                // narrow gap before the watch-only range is registered.
-                MarkTextureContentCached(key, texture.Sampler);
+                // Otherwise, the submit thread can skip a copy before the
+                // observer is registered.
+                MarkTextureContentCached(key, texture.Sampler, texture.WriteGeneration);
             }
 
             return resource;
+        }
+
+        /// <summary>
+        /// Uploads changed guest content into an identity-stable cached image.
+        /// The existing replacement path handles unsupported upload layouts.
+        /// </summary>
+        private bool TryRefreshCachedTextureResource(
+            GuestDrawTexture texture,
+            TextureResource cached,
+            ulong fingerprint,
+            out TextureResource resource)
+        {
+            resource = null!;
+            var width = Math.Max(texture.Width, 1);
+            var height = Math.Max(texture.Height, 1);
+            var depth = GetGuestTextureDepth(texture.Type, texture.Depth);
+            var layers = IsGuestTexture3D(texture.Type)
+                ? 1u
+                : Math.Max(texture.ArrayLayers, 1);
+            var mipLevels = texture.MipUploads is { Length: > 0 }
+                ? Math.Max(texture.ResourceMipLevels, 1)
+                : 1u;
+            if (cached.Width != width ||
+                cached.Height != height ||
+                cached.Depth != depth ||
+                cached.Type != texture.Type ||
+                cached.Layers != layers ||
+                cached.MipLevels != mipLevels)
+            {
+                return false;
+            }
+
+            var rowLength = texture.TileMode == 0
+                ? Math.Max(texture.Pitch, width)
+                : width;
+            var expectedSize = GetTextureByteCount(
+                texture.Format,
+                rowLength,
+                height,
+                depth);
+
+            if (_gpuDetileEnabled &&
+                texture.MipUploads is not { Length: > 0 } &&
+                texture.Detile is { } detileParameters &&
+                texture.TiledSource is { Length: > 0 } tiledSource &&
+                VulkanDetilePass.Supports(detileParameters) &&
+                !IsGuestTexture3D(texture.Type) &&
+                detileParameters.ElementsWide > 0 &&
+                detileParameters.ElementsHigh > 0 &&
+                (long)tiledSource.Length >=
+                    (long)detileParameters.ElementsWide * detileParameters.ElementsHigh *
+                    detileParameters.BytesPerElement * layers &&
+                tiledSource.Length %
+                    (int)(layers * (uint)detileParameters.BytesPerElement) == 0)
+            {
+                try
+                {
+                    var commandBuffer = BeginBatchedGuestCommands();
+                    CloseOpenTranslatedRenderPass();
+                    if (EnsureDetilePass().RecordDetile(
+                            commandBuffer,
+                            cached.Image,
+                            ImageLayout.ShaderReadOnlyOptimal,
+                            width,
+                            height,
+                            layers,
+                            tiledSource,
+                            detileParameters,
+                            out var detileTransients))
+                    {
+                        _batchRetireDetile.Add(detileTransients);
+                        resource = CreateCachedTextureBindingResource(
+                            cached,
+                            texture.Sampler);
+                        return true;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] Cached GPU texture refresh failed for " +
+                        $"addr=0x{texture.Address:X16}: {exception.Message}");
+                }
+            }
+
+            var pixels = texture.RgbaPixels;
+            if (pixels.Length == 0 &&
+                layers == 1 &&
+                texture.TiledSource is { Length: > 0 } fallbackTiled &&
+                texture.Detile is { } fallbackParameters &&
+                expectedSize > 0 &&
+                expectedSize <= int.MaxValue)
+            {
+                var linear = new byte[expectedSize];
+                if (GnmTiling.TryDetile(
+                        fallbackTiled,
+                        linear,
+                        texture.TileMode,
+                        fallbackParameters.ElementsWide,
+                        fallbackParameters.ElementsHigh,
+                        fallbackParameters.BytesPerElement))
+                {
+                    pixels = linear;
+                }
+            }
+
+            var expectedUploadSize = texture.MipUploads is { Length: > 0 } mipUploads
+                ? GetMipUploadByteCount(texture.Format, mipUploads, layers)
+                : expectedSize * layers;
+            if (expectedUploadSize == 0 ||
+                expectedUploadSize > int.MaxValue ||
+                pixels.Length != (int)expectedUploadSize)
+            {
+                return false;
+            }
+
+            DumpTextureUpload(texture, pixels, rowLength, width, height);
+            TraceTextureUploadContents(
+                texture,
+                pixels,
+                rowLength,
+                width,
+                height,
+                GetTextureFormat(texture.Format, texture.NumberType),
+                "refresh");
+            var uploadPixels = texture.Format == 13
+                ? ExpandRgb32Pixels(pixels)
+                : pixels;
+            var (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
+                uploadPixels,
+                $"{TextureDebugName(texture, GetTextureFormat(texture.Format, texture.NumberType))} " +
+                "refresh staging");
+            resource = new TextureResource
+            {
+                Address = cached.Address,
+                StagingBuffer = stagingBuffer,
+                StagingMemory = stagingMemory,
+                Image = cached.Image,
+                View = cached.View,
+                Width = cached.Width,
+                Height = cached.Height,
+                Depth = cached.Depth,
+                Type = cached.Type,
+                RowLength = cached.RowLength,
+                DstSelect = cached.DstSelect,
+                Layers = cached.Layers,
+                MipLevel = cached.MipLevel,
+                MipLevels = cached.MipLevels,
+                MipUploads = texture.MipUploads,
+                NeedsUpload = true,
+                RefreshesExistingImage = true,
+                Cached = true,
+                CpuContentFingerprint = fingerprint,
+                SamplerState = texture.Sampler,
+                WriteGeneration = texture.WriteGeneration,
+            };
+            return true;
+        }
+
+        private void TrackSampledTextureSource(GuestDrawTexture texture)
+        {
+            var sourceByteCount = texture.SourceByteCount != 0
+                ? texture.SourceByteCount
+                : (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length);
+            SharpEmu.HLE.GuestImageWriteTracker.Track(
+                texture.Address,
+                sourceByteCount,
+                CurrentGuestWorkSequenceForDiagnostics,
+                "vulkan.texture-cache",
+                protect: SharpEmu.HLE.GuestImageWriteTracker.Enabled);
         }
 
         private static bool TryGetSubmittedTextureFingerprint(
@@ -9944,122 +10167,15 @@ internal static unsafe partial class VulkanVideoPresenter
             };
 
         /// <summary>
-        /// Single dirty consumer per drain: re-upload CPU-written guest images
-        /// from guest memory, evict matching texture-cache entries, then
-        /// re-arm each address once. Must not enqueue <see cref="VulkanGuestImageWrite"/>.
+        /// Applies texture-cache capacity maintenance. CPU-written images are
+        /// refreshed at their next bind, after AGC has decoded the guest
+        /// tiling and format. Reading raw guest bytes here is incorrect for
+        /// tiled images and can replace a live image between related draws.
         /// </summary>
         private void DrainGuestImageCpuSync()
         {
-            var syncEnabled = SharpEmu.HLE.GuestImageWriteTracker.Enabled;
-            HashSet<ulong>? dirtyAddresses = null;
-            List<(ulong Address, uint Width, uint Height, ulong ByteCount)>? extents = null;
-            if (syncEnabled)
-            {
             _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
-
-            lock (_gate)
-            {
-                if (_guestImageExtents.Count > 0)
-                {
-                    extents = new(_guestImageExtents.Count);
-                    foreach (var entry in _guestImageExtents)
-                    {
-                        extents.Add((
-                            entry.Key,
-                            entry.Value.Width,
-                            entry.Value.Height,
-                            entry.Value.ByteCount));
-                    }
-                }
-            }
-
-            var memory = _guestMemory;
-            if (extents is not null)
-            {
-                foreach (var (address, width, height, byteCount) in extents)
-                {
-                    if (!SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(address))
-                    {
-                        continue;
-                    }
-
-                    (dirtyAddresses ??= []).Add(address);
-                    if (memory is null ||
-                        byteCount == 0 ||
-                        byteCount > 128UL * 1024UL * 1024UL ||
-                        !_guestImages.TryGetValue(address, out var target))
-                    {
-                        continue;
-                    }
-
-                    // GPU-only RTs often get Dirty via page-overlap. A full
-                    // plane read/upload per false dirty destroys Dead Cells FPS
-                    // and can stall GTA after intro. Probe 4 KiB first unless
-                    // the surface is already known CPU-backed.
-                    if (!target.IsCpuBacked)
-                    {
-                        var probeLen = (int)Math.Min(byteCount, 4096UL);
-                        var probe = new byte[probeLen];
-                        if (!memory.TryRead(address, probe) ||
-                            probe.AsSpan().IndexOfAnyExcept((byte)0) < 0)
-                        {
-                            continue;
-                        }
-
-                        target.IsCpuBacked = true;
-                    }
-
-                    var pixels = new byte[byteCount];
-                    if (!memory.TryRead(address, pixels) ||
-                        pixels.AsSpan().IndexOfAnyExcept((byte)0) < 0)
-                    {
-                        continue;
-                    }
-
-                    UploadGuestImageInitialData(target, pixels);
-                    if (Interlocked.Increment(ref _guestImageCpuSyncTraceCount) <= 64)
-                    {
-                        Console.Error.WriteLine(
-                            $"[SYNC] cpu-write-drain addr=0x{address:X} {width}x{height}");
-                    }
-                }
-            }
-
-            }
-
-            if (_textureCache.Count == 0)
-            {
-                if (dirtyAddresses is not null)
-                {
-                    foreach (var address in dirtyAddresses)
-                    {
-                        SharpEmu.HLE.GuestImageWriteTracker.Rearm(address);
-                    }
-                }
-
-                return;
-            }
-
-            List<TextureContentIdentity>? evicted = null;
-            foreach (var entry in _textureCache)
-            {
-                var address = entry.Key.Address;
-                if (dirtyAddresses is not null && dirtyAddresses.Contains(address))
-                {
-                    (evicted ??= []).Add(entry.Key);
-                    continue;
-                }
-
-                if (SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(address))
-                {
-                    (dirtyAddresses ??= []).Add(address);
-                    (evicted ??= []).Add(entry.Key);
-                }
-            }
-
-            if (evicted is null &&
-                dirtyAddresses is null &&
-                _textureCache.Count <= 2048)
+            if (_textureCache.Count <= 2048)
             {
                 return;
             }
@@ -10070,56 +10186,26 @@ internal static unsafe partial class VulkanVideoPresenter
             // is flushed first so the retire timeline exactly covers every
             // recorded reference (nothing may guess which submission lands
             // next on the shared queue).
-            if (_batchOpen && (evicted is not null || _textureCache.Count > 2048))
+            if (_batchOpen)
             {
                 FlushBatchedGuestCommands();
             }
 
             var retireTimeline = _submitTimeline;
-            if (_textureCache.Count > 2048)
+            var watchedAddresses = _textureCache.Keys
+                .Select(static key => key.Address)
+                .Distinct()
+                .ToArray();
+            foreach (var entry in _textureCache)
             {
-                var watchedAddresses = _textureCache.Keys
-                    .Select(static key => key.Address)
-                    .Distinct()
-                    .ToArray();
-                foreach (var entry in _textureCache)
-                {
-                    _deferredTextureDestroys.Enqueue((entry.Value, retireTimeline));
-                }
-
-                _textureCache.Clear();
-                ClearCachedTextureIdentities();
-                foreach (var address in watchedAddresses)
-                {
-                    SharpEmu.HLE.GuestImageWriteTracker.UntrackWatchOnly(address);
-                }
-            }
-            else if (evicted is not null)
-            {
-                foreach (var key in evicted)
-                {
-                    if (_textureCache.Remove(key, out var resource))
-                    {
-                        UnmarkTextureContentCached(key);
-                        _deferredTextureDestroys.Enqueue((resource, retireTimeline));
-                    }
-                }
-
-                foreach (var address in evicted.Select(static key => key.Address).Distinct())
-                {
-                    if (!_textureCache.Keys.Any(key => key.Address == address))
-                    {
-                        SharpEmu.HLE.GuestImageWriteTracker.UntrackWatchOnly(address);
-                    }
-                }
+                _deferredTextureDestroys.Enqueue((entry.Value, retireTimeline));
             }
 
-            if (dirtyAddresses is not null)
+            _textureCache.Clear();
+            ClearCachedTextureIdentities();
+            foreach (var address in watchedAddresses)
             {
-                foreach (var address in dirtyAddresses)
-                {
-                    SharpEmu.HLE.GuestImageWriteTracker.Rearm(address);
-                }
+                SharpEmu.HLE.GuestImageWriteTracker.UntrackWatchOnly(address);
             }
         }
 
@@ -10142,12 +10228,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (texture.StagingBuffer.Handle != 0)
             {
-                _vk.DestroyBuffer(_device, texture.StagingBuffer, null);
-            }
-
-            if (texture.StagingMemory.Handle != 0)
-            {
-                _vk.FreeMemory(_device, texture.StagingMemory, null);
+                RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
             }
         }
 
@@ -10805,19 +10886,11 @@ internal static unsafe partial class VulkanVideoPresenter
             byte[] pixels,
             string debugName)
         {
-            var size = (ulong)pixels.Length;
-            var buffer = CreateBuffer(
-                size,
+            var buffer = CreateHostBuffer(
+                pixels,
                 BufferUsageFlags.TransferSrcBit,
-                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out var memory);
-            void* mapped;
-            Check(_vk.MapMemory(_device, memory, 0, size, 0, &mapped), "vkMapMemory(texture)");
-            fixed (byte* source = pixels)
-            {
-                System.Buffer.MemoryCopy(source, mapped, pixels.Length, pixels.Length);
-            }
-            _vk.UnmapMemory(_device, memory);
+                out var memory,
+                out _);
             SetDebugName(ObjectType.Buffer, buffer.Handle, debugName);
             return (buffer, memory);
         }
@@ -18112,11 +18185,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 var toTransfer = new ImageMemoryBarrier
                 {
                     SType = StructureType.ImageMemoryBarrier,
-                    SrcAccessMask = texture.IsHostMovie && hostMovieImageInitialized
+                    SrcAccessMask = texture.RefreshesExistingImage ||
+                        texture.IsHostMovie && hostMovieImageInitialized
                         ? AccessFlags.ShaderReadBit
                         : 0,
                     DstAccessMask = AccessFlags.TransferWriteBit,
-                    OldLayout = texture.IsHostMovie && hostMovieImageInitialized
+                    OldLayout = texture.RefreshesExistingImage ||
+                        texture.IsHostMovie && hostMovieImageInitialized
                         ? ImageLayout.ShaderReadOnlyOptimal
                         : ImageLayout.Undefined,
                     NewLayout = ImageLayout.TransferDstOptimal,
@@ -18130,7 +18205,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
                 _vk.CmdPipelineBarrier(
                     _commandBuffer,
-                    texture.IsHostMovie && hostMovieImageInitialized
+                    texture.RefreshesExistingImage ||
+                        texture.IsHostMovie && hostMovieImageInitialized
                         ? PipelineStageFlags.AllCommandsBit
                         : PipelineStageFlags.TopOfPipeBit,
                     PipelineStageFlags.TransferBit,
@@ -19676,12 +19752,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (texture.StagingBuffer.Handle != 0)
                 {
-                    _vk.DestroyBuffer(_device, texture.StagingBuffer, null);
-                }
-
-                if (texture.StagingMemory.Handle != 0)
-                {
-                    _vk.FreeMemory(_device, texture.StagingMemory, null);
+                    RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
 
                 if (texture.NeedsUpload &&
@@ -19695,12 +19766,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (buffer.Handle != 0)
                 {
-                    _vk.DestroyBuffer(_device, buffer, null);
-                }
-
-                if (memory.Handle != 0)
-                {
-                    _vk.FreeMemory(_device, memory, null);
+                    RecycleHostBuffer(buffer, memory);
                 }
             }
             resources.DeferredTextureStagingBuffers.Clear();

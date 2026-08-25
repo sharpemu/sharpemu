@@ -13362,7 +13362,8 @@ private static long _indirectDrawProbeCount;
         uint mipLevel,
         IReadOnlyList<uint> samplerDescriptor,
         bool isArrayed,
-        out GuestDrawTexture texture)
+        out GuestDrawTexture texture,
+        int snapshotAttempt = 0)
     {
         texture = default!;
         var textureDepth = GetTextureVolumeDepth(
@@ -13554,6 +13555,7 @@ private static long _indirectDrawProbeCount;
                     descriptor.NumberType);
             var readSucceeded = false;
             var linearNonzero = false;
+            var storageSnapshot = default(SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot);
             if (descriptor.Address != 0 && !uploadKnown)
             {
                 // Storage images can be pre-populated in tiled guest memory
@@ -13562,6 +13564,10 @@ private static long _indirectDrawProbeCount;
                 // tiled bytes as scanlines. Read the full physical footprint
                 // and run the same AddrLib-derived detile path used below for
                 // sampled textures before seeding the Vulkan image.
+                storageSnapshot = SharpEmu.HLE.GuestImageWriteTracker.BeginReadSnapshot(
+                    descriptor.Address,
+                    checked(baseMipByteOffset + physicalSourceByteCount),
+                    source: "agc.storage-image-snapshot");
                 var storageSource = new byte[(int)physicalSourceByteCount];
                 if (ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
@@ -13581,6 +13587,25 @@ private static long _indirectDrawProbeCount;
                         linearNonzero = true;
                         initialPixels = linearStorage;
                     }
+                }
+
+                if (readSucceeded &&
+                    !SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot))
+                {
+                    if (snapshotAttempt < 2)
+                    {
+                        return TryCreateGuestDrawTexture(
+                            ctx,
+                            descriptor,
+                            isStorage,
+                            mipLevel,
+                            samplerDescriptor,
+                            isArrayed,
+                            out texture,
+                            snapshotAttempt + 1);
+                    }
+
+                    initialPixels = [];
                 }
             }
 
@@ -13618,35 +13643,34 @@ private static long _indirectDrawProbeCount;
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
                 Sampler: ToGuestSampler(samplerDescriptor),
+                WriteGeneration: storageSnapshot.Active ? storageSnapshot.Generation : -1,
                 Type: descriptor.Type,
-                Depth: textureDepth);
+                Depth: textureDepth,
+                SourceByteCount: checked(baseMipByteOffset + physicalSourceByteCount),
+                CpuSnapshotStable:
+                    !readSucceeded ||
+                    SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(storageSnapshot));
             return true;
         }
 
         // When the presenter already holds this exact texture identity in
         // its cache, the texel copy below would be discarded on arrival; for
         // scenes that sample large textures every draw this copy dominated
-        // CPU time (Dead Cells menus). The dirty peek closes the race with
-        // eviction when the write tracker is on. With the tracker off,
-        // PeekDirty is always false so a cached identity keeps skipping —
-        // correct for static UI atlases. CPU-updated guest Bink planes are
-        // handled by the upload-known gate above (forced copies when the
-        // tracker cannot invalidate), not by disabling this cache skip.
+        // CPU time (Dead Cells menus). The cache records the write generation
+        // that supplied its pixels. A later native or managed CPU write bumps
+        // the tracker generation and makes IsTextureContentCached return false.
+        // CPU-updated guest Bink planes are handled by the upload-known gate
+        // above when the tracker cannot observe native writes.
         var sampler = ToGuestSampler(samplerDescriptor);
-        // Track the guest allocation before reading its texels so a CPU
-        // rewrite landing after the copy still bumps the write generation.
-        // The generation rides on the texture and is recorded by the
-        // presenter after upload, where the upload-known skip compares it
-        // against the tracker to force fresh texels for rewritten memory.
+        // Capture the generation associated with these texels. The presenter
+        // records it after upload, and a later tracked write makes the cache
+        // generation differ so the next bind sends fresh texels.
         var hasWriteGeneration =
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
-        var textureSourceDirty =
-            SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address);
         if (!_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
-            !textureSourceDirty &&
             GuestGpu.Current.IsTextureContentCached(
                 new TextureCacheLookupIdentity(
                     new TextureContentIdentity(
@@ -13690,6 +13714,19 @@ private static long _indirectDrawProbeCount;
             return true;
         }
 
+        var trackedSourceByteCount = wantsArrayUpload
+            ? checked(chainSliceBytes * arrayUploadLayers)
+            : checked(baseMipByteOffset + physicalSourceByteCount);
+        var readSnapshot = SharpEmu.HLE.GuestImageWriteTracker.BeginReadSnapshot(
+            descriptor.Address,
+            trackedSourceByteCount,
+            source: "agc.sampled-texture-snapshot");
+        if (readSnapshot.Active)
+        {
+            hasWriteGeneration = true;
+            writeGeneration = readSnapshot.Generation;
+        }
+
         if (wantsArrayUpload)
         {
             var arrayLayers = arrayUploadLayers;
@@ -13709,7 +13746,17 @@ private static long _indirectDrawProbeCount;
                     out texture))
             {
                 NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                return true;
+                return FinalizeGuestTextureSnapshot(
+                    ctx,
+                    descriptor,
+                    isStorage,
+                    mipLevel,
+                    samplerDescriptor,
+                    isArrayed,
+                    readSnapshot,
+                    snapshotAttempt,
+                    texture,
+                    out texture);
             }
 
             // GPU detile for arrayed exact-XOR/4bpp textures: pack the tiled array
@@ -13772,8 +13819,19 @@ private static long _indirectDrawProbeCount;
                             Type: descriptor.Type,
                             Depth: textureDepth,
                             TiledSource: tiledLayers,
-                            Detile: gpuArrayParams);
-                        return true;
+                            Detile: gpuArrayParams,
+                            SourceByteCount: trackedSourceByteCount);
+                        return FinalizeGuestTextureSnapshot(
+                            ctx,
+                            descriptor,
+                            isStorage,
+                            mipLevel,
+                            samplerDescriptor,
+                            isArrayed,
+                            readSnapshot,
+                            snapshotAttempt,
+                            texture,
+                            out texture);
                     }
                 }
             }
@@ -13831,7 +13889,17 @@ private static long _indirectDrawProbeCount;
                         Type: descriptor.Type,
                         Depth: textureDepth,
                         SourceByteCount: checked(chainSliceBytes * arrayLayers));
-                    return true;
+                    return FinalizeGuestTextureSnapshot(
+                        ctx,
+                        descriptor,
+                        isStorage,
+                        mipLevel,
+                        samplerDescriptor,
+                        isArrayed,
+                        readSnapshot,
+                        snapshotAttempt,
+                        texture,
+                        out texture);
                 }
             }
 
@@ -13938,7 +14006,17 @@ private static long _indirectDrawProbeCount;
                     TiledSource: source,
                     Detile: gpuDetileParams,
                     SourceByteCount: (ulong)source.Length);
-                return true;
+                return FinalizeGuestTextureSnapshot(
+                    ctx,
+                    descriptor,
+                    isStorage,
+                    mipLevel,
+                    samplerDescriptor,
+                    isArrayed,
+                    readSnapshot,
+                    snapshotAttempt,
+                    texture,
+                    out texture);
             }
         }
 
@@ -13973,6 +14051,67 @@ private static long _indirectDrawProbeCount;
             Type: descriptor.Type,
             Depth: textureDepth,
             SourceByteCount: physicalSourceByteCount);
+        return FinalizeGuestTextureSnapshot(
+            ctx,
+            descriptor,
+            isStorage,
+            mipLevel,
+            samplerDescriptor,
+            isArrayed,
+            readSnapshot,
+            snapshotAttempt,
+            texture,
+            out texture);
+    }
+
+    private static bool FinalizeGuestTextureSnapshot(
+        CpuContext ctx,
+        TextureDescriptor descriptor,
+        bool isStorage,
+        uint mipLevel,
+        IReadOnlyList<uint> samplerDescriptor,
+        bool isArrayed,
+        SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot snapshot,
+        int snapshotAttempt,
+        GuestDrawTexture candidate,
+        out GuestDrawTexture texture)
+    {
+        if (SharpEmu.HLE.GuestImageWriteTracker.IsReadSnapshotStable(snapshot))
+        {
+            texture = snapshot.Active
+                ? candidate with
+                {
+                    WriteGeneration = snapshot.Generation,
+                    CpuSnapshotStable = true,
+                }
+                : candidate;
+            return true;
+        }
+
+        if (snapshotAttempt < 2)
+        {
+            return TryCreateGuestDrawTexture(
+                ctx,
+                descriptor,
+                isStorage,
+                mipLevel,
+                samplerDescriptor,
+                isArrayed,
+                out texture,
+                snapshotAttempt + 1);
+        }
+
+        // Keep the descriptor but withhold bytes that crossed a guest write.
+        // The backend can retain an older cached image and retry on a later
+        // bind without publishing a torn atlas or video plane.
+        texture = candidate with
+        {
+            RgbaPixels = [],
+            TiledSource = null,
+            MipUploads = null,
+            WriteGeneration = -1,
+            CpuSnapshotStable = false,
+        };
         return true;
     }
 
@@ -15379,7 +15518,7 @@ private static long _indirectDrawProbeCount;
                     return;
                 }
 
-                GuestImageWriteTracker.Track(
+                GuestImageWriteTracker.TrackManagedWriter(
                     destinationAddress,
                     (ulong)output.Length,
                     GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics,
