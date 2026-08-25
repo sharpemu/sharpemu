@@ -1868,6 +1868,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return CanUseLleLibcAllocatorFamily();
 		}
+		if (IsLibcNativeFormattingExport(exportName))
+		{
+			return HasUsableLleLibcExport("tcVi5SivF7Q", "sprintf");
+		}
 		if (string.Equals(value, "0", StringComparison.Ordinal))
 		{
 			return true;
@@ -1934,6 +1938,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			"memcmp" => true,
 			_ => false,
 		};
+	}
+
+	internal static bool IsLibcNativeFormattingExport(string exportName)
+	{
+		return exportName is "sprintf";
 	}
 
 	internal static bool IsLibcFileObjectExport(string exportName)
