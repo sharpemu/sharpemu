@@ -8,7 +8,7 @@ using Silk.NET.Vulkan;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
-    // This partial owns guest texture formats, samplers, and pixel conversion.
+    // This partial converts guest texture state into Vulkan representations.
 
     private static uint GetGuestTextureFormat(uint format, uint numberType) =>
         IsKnownGuestTextureFormat(format)
@@ -433,6 +433,54 @@ internal static unsafe partial class VulkanVideoPresenter
                 Format.R32G32B32A32Sint or
                 Format.R32G32B32A32Sfloat => 128,
                 _ => 0,
+            };
+
+        private bool SupportsColorAttachment(Format format)
+        {
+            _vk.GetPhysicalDeviceFormatProperties(_physicalDevice, format, out var properties);
+            return (properties.OptimalTilingFeatures & FormatFeatureFlags.ColorAttachmentBit) != 0;
+        }
+
+        private bool SupportsStorageImage(Format format)
+        {
+            _vk.GetPhysicalDeviceFormatProperties(_physicalDevice, format, out var properties);
+            return (properties.OptimalTilingFeatures & FormatFeatureFlags.StorageImageBit) != 0;
+        }
+
+        private static ImageUsageFlags GetNonStorageGuestImageViewUsage(uint type) =>
+            ImageUsageFlags.SampledBit |
+            ImageUsageFlags.TransferSrcBit |
+            ImageUsageFlags.TransferDstBit |
+            (IsGuestTexture3D(type)
+                ? (ImageUsageFlags)0
+                : ImageUsageFlags.ColorAttachmentBit);
+
+
+        private static Format GetRenderTargetFormat(uint format, uint numberType) =>
+            (format, numberType) switch
+            {
+                (4, 4) => Format.R32Uint,
+                (4, 5) => Format.R32Sint,
+                (4, 7) => Format.R32Sfloat,
+                (5, 4) => Format.R16G16Uint,
+                (5, 5) => Format.R16G16Sint,
+                (5, 7) => Format.R16G16Sfloat,
+                (6, 7) => Format.B10G11R11UfloatPack32,
+                (7, 7) => Format.B10G11R11UfloatPack32,
+                (9, _) => Format.A2B10G10R10UnormPack32,
+                (10, 9) => Format.R8G8B8A8Srgb,
+                (10, 4) => Format.R8G8B8A8Uint,
+                (10, 5) => Format.R8G8B8A8Sint,
+                (10, _) => Format.R8G8B8A8Unorm,
+                (11, 7) => Format.R32G32Sfloat,
+                (12, 4) => Format.R16G16B16A16Uint,
+                (12, 5) => Format.R16G16B16A16Sint,
+                (12, 7) => Format.R16G16B16A16Sfloat,
+                (13, 7) => Format.R32G32B32A32Sfloat,
+                (14, 7) => Format.R32G32B32A32Sfloat,
+                (_, 0) => GetTextureFormat(format, numberType),
+                (_, 9) => GetTextureFormat(format, numberType),
+                _ => Format.Undefined,
             };
     }
 }
