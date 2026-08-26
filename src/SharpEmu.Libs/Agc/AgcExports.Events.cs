@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -384,5 +385,140 @@ public static partial class AgcExports
         }
 
         return interrupt == 6 && TryReadLiveUInt64(ctx, address, out value);
+    }
+
+    private static readonly Dictionary<(ulong Source, ulong Destination), ulong> _softwarePresenterFingerprints = new();
+
+    private static bool TrySoftwarePresent(
+        CpuContext ctx,
+        TextureDescriptor source,
+        int videoOutHandle,
+        int displayBufferIndex)
+    {
+        if (source.Format != Gen5TextureFormatR8G8B8A8Unorm ||
+            source.TileMode != 0 ||
+            source.Type != Gen5TextureType2D ||
+            source.Width > 8192 ||
+            source.Height > 8192 ||
+            !VideoOutExports.TryGetDisplayBufferInfo(videoOutHandle, displayBufferIndex, out var destination) ||
+            destination.Address == 0 ||
+            destination.Width == 0 ||
+            destination.Height == 0 ||
+            destination.Width > 8192 ||
+            destination.Height > 8192 ||
+            destination.TilingMode != 0 ||
+            destination.PixelFormat is not (
+                VideoOutPixelFormatA8R8G8B8Srgb or
+                VideoOutPixelFormatA8B8G8R8Srgb or
+                VideoOutPixelFormat2R8G8B8A8Srgb or
+                VideoOutPixelFormat2B8G8R8A8Srgb or
+                VideoOutPixelFormat2R10G10B10A2 or
+                VideoOutPixelFormat2B10G10R10A2 or
+                VideoOutPixelFormat2R10G10B10A2Srgb or
+                VideoOutPixelFormat2B10G10R10A2Srgb or
+                VideoOutPixelFormat2R10G10B10A2Bt2100Pq or
+                VideoOutPixelFormat2B10G10R10A2Bt2100Pq))
+        {
+            return false;
+        }
+
+        var sourceByteCount = checked((ulong)source.Width * source.Height * 4);
+        if (sourceByteCount > 256UL * 1024UL * 1024UL)
+        {
+            return false;
+        }
+
+        var sourceBytes = new byte[(int)sourceByteCount];
+        if (!ctx.Memory.TryRead(source.Address, sourceBytes))
+        {
+            return false;
+        }
+
+        var fingerprint = ComputeFingerprint(sourceBytes);
+        var fingerprintKey = (source.Address, destination.Address);
+        lock (_softwarePresenterGate)
+        {
+            if (_softwarePresenterFingerprints.TryGetValue(fingerprintKey, out var previousFingerprint) &&
+                previousFingerprint == fingerprint)
+            {
+                return true;
+            }
+        }
+
+        var destinationPitch = destination.PitchInPixel == 0
+            ? destination.Width
+            : destination.PitchInPixel;
+        if (destinationPitch < destination.Width)
+        {
+            return false;
+        }
+
+        var destinationRow = new byte[checked((int)destinationPitch * 4)];
+        var rgbaDestination = destination.PixelFormat is
+            VideoOutPixelFormatA8B8G8R8Srgb or
+            VideoOutPixelFormat2R8G8B8A8Srgb;
+        var packed10Destination =
+            VideoOutExports.IsPacked10BitPixelFormat(destination.PixelFormat);
+        for (uint y = 0; y < destination.Height; y++)
+        {
+            var sourceY = (uint)(((ulong)y * source.Height) / destination.Height);
+            for (uint x = 0; x < destination.Width; x++)
+            {
+                var sourceX = (uint)(((ulong)x * source.Width) / destination.Width);
+                var sourceOffset = checked((int)(((ulong)sourceY * source.Width + sourceX) * 4));
+                var destinationOffset = checked((int)x * 4);
+                if (packed10Destination)
+                {
+                    if (!VideoOutExports.TryPackRgba8Pixel(
+                            destination.PixelFormat,
+                            sourceBytes[sourceOffset + 0],
+                            sourceBytes[sourceOffset + 1],
+                            sourceBytes[sourceOffset + 2],
+                            sourceBytes[sourceOffset + 3],
+                            out var packed))
+                    {
+                        return false;
+                    }
+
+                    BinaryPrimitives.WriteUInt32LittleEndian(
+                        destinationRow.AsSpan(destinationOffset, sizeof(uint)),
+                        packed);
+                }
+                else if (rgbaDestination)
+                {
+                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 0];
+                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
+                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 2];
+                }
+                else
+                {
+                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 2];
+                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
+                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 0];
+                }
+
+                if (!packed10Destination)
+                {
+                    destinationRow[destinationOffset + 3] = sourceBytes[sourceOffset + 3];
+                }
+            }
+
+            var destinationAddress = destination.Address + ((ulong)y * destinationPitch * 4);
+            if (!ctx.Memory.TryWrite(destinationAddress, destinationRow))
+            {
+                return false;
+            }
+        }
+
+        lock (_softwarePresenterGate)
+        {
+            _softwarePresenterFingerprints[fingerprintKey] = fingerprint;
+        }
+
+        VideoOutExports.SubmitHostRgbaFrame(sourceBytes, source.Width, source.Height);
+        TraceAgc(
+            $"agc.software_presenter src=0x{source.Address:X16} {source.Width}x{source.Height} fmt={source.Format}/num{source.NumberType} " +
+            $"dst=0x{destination.Address:X16} {destination.Width}x{destination.Height} fingerprint=0x{fingerprint:X16}");
+        return true;
     }
 }
