@@ -26,6 +26,7 @@ public static partial class AgcExports
         (ulong Depth, ulong Htile, uint Layer, uint ClearBits), byte>
         _tracedHtileMetadataConsumes = new();
     private static int _depthMetadataTraceCount;
+    private static long _duplicateTargetTraceCount;
 
     private readonly record struct RenderTargetDescriptor(
         uint Slot,
