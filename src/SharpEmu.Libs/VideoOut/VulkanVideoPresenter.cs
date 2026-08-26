@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Silk.NET.Core;
-using Silk.NET.Core.Native;
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
@@ -415,11 +414,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private sealed partial class Presenter : IDisposable
     {
-        private const string FullscreenBarycentricVertexSpirv =
-            "AwIjBwAAAQALAAgAMgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAAAAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABoAAAApAAAAAwADAAIAAADCAQAABQAEAAQAAABtYWluAAAAAAUABgALAAAAZ2xfUGVyVmVydGV4AAAAAAYABgALAAAAAAAAAGdsX1Bvc2l0aW9uAAYABwALAAAAAQAAAGdsX1BvaW50U2l6ZQAAAAAGAAcACwAAAAIAAABnbF9DbGlwRGlzdGFuY2UABgAHAAsAAAADAAAAZ2xfQ3VsbERpc3RhbmNlAAUAAwANAAAAAAAAAAUABgAaAAAAZ2xfVmVydGV4SW5kZXgAAAUABQAdAAAAaW5kZXhhYmxlAAAABQAFACkAAABiYXJ5Y2VudHJpYwAFAAUALwAAAGluZGV4YWJsZQAAAEcAAwALAAAAAgAAAEgABQALAAAAAAAAAAsAAAAAAAAASAAFAAsAAAABAAAACwAAAAEAAABIAAUACwAAAAIAAAALAAAAAwAAAEgABQALAAAAAwAAAAsAAAAEAAAARwAEABoAAAALAAAAKgAAAEcABAApAAAAHgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAAAAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAAAAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQADgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAgAAACsABAAIAAAAEQAAAAMAAAAcAAQAEgAAABAAAAARAAAAKwAEAAYAAAATAAAAAACAvywABQAQAAAAFAAAABMAAAATAAAAKwAEAAYAAAAVAAAAAABAQCwABQAQAAAAFgAAABUAAAATAAAALAAFABAAAAAXAAAAEwAAABUAAAAsAAYAEgAAABgAAAAUAAAAFgAAABcAAAAgAAQAGQAAAAEAAAAOAAAAOwAEABkAAAAaAAAAAQAAACAABAAcAAAABwAAABIAAAAgAAQAHgAAAAcAAAAQAAAAKwAEAAYAAAAhAAAAAAAAACsABAAGAAAAIgAAAAAAgD8gAAQAJgAAAAMAAAAHAAAAIAAEACgAAAADAAAAEAAAADsABAAoAAAAKQAAAAMAAAAsAAUAEAAAACoAAAAiAAAAIQAAACwABQAQAAAAKwAAACEAAAAiAAAALAAFABAAAAAsAAAAIQAAACEAAAAsAAYAEgAAAC0AAAAqAAAAKwAAACwAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAOwAEABwAAAAdAAAABwAAADsABAAcAAAALwAAAAcAAAA9AAQADgAAABsAAAAaAAAAPgADAB0AAAAYAAAAQQAFAB4AAAAfAAAAHQAAABsAAAA9AAQAEAAAACAAAAAfAAAAUQAFAAYAAAAjAAAAIAAAAAAAAABRAAUABgAAACQAAAAgAAAAAQAAAFAABwAHAAAAJQAAACMAAAAkAAAAIQAAACIAAABBAAUAJgAAACcAAAANAAAADwAAAD4AAwAnAAAAJQAAAD0ABAAOAAAALgAAABoAAAA+AAMALwAAAC0AAABBAAUAHgAAADAAAAAvAAAALgAAAD0ABAAQAAAAMQAAADAAAAA+AAMAKQAAADEAAAD9AAEAOAABAA==";
-
-        private const string FullscreenBarycentricFragmentSpirv =
-            "AwIjBwAAAQALAAgAEgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAAAAAAAQAAAA8ABwAEAAAABAAAAG1haW4AAAAACQAAAAwAAAAQAAMABAAAAAcAAAADAAMAAgAAAMIBAAAFAAQABAAAAG1haW4AAAAABQAFAAkAAABvdXRDb2xvcgAAAAAFAAUADAAAAGJhcnljZW50cmljAEcABAAJAAAAHgAAAAAAAABHAAQADAAAAB4AAAAAAAAAEwACAAIAAAAhAAMAAwAAAAIAAAAWAAMABgAAACAAAAAXAAQABwAAAAYAAAAEAAAAIAAEAAgAAAADAAAABwAAADsABAAIAAAACQAAAAMAAAAXAAQACgAAAAYAAAACAAAAIAAEAAsAAAABAAAACgAAADsABAALAAAADAAAAAEAAAArAAQABgAAAA4AAAAAAAAANgAFAAIAAAAEAAAAAAAAAAMAAAD4AAIABQAAAD0ABAAKAAAADQAAAAwAAABRAAUABgAAAA8AAAANAAAAAAAAAFEABQAGAAAAEAAAAA0AAAABAAAAUAAHAAcAAAARAAAADwAAABAAAAAOAAAADgAAAD4AAwAJAAAAEQAAAP0AAQA4AAEA";
 
         private long _presentedSequence;
         private long _presentNotTakenLoggedSequence = long.MinValue;
@@ -907,112 +901,6 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_hdrOutputActive)
             {
                 CreateHdrPresentationResources();
-            }
-        }
-
-
-        private void CreateBarycentricPipeline()
-        {
-            var vertexBytes = Convert.FromBase64String(FullscreenBarycentricVertexSpirv);
-            var fragmentBytes = Convert.FromBase64String(FullscreenBarycentricFragmentSpirv);
-            var vertexModule = CreateShaderModule(vertexBytes);
-            var fragmentModule = CreateShaderModule(fragmentBytes);
-            var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
-            try
-            {
-                var shaderStages = stackalloc PipelineShaderStageCreateInfo[2];
-                shaderStages[0] = new PipelineShaderStageCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageCreateInfo,
-                    Stage = ShaderStageFlags.VertexBit,
-                    Module = vertexModule,
-                    PName = entryPoint,
-                };
-                shaderStages[1] = new PipelineShaderStageCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageCreateInfo,
-                    Stage = ShaderStageFlags.FragmentBit,
-                    Module = fragmentModule,
-                    PName = entryPoint,
-                };
-
-                var vertexInput = new PipelineVertexInputStateCreateInfo
-                {
-                    SType = StructureType.PipelineVertexInputStateCreateInfo,
-                };
-                var inputAssembly = new PipelineInputAssemblyStateCreateInfo
-                {
-                    SType = StructureType.PipelineInputAssemblyStateCreateInfo,
-                    Topology = PrimitiveTopology.TriangleList,
-                };
-                var viewport = new Viewport(0, 0, _extent.Width, _extent.Height, 0, 1);
-                var scissor = new Rect2D(new Offset2D(0, 0), _extent);
-                var viewportState = new PipelineViewportStateCreateInfo
-                {
-                    SType = StructureType.PipelineViewportStateCreateInfo,
-                    ViewportCount = 1,
-                    PViewports = &viewport,
-                    ScissorCount = 1,
-                    PScissors = &scissor,
-                };
-                var rasterization = new PipelineRasterizationStateCreateInfo
-                {
-                    SType = StructureType.PipelineRasterizationStateCreateInfo,
-                    PolygonMode = PolygonMode.Fill,
-                    CullMode = CullModeFlags.None,
-                    FrontFace = FrontFace.CounterClockwise,
-                    LineWidth = 1,
-                };
-                var multisample = new PipelineMultisampleStateCreateInfo
-                {
-                    SType = StructureType.PipelineMultisampleStateCreateInfo,
-                    RasterizationSamples = SampleCountFlags.Count1Bit,
-                };
-                var colorBlendAttachment = new PipelineColorBlendAttachmentState
-                {
-                    ColorWriteMask =
-                        ColorComponentFlags.RBit |
-                        ColorComponentFlags.GBit |
-                        ColorComponentFlags.BBit |
-                        ColorComponentFlags.ABit,
-                };
-                var colorBlend = new PipelineColorBlendStateCreateInfo
-                {
-                    SType = StructureType.PipelineColorBlendStateCreateInfo,
-                    AttachmentCount = 1,
-                    PAttachments = &colorBlendAttachment,
-                };
-                var pipelineInfo = new GraphicsPipelineCreateInfo
-                {
-                    SType = StructureType.GraphicsPipelineCreateInfo,
-                    StageCount = 2,
-                    PStages = shaderStages,
-                    PVertexInputState = &vertexInput,
-                    PInputAssemblyState = &inputAssembly,
-                    PViewportState = &viewportState,
-                    PRasterizationState = &rasterization,
-                    PMultisampleState = &multisample,
-                    PColorBlendState = &colorBlend,
-                    Layout = _pipelineLayout,
-                    RenderPass = _renderPass,
-                    Subpass = 0,
-                };
-                Check(
-                    _vk.CreateGraphicsPipelines(
-                        _device,
-                        _pipelineCache,
-                        1,
-                        &pipelineInfo,
-                        null,
-                        out _barycentricPipeline),
-                    "vkCreateGraphicsPipelines");
-                MarkPipelineCacheDirty();
-            }
-            finally
-            {
-                SilkMarshal.Free((nint)entryPoint);
-                _vk.DestroyShaderModule(_device, fragmentModule, null);
-                _vk.DestroyShaderModule(_device, vertexModule, null);
             }
         }
 
