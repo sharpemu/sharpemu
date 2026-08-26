@@ -67,7 +67,6 @@ public static partial class AgcExports
     private const uint RewindOffloadEnableBit = 1u << 24;
     private const uint ItGetLodStats = 0x8E;
 
-
     private const uint RZero = 0x00;
     private const uint RDrawIndexAuto = 0x04;
     private const uint RDrawReset = 0x05;
@@ -98,7 +97,6 @@ public static partial class AgcExports
     private static bool IsCpuVisibleLabel(ulong address) =>
         address >= GpuLabelPoolBase &&
         address < GpuLabelPoolBase + GpuLabelPoolSize;
-
 
     // Parse window for a ring resuming at appended commands: covers a full
     // chunk, safe since parsing re-suspends at the next unwritten word.
@@ -249,9 +247,6 @@ public static partial class AgcExports
         return memory;
     }
 
-
-
-
     private sealed record TranslatedGuestDraw(
         ulong ExportShaderAddress,
         ulong PixelShaderAddress,
@@ -284,9 +279,6 @@ public static partial class AgcExports
         float ClearAlpha = 1f,
         bool IsDccFastClear = false);
 
-
-
-
     private readonly record struct SubmittedAcquireMem(
         uint Engine,
         uint CbDbControl,
@@ -302,8 +294,6 @@ public static partial class AgcExports
 
         public bool CoversAllGuestMemory => Semantics.CoversAllMemory;
     }
-
-
 
     private sealed class SubmittedDcbState
     {
@@ -431,13 +421,7 @@ public static partial class AgcExports
         public CpuContext? PendingDrainContext;
     }
 
-
-
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
-
-
-
-
 
     private static uint[] ReadPsInputCntlRegisters(IReadOnlyDictionary<uint, uint> cxRegisters)
     {
@@ -734,15 +718,6 @@ public static partial class AgcExports
         return buffers;
     }
 
-
-
-
-
-
-
-
-
-
     private static uint SelectExportUserDataRegister(
         IReadOnlyDictionary<uint, uint> registers)
     {
@@ -827,10 +802,6 @@ public static partial class AgcExports
         return count;
     }
 
-
-
-
-
     private static bool TryGetShaderAddress(
         IReadOnlyDictionary<uint, uint> registers,
         uint loRegister,
@@ -848,8 +819,6 @@ public static partial class AgcExports
         return address != 0;
     }
 
-
-
     private static ulong ComputeFingerprint(ReadOnlySpan<byte> bytes)
     {
         const ulong fnvOffsetBasis = 14695981039346656037UL;
@@ -862,10 +831,6 @@ public static partial class AgcExports
 
         return fingerprint;
     }
-
-
-
-
 
     private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
     {
@@ -963,8 +928,6 @@ public static partial class AgcExports
             ? (uint)availableDwords - reservedDwords
             : 0;
     }
-
-
 
     private static int ReturnPointer(CpuContext ctx, ulong pointer)
     {
@@ -1273,7 +1236,6 @@ public static partial class AgcExports
          (double)System.Diagnostics.Stopwatch.Frequency).ToString(
             "F3", System.Globalization.CultureInfo.InvariantCulture);
 
-
     private static void TraceAgc(
         [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument] ref AgcTraceHandler message)
     {
@@ -1312,7 +1274,6 @@ public static partial class AgcExports
         Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
-
     private static ulong? ParseOptionalHexAddress(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -1334,12 +1295,5 @@ public static partial class AgcExports
             ? address
             : null;
     }
-
-
-
-
-
-
-
 
 }

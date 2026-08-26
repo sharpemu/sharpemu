@@ -161,7 +161,6 @@ internal static unsafe partial class VulkanVideoPresenter
                (frame is 1 or 30 or 120 || frame % 600 == 0);
     }
 
-
     public static void EnsureStarted(uint width, uint height)
     {
         if (width == 0 || height == 0)

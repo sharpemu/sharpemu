@@ -48,7 +48,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => BlendOp.Add,
             };
 
-
         private static ColorComponentFlags ToVkColorWriteMask(uint mask)
         {
             var flags = default(ColorComponentFlags);
@@ -154,8 +153,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var maxDepth = Math.Clamp(rect.MaxDepth, minDepth, 1f);
             return new Viewport(x, y, width, height, minDepth, maxDepth);
         }
-
-
 
         private static readonly bool _forceTitleDefaultBlend =
             Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DEFAULT_BLEND") == "1";

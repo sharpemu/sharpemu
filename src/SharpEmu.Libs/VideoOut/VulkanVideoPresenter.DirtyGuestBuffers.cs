@@ -559,7 +559,5 @@ internal static unsafe partial class VulkanVideoPresenter
             return cursor;
         }
 
-
-
     }
 }

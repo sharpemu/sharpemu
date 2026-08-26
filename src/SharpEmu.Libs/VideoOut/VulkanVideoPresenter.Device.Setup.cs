@@ -451,7 +451,6 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             Console.Error.WriteLine($"{prefix} {message}");
 
-
             if (severity == DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt &&
                 message is not null &&
                 message.Contains("vkCreateShaderModule", StringComparison.Ordinal))

@@ -634,7 +634,6 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-
         [MethodImpl(MethodImplOptions.NoInlining)]
 
         private static ulong ComputeTextureContentFingerprint(ReadOnlySpan<byte> pixels)

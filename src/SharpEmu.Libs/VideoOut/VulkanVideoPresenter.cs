@@ -120,7 +120,6 @@ internal sealed record VulkanGpuLabelSignal(
     Action? PublishHost,
     string DebugName);
 
-
 internal static class VulkanVertexBindingPlanner
 {
     public static int BuildUniqueSourceIndices(
@@ -157,7 +156,6 @@ internal static class VulkanVertexBindingPlanner
         return bindingCount;
     }
 }
-
 
 internal readonly record struct VulkanGuestQueueIdentity(
     string Name,
@@ -411,7 +409,6 @@ internal static unsafe partial class VulkanVideoPresenter
                (Is10Bit(from) && to == Format.R8G8B8A8Unorm);
     }
 
-
     private sealed partial class Presenter : IDisposable
     {
 
@@ -438,8 +435,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _rejectedGuestImageUploads = new();
         private readonly Dictionary<ulong, int> _tracedGuestWriteCounts = new();
         private readonly Dictionary<int, int> _pixelSpirvWriteCounts = new();
-
-
 
         private sealed class TranslatedDrawResources
         {
@@ -482,10 +477,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public Framebuffer TransientFramebuffer;
         }
 
-
-
         private const ulong SwapchainAcquireTimeoutNs = 250_000_000;
-
 
         public Presenter(uint width, uint height)
         {
@@ -526,8 +518,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _window.Dispose();
         }
 
-
-
         private static bool AnyTargetAddressMatches(
             IReadOnlyList<GuestImageResource>? targets,
             string environmentVariable)
@@ -548,17 +538,8 @@ internal static unsafe partial class VulkanVideoPresenter
             return false;
         }
 
-
-
         [ThreadStatic]
         private static string? _pendingShaderModuleDumpPath;
-
-
-
-
-
-
-
 
         private static byte[]? TryReadGuestTexturePixels(GuestDrawTexture texture)
         {
@@ -583,7 +564,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var pixels = new byte[(int)byteCount];
             return memory.TryRead(texture.Address, pixels) ? pixels : null;
         }
-
 
         private void ProcessDeferredTextureDestroys()
         {
@@ -621,7 +601,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-
         private static void WriteUInt16(byte[] output, int offset, ushort value)
         {
             output[offset + 0] = (byte)value;
@@ -638,8 +617,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static void WriteInt32(byte[] output, int offset, int value) =>
             WriteUInt32(output, offset, unchecked((uint)value));
-
-
 
         private VkBuffer CreateBuffer(
             ulong size,
@@ -672,7 +649,6 @@ internal static unsafe partial class VulkanVideoPresenter
             return buffer;
         }
 
-
         private uint FindMemoryType(
             uint typeBits,
             MemoryPropertyFlags requiredFlags,
@@ -696,14 +672,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             throw new InvalidOperationException("No compatible Vulkan host-visible memory type was found.");
         }
-
-
-
-
-
-
-
-
 
         private static uint ClampMipLevels(
             uint width,
@@ -749,7 +717,6 @@ internal static unsafe partial class VulkanVideoPresenter
             DestroyGuestImage(presentedGuestImage);
         }
 
-
         // Metal cannot blend into integer render targets or 32-bit-per-channel
         // float targets (unsupported on Apple-family GPUs). Enabling blend on
         // one makes vkCreateGraphicsPipelines fail with ErrorInitializationFailed
@@ -772,11 +739,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => true,
             };
 
-
-
-
-
-
         private static ImageSubresourceRange ColorSubresourceRange(
             uint baseMipLevel = 0,
             uint levelCount = 1,
@@ -788,8 +750,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 LevelCount = levelCount,
                 LayerCount = layerCount,
             };
-
-
 
         private static void TraceVulkanShader(string message)
         {

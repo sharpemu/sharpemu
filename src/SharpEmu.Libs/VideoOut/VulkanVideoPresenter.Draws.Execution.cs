@@ -1152,9 +1152,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private static uint AlignUp(uint value, uint alignment) =>
             (value + alignment - 1) / alignment * alignment;
 
-
-
-
         private (RenderPass RenderPass, RenderPass InitialRenderPass, Framebuffer Framebuffer)
             CreateRenderPassAndFramebuffer(
             Format format,

@@ -752,7 +752,6 @@ public static partial class AgcExports
         return true;
     }
 
-
     private static bool PatchShaderProgramRegisters(CpuContext ctx, ulong headerAddress, ulong codeAddress)
     {
         if (!TryReadUInt64(ctx, headerAddress + ShaderShRegistersOffset, out var shRegistersAddress) ||

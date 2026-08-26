@@ -188,8 +188,6 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-
-
     [SysAbiExport(
         Nid = "h9z6+0hEydk",
         ExportName = "sceAgcSuspendPoint",
@@ -349,7 +347,6 @@ public static partial class AgcExports
             NotifySubmittedDcbCompleted(gpuState, state, submission.SubmissionId);
         }
     }
-
 
     private static void ApplySubmittedDmaData(
         CpuContext ctx,
@@ -1639,7 +1636,6 @@ public static partial class AgcExports
         System.Diagnostics.Debug.Assert(agc.CachePolicy == 3u);
     }
 
-
     private static void ValidateSubmittedQueueAndReleaseMemDecoders()
     {
         var nggRegisters = new Dictionary<uint, uint>
@@ -1743,7 +1739,6 @@ public static partial class AgcExports
             : (System.Diagnostics.Stopwatch.GetTimestamp() - lastTicks) / (double)System.Diagnostics.Stopwatch.Frequency;
         return (count, seconds);
     }
-
 
     private static void ApplySubmittedStandardReleaseMem(
         CpuContext ctx,

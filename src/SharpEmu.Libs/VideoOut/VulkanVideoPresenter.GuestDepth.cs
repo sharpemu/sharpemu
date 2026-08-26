@@ -264,7 +264,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 ReadOnlyDepthFeedback = true,
             };
 
-
         private (Image Image, DeviceMemory Memory, ImageView View) CreateDepthAttachment(
             uint width,
             uint height)

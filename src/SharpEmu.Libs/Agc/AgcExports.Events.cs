@@ -62,7 +62,6 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-
     [SysAbiExport(
         Nid = "aJf+j5yntiU",
         ExportName = "sceAgcDcbEventWrite",
@@ -88,7 +87,6 @@ public static partial class AgcExports
         TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType}");
         return ReturnPointer(ctx, commandAddress);
     }
-
 
     [SysAbiExport(
         Nid = "MWiElSNE8j8",
@@ -276,7 +274,6 @@ public static partial class AgcExports
             $"managed={Environment.CurrentManagedThreadId}");
     }
 
-
     private static void NotifySubmittedDcbCompleted(
         SubmittedGpuState gpuState,
         SubmittedDcbState state,
@@ -335,7 +332,6 @@ public static partial class AgcExports
             TriggerCompletionEvents();
         }
     }
-
 
     internal readonly record struct QueuedInterruptDecision(
         bool WritesData,

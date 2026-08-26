@@ -71,7 +71,6 @@ public static partial class AgcExports
         }
     }
 
-
     private static void TraceTranslatedGuestDraw(
         CpuContext ctx,
         SubmittedGpuState gpuState,

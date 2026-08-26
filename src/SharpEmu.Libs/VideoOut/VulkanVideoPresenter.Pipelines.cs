@@ -181,7 +181,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _pendingShaderModuleDumpPath = dumpPath;
             }
 
-
             try
             {
                 fixed (byte* codePointer = code)
@@ -1258,7 +1257,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DestroyShaderModule(_device, computeModule, null);
             }
         }
-
 
     }
 }

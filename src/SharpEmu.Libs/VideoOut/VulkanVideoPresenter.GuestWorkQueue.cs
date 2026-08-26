@@ -152,7 +152,6 @@ internal static unsafe partial class VulkanVideoPresenter
         needsRefresh &&
         (allocationInFlight || allocationInOpenBatch);
 
-
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -553,7 +552,6 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static void CountSpirvCompilation() =>
         Interlocked.Increment(ref _perfSpirvCompilations);
 
-
     public static void SubmitStorageTranslatedDraw(
         byte[] pixelSpirv,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -844,7 +842,6 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-
     internal static ulong GetGuestImageByteCount(uint format, uint width, uint height)
     {
         var blockBytes = format switch
@@ -878,9 +875,6 @@ internal static unsafe partial class VulkanVideoPresenter
         uint depth) =>
         checked(GetGuestImageByteCount(format, width, height) * Math.Max(depth, 1u));
 
-
-
-
     // Guest memory handle for render-thread self-healing: when a draw whose
     // texel copy was skipped misses the texture cache (eviction, cache
     // clear, or any other race), the presenter re-reads the texels itself
@@ -889,8 +883,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
     internal static void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
         _guestMemory = memory;
-
-
 
     // Display buffers registered through sceVideoOutRegisterBuffers remain
     // valid flip targets even before AGC has rendered into them.
@@ -973,7 +965,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         return true;
     }
-
 
     internal static bool TryDecodeRenderTargetFormat(
         uint dataFormat,
@@ -1088,8 +1079,6 @@ internal static unsafe partial class VulkanVideoPresenter
         };
         return componentCount != 0;
     }
-
-
 
     private static long EnqueueGuestWorkLocked(object work)
     {

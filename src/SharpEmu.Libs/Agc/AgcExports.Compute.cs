@@ -829,7 +829,6 @@ public static partial class AgcExports
     private static string DescribeRegister(uint? register) =>
         register.HasValue ? $"s{register.Value}" : "-";
 
-
     private static uint GetComputeLocalSize(
         IReadOnlyDictionary<uint, uint> registers,
         uint register)

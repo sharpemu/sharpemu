@@ -156,7 +156,6 @@ public static partial class AgcExports
         // default packet is group-dimensional.
         (modifier & 0xA038u) | 0x41u;
 
-
     [SysAbiExport(
         Nid = "JrtiDtKeS38",
         ExportName = "sceAgcAcbResetQueue",
@@ -313,7 +312,6 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-
     [SysAbiExport(
         Nid = "wr23dPKyWc0",
         ExportName = "sceAgcCbReleaseMem",
@@ -413,8 +411,6 @@ public static partial class AgcExports
         TraceAgc($"agc.dcb_reset_queue buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
-
-
 
     [SysAbiExport(
         Nid = "rUuVjyR+Rd4",
@@ -595,7 +591,6 @@ public static partial class AgcExports
         RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
     }
-
 
     [SysAbiExport(
         Nid = "FuVbkyKlf+s",
@@ -785,7 +780,6 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 2u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
     }
-
 
     [SysAbiExport(
         Nid = "RmaJwLtc8rY",

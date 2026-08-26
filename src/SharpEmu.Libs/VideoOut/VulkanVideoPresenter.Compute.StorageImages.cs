@@ -483,9 +483,6 @@ internal static unsafe partial class VulkanVideoPresenter
             return (uint)selectedMipLevel;
         }
 
-
-
-
         private void RecordStorageImagesForWrite(
             TranslatedDrawResources resources,
             PipelineStageFlags shaderStage)

@@ -688,7 +688,6 @@ public static partial class AgcExports
         return (count, seconds);
     }
 
-
     private static void MonitorGpuWaits(
         CpuContext ctx,
         SubmittedGpuState gpuState)

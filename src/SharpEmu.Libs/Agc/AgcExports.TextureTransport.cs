@@ -1304,8 +1304,6 @@ public static partial class AgcExports
         return true;
     }
 
-
-
     /// <summary>
     /// On PS5 render targets alias guest memory, so pixels the game wrote with
     /// the CPU are visible before the first GPU draw (Chowdren pre-fills its

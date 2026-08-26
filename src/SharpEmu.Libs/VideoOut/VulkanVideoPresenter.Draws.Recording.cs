@@ -33,9 +33,6 @@ internal static unsafe partial class VulkanVideoPresenter
             EndDebugLabel(_commandBuffer);
         }
 
-
-
-
         private void RecordGuestImageForSampling(
             GuestImageResource guestImage,
             PipelineStageFlags shaderStage)
@@ -104,7 +101,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             guestImage.Initialized = true;
         }
-
 
         private void RecordRenderTargetFeedbackSnapshots(
             TranslatedDrawResources resources,
@@ -273,8 +269,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"size={source.Width}x{source.Height} initialized={source.Initialized}");
             }
         }
-
-
 
         private static void MarkSampledImagesInitialized(
             TranslatedDrawResources resources)

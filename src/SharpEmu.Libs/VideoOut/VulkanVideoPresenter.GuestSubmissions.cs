@@ -674,7 +674,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-
         private void EnsureGuestSubmissionCapacity()
         {
             CollectCompletedGuestSubmissions(waitForOldest: false);

@@ -135,7 +135,6 @@ public static partial class AgcExports
                     return false;
                 }
 
-
                 if (multiStride < DrawIndexedIndirectArgsSize)
                 {
                     multiStride = DrawIndexedIndirectArgsSize;

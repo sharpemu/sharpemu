@@ -690,7 +690,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 ? (ImageUsageFlags)0
                 : ImageUsageFlags.ColorAttachmentBit);
 
-
         private static Format GetRenderTargetFormat(uint format, uint numberType) =>
             (format, numberType) switch
             {
