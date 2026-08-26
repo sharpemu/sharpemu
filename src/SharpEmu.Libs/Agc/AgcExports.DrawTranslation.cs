@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 
@@ -2097,4 +2098,111 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             ColorDstFactor: 5,
             ColorFunc: 0,
         };
+
+    /// <summary>
+    /// Guest storage buffers for a translated draw, followed by the per-draw
+    /// initial scalar registers of each stage (pixel then vertex), matching
+    /// the binding layout the shaders were compiled against.
+    /// </summary>
+    private static IReadOnlyList<GuestMemoryBuffer> CreateTranslatedDrawGlobalBuffers(
+        TranslatedGuestDraw translatedDraw)
+    {
+        var buffers = CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+        if (_bakeScalars)
+        {
+            return buffers;
+        }
+
+        var combined = new List<GuestMemoryBuffer>(buffers.Count + 2);
+        combined.AddRange(buffers);
+        var runtimeStateLength = GetRuntimeScalarBufferLength(
+            translatedDraw.GlobalMemoryBindings.Count);
+        combined.Add(new GuestMemoryBuffer(
+            0,
+            PackRuntimeScalarState(
+                translatedDraw.PixelInitialScalars,
+                translatedDraw.GlobalMemoryBindings),
+            runtimeStateLength,
+            Pooled: true));
+        combined.Add(new GuestMemoryBuffer(
+            0,
+            PackRuntimeScalarState(
+                translatedDraw.VertexInitialScalars,
+                translatedDraw.GlobalMemoryBindings),
+            runtimeStateLength,
+            Pooled: true));
+        return combined;
+    }
+
+    private static IReadOnlyList<GuestMemoryBuffer>
+        CreateGlobalBufferOwnershipView(
+            IReadOnlyList<GuestMemoryBuffer> buffers,
+            bool ownsPooledData)
+    {
+        var view = new GuestMemoryBuffer[buffers.Count];
+        for (var index = 0; index < buffers.Count; index++)
+        {
+            var buffer = buffers[index];
+            view[index] = buffer with
+            {
+                Pooled = ownsPooledData && buffer.Pooled,
+            };
+        }
+
+        return view;
+    }
+
+    /// <summary>
+    /// Present-time variant: the flip path can reuse the same translated
+    /// draw across several flips and swapchain retries, so it must not wrap
+    /// the (pooled, single-consumption) binding arrays. Buffer contents are
+    /// re-read from guest memory instead, which also presents current data.
+    /// </summary>
+    private static IReadOnlyList<GuestMemoryBuffer> CreateTranslatedDrawGlobalBuffersForPresent(
+        CpuContext ctx,
+        TranslatedGuestDraw translatedDraw)
+    {
+        var bindings = translatedDraw.GlobalMemoryBindings;
+        var combined = new List<GuestMemoryBuffer>(bindings.Count + 2);
+        foreach (var binding in bindings)
+        {
+            var data = new byte[Math.Max(binding.DataLength, sizeof(uint))];
+            var guestMemoryBacked = binding.BaseAddress != 0 &&
+                (ctx.Memory.TryRead(binding.BaseAddress, data) ||
+                 KernelMemoryCompatExports.TryReadTrackedLibcHeap(binding.BaseAddress, data));
+            if (!guestMemoryBacked)
+            {
+                // Keep the zero-filled buffer; layout must match the shader.
+            }
+
+            combined.Add(new GuestMemoryBuffer(
+                binding.BaseAddress,
+                data,
+                data.Length,
+                Pooled: false,
+                Writable: binding.Writable,
+                WriteBackToGuest: binding.WriteBackToGuest && guestMemoryBacked));
+        }
+
+        if (!_bakeScalars)
+        {
+            var runtimeStateLength = GetRuntimeScalarBufferLength(bindings.Count);
+            combined.Add(new GuestMemoryBuffer(
+                0,
+                PackRuntimeScalarStateUnpooled(
+                    translatedDraw.PixelInitialScalars,
+                    bindings),
+                runtimeStateLength,
+                Pooled: false));
+            combined.Add(new GuestMemoryBuffer(
+                0,
+                PackRuntimeScalarStateUnpooled(
+                    translatedDraw.VertexInitialScalars,
+                    bindings),
+                runtimeStateLength,
+                Pooled: false));
+        }
+
+        return combined;
+    }
 }
