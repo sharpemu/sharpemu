@@ -11,6 +11,11 @@ namespace SharpEmu.Libs.Agc;
 // This partial owns submitted PM4 stream decoding.
 public static partial class AgcExports
 {
+    private static readonly bool _traceFramePackets = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FRAME_PACKETS"),
+        "1",
+        StringComparison.Ordinal);
+
     private static readonly HashSet<uint> KnownPm4Opcodes =
     [
         ItNop, ItSetBase, ItIndexBufferSize, ItIndexBase, ItDrawIndirect,

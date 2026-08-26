@@ -234,10 +234,6 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
         StringComparison.Ordinal);
-    private static readonly bool _traceFramePackets = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FRAME_PACKETS"),
-        "1",
-        StringComparison.Ordinal);
     private static long _duplicateTargetTraceCount;
     private static readonly object _softwarePresenterGate = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
