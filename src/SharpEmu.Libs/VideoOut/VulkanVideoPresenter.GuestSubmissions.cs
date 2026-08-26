@@ -12,7 +12,7 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     private sealed partial class Presenter
     {
-        // This partial owns guest GPU submission lifetime.
+        // This partial owns guest GPU submission execution and lifetime.
 
         private const int MaxInFlightGuestSubmissions = 8;
         private bool _gpuLabelTimelineEnabled;
@@ -69,6 +69,204 @@ internal static unsafe partial class VulkanVideoPresenter
             string DebugName,
             VulkanGuestQueueIdentity Queue,
             long WorkSequence);
+
+        private bool TryExecuteOrderedGuestAction(VulkanOrderedGuestAction work)
+        {
+            var visible = TryMakeActiveGuestQueueSubmissionsCpuVisible();
+            if (!visible)
+            {
+                RenderPhaseProfile.RecordOrderedAction(work.DebugName, completed: false);
+                return false;
+            }
+
+            WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
+            work.Action();
+            RenderPhaseProfile.RecordOrderedAction(work.DebugName, completed: true);
+            if (_traceVulkanShaderEnabled)
+            {
+                TraceVulkanShader(
+                    $"vk.ordered_action queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} " +
+                    $"work_sequence={_activeGuestWorkSequence} name='{work.DebugName}'");
+            }
+
+            return true;
+        }
+
+        private void ExecuteGuestCacheOperation(VulkanGuestCacheOperation work)
+        {
+            CloseOpenTranslatedRenderPass();
+            var commandBuffer = BeginBatchedGuestCommands();
+            var plan = VulkanGuestCacheBarrierPlanner.Resolve(work.Operation);
+            var barrier = new MemoryBarrier
+            {
+                SType = StructureType.MemoryBarrier,
+                SrcAccessMask = AccessFlags.MemoryWriteBit,
+                DstAccessMask = plan.DestinationAccess,
+            };
+            _vk.CmdPipelineBarrier(
+                commandBuffer,
+                PipelineStageFlags.AllCommandsBit,
+                plan.DestinationStages,
+                0,
+                1,
+                &barrier,
+                0,
+                null,
+                0,
+                null);
+            work.ApplyHostState();
+            if (_traceVulkanShaderEnabled)
+            {
+                TraceVulkanShader(
+                    $"vk.guest_cache_operation queue={_activeGuestQueue.Name} " +
+                    $"submission={_activeGuestQueue.SubmissionId} " +
+                    $"work_sequence={_activeGuestWorkSequence} " +
+                    $"domains={work.Operation.Domains} actions={work.Operation.Actions} " +
+                    $"name='{work.DebugName}'");
+            }
+        }
+
+        private void ExecuteGpuLabelSignal(VulkanGpuLabelSignal work)
+        {
+            FlushBatchedGuestCommands();
+            _lastSubmittedGpuLabelDependencyByGuestQueue.TryGetValue(
+                _activeGuestQueue.Name,
+                out var dependency);
+            _gpuLabelTimelineSignalCount++;
+            if (_gpuLabelTimelineSignalCount <= 8 ||
+                (_gpuLabelTimelineSignalCount & (_gpuLabelTimelineSignalCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] vk.gpu_label_signal " +
+                    $"count={_gpuLabelTimelineSignalCount} " +
+                    $"queue={_activeGuestQueue.Name} " +
+                    $"dependency=g{dependency.GraphicsTimeline}/" +
+                    $"c{dependency.ComputeTimeline}");
+            }
+            work.PublishGpu(dependency);
+            if (work.PublishHost is not null)
+            {
+                RegisterGpuLabelHostPublication(dependency, work.PublishHost);
+            }
+        }
+
+        private void RegisterGpuLabelHostPublication(
+            GuestGpuLabelDependency dependency,
+            Action publish) =>
+            _gpuLabelHostPublications.Register(dependency, publish);
+
+        /// <summary>
+        /// Returns a skipped draw's pooled data arrays: draws dropped before
+        /// resource creation would otherwise strand their rented buffers.
+        /// </summary>
+        private static void ReturnPooledGuestData(VulkanTranslatedGuestDraw draw)
+        {
+            var returned = new HashSet<byte[]>(
+                System.Collections.Generic.ReferenceEqualityComparer.Instance);
+            foreach (var buffer in draw.GlobalMemoryBuffers)
+            {
+                if (buffer.Pooled && returned.Add(buffer.Data))
+                {
+                    GuestDataPool.Shared.Return(buffer.Data);
+                }
+            }
+
+            foreach (var buffer in draw.VertexBuffers)
+            {
+                if (buffer.Pooled && returned.Add(buffer.Data))
+                {
+                    GuestDataPool.Shared.Return(buffer.Data);
+                }
+            }
+
+            if (draw.IndexBuffer is { Pooled: true } indexBuffer &&
+                returned.Add(indexBuffer.Data))
+            {
+                indexBuffer.TryReturnPooledData();
+            }
+        }
+
+        private static void ReturnPooledGuestData(VulkanComputeGuestDispatch dispatch)
+        {
+            var returned = new HashSet<byte[]>(
+                System.Collections.Generic.ReferenceEqualityComparer.Instance);
+            foreach (var buffer in dispatch.GlobalMemoryBuffers)
+            {
+                if (buffer.Pooled && returned.Add(buffer.Data))
+                {
+                    GuestDataPool.Shared.Return(buffer.Data);
+                }
+            }
+        }
+
+        private string ResolveGuestSubmitContext(
+            IReadOnlyList<TranslatedDrawResources> resources)
+        {
+            var workLabel = !string.IsNullOrEmpty(_activeGuestWorkLabel)
+                ? _activeGuestWorkLabel
+                : _lastGuestWorkLabel;
+            var resourceName = resources.Count > 0
+                ? resources[0].DebugName
+                : _batchResources.Count > 0
+                    ? _batchResources[0].DebugName
+                    : string.Empty;
+            if (string.IsNullOrEmpty(workLabel))
+            {
+                return string.IsNullOrEmpty(resourceName)
+                    ? string.Empty
+                    : $"batch={resourceName}";
+            }
+
+            return string.IsNullOrEmpty(resourceName)
+                ? workLabel
+                : $"{workLabel} batch={resourceName}";
+        }
+
+        private static string DescribeGuestWork(
+            object work,
+            VulkanGuestQueueIdentity queue,
+            long sequence)
+        {
+            var queuePart =
+                $"queue={queue.Name} submission={queue.SubmissionId} sequence={sequence}";
+            return work switch
+            {
+                VulkanComputeGuestDispatch compute =>
+                    $"compute cs=0x{compute.ShaderAddress:X16} " +
+                    $"groups={compute.GroupCountX}x{compute.GroupCountY}x{compute.GroupCountZ} " +
+                    $"textures={compute.Textures.Count} " +
+                    $"globals={compute.GlobalMemoryBuffers.Count} " +
+                    $"writes_global={(compute.WritesGlobalMemory ? 1 : 0)} " +
+                    $"indirect={(compute.IsIndirect ? 1 : 0)} " +
+                    $"spirv={compute.ComputeSpirv.Length} {queuePart}",
+                VulkanOffscreenGuestDraw draw =>
+                    $"offscreen vs=0x{draw.ShaderAddress:X16} " +
+                    $"mrt={draw.Targets.Count} " +
+                    $"textures={draw.Draw.Textures.Count} " +
+                    $"vertices={draw.Draw.VertexCount} {queuePart}",
+                VulkanOffscreenColorClear clear =>
+                    $"offscreen_clear ps=0x{clear.ShaderAddress:X16} " +
+                    $"mrt={clear.Targets.Count} " +
+                    $"rgba=({clear.Red:0.###},{clear.Green:0.###},{clear.Blue:0.###},{clear.Alpha:0.###}) " +
+                    queuePart,
+                VulkanGuestImageWrite imageWrite =>
+                    $"image_write addr=0x{imageWrite.Address:X16} {queuePart}",
+                VulkanOrderedGuestAction action =>
+                    $"ordered_action name={action.DebugName} {queuePart}",
+                VulkanGuestCacheOperation operation =>
+                    $"cache_operation name={operation.DebugName} " +
+                    $"domains={operation.Operation.Domains} " +
+                    $"actions={operation.Operation.Actions} {queuePart}",
+                VulkanOrderedGuestFlip flip =>
+                    $"ordered_flip version={flip.Version} " +
+                    $"buf={flip.DisplayBufferIndex} addr=0x{flip.Address:X16} {queuePart}",
+                VulkanOrderedGuestFlipWait wait =>
+                    $"flip_wait version={wait.Version} " +
+                    $"buf={wait.DisplayBufferIndex} {queuePart}",
+                _ => $"{work.GetType().Name} {queuePart}",
+            };
+        }
 
         private CommandBuffer AllocateGuestCommandBuffer()
         {
