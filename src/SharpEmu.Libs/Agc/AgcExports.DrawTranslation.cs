@@ -14,6 +14,9 @@ namespace SharpEmu.Libs.Agc;
 public static partial class AgcExports
 {
     private static readonly HashSet<(ulong Es, ulong Ps, ulong Target, ulong Texture, uint VertexCount)> _tracedShaderDraws = new();
+    private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
+    private static long _cbMetadataSkipTraceCount;
 
     private static readonly HashSet<ulong> _tracedEmptySrtDrawRejects = new();
     private static readonly HashSet<(ulong Es, ulong Ps)> _tracedFixedFullscreenClears = new();
@@ -2204,5 +2207,31 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         return combined;
+    }
+
+    private static ulong ComputePsInputCntlFingerprint(ReadOnlySpan<uint> cntl)
+    {
+        const ulong prime = 1099511628211UL;
+        var hash = 14695981039346656037UL;
+        foreach (var value in cntl)
+        {
+            hash = (hash ^ value) * prime;
+        }
+
+        return hash;
+    }
+
+    private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
+    {
+        var maxAttribute = -1;
+        foreach (var instruction in state.Program.Instructions)
+        {
+            if (instruction.Control is Gen5InterpolationControl interpolation)
+            {
+                maxAttribute = Math.Max(maxAttribute, (int)interpolation.Attribute);
+            }
+        }
+
+        return (uint)(maxAttribute + 1);
     }
 }

@@ -230,8 +230,6 @@ public static partial class AgcExports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
             "1",
             StringComparison.Ordinal);
-    private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
     private static readonly bool _traceDraws = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
@@ -241,7 +239,6 @@ public static partial class AgcExports
         "1",
         StringComparison.Ordinal);
     private static long _duplicateTargetTraceCount;
-    private static long _cbMetadataSkipTraceCount;
     private static readonly object _softwarePresenterGate = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 
@@ -461,25 +458,6 @@ public static partial class AgcExports
         return cntl;
     }
 
-    private static ulong ComputePsInputCntlFingerprint(ReadOnlySpan<uint> cntl)
-    {
-        const ulong prime = 1099511628211UL;
-        var hash = 14695981039346656037UL;
-        foreach (var value in cntl)
-        {
-            hash = (hash ^ value) * prime;
-        }
-
-        return hash;
-    }
-
-
-
-
-
-
-
-
     private static uint GetPixelColorExportMask(uint packedMasks, uint target) =>
         target < ColorTargetCount
             ? (packedMasks >> (int)(target * 4)) & 0xFu
@@ -500,20 +478,6 @@ public static partial class AgcExports
         }
 
         return packed;
-    }
-
-    private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
-    {
-        var maxAttribute = -1;
-        foreach (var instruction in state.Program.Instructions)
-        {
-            if (instruction.Control is Gen5InterpolationControl interpolation)
-            {
-                maxAttribute = Math.Max(maxAttribute, (int)interpolation.Attribute);
-            }
-        }
-
-        return (uint)(maxAttribute + 1);
     }
 
     private static readonly bool _bakeScalars = string.Equals(
