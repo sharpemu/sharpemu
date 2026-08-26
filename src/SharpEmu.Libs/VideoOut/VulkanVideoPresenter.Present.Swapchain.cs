@@ -153,6 +153,127 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private void CreateGuestDrawResources()
+        {
+            var presentationFormat = PresentationTargetFormat;
+            var colorAttachment = new AttachmentDescription
+            {
+                Format = presentationFormat,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.Clear,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.Undefined,
+                FinalLayout = PresentationTargetFinalLayout,
+            };
+            var colorReference = new AttachmentReference
+            {
+                Attachment = 0,
+                Layout = ImageLayout.ColorAttachmentOptimal,
+            };
+            var subpass = new SubpassDescription
+            {
+                PipelineBindPoint = PipelineBindPoint.Graphics,
+                ColorAttachmentCount = 1,
+                PColorAttachments = &colorReference,
+            };
+            var dependency = new SubpassDependency
+            {
+                SrcSubpass = Vk.SubpassExternal,
+                DstSubpass = 0,
+                SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
+            };
+            var renderPassInfo = new RenderPassCreateInfo
+            {
+                SType = StructureType.RenderPassCreateInfo,
+                AttachmentCount = 1,
+                PAttachments = &colorAttachment,
+                SubpassCount = 1,
+                PSubpasses = &subpass,
+                DependencyCount = 1,
+                PDependencies = &dependency,
+            };
+            Check(
+                _vk.CreateRenderPass(
+                    _device,
+                    &renderPassInfo,
+                    null,
+                    out var swapchainRenderPass),
+                "vkCreateRenderPass");
+            if (swapchainRenderPass.Handle == 0)
+            {
+                throw new InvalidOperationException(
+                    "vkCreateRenderPass returned a null swapchain render pass");
+            }
+
+            _renderPass = swapchainRenderPass;
+
+            _swapchainImageViews = new ImageView[_swapchainImages.Length];
+            _framebuffers = new Framebuffer[_swapchainImages.Length];
+            if (_hdrOutputActive)
+            {
+                _presentationImages = new Image[_swapchainImages.Length];
+                _presentationImageMemory = new DeviceMemory[_swapchainImages.Length];
+                _presentationImageViews = new ImageView[_swapchainImages.Length];
+                _presentationSampleViews = new ImageView[_swapchainImages.Length];
+            }
+            for (var index = 0; index < _swapchainImages.Length; index++)
+            {
+                var viewInfo = new ImageViewCreateInfo
+                {
+                    SType = StructureType.ImageViewCreateInfo,
+                    Image = _swapchainImages[index],
+                    ViewType = ImageViewType.Type2D,
+                    Format = _swapchainFormat,
+                    Components = new ComponentMapping(
+                        ComponentSwizzle.Identity,
+                        ComponentSwizzle.Identity,
+                        ComponentSwizzle.Identity,
+                        ComponentSwizzle.Identity),
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                Check(
+                    _vk.CreateImageView(_device, &viewInfo, null, out _swapchainImageViews[index]),
+                    "vkCreateImageView");
+
+                var imageView = _swapchainImageViews[index];
+                if (_hdrOutputActive)
+                {
+                    CreatePresentationImage(index);
+                    imageView = _presentationImageViews[index];
+                }
+                var framebufferInfo = new FramebufferCreateInfo
+                {
+                    SType = StructureType.FramebufferCreateInfo,
+                    RenderPass = swapchainRenderPass,
+                    AttachmentCount = 1,
+                    PAttachments = &imageView,
+                    Width = _extent.Width,
+                    Height = _extent.Height,
+                    Layers = 1,
+                };
+                Check(
+                    _vk.CreateFramebuffer(_device, &framebufferInfo, null, out _framebuffers[index]),
+                    "vkCreateFramebuffer");
+            }
+
+            var layoutInfo = new PipelineLayoutCreateInfo
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+            };
+            Check(
+                _vk.CreatePipelineLayout(_device, &layoutInfo, null, out _pipelineLayout),
+                "vkCreatePipelineLayout");
+            CreateBarycentricPipeline();
+            if (_hdrOutputActive)
+            {
+                CreateHdrPresentationResources();
+            }
+        }
+
         private PresentModeKHR ChoosePresentMode()
         {
             // MAILBOX never blocks vkQueuePresentKHR on vblank, so a slow
