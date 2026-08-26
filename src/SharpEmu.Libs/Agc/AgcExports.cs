@@ -240,11 +240,8 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FRAME_PACKETS"),
         "1",
         StringComparison.Ordinal);
-    private static long _dcbWriteDataTraceCount;
-    private static long _dcbWaitRegMemTraceCount;
     private static long _duplicateTargetTraceCount;
     private static long _cbMetadataSkipTraceCount;
-    private static long _packetPayloadTraceCount;
     private static readonly object _softwarePresenterGate = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 
@@ -1027,23 +1024,6 @@ public static partial class AgcExports
         ((((ushort)lengthDwords - 2u) & 0x3FFFu) << 16) |
         ((op & 0xFFu) << 8) |
         ((register & 0x3Fu) << 2);
-
-    private static uint EncodeWaitRegMemPoll(uint pollCycles) =>
-        Math.Min(pollCycles >> 4, 0xFFFFu);
-
-    private static uint EncodeWaitRegMem32Control(uint compareFunction, uint operation, uint cachePolicy) =>
-        0x10u |
-        (compareFunction & 0x7u) |
-        ((operation & 0x3u) << 8) |
-        ((operation & 0xCu) << 4) |
-        ((cachePolicy & 0x3u) << 25);
-
-    private static uint EncodeWaitRegMem64Control(uint compareFunction, uint operation, uint cachePolicy) =>
-        0x10u |
-        (compareFunction & 0x7u) |
-        ((operation & 0x1u) << 8) |
-        ((operation & 0x6u) << 5) |
-        ((cachePolicy & 0x3u) << 25);
 
     internal static bool IsValidWaitOperation(uint operation) =>
         operation is 0 or 1 or 4;

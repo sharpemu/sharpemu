@@ -8,6 +8,28 @@ namespace SharpEmu.Libs.Agc;
 public static partial class AgcExports
 {
     // This partial builds general AGC command-buffer packets.
+
+    private static long _dcbWriteDataTraceCount;
+    private static long _dcbWaitRegMemTraceCount;
+    private static long _packetPayloadTraceCount;
+
+    private static uint EncodeWaitRegMemPoll(uint pollCycles) =>
+        Math.Min(pollCycles >> 4, 0xFFFFu);
+
+    private static uint EncodeWaitRegMem32Control(uint compareFunction, uint operation, uint cachePolicy) =>
+        0x10u |
+        (compareFunction & 0x7u) |
+        ((operation & 0x3u) << 8) |
+        ((operation & 0xCu) << 4) |
+        ((cachePolicy & 0x3u) << 25);
+
+    private static uint EncodeWaitRegMem64Control(uint compareFunction, uint operation, uint cachePolicy) =>
+        0x10u |
+        (compareFunction & 0x7u) |
+        ((operation & 0x1u) << 8) |
+        ((operation & 0x6u) << 5) |
+        ((cachePolicy & 0x3u) << 25);
+
     // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
     #pragma warning disable SHEM004
     [SysAbiExport(
