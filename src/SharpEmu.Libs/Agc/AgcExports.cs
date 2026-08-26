@@ -1212,24 +1212,6 @@ public static partial class AgcExports
         return false;
     }
 
-    private static bool TryGetPacketIdentity(
-        CpuContext ctx,
-        ulong commandAddress,
-        out uint op,
-        out uint register)
-    {
-        op = 0;
-        register = 0;
-        if (commandAddress == 0 || !TryReadUInt32(ctx, commandAddress, out var header))
-        {
-            return false;
-        }
-
-        op = (header >> 8) & 0xFFu;
-        register = (header >> 2) & 0x3Fu;
-        return true;
-    }
-
     private static bool ShouldTraceHotPath(ref long counter)
     {
         var count = Interlocked.Increment(ref counter);
