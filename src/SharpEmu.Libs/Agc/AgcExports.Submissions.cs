@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Kernel;
@@ -2143,5 +2144,68 @@ public static partial class AgcExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool TryCopyGuestMemory(
+        CpuContext ctx,
+        ulong sourceAddress,
+        ulong destinationAddress,
+        uint byteCount)
+    {
+        if (sourceAddress == destinationAddress)
+        {
+            return true;
+        }
+
+        var buffer = new byte[Math.Min(byteCount, 64u * 1024u)];
+        ulong offset = 0;
+        while (offset < byteCount)
+        {
+            var chunkLength = (int)Math.Min((ulong)buffer.Length, byteCount - offset);
+            var chunk = buffer.AsSpan(0, chunkLength);
+            if (!ctx.Memory.TryRead(sourceAddress + offset, chunk) ||
+                !ctx.Memory.TryWrite(destinationAddress + offset, chunk))
+            {
+                return false;
+            }
+
+            offset += (uint)chunkLength;
+        }
+
+        return true;
+    }
+
+    private static bool TryFillGuestMemory(
+        CpuContext ctx,
+        uint value,
+        ulong destinationAddress,
+        uint byteCount)
+    {
+        var buffer = new byte[Math.Min(byteCount, 64u * 1024u)];
+        Span<byte> encoded = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(encoded, value);
+        for (var offset = 0; offset < buffer.Length; offset += sizeof(uint))
+        {
+            var remaining = Math.Min(sizeof(uint), buffer.Length - offset);
+            encoded[..remaining].CopyTo(buffer.AsSpan(offset, remaining));
+        }
+
+        ulong destinationOffset = 0;
+        while (destinationOffset < byteCount)
+        {
+            var chunkLength = (int)Math.Min(
+                (ulong)buffer.Length,
+                byteCount - destinationOffset);
+            if (!ctx.Memory.TryWrite(
+                    destinationAddress + destinationOffset,
+                    buffer.AsSpan(0, chunkLength)))
+            {
+                return false;
+            }
+
+            destinationOffset += (uint)chunkLength;
+        }
+
+        return true;
     }
 }
