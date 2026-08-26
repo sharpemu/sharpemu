@@ -995,5 +995,120 @@ internal static unsafe partial class VulkanVideoPresenter
             };
         }
 
+        private void WaitFrameSlot(int slot) => TryWaitFrameSlot(slot, ulong.MaxValue);
+
+        // Returns false when the slot's fence is still unsignaled after
+        // timeoutNs (the GPU is behind, e.g. a slow-compute backlog). Callers
+        // on the macOS main thread must NOT wait forever here or the Cocoa
+        // event pump stalls and the window goes "Not Responding" (F1 overlay /
+        // close stop working). A bounded wait lets Render() skip the frame and
+        // return to the pump; the fence still signals later and the frame is
+        // retried.
+        private bool TryWaitFrameSlot(int slot, ulong timeoutNs)
+        {
+            if (_frameFencePending.Length <= slot || !_frameFencePending[slot])
+            {
+                if (_frameGuestImageVersions.Length > slot &&
+                    _frameGuestImageVersions[slot] is { } unsubmittedVersion)
+                {
+                    _frameGuestImageVersions[slot] = null;
+                    DestroyGuestImage(unsubmittedVersion);
+                    FlipProgressTracker.RecordFlip(unsubmittedVersion.FlipVersion);
+                    TraceVulkanShader(
+                        $"vk.flip_retired version={unsubmittedVersion.FlipVersion} " +
+                        $"frame_slot={slot} reason=frame-not-submitted");
+                }
+                return true;
+            }
+
+            var fence = _frameFences[slot];
+            var waitResult = _vk.WaitForFences(_device, 1, &fence, true, timeoutNs);
+            if (waitResult == Result.Timeout)
+            {
+                return false;
+            }
+
+            Check(waitResult, "vkWaitForFences(frame)");
+            Check(_vk.ResetFences(_device, 1, &fence), "vkResetFences(frame)");
+            _frameFencePending[slot] = false;
+            if (_frameTimelines[slot] > _completedTimeline)
+            {
+                _completedTimeline = _frameTimelines[slot];
+            }
+
+            if (_frameTranslatedResources[slot] is { } translated)
+            {
+                _frameTranslatedResources[slot] = null;
+                DestroyTranslatedDrawResources(translated);
+            }
+
+            if (_frameGuestImageVersions[slot] is { } guestImageVersion)
+            {
+                _frameGuestImageVersions[slot] = null;
+                DestroyGuestImage(guestImageVersion);
+                FlipProgressTracker.RecordFlip(guestImageVersion.FlipVersion);
+                TraceVulkanShader(
+                    $"vk.flip_retired version={guestImageVersion.FlipVersion} " +
+                    $"frame_slot={slot} timeline={_frameTimelines[slot]}");
+            }
+
+            ProcessDeferredTextureDestroys();
+            return true;
+        }
+
+        private void WaitAllFrameSlots()
+        {
+            for (var slot = 0; slot < _frameFencePending.Length; slot++)
+            {
+                WaitFrameSlot(slot);
+            }
+        }
+
+        private void CollectAbandonedGuestImageVersions()
+        {
+            if (_guestImageVersions.Count == 0)
+            {
+                return;
+            }
+
+            HashSet<long> referencedVersions;
+            lock (_gate)
+            {
+                referencedVersions = _pendingGuestImagePresentations
+                    .Select(static presentation => presentation.GuestImageVersion)
+                    .Where(static version => version != 0)
+                    .ToHashSet();
+                if (_latestPresentation is { GuestImageVersion: not 0 } latest)
+                {
+                    referencedVersions.Add(latest.GuestImageVersion);
+                }
+            }
+
+            foreach (var entry in _guestImageVersions.ToArray())
+            {
+                if (referencedVersions.Contains(entry.Key))
+                {
+                    continue;
+                }
+
+                _guestImageVersions.Remove(entry.Key);
+                _deferredGuestImageVersionDestroys.Enqueue(
+                    (entry.Value, _submitTimeline));
+                TraceVulkanShader(
+                    $"vk.flip_retire_deferred version={entry.Key} " +
+                    $"timeline={_submitTimeline} reason=presentation-dropped");
+            }
+        }
+
+        // Used on teardown paths that already drained the queue (device
+        // wait-idle): releases per-slot state without touching fences that
+        // were never submitted.
+        private void DrainFrameSlots()
+        {
+            WaitAllFrameSlots();
+            _completedTimeline = _submitTimeline;
+            ProcessDeferredTextureDestroys();
+        }
+
     }
 }
