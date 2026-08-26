@@ -770,4 +770,60 @@ public static partial class AgcExports
 
         gpuState.HtileMetadata.UnregisterRange(address, length);
     }
+
+    private enum CbColorMode : byte
+    {
+        Disable = 0,
+        Normal = 1,
+        EliminateFastClear = 2,
+        Resolve = 3,
+        FmaskDecompress = 5,
+        DccDecompress = 6,
+    }
+
+    private static bool TryGetCbColorControlMode(
+        IReadOnlyDictionary<uint, uint> registers,
+        out uint mode)
+    {
+        mode = 0;
+        if (!registers.TryGetValue(CbColorControl, out var colorControl))
+        {
+            return false;
+        }
+
+        mode = (colorControl >> 4) & 0x7u;
+        return true;
+    }
+
+    private static bool IsCbMetadataColorMode(uint mode) =>
+        mode is (uint)CbColorMode.EliminateFastClear or
+            (uint)CbColorMode.FmaskDecompress or
+            (uint)CbColorMode.DccDecompress;
+
+    private static bool TryGetHardwareColorResolveTargets(
+        IReadOnlyDictionary<uint, uint> registers,
+        out RenderTargetDescriptor source,
+        out RenderTargetDescriptor destination)
+    {
+        source = default;
+        destination = default;
+        if (!TryGetCbColorControlMode(registers, out var mode) ||
+            mode != (uint)CbColorMode.Resolve)
+        {
+            return false;
+        }
+
+        // CB_COLOR_CONTROL.MODE=RESOLVE uses color slot 0 as the multisampled
+        // source and slot 1 as the single-sample destination. CB_TARGET_MASK
+        // still enables only slot 0, so treating this like a normal MRT draw
+        // rewrites the source and leaves the following composite's input blank.
+        var boundTargets = GetRenderTargets(registers, includeMaskedTargets: true);
+        source = boundTargets.FirstOrDefault(target => target.Slot == 0);
+        destination = boundTargets.FirstOrDefault(target => target.Slot == 1);
+        return source.Address != 0 &&
+            destination.Address != 0 &&
+            source.Width == destination.Width &&
+            source.Height == destination.Height &&
+            source.Format == destination.Format;
+    }
 }
