@@ -2069,4 +2069,79 @@ public static partial class AgcExports
             writesGuestMemory ? destinationAddress : 0,
             writesGuestMemory ? writeLength : 0);
     }
+
+    // ABI (reversed from Quake): rdi = array of DCB base addresses (u64 each),
+    // rsi = array of DCB sizes in dwords (u32 each), rdx = buffer count.
+    [SysAbiExport(
+        Nid = "6UzEidRZwkg",
+        ExportName = "sceAgcDriverSubmitMultiDcbs",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSubmitMultiDcbs(CpuContext ctx)
+    {
+        Interlocked.Increment(ref _dcbSubmitCount);
+        Volatile.Write(ref _lastDcbSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+
+        var addressArray = ctx[CpuRegister.Rdi];
+        var sizeArray = ctx[CpuRegister.Rsi];
+        var bufferCount = (uint)ctx[CpuRegister.Rdx];
+        if (addressArray == 0 || sizeArray == 0 || bufferCount == 0 || bufferCount > 4096)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var tracePackets = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal);
+
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        lock (gpuState.Gate)
+        {
+            Gen5ShaderScalarEvaluator.BeginGlobalMemoryReadScope();
+            try
+            {
+                for (uint i = 0; i < bufferCount; i++)
+                {
+                    if (gpuState.Graphics.IsFaulted)
+                    {
+                        ReportFaultedSubmissionRejected(
+                            gpuState.Graphics,
+                            gpuState.Graphics.ActiveSubmissionId);
+                        break;
+                    }
+
+                    if (!ctx.TryReadUInt64(addressArray + i * 8, out var commandAddress) ||
+                        commandAddress == 0 ||
+                        !ctx.TryReadUInt32(sizeArray + i * 4, out var dwordCount) ||
+                        dwordCount == 0)
+                    {
+                        continue;
+                    }
+
+                    if (tracePackets)
+                    {
+                        TraceAgc(
+                            $"agc.driver_submit_multi_dcbs index={i}/{bufferCount} " +
+                            $"addr=0x{commandAddress:X16} dwords={dwordCount}");
+                    }
+
+                    ParseSubmittedDcb(
+                        ctx,
+                        gpuState,
+                        gpuState.Graphics,
+                        commandAddress,
+                        dwordCount,
+                        tracePackets);
+                }
+
+                DrainResumableDcbs(ctx, gpuState, tracePackets);
+            }
+            finally
+            {
+                Gen5ShaderScalarEvaluator.EndGlobalMemoryReadScope();
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 }
