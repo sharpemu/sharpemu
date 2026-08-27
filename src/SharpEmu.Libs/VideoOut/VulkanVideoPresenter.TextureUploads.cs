@@ -38,6 +38,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private sealed class TextureResource
         {
             public ulong Address;
+            // Exact guest-memory span represented by a cached texture. Host
+            // image memory can have a different size and must not define the
+            // guest range used for cache-operation overlap checks.
+            public ulong SourceByteCount;
             public VkBuffer StagingBuffer;
             public DeviceMemory StagingMemory;
             public Image Image;
@@ -366,6 +370,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var resource = new TextureResource
             {
                 Address = texture.Address,
+                SourceByteCount = texture.SourceByteCount,
                 StagingBuffer = stagingBuffer,
                 StagingMemory = stagingMemory,
                 Image = image,

@@ -93,6 +93,22 @@ internal readonly record struct VulkanGuestCacheBarrier(
     PipelineStageFlags DestinationStages,
     AccessFlags DestinationAccess);
 
+internal enum VulkanGuestCacheResourceKind
+{
+    Buffer,
+    DepthImage,
+    ImageWithoutTrackedLayout,
+}
+
+internal readonly record struct VulkanGuestCacheResourceRange(
+    ulong BaseAddress,
+    ulong SizeBytes,
+    VulkanGuestCacheResourceKind Kind);
+
+internal readonly record struct VulkanGuestCacheResourcePlan(
+    bool UseGlobalBarrier,
+    int MatchedResourceCount);
+
 internal static class VulkanGuestCacheBarrierPlanner
 {
     private const GuestGpuCacheDomain ShaderDomains =
@@ -113,6 +129,65 @@ internal static class VulkanGuestCacheBarrierPlanner
                 PipelineStageFlags.AllGraphicsBit | PipelineStageFlags.ComputeShaderBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
     }
+
+    public static VulkanGuestCacheResourcePlan ResolveResources(
+        GuestGpuCacheOperation operation,
+        IReadOnlyList<VulkanGuestCacheResourceRange> resources)
+    {
+        if (operation.CoversAllMemory ||
+            operation.SizeBytes == 0 ||
+            operation.SizeBytes == ulong.MaxValue)
+        {
+            return new VulkanGuestCacheResourcePlan(
+                UseGlobalBarrier: true,
+                MatchedResourceCount: 0);
+        }
+
+        var matches = 0;
+        foreach (var resource in resources)
+        {
+            if (!RangesOverlap(
+                    operation.BaseAddress,
+                    operation.SizeBytes,
+                    resource.BaseAddress,
+                    resource.SizeBytes))
+            {
+                continue;
+            }
+
+            matches++;
+            if (resource.Kind ==
+                VulkanGuestCacheResourceKind.ImageWithoutTrackedLayout)
+            {
+                return new VulkanGuestCacheResourcePlan(
+                    UseGlobalBarrier: true,
+                    MatchedResourceCount: matches);
+            }
+        }
+
+        return new VulkanGuestCacheResourcePlan(
+            UseGlobalBarrier: matches == 0,
+            MatchedResourceCount: matches);
+    }
+
+    internal static bool RangesOverlap(
+        ulong leftBase,
+        ulong leftSize,
+        ulong rightBase,
+        ulong rightSize)
+    {
+        if (leftSize == 0 || rightSize == 0)
+        {
+            return false;
+        }
+
+        var leftEnd = SaturatingEnd(leftBase, leftSize);
+        var rightEnd = SaturatingEnd(rightBase, rightSize);
+        return leftBase < rightEnd && rightBase < leftEnd;
+    }
+
+    internal static ulong SaturatingEnd(ulong address, ulong size) =>
+        address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
 }
 
 internal sealed record VulkanGpuLabelSignal(

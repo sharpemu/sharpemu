@@ -97,26 +97,18 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             CloseOpenTranslatedRenderPass();
             var commandBuffer = BeginBatchedGuestCommands();
+            var resources = CollectGuestCacheResourceRanges();
             foreach (var operation in work.Operations)
             {
-                var plan = VulkanGuestCacheBarrierPlanner.Resolve(operation);
-                var barrier = new MemoryBarrier
+                if (TryRecordResourceGuestCacheBarrier(
+                        commandBuffer,
+                        operation,
+                        resources))
                 {
-                    SType = StructureType.MemoryBarrier,
-                    SrcAccessMask = AccessFlags.MemoryWriteBit,
-                    DstAccessMask = plan.DestinationAccess,
-                };
-                _vk.CmdPipelineBarrier(
-                    commandBuffer,
-                    PipelineStageFlags.AllCommandsBit,
-                    plan.DestinationStages,
-                    0,
-                    1,
-                    &barrier,
-                    0,
-                    null,
-                    0,
-                    null);
+                    continue;
+                }
+
+                RecordGlobalGuestCacheBarrier(commandBuffer, operation);
             }
 
             work.ApplyHostState();
