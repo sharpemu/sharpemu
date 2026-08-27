@@ -539,7 +539,7 @@ internal static class AgcVertexMetadata
     private static bool IsCompatibleVertexStream(
         Gen5VertexInputBinding input,
         MetadataVertexResource resource) =>
-        (input.Stride == 0 || resource.Stride == 0 || input.Stride == resource.Stride) &&
+        (resource.Stride == 0 || resource.OffsetBytes < resource.Stride) &&
         IsSameVertexStream(input, resource);
 
     private static bool IsSameVertexStream(

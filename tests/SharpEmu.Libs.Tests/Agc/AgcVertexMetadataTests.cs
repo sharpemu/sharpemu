@@ -152,7 +152,7 @@ public sealed class AgcVertexMetadataTests
         const ulong bufferTable = memoryBase + 0x300;
         const ulong sharpBase = memoryBase + 0x800;
 
-        WriteUInt32(memory, semanticsAddress, 0u | (0u << 8) | (4u << 16));
+        WriteUInt32(memory, semanticsAddress, 0u | (4u << 8));
         WriteUInt32(memory, attribTable, 0u | (56u << 5) | (12u << 14));
         WriteUInt32(memory, bufferTable, (uint)(sharpBase & 0xFFFF_FFFFUL));
         WriteUInt32(memory, bufferTable + 4, (uint)(sharpBase >> 32) | (40u << 16));
@@ -179,6 +179,7 @@ public sealed class AgcVertexMetadataTests
             ctx,
             scalars,
             tables,
+            CreateVertexFetchProgram((Pc: 0x40u, VectorData: 4u)),
             discovered);
 
         Assert.Single(merged);
@@ -241,7 +242,7 @@ public sealed class AgcVertexMetadataTests
         const ulong capturedBase = memoryBase + 0x7F8;
         const ulong sharpBase = memoryBase + 0x800;
 
-        WriteUInt32(memory, semanticsAddress, 0u | (0u << 8) | (4u << 16));
+        WriteUInt32(memory, semanticsAddress, 0u | (4u << 8));
         WriteUInt32(memory, attribTable, 0u | (56u << 5) | (12u << 14));
         WriteUInt32(memory, bufferTable, (uint)(sharpBase & 0xFFFF_FFFFUL));
         WriteUInt32(memory, bufferTable + 4, (uint)(sharpBase >> 32) | (40u << 16));
@@ -262,6 +263,7 @@ public sealed class AgcVertexMetadataTests
             ctx,
             scalars,
             tables,
+            CreateVertexFetchProgram((Pc: 0x40u, VectorData: 4u)),
             [new Gen5VertexInputBinding(
                 0x40, 0, 4, 14, 7, capturedBase, 32, 20, data, data.Length, false)]);
 
