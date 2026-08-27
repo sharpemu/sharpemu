@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -105,6 +106,69 @@ public sealed class AgcGpuCacheSemanticsTests
     }
 
     [Fact]
+    public void AcquireSemantics_PreserveUnsharedScopeAndCacheOrder()
+    {
+        var semantics = new AcquireMemGcrControl(
+            (1u << 10) |
+            (2u << 16))
+            .ToSemantics(sizeIsAllMemory: false);
+
+        Assert.Equal(GuestGpuCacheScope.Unshared, semantics.Scope);
+        Assert.Equal(GuestGpuCacheOrder.HighToLow, semantics.Order);
+    }
+
+    [Fact]
+    public void AcquireBatcher_PreservesDisjointRanges()
+    {
+        var operations = new List<GuestGpuCacheOperation>();
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(0x1000, 0x1000));
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(0x900000, 0x1000));
+
+        Assert.Collection(
+            operations,
+            operation => Assert.Equal(0x1000UL, operation.BaseAddress),
+            operation => Assert.Equal(0x900000UL, operation.BaseAddress));
+    }
+
+    [Fact]
+    public void AcquireBatcher_MergesAdjacentMatchingRanges()
+    {
+        var operations = new List<GuestGpuCacheOperation>();
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(0x1000, 0x1000));
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(0x2000, 0x0800));
+
+        var operation = Assert.Single(operations);
+        Assert.Equal(0x1000UL, operation.BaseAddress);
+        Assert.Equal(0x1800UL, operation.SizeBytes);
+    }
+
+    [Fact]
+    public void AcquireBatcher_DoesNotMergeDifferentScopeOrOrder()
+    {
+        var operations = new List<GuestGpuCacheOperation>();
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(0x1000, 0x1000));
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            operations,
+            CreateAcquireOperation(
+                0x1800,
+                0x1000,
+                GuestGpuCacheScope.Unshared,
+                GuestGpuCacheOrder.HighToLow));
+
+        Assert.Equal(2, operations.Count);
+    }
+
+    [Fact]
     public void AcquireSemantics_ExpandZeroSizeOrAllRange()
     {
         var rangeAll = new AcquireMemGcrControl((1u << 14));
@@ -188,4 +252,19 @@ public sealed class AgcGpuCacheSemanticsTests
             AgcGpuCacheAction.MakeAvailable,
             control.ActionSemantics.Actions);
     }
+
+    private static GuestGpuCacheOperation CreateAcquireOperation(
+        ulong baseAddress,
+        ulong sizeBytes,
+        GuestGpuCacheScope scope = GuestGpuCacheScope.Shared,
+        GuestGpuCacheOrder order = GuestGpuCacheOrder.Parallel) => new(
+            GuestGpuCacheDomain.ShaderL2,
+            GuestGpuCacheAction.MakeVisible | GuestGpuCacheAction.Invalidate,
+            baseAddress,
+            sizeBytes,
+            CoversAllMemory: false,
+            RawCbDbControl: 0,
+            RawGcrControl: 1u << 14,
+            scope,
+            order);
 }

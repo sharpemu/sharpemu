@@ -234,6 +234,14 @@ internal interface IGuestGpuBackend
         string debugName);
 
     /// <summary>
+    /// Enqueues cache operations as one ordered backend work item.
+    /// </summary>
+    long SubmitGuestCacheOperations(
+        IReadOnlyList<GuestGpuCacheOperation> operations,
+        Action applyHostState,
+        string debugName);
+
+    /// <summary>
     /// Enqueues a GPU-only label marker. The callback receives the producer
     /// queue timeline. Returns zero when the backend cannot preserve GPU-only
     /// visibility.

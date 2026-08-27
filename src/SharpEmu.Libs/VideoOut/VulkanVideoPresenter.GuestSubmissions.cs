@@ -97,24 +97,28 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             CloseOpenTranslatedRenderPass();
             var commandBuffer = BeginBatchedGuestCommands();
-            var plan = VulkanGuestCacheBarrierPlanner.Resolve(work.Operation);
-            var barrier = new MemoryBarrier
+            foreach (var operation in work.Operations)
             {
-                SType = StructureType.MemoryBarrier,
-                SrcAccessMask = AccessFlags.MemoryWriteBit,
-                DstAccessMask = plan.DestinationAccess,
-            };
-            _vk.CmdPipelineBarrier(
-                commandBuffer,
-                PipelineStageFlags.AllCommandsBit,
-                plan.DestinationStages,
-                0,
-                1,
-                &barrier,
-                0,
-                null,
-                0,
-                null);
+                var plan = VulkanGuestCacheBarrierPlanner.Resolve(operation);
+                var barrier = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier,
+                    SrcAccessMask = AccessFlags.MemoryWriteBit,
+                    DstAccessMask = plan.DestinationAccess,
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer,
+                    PipelineStageFlags.AllCommandsBit,
+                    plan.DestinationStages,
+                    0,
+                    1,
+                    &barrier,
+                    0,
+                    null,
+                    0,
+                    null);
+            }
+
             work.ApplyHostState();
             if (_traceVulkanShaderEnabled)
             {
@@ -122,7 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"vk.guest_cache_operation queue={_activeGuestQueue.Name} " +
                     $"submission={_activeGuestQueue.SubmissionId} " +
                     $"work_sequence={_activeGuestWorkSequence} " +
-                    $"domains={work.Operation.Domains} actions={work.Operation.Actions} " +
+                    $"count={work.Operations.Count} " +
                     $"name='{work.DebugName}'");
             }
         }
@@ -256,8 +260,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"ordered_action name={action.DebugName} {queuePart}",
                 VulkanGuestCacheOperation operation =>
                     $"cache_operation name={operation.DebugName} " +
-                    $"domains={operation.Operation.Domains} " +
-                    $"actions={operation.Operation.Actions} {queuePart}",
+                    $"count={operation.Operations.Count} {queuePart}",
                 VulkanOrderedGuestFlip flip =>
                     $"ordered_flip version={flip.Version} " +
                     $"buf={flip.DisplayBufferIndex} addr=0x{flip.Address:X16} {queuePart}",

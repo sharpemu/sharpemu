@@ -377,6 +377,15 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             applyHostState,
             debugName);
 
+    public long SubmitGuestCacheOperations(
+        IReadOnlyList<GuestGpuCacheOperation> operations,
+        Action applyHostState,
+        string debugName) =>
+        VulkanVideoPresenter.SubmitGuestCacheOperations(
+            operations,
+            applyHostState,
+            debugName);
+
     public long SubmitGpuLabelSignal(
         Action<GuestGpuLabelDependency> publishGpu,
         Action? publishHost,

@@ -708,15 +708,31 @@ internal static unsafe partial class VulkanVideoPresenter
     public static long SubmitGuestCacheOperation(
         GuestGpuCacheOperation operation,
         Action applyHostState,
+        string debugName) =>
+        SubmitGuestCacheOperations([operation], applyHostState, debugName);
+
+    /// <summary>
+    /// Enqueues exact guest cache operations in one queue position.
+    /// </summary>
+    public static long SubmitGuestCacheOperations(
+        IReadOnlyList<GuestGpuCacheOperation> operations,
+        Action applyHostState,
         string debugName)
     {
+        ArgumentNullException.ThrowIfNull(operations);
         ArgumentNullException.ThrowIfNull(applyHostState);
+        if (operations.Count == 0)
+        {
+            return 0;
+        }
+
+        var snapshot = operations.ToArray();
         lock (_gate)
         {
             return _closed || _thread is null
                 ? 0
                 : EnqueueGuestWorkLocked(
-                    new VulkanGuestCacheOperation(operation, applyHostState, debugName));
+                    new VulkanGuestCacheOperation(snapshot, applyHostState, debugName));
         }
     }
 

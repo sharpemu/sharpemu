@@ -826,8 +826,9 @@ public static partial class AgcExports
                 $"scope={(acquire.CoversAllGuestMemory ? "all" : "range")} " +
                 $"poll={acquire.PollInterval} gcr=0x{acquire.GcrControl.Raw:X8} " +
                 $"domains={acquire.Semantics.Domains} actions={acquire.Semantics.Actions} " +
-                $"pending_base=0x{state.PendingAcquireBase:X16} " +
-                $"pending_size=0x{state.PendingAcquireSize:X16}");
+                $"cache_scope={acquire.Semantics.Scope} " +
+                $"cache_order={acquire.Semantics.Order} " +
+                $"pending_count={state.PendingAcquireInvalidations.Count}");
         }
     }
 
@@ -839,37 +840,13 @@ public static partial class AgcExports
         uint cbDbControl,
         uint gcrControl)
     {
-        state.PendingAcquireDomains |= semantics.Domains;
-        state.PendingAcquireActions |= semantics.Actions;
-        state.PendingAcquireCbDbControl |= cbDbControl;
-        state.PendingAcquireGcrControl |= gcrControl;
-        if (!state.PendingAcquireInvalidation)
-        {
-            state.PendingAcquireInvalidation = true;
-            state.PendingAcquireBase = baseAddress;
-            state.PendingAcquireSize = sizeBytes;
-            return;
-        }
-
-        if (state.PendingAcquireSize == ulong.MaxValue || sizeBytes == ulong.MaxValue)
-        {
-            state.PendingAcquireBase = 0;
-            state.PendingAcquireSize = ulong.MaxValue;
-            return;
-        }
-
-        var existingEnd = state.PendingAcquireBase > ulong.MaxValue - state.PendingAcquireSize
-            ? ulong.MaxValue
-            : state.PendingAcquireBase + state.PendingAcquireSize;
-        var newEnd = baseAddress > ulong.MaxValue - sizeBytes
-            ? ulong.MaxValue
-            : baseAddress + sizeBytes;
-        var mergedBase = Math.Min(state.PendingAcquireBase, baseAddress);
-        var mergedEnd = Math.Max(existingEnd, newEnd);
-        state.PendingAcquireBase = mergedBase;
-        state.PendingAcquireSize = mergedEnd == ulong.MaxValue
-            ? ulong.MaxValue
-            : mergedEnd - mergedBase;
+        GuestGpuCacheOperationBatcher.AddOrMerge(
+            state.PendingAcquireInvalidations,
+            semantics.ToGuestOperation(
+                baseAddress,
+                sizeBytes,
+                cbDbControl,
+                gcrControl));
     }
 
     private static void FlushPendingAcquireInvalidation(
@@ -877,62 +854,57 @@ public static partial class AgcExports
         SubmittedDcbState state,
         bool tracePacket)
     {
-        if (!state.PendingAcquireInvalidation)
+        if (state.PendingAcquireInvalidations.Count == 0)
         {
             return;
         }
 
-        var baseAddress = state.PendingAcquireBase;
-        var sizeBytes = state.PendingAcquireSize;
-        var domains = state.PendingAcquireDomains;
-        var actions = state.PendingAcquireActions;
-        var cbDbControl = state.PendingAcquireCbDbControl;
-        var gcrControl = state.PendingAcquireGcrControl;
-        state.PendingAcquireInvalidation = false;
-        state.PendingAcquireBase = 0;
-        state.PendingAcquireSize = 0;
-        state.PendingAcquireDomains = AgcGpuCacheDomain.None;
-        state.PendingAcquireActions = AgcGpuCacheAction.None;
-        state.PendingAcquireCbDbControl = 0;
-        state.PendingAcquireGcrControl = 0;
+        var operations = state.PendingAcquireInvalidations.ToArray();
+        state.PendingAcquireInvalidations.Clear();
 
         var queueName = state.QueueName;
         var submissionId = state.ActiveSubmissionId;
-        var debugName =
-            $"acquire_mem_flush base=0x{baseAddress:X16} size=0x{sizeBytes:X16}";
+        var debugName = $"acquire_mem_flush count={operations.Length}";
         void ApplyAcquire()
         {
-            SyncCpuWrittenGuestImages(ctx, baseAddress, sizeBytes);
+            foreach (var operation in operations)
+            {
+                SyncCpuWrittenGuestImages(
+                    ctx,
+                    operation.BaseAddress,
+                    operation.SizeBytes);
+            }
+
             if (tracePacket)
             {
                 TraceAgc(
                     $"agc.acquire_mem_applied queue={queueName} " +
                     $"submission={submissionId} " +
                     $"work_sequence={GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics} " +
-                    $"base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
+                    $"count={operations.Length}");
             }
         }
 
-        var semantics = new AgcGpuCacheSemantics(
-            domains,
-            actions,
-            CoversAllMemory: sizeBytes == ulong.MaxValue);
-        var operation = semantics.ToGuestOperation(
-            baseAddress,
-            sizeBytes,
-            cbDbControl,
-            gcrControl);
         if (tracePacket || _logGpuCacheOperations)
         {
-            TraceUniqueGpuCacheOperation(
-                "acquire_mem_flush",
-                state,
-                cbDbControl,
-                gcrControl,
-                baseAddress,
-                sizeBytes,
-                semantics,
-                nextConsumer: "submission_boundary");
+            foreach (var operation in operations)
+            {
+                var semantics = new AgcGpuCacheSemantics(
+                    (AgcGpuCacheDomain)(int)operation.Domains,
+                    (AgcGpuCacheAction)(int)operation.Actions,
+                    operation.CoversAllMemory,
+                    operation.Scope,
+                    operation.Order);
+                TraceUniqueGpuCacheOperation(
+                    "acquire_mem_flush",
+                    state,
+                    operation.RawCbDbControl,
+                    operation.RawGcrControl,
+                    operation.BaseAddress,
+                    operation.SizeBytes,
+                    semantics,
+                    nextConsumer: "submission_boundary");
+            }
         }
 
         if (!_gpuCacheHostEffectsEnabled)
@@ -947,8 +919,8 @@ public static partial class AgcExports
             return;
         }
 
-        var sequence = GuestGpu.Current.SubmitGuestCacheOperation(
-            operation,
+        var sequence = GuestGpu.Current.SubmitGuestCacheOperations(
+            operations,
             ApplyAcquire,
             debugName);
         if (sequence == 0)

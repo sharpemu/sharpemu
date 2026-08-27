@@ -34,7 +34,9 @@ internal enum AgcGpuCacheAction
 internal readonly record struct AgcGpuCacheSemantics(
     AgcGpuCacheDomain Domains,
     AgcGpuCacheAction Actions,
-    bool CoversAllMemory)
+    bool CoversAllMemory,
+    GuestGpuCacheScope Scope = GuestGpuCacheScope.Shared,
+    GuestGpuCacheOrder Order = GuestGpuCacheOrder.Parallel)
 {
     public GuestGpuCacheOperation ToGuestOperation(
         ulong baseAddress,
@@ -47,7 +49,9 @@ internal readonly record struct AgcGpuCacheSemantics(
             sizeBytes,
             CoversAllMemory,
             rawCbDbControl,
-            rawGcrControl);
+            rawGcrControl,
+            Scope,
+            Order);
 }
 
 /// <summary>
@@ -141,7 +145,21 @@ internal readonly record struct AcquireMemGcrControl(uint Raw)
             ((Gl2MetadataInvalidate || Gl0ScalarInvalidate ||
               Gl0VectorInvalidate || Gl1Invalidate) && TextureCacheRange == 0) ||
             ((Gl2Discard || Gl2Invalidate || Gl2Writeback) && Gl2Range == 0);
-        return new AgcGpuCacheSemantics(domains, actions, coversAllMemory);
+        var scope = Gl2Unshared
+            ? GuestGpuCacheScope.Unshared
+            : GuestGpuCacheScope.Shared;
+        var order = Order switch
+        {
+            1 => GuestGpuCacheOrder.LowToHigh,
+            2 => GuestGpuCacheOrder.HighToLow,
+            _ => GuestGpuCacheOrder.Parallel,
+        };
+        return new AgcGpuCacheSemantics(
+            domains,
+            actions,
+            coversAllMemory,
+            scope,
+            order);
     }
 }
 

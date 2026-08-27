@@ -28,6 +28,19 @@ internal enum GuestGpuCacheAction
     Discard = 1 << 4,
 }
 
+internal enum GuestGpuCacheScope
+{
+    Shared,
+    Unshared,
+}
+
+internal enum GuestGpuCacheOrder
+{
+    Parallel,
+    LowToHigh,
+    HighToLow,
+}
+
 internal readonly record struct GuestGpuCacheOperation(
     GuestGpuCacheDomain Domains,
     GuestGpuCacheAction Actions,
@@ -35,4 +48,89 @@ internal readonly record struct GuestGpuCacheOperation(
     ulong SizeBytes,
     bool CoversAllMemory,
     uint RawCbDbControl,
-    uint RawGcrControl);
+    uint RawGcrControl,
+    GuestGpuCacheScope Scope = GuestGpuCacheScope.Shared,
+    GuestGpuCacheOrder Order = GuestGpuCacheOrder.Parallel);
+
+internal static class GuestGpuCacheOperationBatcher
+{
+    public static void AddOrMerge(
+        List<GuestGpuCacheOperation> operations,
+        GuestGpuCacheOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull(operations);
+
+        var merged = Normalize(operation);
+        for (var index = operations.Count - 1; index >= 0; index--)
+        {
+            if (!CanMerge(operations[index], merged))
+            {
+                continue;
+            }
+
+            merged = Merge(operations[index], merged);
+            operations.RemoveAt(index);
+        }
+
+        operations.Add(merged);
+        operations.Sort(static (left, right) =>
+            left.BaseAddress.CompareTo(right.BaseAddress));
+    }
+
+    internal static bool CanMerge(
+        GuestGpuCacheOperation left,
+        GuestGpuCacheOperation right)
+    {
+        if (left.Domains != right.Domains ||
+            left.Actions != right.Actions ||
+            left.RawCbDbControl != right.RawCbDbControl ||
+            left.RawGcrControl != right.RawGcrControl ||
+            left.Scope != right.Scope ||
+            left.Order != right.Order)
+        {
+            return false;
+        }
+
+        if (left.CoversAllMemory || right.CoversAllMemory)
+        {
+            return true;
+        }
+
+        var leftEnd = SaturatingEnd(left.BaseAddress, left.SizeBytes);
+        var rightEnd = SaturatingEnd(right.BaseAddress, right.SizeBytes);
+        return left.BaseAddress <= rightEnd && right.BaseAddress <= leftEnd;
+    }
+
+    private static GuestGpuCacheOperation Merge(
+        GuestGpuCacheOperation left,
+        GuestGpuCacheOperation right)
+    {
+        if (left.CoversAllMemory || right.CoversAllMemory)
+        {
+            return left with
+            {
+                BaseAddress = 0,
+                SizeBytes = ulong.MaxValue,
+                CoversAllMemory = true,
+            };
+        }
+
+        var start = Math.Min(left.BaseAddress, right.BaseAddress);
+        var end = Math.Max(
+            SaturatingEnd(left.BaseAddress, left.SizeBytes),
+            SaturatingEnd(right.BaseAddress, right.SizeBytes));
+        return left with
+        {
+            BaseAddress = start,
+            SizeBytes = end == ulong.MaxValue ? ulong.MaxValue : end - start,
+        };
+    }
+
+    private static GuestGpuCacheOperation Normalize(GuestGpuCacheOperation operation) =>
+        operation.CoversAllMemory
+            ? operation with { BaseAddress = 0, SizeBytes = ulong.MaxValue }
+            : operation;
+
+    private static ulong SaturatingEnd(ulong address, ulong size) =>
+        address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
+}

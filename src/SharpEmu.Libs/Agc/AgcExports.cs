@@ -370,15 +370,9 @@ public static partial class AgcExports
         public uint FrameDrawCount { get; set; }
         public uint FrameDispatchCount { get; set; }
         public ulong FlipCount { get; set; }
-        // Coalesce ACQUIRE_MEM invalidations within one DCB parse so North
-        // Yankton load does not enqueue hundreds of empty OrderedGuestActions.
-        public bool PendingAcquireInvalidation { get; set; }
-        public ulong PendingAcquireBase { get; set; }
-        public ulong PendingAcquireSize { get; set; }
-        public AgcGpuCacheDomain PendingAcquireDomains { get; set; }
-        public AgcGpuCacheAction PendingAcquireActions { get; set; }
-        public uint PendingAcquireCbDbControl { get; set; }
-        public uint PendingAcquireGcrControl { get; set; }
+        // Keep exact ACQUIRE_MEM ranges in one presenter work item. This avoids
+        // queue growth without widening disjoint guest cache operations.
+        public List<GuestGpuCacheOperation> PendingAcquireInvalidations { get; } = [];
 
         // Growing ring: never follows the chunk-advance sentinel (builders jump
         // to non-contiguous chunks), parks on the first not-yet-written word instead.

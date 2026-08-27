@@ -85,7 +85,7 @@ internal sealed record VulkanOrderedGuestAction(
     string DebugName);
 
 internal sealed record VulkanGuestCacheOperation(
-    GuestGpuCacheOperation Operation,
+    IReadOnlyList<GuestGpuCacheOperation> Operations,
     Action ApplyHostState,
     string DebugName);
 
