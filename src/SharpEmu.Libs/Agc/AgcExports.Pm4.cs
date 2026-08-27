@@ -503,9 +503,8 @@ public static partial class AgcExports
 
             if (op == ItNop && register == RDmaData && length >= 7)
             {
-                // Ensure CMASK addresses are tracked before DMA fills
-                var tempTargets = GetRenderTargets(state.CxRegisters);
-                TrackCmaskAddresses(state.CxRegisters, tempTargets);
+                var targets = GetRenderTargets(state.CxRegisters);
+                TrackCmaskAddresses(state.CxRegisters, targets);
 
                 ApplySubmittedDmaData(
                     ctx,
@@ -915,5 +914,263 @@ public static partial class AgcExports
             $"addr=0x{buffer.Address:X16} fmt=0x{buffer.PixelFormat:X16} " +
             $"tile={buffer.TilingMode} size={buffer.Width}x{buffer.Height} " +
             $"pitch={buffer.PitchInPixel} path={path}");
+    }
+
+    private static readonly Dictionary<(uint Op, uint Register), long> _submittedOpcodeCounts = new();
+    private static long _submittedOpcodeTotal;
+
+    private static void CountSubmittedOpcode(uint op, uint register)
+    {
+        var key = (op, op == ItNop ? register : uint.MaxValue);
+        lock (_submittedOpcodeCounts)
+        {
+            _submittedOpcodeCounts[key] =
+                _submittedOpcodeCounts.TryGetValue(key, out var count) ? count + 1 : 1;
+            if (++_submittedOpcodeTotal % 500_000 == 0)
+            {
+                var summary = string.Join(
+                    ' ',
+                    _submittedOpcodeCounts
+                        .OrderByDescending(entry => entry.Value)
+                        .Select(entry => entry.Key.Register == uint.MaxValue
+                            ? $"0x{entry.Key.Op:X2}:{entry.Value}"
+                            : $"0x{entry.Key.Op:X2}/r{entry.Key.Register}:{entry.Value}"));
+                Console.Error.WriteLine($"[PKT] total={_submittedOpcodeTotal} {summary}");
+            }
+        }
+    }
+
+    private static void ApplySubmittedRegisters(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint packetLength,
+        uint op,
+        uint register)
+    {
+        if (op is ItSetShReg or ItSetContextReg or ItSetUconfigReg or ItSetUconfigRegIndex)
+        {
+            if (packetLength < 3 ||
+                !TryReadUInt32(ctx, packetAddress + sizeof(uint), out var startRegister))
+            {
+                return;
+            }
+
+            if (op == ItSetUconfigRegIndex)
+            {
+                startRegister &= 0x0FFF_FFFFu;
+            }
+
+            var directDestination = op switch
+            {
+                ItSetShReg => state.ShRegisters,
+                ItSetContextReg => state.CxRegisters,
+                _ => state.UcRegisters,
+            };
+            for (uint index = 0; index < packetLength - 2; index++)
+            {
+                if (!TryReadUInt32(
+                        ctx,
+                        packetAddress + 8 + ((ulong)index * sizeof(uint)),
+                        out var value))
+                {
+                    return;
+                }
+
+                directDestination[startRegister + index] = value;
+                if (op is ItSetUconfigReg or ItSetUconfigRegIndex)
+                {
+                    ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
+                }
+            }
+
+            return;
+        }
+
+        if (op != ItNop ||
+            register is not (RCxRegsIndirect or RShRegsIndirect or RUcRegsIndirect) ||
+            packetLength < 4 ||
+            !TryReadUInt32(ctx, packetAddress + sizeof(uint), out var registerCount) ||
+            !TryReadUInt64(ctx, packetAddress + 8, out var registersAddress))
+        {
+            return;
+        }
+
+        var destination = register switch
+        {
+            RCxRegsIndirect => state.CxRegisters,
+            RShRegsIndirect => state.ShRegisters,
+            _ => state.UcRegisters,
+        };
+        for (uint index = 0; index < registerCount; index++)
+        {
+            var entryAddress = registersAddress + ((ulong)index * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var registerOffset) ||
+                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
+            {
+                return;
+            }
+
+            // The indirect table has an explicit count; offset zero is a real
+            // context-register index (DB_RENDER_CONTROL), not a terminator.
+            // Dropping it leaves stale depth/render-control state active in
+            // later passes.
+            destination[registerOffset] = value;
+            if (register == RUcRegsIndirect)
+            {
+                ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Test-only view of a parsed graphics context register. False when the
+    /// register was never written.
+    /// </summary>
+    internal static bool TryGetGraphicsContextRegisterForTests(
+        CpuContext ctx,
+        uint registerOffset,
+        out uint value)
+    {
+        value = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            return gpuState.Graphics.CxRegisters.TryGetValue(registerOffset, out value);
+        }
+    }
+
+    /// <summary>
+    /// SH-register counterpart of <see cref="TryGetGraphicsContextRegisterForTests"/>;
+    /// the shader stage addresses live here.
+    /// </summary>
+    internal static bool TryGetGraphicsShRegisterForTests(
+        CpuContext ctx,
+        uint registerOffset,
+        out uint value)
+    {
+        value = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            return gpuState.Graphics.ShRegisters.TryGetValue(registerOffset, out value);
+        }
+    }
+
+    internal static bool TryGetGraphicsIndexStateForTests(
+        CpuContext ctx,
+        out ulong address,
+        out uint count,
+        out uint offset)
+    {
+        address = 0;
+        count = 0;
+        offset = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            address = gpuState.Graphics.IndexBufferAddress;
+            count = gpuState.Graphics.IndexBufferCount;
+            offset = gpuState.Graphics.DrawIndexOffset;
+            return true;
+        }
+    }
+
+    internal static bool TryGetGraphicsIndexSizeForTests(
+        CpuContext ctx,
+        out uint indexSize)
+    {
+        indexSize = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            indexSize = gpuState.Graphics.IndexSize;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// GraphicsDcbSetIndexSize writes VGT_INDEX_TYPE via SET_UCONFIG_REG.
+    /// Mirror that into <see cref="SubmittedDcbState.IndexSize"/>.
+    /// </summary>
+    private static void ApplyUcIndexTypeIfNeeded(
+        SubmittedDcbState state,
+        uint registerOffset,
+        uint value)
+    {
+        if (registerOffset == VgtIndexType)
+        {
+            state.IndexSize = value & 0x3;
+        }
+    }
+
+    private static void TraceSubmittedPacket(
+        CpuContext ctx,
+        ulong packetAddress,
+        uint dwordOffset,
+        uint header,
+        uint length,
+        uint op,
+        uint register)
+    {
+        TraceAgc(
+            $"agc.dcb.packet dw={dwordOffset} addr=0x{packetAddress:X16} header=0x{header:X8} len={length} op=0x{op:X2} reg=0x{register:X2}");
+
+        var payloadCount = Math.Min(length - 1, 32u);
+        for (uint i = 0; i < payloadCount; i++)
+        {
+            if (!TryReadUInt32(ctx, packetAddress + ((ulong)(i + 1) * sizeof(uint)), out var value))
+            {
+                return;
+            }
+
+            TraceAgc($"agc.dcb.payload dw={dwordOffset + i + 1} value=0x{value:X8}");
+        }
+
+        if (op != ItNop ||
+            register is not (RCxRegsIndirect or RShRegsIndirect or RUcRegsIndirect) ||
+            length < 4 ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var registerCount) ||
+            !TryReadUInt64(ctx, packetAddress + 8, out var registersAddress))
+        {
+            return;
+        }
+
+        var registerSpace = register == RCxRegsIndirect ? "cx" : register == RShRegsIndirect ? "sh" : "uc";
+        var tracedCount = Math.Min(registerCount, 256u);
+        TraceAgc($"agc.dcb.indirect space={registerSpace} regs=0x{registersAddress:X16} count={registerCount}");
+        for (uint i = 0; i < tracedCount; i++)
+        {
+            var entryAddress = registersAddress + ((ulong)i * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var registerOffset) ||
+                !TryReadUInt32(ctx, entryAddress + 4, out var value))
+            {
+                TraceAgc($"agc.dcb.indirect_read_failed space={registerSpace} index={i} addr=0x{entryAddress:X16}");
+                return;
+            }
+
+            TraceAgc($"agc.dcb.reg space={registerSpace} index={i} offset=0x{registerOffset:X4} value=0x{value:X8}");
+        }
+
+        if (tracedCount != registerCount)
+        {
+            TraceAgc($"agc.dcb.indirect_truncated space={registerSpace} traced={tracedCount} total={registerCount}");
+        }
     }
 }

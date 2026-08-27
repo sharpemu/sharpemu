@@ -13,6 +13,16 @@ namespace SharpEmu.Libs.Agc;
 // This partial builds translated guest draws from submitted AGC graphics state.
 public static partial class AgcExports
 {
+    private record struct MetaSurfaceInfo(
+        ulong CmaskAddress,
+        uint ClearWord0,
+        uint ClearWord1,
+        bool IsCleared);
+
+    private static readonly Dictionary<ulong, MetaSurfaceInfo> _metaSurfaces = new();
+    private static readonly Dictionary<ulong, ulong> _cmaskToColorBuffer = new();
+    private static readonly object _metaSurfaceGate = new();
+
     private static readonly HashSet<(ulong Es, ulong Ps, ulong Target, ulong Texture, uint VertexCount)> _tracedShaderDraws = new();
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
