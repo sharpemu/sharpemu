@@ -66,7 +66,7 @@ public sealed partial class DirectExecutionBackend
         // MONITORX (0F 01 FA) and MWAITX (0F 01 FB) are fixed 3-byte encodings with no
         // ModRM/SIB/displacement/immediate, so a raw byte compare is sufficient and unambiguous.
         var opcode = new byte[3];
-        if (!TryReadHostBytes(rip, opcode) ||
+        if (!TryReadExecutableBytes(rip, opcode) ||
             opcode[0] != 0x0F || opcode[1] != 0x01 || (opcode[2] != 0xFA && opcode[2] != 0xFB))
         {
             return false;

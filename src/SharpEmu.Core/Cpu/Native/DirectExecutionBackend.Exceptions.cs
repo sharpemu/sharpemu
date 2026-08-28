@@ -308,7 +308,7 @@ public sealed partial class DirectExecutionBackend
 			for (int i = 0; i < 16; i++)
 			{
 				ulong stackAddr = rsp + (ulong)(i * 8);
-				if (!TryReadHostQword(stackAddr, out ulong value))
+				if (!TryReadDiagnosticHostQword(stackAddr, out ulong value))
 				{
 					Console.Error.WriteLine("[LOADER][WARNING]   Could not read stack qwords.");
 					break;
@@ -325,7 +325,7 @@ public sealed partial class DirectExecutionBackend
 				var windowStart = rsp >= 0x300 ? rsp - 0x300 : 0;
 				for (var stackAddr = windowStart; stackAddr < rsp + 0x100; stackAddr += 8)
 				{
-					if (!TryReadHostQword(stackAddr, out var value))
+					if (!TryReadDiagnosticHostQword(stackAddr, out var value))
 					{
 						continue;
 					}
@@ -357,11 +357,12 @@ public sealed partial class DirectExecutionBackend
 				ulong frame = rbp;
 				for (int i = 0; i < 12; i++)
 				{
-					if (frame < 0x10000)
+					if (!IsCanonicalUserAddress(frame) || (frame & 7) != 0)
 					{
 						break;
 					}
-					if (!TryReadHostQword(frame, out ulong next) || !TryReadHostQword(frame + 8, out ulong ret))
+					if (!TryReadDiagnosticHostQword(frame, out ulong next) ||
+						!TryReadDiagnosticHostQword(frame + 8, out ulong ret))
 					{
 						Console.Error.WriteLine("[LOADER][WARNING]   Could not walk RBP frame chain.");
 						break;
@@ -640,7 +641,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		byte[] opcode = new byte[2];
-		if (!TryReadHostBytes(rip, opcode) || opcode[0] != 0xCD || opcode[1] != 0x41)
+		if (!TryReadExecutableBytes(rip, opcode) || opcode[0] != 0xCD || opcode[1] != 0x41)
 		{
 			return false;
 		}
@@ -793,7 +794,7 @@ public sealed partial class DirectExecutionBackend
 		// Optimized guest code frequently omits frame pointers. The return
 		// address at RSP is then more useful than an RBP walk and identifies the
 		// exact call site that supplied the faulting arguments.
-		if (TryReadHostQword(rsp, out var stackReturn) && stackReturn >= 0x60)
+		if (TryReadDiagnosticHostQword(rsp, out var stackReturn) && stackReturn >= 0x60)
 		{
 			DumpGuestInstructionStream("stack-return-prelude", stackReturn - 0x60, 40);
 		}
@@ -1283,24 +1284,58 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
-		if (address < 65536)
+		if (!OperatingSystem.IsWindows())
+		{
+			return TryReadStackU64(address, out value);
+		}
+
+		value = 0;
+		if (!IsReadableHostRange(address, sizeof(ulong)))
 		{
 			return false;
 		}
 
+		ulong readValue = 0;
+		if (ReadProcessMemory(
+				(nint)(-1),
+				(nint)address,
+				&readValue,
+				sizeof(ulong),
+				out var bytesRead) == 0 ||
+			bytesRead != sizeof(ulong))
+		{
+			return false;
+		}
+
+		value = readValue;
+		return true;
+	}
+
+	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	{
+		if (!IsReadableHostRange(address, buffer.Length))
+		{
+			return false;
+		}
+
+		if (buffer.Length == 0)
+		{
+			return true;
+		}
+
 		if (OperatingSystem.IsWindows())
 		{
-			ulong end = address + (ulong)buffer.Length;
-			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
+			fixed (byte* destination = buffer)
 			{
-				if (VirtualQuery((void*)page, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-					mbi.State != MEM_COMMIT ||
-					!IsReadableProtection(mbi.Protect))
-				{
-					return false;
-				}
+				return ReadProcessMemory(
+					(nint)(-1),
+					(nint)address,
+					destination,
+					(nuint)buffer.Length,
+					out var bytesRead) != 0 &&
+					bytesRead == (nuint)buffer.Length;
 			}
 		}
 
@@ -1314,6 +1349,82 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 	}
+
+	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return TryReadHostBytes(address, buffer);
+		}
+
+		if (!IsReadableHostRange(address, buffer.Length))
+		{
+			return false;
+		}
+
+		if (buffer.Length == 0)
+		{
+			return true;
+		}
+
+		// RIP identifies code that Windows was already executing when the
+		// exception occurred. These mappings are stable for the duration of
+		// dispatch, so read them directly. Arbitrary diagnostic and operand
+		// addresses continue to use ReadProcessMemory above because they can
+		// become invalid while an exception is being reported.
+		new ReadOnlySpan<byte>((void*)address, buffer.Length).CopyTo(buffer);
+		return true;
+	}
+
+	private unsafe static bool IsReadableHostRange(ulong address, int byteCount)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address))
+		{
+			return false;
+		}
+
+		var length = (ulong)byteCount;
+		if (address > 0x0000_8000_0000_0000UL - length)
+		{
+			return false;
+		}
+
+		var end = address + length;
+		var cursor = address;
+		while (cursor < end)
+		{
+			if (VirtualQuery(
+					(void*)cursor,
+					out var mbi,
+					(nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				mbi.State != MEM_COMMIT ||
+				!IsReadableProtection(mbi.Protect))
+			{
+				return false;
+			}
+
+			var regionEnd = mbi.BaseAddress + mbi.RegionSize;
+			if (regionEnd < mbi.BaseAddress || regionEnd <= cursor)
+			{
+				return false;
+			}
+
+			cursor = Math.Min(regionEnd, end);
+		}
+
+		return true;
+	}
+
+	private static bool IsCanonicalUserAddress(ulong address) =>
+		address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
+
+	[DllImport("kernel32.dll", SetLastError = false)]
+	private unsafe static extern int ReadProcessMemory(
+		nint process,
+		nint baseAddress,
+		void* buffer,
+		nuint byteCount,
+		out nuint bytesRead);
 
 	private string FormatPointerWithNearestSymbol(ulong value)
 	{
