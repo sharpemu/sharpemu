@@ -576,7 +576,8 @@ public static class AjmExports
         var infoAddress = ctx[CpuRegister.Rdi];
         var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
         var gaplessAddress = ctx[CpuRegister.Rdx];
-        var resultAddress = ctx[CpuRegister.Rcx];
+        var reset = unchecked((int)ctx[CpuRegister.Rcx]);
+        var resultAddress = ctx[CpuRegister.R8];
 
         if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
         {
@@ -585,7 +586,9 @@ public static class AjmExports
 
         var status = TryGetInstance(instanceId, out _) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
         WriteBasicResult(ctx, resultAddress, status);
-        Trace($"batch_job_set_gapless_decode instance=0x{instanceId:X8} gapless=0x{gaplessAddress:X16} status=0x{status:X8}");
+        Trace(
+            $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
+            $"gapless=0x{gaplessAddress:X16} reset={reset} status=0x{status:X8}");
         return ctx.SetReturn(0);
     }
 
@@ -892,7 +895,10 @@ public static class AjmExports
         var descriptors = split
             ? Math.Min(inputCountOrSize, MaxBufferDescriptors) + Math.Min(outputCountOrSize, MaxBufferDescriptors)
             : 0;
-        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize + (descriptors * AjmBufferDescriptorBytes)))
+        var jobSize = split
+            ? AjmJobRunSplitBaseSize + (descriptors * AjmBufferDescriptorBytes)
+            : AjmJobRunSize;
+        if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
@@ -1271,6 +1277,8 @@ public static class AjmExports
     private const ulong AjmBatchInfoLastGoodJobRaField = 32;
     private const ulong AjmJobControlSize = 48;
     private const ulong AjmJobRunSize = 64;
+    // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) is 32 + 16 bytes per descriptor.
+    private const ulong AjmJobRunSplitBaseSize = 32;
     private const ulong AjmJobGetStatisticsSize = 88;
     private const int AjmStatisticsResultBytes = 48;
     private const int AjmSidebandResultBytes = 8;
