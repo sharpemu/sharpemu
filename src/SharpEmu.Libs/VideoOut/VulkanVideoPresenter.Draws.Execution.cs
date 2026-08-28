@@ -201,7 +201,14 @@ internal static unsafe partial class VulkanVideoPresenter
             Framebuffer transientFramebuffer = default;
             try
             {
-                var extent = new Extent2D(firstTarget.Width, firstTarget.Height);
+                Span<Extent2D> colorAttachmentExtents = stackalloc Extent2D[targets.Length];
+                for (var index = 0; index < targets.Length; index++)
+                {
+                    colorAttachmentExtents[index] = new Extent2D(
+                        targets[index].Width,
+                        targets[index].Height);
+                }
+                var extent = VulkanFramebufferExtentResolver.Resolve(colorAttachmentExtents);
                 var depthClearMode = GuestDepthClearMode.Resolve(
                     draw.RenderState.Depth,
                     work.DepthTarget);
@@ -262,9 +269,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     // resolution while the active viewport and DB surface use
                     // a smaller dynamic-rendering extent. Vulkan requires the
                     // framebuffer extent to fit every attachment.
-                    extent = new Extent2D(
-                        Math.Min(firstTarget.Width, depth.Width),
-                        Math.Min(firstTarget.Height, depth.Height));
+                    extent = VulkanFramebufferExtentResolver.Resolve(
+                        colorAttachmentExtents,
+                        new Extent2D(depth.Width, depth.Height));
                 }
 
                 if (depthClearMode.SuppressDrawDepthState)

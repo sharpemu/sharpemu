@@ -474,7 +474,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public RenderPass InitialRenderPass;
             public Framebuffer Framebuffer;
             public Dictionary<Format, ReinterpretedGuestImageViews> ReinterpretCache { get; } = new();
-            public Dictionary<GuestDepthKey, DepthFramebufferResource> DepthFramebuffers { get; } = new();
+            public Dictionary<DepthFramebufferKey, DepthFramebufferResource> DepthFramebuffers { get; } = new();
             public bool Initialized;
             public bool InitialUploadPending;
             public bool IsCpuBacked;

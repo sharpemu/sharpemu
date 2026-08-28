@@ -68,7 +68,6 @@ internal static unsafe partial class VulkanVideoPresenter
             uint NumberType,
             uint TileMode)> _tracedDepthTextureAliasRejects = new();
         private readonly HashSet<(ulong Address, uint Width, uint Height)> _tracedDepthExtentFallbacks = new();
-
         private const Format DepthFormat = Format.D32Sfloat;
 
         private sealed class GuestDepthResource
@@ -107,6 +106,11 @@ internal static unsafe partial class VulkanVideoPresenter
             public RenderPass ReadOnlyColorClearRenderPass;
             public Framebuffer ReadOnlyFramebuffer;
         }
+
+        private readonly record struct DepthFramebufferKey(
+            GuestDepthKey Depth,
+            Format ColorFormat,
+            ulong ColorView);
 
         private bool TryResolveGuestDepthTexture(
             GuestDrawTexture texture,
@@ -453,12 +457,18 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestImageResource color,
             GuestDepthResource depth)
         {
-            if (color.DepthFramebuffers.TryGetValue(depth.Key, out var existing))
+            var attachmentView = color.MipViews.Length > 0
+                ? color.MipViews[0]
+                : color.View;
+            var key = new DepthFramebufferKey(
+                depth.Key,
+                color.Format,
+                attachmentView.Handle);
+            if (color.DepthFramebuffers.TryGetValue(key, out var existing))
             {
                 return existing;
             }
 
-            var attachmentView = color.MipViews.Length > 0 ? color.MipViews[0] : color.View;
             var loadRenderPass = CreateDepthRenderPass(
                 color.Format,
                 clearColor: false,
@@ -539,7 +549,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ObjectType.Framebuffer,
                 readOnlyFramebuffer.Handle,
                 $"{name} read-only framebuffer");
-            color.DepthFramebuffers.Add(depth.Key, resource);
+            color.DepthFramebuffers.Add(key, resource);
             return resource;
         }
 
