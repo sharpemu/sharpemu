@@ -367,7 +367,11 @@ public static partial class AgcExports
                     return;
                 }
 
-                GuestImageWriteTracker.Track(
+                // TryWrite reports the complete write through
+                // NotifyManagedWrite before it copies the bytes. Keep this
+                // range on the managed-writer path so each constant fill does
+                // not protect and immediately fault the same pages again.
+                GuestImageWriteTracker.TrackManagedWriter(
                     destinationAddress,
                     (ulong)output.Length,
                     VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
