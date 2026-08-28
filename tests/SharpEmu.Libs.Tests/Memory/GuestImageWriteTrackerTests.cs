@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.Core.Cpu.Native;
 using SharpEmu.HLE;
 using Xunit;
 
@@ -356,6 +357,18 @@ public sealed unsafe class GuestImageWriteTrackerTests
                     out var armed));
             Assert.True(protect);
             Assert.True(armed);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(
+                    GuestImageWriteTracker.TryGetNativeWindowsFaultState(
+                        address,
+                        out var nativeState,
+                        out var faultCount));
+                Assert.Equal(
+                    GuestImageWriteTracker.NativeWindowsPageStateArmed,
+                    nativeState);
+                Assert.Equal(0, faultCount);
+            }
         }
         finally
         {
@@ -547,6 +560,15 @@ public sealed unsafe class GuestImageWriteTrackerTests
         try
         {
             GuestImageWriteTracker.Track(address, TrackedByteCount);
+            var previousNativeFaultCount = 0;
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(
+                    GuestImageWriteTracker.TryGetNativeWindowsFaultState(
+                        address,
+                        out _,
+                        out previousNativeFaultCount));
+            }
             Assert.NotEqual(0u, HostMemory.Query(allocation, out var armedInfo));
             Assert.Equal(
                 HostMemory.PAGE_EXECUTE_READ,
@@ -557,11 +579,103 @@ public sealed unsafe class GuestImageWriteTrackerTests
             Assert.Equal(
                 HostMemory.PAGE_EXECUTE_READWRITE,
                 writableInfo.Protect & 0xFFu);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(
+                    GuestImageWriteTracker.TryGetNativeWindowsFaultState(
+                        address,
+                        out var nativeState,
+                        out var faultCount));
+                Assert.Equal(
+                    GuestImageWriteTracker.NativeWindowsPageStateUntracked,
+                    nativeState);
+                Assert.Equal(previousNativeFaultCount + 1, faultCount);
+            }
         }
         finally
         {
             GuestImageWriteTracker.Untrack(address);
             _ = HostMemory.Free(allocation, 0, HostMemory.MEM_RELEASE);
+        }
+    }
+
+    [Fact]
+    public void NativeWindowsHandlerResumesManagedWrite()
+    {
+        if (!GuestImageWriteTracker.Enabled || !OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var moduleManager = new ModuleManager();
+        moduleManager.Freeze();
+        using var backend = new DirectExecutionBackend(moduleManager);
+        var address = AllocateTrackedPages(out var allocation);
+        try
+        {
+            GuestImageWriteTracker.Track(address, TrackedByteCount);
+
+            // This managed store must resume through the native VEH without
+            // entering a managed exception callback on the faulting thread.
+            *(byte*)address = 0x5A;
+
+            Assert.Equal(0x5A, *(byte*)address);
+            Assert.True(GuestImageWriteTracker.PeekDirty(address));
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(
+                    address,
+                    out var generation));
+            Assert.Equal(1, generation);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void NativeWindowsHandlerDrainsEachFaultedPage()
+    {
+        if (!GuestImageWriteTracker.Enabled || !OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var moduleManager = new ModuleManager();
+        moduleManager.Freeze();
+        using var backend = new DirectExecutionBackend(moduleManager);
+        var first = AllocateTrackedPages(out var allocation);
+        var second = first + (ulong)TrackedByteCount;
+        try
+        {
+            GuestImageWriteTracker.Track(first, TrackedByteCount);
+            GuestImageWriteTracker.Track(second, TrackedByteCount);
+
+            // Queue two native faults before managed code asks for either
+            // range. Draining one range must process both dirty-page records
+            // without scanning every page in every tracked allocation.
+            *(byte*)first = 0x11;
+            *(byte*)second = 0x22;
+
+            Assert.True(GuestImageWriteTracker.PeekDirty(first));
+            Assert.True(GuestImageWriteTracker.PeekDirty(second));
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(
+                    first,
+                    out var firstGeneration));
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(
+                    second,
+                    out var secondGeneration));
+            Assert.Equal(1, firstGeneration);
+            Assert.Equal(1, secondGeneration);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(first);
+            GuestImageWriteTracker.Untrack(second);
+            FreeTrackedPages(allocation);
         }
     }
 

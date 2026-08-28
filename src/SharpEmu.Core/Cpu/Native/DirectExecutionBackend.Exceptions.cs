@@ -66,6 +66,32 @@ public sealed partial class DirectExecutionBackend
 		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
 		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
 
+		if (SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+		{
+			_guestImageWriteFaultHandlerStub = CreateGuestImageWriteFaultHandlerStub();
+			if (_guestImageWriteFaultHandlerStub == 0)
+			{
+				throw new InvalidOperationException(
+					"Failed to create native guest-image write-fault handler");
+			}
+
+			// Install this handler last with first priority. A tracked write fault
+			// must not reach a managed VEH callback while CoreCLR is in a managed
+			// memory-copy or presenter store.
+			_guestImageWriteFaultHandler = (nint)AddVectoredExceptionHandler(
+				1u,
+				_guestImageWriteFaultHandlerStub);
+			if (_guestImageWriteFaultHandler == 0)
+			{
+				throw new InvalidOperationException(
+					"Failed to install native guest-image write-fault handler");
+			}
+
+			Console.Error.WriteLine(
+				"[LOADER][INFO] Native guest-image write-fault handler installed: " +
+				$"0x{_guestImageWriteFaultHandler:X16}");
+		}
+
 		_unhandledFilterDelegate = UnhandledExceptionFilter;
 		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);
 		_unhandledFilterStub = CreateExceptionHandlerTrampoline(Marshal.GetFunctionPointerForDelegate(_unhandledFilterDelegate));
@@ -127,7 +153,8 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
-			if (exceptionCode == 3221225477u &&
+			if (!OperatingSystem.IsWindows() &&
+				exceptionCode == 3221225477u &&
 				exceptionRecord->NumberParameters >= 2 &&
 				exceptionRecord->ExceptionInformation[0] == 1uL &&
 				SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(

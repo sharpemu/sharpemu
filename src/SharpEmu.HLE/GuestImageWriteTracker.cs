@@ -18,7 +18,7 @@ namespace SharpEmu.HLE;
 /// watchers again after re-uploading. Shared pages stay protected while any
 /// clean image still watches them.
 /// </summary>
-public static unsafe class GuestImageWriteTracker
+public static unsafe partial class GuestImageWriteTracker
 {
     public readonly record struct ReadSnapshot(
         ulong Address,
@@ -40,6 +40,7 @@ public static unsafe class GuestImageWriteTracker
         public ulong Address;
         public int WriteWatchers;
         public bool Executable;
+        public nint NativeWindowsEntry;
     }
 
     private sealed class TrackedRange
@@ -214,6 +215,7 @@ public static unsafe class GuestImageWriteTracker
         {
             if (_rangesByAddress.TryGetValue(address, out var protectedRange))
             {
+                DrainNativeWindowsFaultsForRangeLocked(protectedRange);
                 protect = true;
                 armed = Volatile.Read(ref protectedRange.Armed) == RangeArmed;
                 return true;
@@ -442,6 +444,7 @@ public static unsafe class GuestImageWriteTracker
             var dirty = false;
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
+                DrainNativeWindowsFaultsForRangeLocked(range);
                 FlushPendingFirstCpuWrite(range);
                 dirty |= Interlocked.Exchange(ref range.Dirty, 0) != 0;
             }
@@ -466,6 +469,7 @@ public static unsafe class GuestImageWriteTracker
         {
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
+                DrainNativeWindowsFaultsForRangeLocked(range);
                 FlushPendingFirstCpuWrite(range);
                 if (Volatile.Read(ref range.Dirty) != 0)
                 {
@@ -490,6 +494,7 @@ public static unsafe class GuestImageWriteTracker
             if (_rangesByAddress.TryGetValue(address, out var range) &&
                 range.Protect)
             {
+                DrainNativeWindowsFaultsForRangeLocked(range);
                 ArmLocked(range, "rearm");
             }
         }
@@ -508,6 +513,7 @@ public static unsafe class GuestImageWriteTracker
             var found = false;
             if (_rangesByAddress.TryGetValue(address, out var range))
             {
+                DrainNativeWindowsFaultsForRangeLocked(range);
                 generation = Volatile.Read(ref range.WriteGeneration);
                 found = true;
             }
@@ -558,16 +564,47 @@ public static unsafe class GuestImageWriteTracker
             return;
         }
 
-        var candidate = address;
-        while (candidate < end)
+        if (OperatingSystem.IsWindows())
         {
-            _ = TryHandleWriteFault(candidate);
-            var nextPage = (candidate & ~0xFFFUL) + 0x1000UL;
-            if (nextPage <= candidate)
+            // Managed writers cannot resume from a CLR access violation. Use
+            // the page index as the exact pre-filter, then claim every watched
+            // page while holding the tracker lock once for the complete span.
+            // This preserves the pre-visit guarantee without serializing one
+            // lock acquisition per page inside the broad tracked envelope.
+            lock (_gate)
+            {
+                var candidate = address;
+                while (candidate < end)
+                {
+                    var pageAddress = candidate & ~(TrackingPageSize - 1);
+                    if (_pagesByAddress.TryGetValue(pageAddress, out var page) &&
+                        Volatile.Read(ref page.WriteWatchers) != 0 &&
+                        TryClaimNativeWindowsPageManagedLocked(pageAddress, out _))
+                    {
+                        _ = DrainNativeWindowsDirtyPageLocked(pageAddress);
+                    }
+
+                    var nextPage = pageAddress + TrackingPageSize;
+                    if (nextPage <= candidate)
+                    {
+                        break;
+                    }
+                    candidate = nextPage;
+                }
+            }
+            return;
+        }
+
+        var posixCandidate = address;
+        while (posixCandidate < end)
+        {
+            _ = TryHandleWriteFault(posixCandidate);
+            var nextPage = (posixCandidate & ~0xFFFUL) + 0x1000UL;
+            if (nextPage <= posixCandidate)
             {
                 break;
             }
-            candidate = nextPage;
+            posixCandidate = nextPage;
         }
     }
 
@@ -586,6 +623,7 @@ public static unsafe class GuestImageWriteTracker
         {
             lock (_gate)
             {
+                DrainAllNativeWindowsFaultsLocked();
                 foreach (var range in _rangesByAddress.Values)
                 {
                     FlushPendingFirstCpuWrite(range);
@@ -594,6 +632,7 @@ public static unsafe class GuestImageWriteTracker
         }
 
         ReportProfileIfDue();
+        ReportNativeWindowsFaultsIfDue();
     }
 
     /// <summary>
@@ -608,8 +647,23 @@ public static unsafe class GuestImageWriteTracker
             return false;
         }
 
-        var ranges = Volatile.Read(ref _rangeSnapshot).Ranges;
         var faultPage = faultAddress & ~(TrackingPageSize - 1);
+        if (OperatingSystem.IsWindows())
+        {
+            lock (_gate)
+            {
+                if (!TryClaimNativeWindowsPageManagedLocked(
+                        faultPage,
+                        out _))
+                {
+                    return false;
+                }
+
+                return DrainNativeWindowsDirtyPageLocked(faultPage);
+            }
+        }
+
+        var ranges = Volatile.Read(ref _rangeSnapshot).Ranges;
         var faultPageEnd = faultPage + TrackingPageSize;
         var handled = false;
         long writableBytes = 0;
@@ -723,6 +777,7 @@ public static unsafe class GuestImageWriteTracker
 
     private static void ArmLocked(TrackedRange range, string operation)
     {
+        DrainNativeWindowsFaultsForRangeLocked(range);
         FlushPendingFirstCpuWrite(range);
         if (Interlocked.CompareExchange(
                 ref range.Armed,
@@ -865,6 +920,7 @@ public static unsafe class GuestImageWriteTracker
                         writable: false,
                         ref protectedBytes))
                 {
+                    RecordNativeWindowsArmRaceLocked(range, processedPages);
                     _ = RemovePageWatchers(range, processedPages, out _);
                     return false;
                 }
@@ -884,6 +940,7 @@ public static unsafe class GuestImageWriteTracker
                     writable: false,
                     ref protectedBytes))
             {
+                RecordNativeWindowsArmRaceLocked(range, processedPages);
                 _ = RemovePageWatchers(range, processedPages, out _);
                 return false;
             }
@@ -903,6 +960,7 @@ public static unsafe class GuestImageWriteTracker
             return true;
         }
 
+        RecordNativeWindowsArmRaceLocked(range, processedPages);
         _ = RemovePageWatchers(range, processedPages, out _);
         return false;
     }
@@ -986,7 +1044,47 @@ public static unsafe class GuestImageWriteTracker
         }
 
         var byteCount = runEnd - runStart;
-        if (!TrySetProtection(runStart, byteCount, writable, executable))
+        if (OperatingSystem.IsWindows())
+        {
+            if (!writable)
+            {
+                for (var page = runStart; page < runEnd; page += TrackingPageSize)
+                {
+                    if (!PublishNativeWindowsPageLocked(page, executable))
+                    {
+                        for (var published = runStart; published < page; published += TrackingPageSize)
+                        {
+                            UnpublishNativeWindowsPageLocked(published);
+                        }
+                        return false;
+                    }
+                }
+
+                if (!TrySetProtection(runStart, byteCount, writable: false, executable))
+                {
+                    _ = TrySetProtection(runStart, byteCount, writable: true, executable);
+                    for (var page = runStart; page < runEnd; page += TrackingPageSize)
+                    {
+                        UnpublishNativeWindowsPageLocked(page);
+                    }
+                    return false;
+                }
+
+            }
+            else
+            {
+                if (!TrySetProtection(runStart, byteCount, writable: true, executable))
+                {
+                    return false;
+                }
+
+                for (var page = runStart; page < runEnd; page += TrackingPageSize)
+                {
+                    UnpublishNativeWindowsPageLocked(page);
+                }
+            }
+        }
+        else if (!TrySetProtection(runStart, byteCount, writable, executable))
         {
             return false;
         }

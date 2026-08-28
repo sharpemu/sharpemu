@@ -72,7 +72,8 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
-		if (TryHandleGuestImageWriteFault(exceptionInfo))
+		if (!OperatingSystem.IsWindows() &&
+			TryHandleGuestImageWriteFault(exceptionInfo))
 		{
 			return -1;
 		}

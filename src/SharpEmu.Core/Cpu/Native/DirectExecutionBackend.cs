@@ -3103,12 +3103,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int belowStackJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 
-		// Allocate Win64 shadow space (0x28) aligned to 16 bytes before calling into managed code or Win32 APIs.
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
-		// Never hold a process-wide native lock across reverse P/Invoke: the
-		// handler may wait for GC or a resource owned by another faulting thread.
-		// Keep native exception filtering and per-thread recursion protection.
+		// A host-stack access violation can originate in managed or JIT code.
+		// Do not enter a managed VEH callback from that state. Direct guest code
+		// uses the guest stack and keeps the existing managed recovery path.
+		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B);
+		EmitByte(code, ref offset, 0x45); EmitByte(code, ref offset, 0x00); // mov rax, [r13]
+		EmitByte(code, ref offset, 0x81); EmitByte(code, ref offset, 0x38);
+		EmitUInt32(code, ref offset, 0xC0000005u);
+		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
+		int hostNotAccessViolationJump = offset;
+		EmitUInt32(code, ref offset, 0u);
+		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
+		EmitByte(code, ref offset, 0xE4); // mov rsp, r12
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
+		EmitByte(code, ref offset, 0xC3);
+		int hostManagedOffset = offset;
+		*(int*)(code + hostNotAccessViolationJump) =
+			hostManagedOffset - (hostNotAccessViolationJump + sizeof(int));
+
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
+		// A managed handler can wait for another faulting thread.
+		// Do not hold a native lock across the callback.
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = managedHandler;
@@ -7455,6 +7472,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_runtimeSymbolsByName.Clear();
 		StopReadyThreadDispatcher();
 		StopStallWatchdog();
+		if (_guestImageWriteFaultHandler != 0)
+		{
+			RemoveVectoredExceptionHandler((void*)_guestImageWriteFaultHandler);
+			_guestImageWriteFaultHandler = 0;
+		}
 		if (_exceptionHandler != 0)
 		{
 			RemoveVectoredExceptionHandler((void*)_exceptionHandler);
@@ -7469,6 +7491,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			VirtualFree((void*)_rawExceptionHandlerStub, 0u, 32768u);
 			_rawExceptionHandlerStub = 0;
+		}
+		if (_guestImageWriteFaultHandlerStub != 0)
+		{
+			VirtualFree((void*)_guestImageWriteFaultHandlerStub, 0u, 32768u);
+			_guestImageWriteFaultHandlerStub = 0;
 		}
 		if (_exceptionHandlerStub != 0)
 		{
