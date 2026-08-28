@@ -293,6 +293,16 @@ public sealed class SelfLoader : ISelfLoader
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
+        if (virtualMemory is PhysicalVirtualMemory patchableMemory)
+        {
+            _ = WindowsGuestRedZonePatcher.Patch(
+                virtualMemory,
+                patchableMemory,
+                programHeaders,
+                imageBase,
+                totalImageSize);
+        }
+
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");
         Console.WriteLine($"[LOADER] Using image base: 0x{imageBase:X16}");
