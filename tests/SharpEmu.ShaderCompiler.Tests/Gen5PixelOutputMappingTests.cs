@@ -78,14 +78,48 @@ public sealed class Gen5PixelOutputMappingTests
             instruction => instruction.Opcode == SpirvOp.Kill);
     }
 
+    [Fact]
+    public void PixelWaveMaskControlUsesSubgroupBallot()
+    {
+        var moveVcc = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Sop1,
+            "SMovB64",
+            [0u],
+            [Gen5Operand.Scalar(106)],
+            [Gen5Operand.Scalar(0)],
+            null);
+        var instructions = ReadInstructions(
+            Compile(
+                Gen5ColorComponentMapping.Identity,
+                prefix: [moveVcc]));
+
+        Assert.Contains(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Capability &&
+                instruction.Operands[0] ==
+                    (uint)SpirvCapability.GroupNonUniformBallot);
+        Assert.Contains(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Decorate &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+                instruction.Operands[2] ==
+                    (uint)SpirvBuiltIn.SubgroupLocalInvocationId);
+    }
+
     private static byte[] Compile(
         Gen5ColorComponentMapping componentMapping,
         uint enableMask = 0xF,
         uint target = 0,
-        IReadOnlyList<Gen5PixelOutputBinding>? outputs = null)
+        IReadOnlyList<Gen5PixelOutputBinding>? outputs = null,
+        IReadOnlyList<Gen5ShaderInstruction>? prefix = null)
     {
+        var prefixInstructions = prefix ?? [];
         var export = new Gen5ShaderInstruction(
-            0,
+            (uint)(prefixInstructions.Count * sizeof(uint)),
             Gen5ShaderEncoding.Exp,
             "Exp",
             [],
@@ -98,7 +132,7 @@ public sealed class Gen5PixelOutputMappingTests
             [],
             new Gen5ExportControl(target, enableMask, false, true, true));
         var end = new Gen5ShaderInstruction(
-            8,
+            (uint)((prefixInstructions.Count + 2) * sizeof(uint)),
             Gen5ShaderEncoding.Sopp,
             "SEndpgm",
             [0xBF810000],
@@ -106,7 +140,9 @@ public sealed class Gen5PixelOutputMappingTests
             [],
             null);
         var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0x1_0000_D000, [export, end]),
+            new Gen5ShaderProgram(
+                0x1_0000_D000,
+                [.. prefixInstructions, export, end]),
             [],
             null);
         var evaluation = new Gen5ShaderEvaluation(

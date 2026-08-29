@@ -5755,14 +5755,11 @@ public static partial class Gen5SpirvTranslator
                 instruction.Destinations.Any(IsWaveMaskOperand));
 
         private bool UsesSubgroupOperations() =>
+            UsesSubgroupShuffle() ||
+            UsesSubgroupBroadcast() ||
+            UsesWaveControl() ||
             _state.Program.Instructions.Any(static instruction =>
-                instruction.Opcode is "DsAppend" or "DsConsume") ||
-            (_stage == Gen5SpirvStage.Compute &&
-             (UsesSubgroupShuffle() ||
-              UsesSubgroupBroadcast() ||
-              UsesWaveControl() ||
-              _state.Program.Instructions.Any(static instruction =>
-                  instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32")));
+                instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32");
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
