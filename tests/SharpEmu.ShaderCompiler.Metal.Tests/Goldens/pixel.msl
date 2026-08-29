@@ -91,6 +91,7 @@ fragment Gen5PsOut gen5_ps(
     uint s[128] = {};
     uint v[256] = {};
     bool exec = true;
+    bool pixel_valid_mask_active = true;
     bool vcc = false;
     bool scc = false;
     uint pc = 0u;
@@ -115,6 +116,7 @@ fragment Gen5PsOut gen5_ps(
             if (exec) { v[2] = t0; }
             uint t1 = 0x3F000000u;
             if (exec) { v[3] = t1; }
+            pixel_valid_mask_active = exec;
             sharpemu_out.mrt0 = exec ? vec<float, 4>(as_type<float>(v[0]), as_type<float>(v[1]), as_type<float>(v[2]), as_type<float>(v[3])) : sharpemu_out.mrt0;
             active = false;
         }
@@ -128,7 +130,7 @@ fragment Gen5PsOut gen5_ps(
             active = false;
         }
     }
-    if (!exec)
+    if (!pixel_valid_mask_active)
     {
         discard_fragment();
     }

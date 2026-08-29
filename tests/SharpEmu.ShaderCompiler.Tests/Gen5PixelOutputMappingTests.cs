@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -46,9 +47,42 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Equal([1u, 0u, 3u], preservedComponents);
     }
 
+    [Fact]
+    public void NullValidMaskExportControlsFragmentValidity()
+    {
+        var instructions = ReadInstructions(
+            Compile(
+                Gen5ColorComponentMapping.Identity,
+                target: 9,
+                outputs: []));
+        var validMaskName = Assert.Single(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Name &&
+                DecodeString(instruction.Operands[1..]) == "pixelValidMaskActive");
+        var validMaskVariable = validMaskName.Operands[0];
+
+        // One function store initializes the mask and a second publishes EXEC
+        // from the NULL EXP.VM. The epilogue reads it before OpKill.
+        Assert.True(
+            instructions.Count(instruction =>
+                instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == validMaskVariable) >= 2);
+        Assert.Contains(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Load &&
+                instruction.Operands[^1] == validMaskVariable);
+        Assert.Contains(
+            instructions,
+            instruction => instruction.Opcode == SpirvOp.Kill);
+    }
+
     private static byte[] Compile(
         Gen5ColorComponentMapping componentMapping,
-        uint enableMask = 0xF)
+        uint enableMask = 0xF,
+        uint target = 0,
+        IReadOnlyList<Gen5PixelOutputBinding>? outputs = null)
     {
         var export = new Gen5ShaderInstruction(
             0,
@@ -62,7 +96,7 @@ public sealed class Gen5PixelOutputMappingTests
                 Gen5Operand.Vector(3),
             ],
             [],
-            new Gen5ExportControl(0, enableMask, false, true, true));
+            new Gen5ExportControl(target, enableMask, false, true, true));
         var end = new Gen5ShaderInstruction(
             8,
             Gen5ShaderEncoding.Sopp,
@@ -85,7 +119,7 @@ public sealed class Gen5PixelOutputMappingTests
             Gen5SpirvTranslator.TryCompilePixelShader(
                 state,
                 evaluation,
-                [new Gen5PixelOutputBinding(
+                outputs ?? [new Gen5PixelOutputBinding(
                     0,
                     0,
                     Gen5PixelOutputKind.Float,
@@ -94,6 +128,19 @@ public sealed class Gen5PixelOutputMappingTests
                 out var error),
             error);
         return shader.Spirv;
+    }
+
+    private static string DecodeString(ReadOnlySpan<uint> words)
+    {
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bytes.AsSpan(index * sizeof(uint)),
+                words[index]);
+        }
+
+        return Encoding.UTF8.GetString(bytes).TrimEnd('\0');
     }
 
     private static IReadOnlyList<ParsedInstruction> ReadInstructions(byte[] spirv)

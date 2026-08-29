@@ -687,6 +687,14 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            // EXP.VM communicates the current EXEC mask independently of the
+            // export data target. NULL exports are the hardware-defined way to
+            // update only fragment validity, and the final VM export wins.
+            if (export.ValidMask && _usesPixelValidMask)
+            {
+                Line("pixel_valid_mask_active = exec;");
+            }
+
             Gen5PixelOutputBinding? binding = null;
             foreach (var candidate in _pixelOutputBindings)
             {

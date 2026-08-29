@@ -181,6 +181,62 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void NullValidMaskExportControlsFragmentDiscard()
+    {
+        var export = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Exp,
+            "Exp",
+            [],
+            [
+                Gen5Operand.Vector(0),
+                Gen5Operand.Vector(1),
+                Gen5Operand.Vector(2),
+                Gen5Operand.Vector(3),
+            ],
+            [],
+            new Gen5ExportControl(9, 0, false, true, true));
+        var end = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [0xBF810000],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [export, end]),
+            [],
+            null);
+        var evaluation = new Gen5ShaderEvaluation(
+            new uint[128],
+            new uint[128],
+            [],
+            []);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompilePixelShader(
+                state,
+                evaluation,
+                [],
+                out var shader,
+                out var error),
+            error);
+        Assert.Contains(
+            "bool pixel_valid_mask_active = true;",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "pixel_valid_mask_active = exec;",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "if (!pixel_valid_mask_active)",
+            shader.Source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PixelOutputKindsSelectTheAttachmentType()
     {
         var uintShader = Gen5ComputeFixtures.CompilePixelOrThrow(Gen5PixelOutputKind.Uint);
