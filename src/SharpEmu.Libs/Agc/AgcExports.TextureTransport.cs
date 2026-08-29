@@ -1559,6 +1559,37 @@ public static partial class AgcExports
                 blockBytes);
     }
 
+    internal static ulong GetGuestSurfaceByteCount(
+        uint format,
+        uint width,
+        uint height,
+        uint tileMode)
+    {
+        var logicalByteCount = GetTextureByteCount(format, width, height);
+        if (logicalByteCount == 0 || tileMode == 0)
+        {
+            return logicalByteCount;
+        }
+
+        var bytesPerTexel = GetTextureBytesPerTexel(format);
+        if (bytesPerTexel == 0 ||
+            bytesPerTexel > int.MaxValue ||
+            width > int.MaxValue ||
+            height > int.MaxValue)
+        {
+            return 0;
+        }
+
+        return GnmTiling.TryGetPhysicalTiledByteCount(
+            tileMode,
+            (int)width,
+            (int)height,
+            (int)bytesPerTexel,
+            out var tiledByteCount)
+                ? tiledByteCount
+                : 0;
+    }
+
     internal static uint GetTextureVolumeDepth(uint type, uint depth) =>
         type == Gen5TextureType3D
             ? Math.Max(depth, 1u)

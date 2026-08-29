@@ -259,6 +259,7 @@ internal static unsafe partial class VulkanVideoPresenter
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
         _pendingGuestImageInitialData.Clear();
+        _pendingGuestImageBufferClears.Clear();
         _guestImageExtents.Clear();
         _enqueuedGuestWorkSequence = 0;
         _completedGuestWorkSequence = 0;

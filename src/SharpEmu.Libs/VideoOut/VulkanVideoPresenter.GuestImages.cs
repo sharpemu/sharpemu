@@ -464,6 +464,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public uint MipLevels;
             public uint TileMode;
             public uint GuestFormat;
+            public ulong GuestAllocationByteCount;
             public Format Format;
             public Image Image;
             public DeviceMemory Memory;
@@ -533,6 +534,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 physicalDepth,
                 target.MipLevels);
             var guestFormat = GetGuestTextureFormat(target.Format, target.NumberType);
+            var guestAllocationByteCount = Agc.AgcExports.GetGuestSurfaceByteCount(
+                target.Format,
+                target.Width,
+                target.Height,
+                target.TileMode);
             var requestedKey = new GuestImageVariantKey(
                 target.Address,
                 target.Width,
@@ -572,6 +578,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     (exactFormatMatch ||
                     IsAliasableGuestImageFormat(existing.Format, format)))
                 {
+                    existing.GuestAllocationByteCount = guestAllocationByteCount;
                     existing.IsCpuBacked = false;
                     existing.CpuContentFingerprint = 0;
                     if (existing.RenderPass.Handle == 0 &&
@@ -598,6 +605,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         SetDebugName(ObjectType.Framebuffer, promotedFramebuffer.Handle, $"{promotedName} framebuffer");
                     }
 
+                    ApplyPendingGuestImageBufferClear(existing);
                     return existing;
                 }
 
@@ -620,6 +628,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     ReinterpretGuestImageFormat(existing, format, !requiresStorage, target);
                     existing.GuestFormat = guestFormat;
+                    existing.GuestAllocationByteCount = guestAllocationByteCount;
                     existing.IsCpuBacked = false;
                     existing.CpuContentFingerprint = 0;
                     if (!requiresStorage && existing.RenderPass.Handle == 0)
@@ -641,6 +650,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         SetDebugName(ObjectType.Framebuffer, promoted.Framebuffer.Handle, $"{promotedName} framebuffer");
                     }
 
+                    ApplyPendingGuestImageBufferClear(existing);
                     return existing;
                 }
 
@@ -690,6 +700,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 else
                 {
+                    retained.GuestAllocationByteCount = guestAllocationByteCount;
                     retained.IsCpuBacked = false;
                     retained.CpuContentFingerprint = 0;
                     _guestImages.Add(target.Address, retained);
@@ -729,6 +740,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             $"initialized={retained.Initialized}");
                     }
 
+                    ApplyPendingGuestImageBufferClear(retained);
                     return retained;
                 }
             }
@@ -841,6 +853,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 MipLevels = mipLevels,
                 TileMode = target.TileMode,
                 GuestFormat = guestFormat,
+                GuestAllocationByteCount = guestAllocationByteCount,
                 Format = format,
                 Image = image,
                 Memory = memory,
@@ -901,6 +914,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"{target.Width}x{target.Height} fmt={format}");
             }
 
+            ApplyPendingGuestImageBufferClear(resource);
             return resource;
         }
 

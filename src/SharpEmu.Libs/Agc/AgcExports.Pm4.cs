@@ -504,7 +504,7 @@ public static partial class AgcExports
             if (op == ItNop && register == RDmaData && length >= 7)
             {
                 var targets = GetRenderTargets(state.CxRegisters);
-                TrackCmaskAddresses(state.CxRegisters, targets);
+                TrackColorMetadataAddresses(state.CxRegisters, targets);
 
                 ApplySubmittedDmaData(
                     ctx,

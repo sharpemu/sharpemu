@@ -241,8 +241,34 @@ internal static unsafe class GnmTiling
         int bytesPerElement,
         out ulong byteCount)
     {
+        if (!ShouldDetile(swizzleMode))
+        {
+            byteCount = 0;
+            return false;
+        }
+
+        return TryGetPhysicalTiledByteCount(
+            swizzleMode,
+            elementsWide,
+            elementsHigh,
+            bytesPerElement,
+            out byteCount);
+    }
+
+    /// <summary>
+    /// Gets the allocation span independently of whether host detiling is
+    /// enabled. Surface identity and overlap checks still require the physical
+    /// block-rounded size when a debug option disables content conversion.
+    /// </summary>
+    internal static bool TryGetPhysicalTiledByteCount(
+        uint swizzleMode,
+        int elementsWide,
+        int elementsHigh,
+        int bytesPerElement,
+        out ulong byteCount)
+    {
         byteCount = 0;
-        if (!ShouldDetile(swizzleMode) ||
+        if (swizzleMode == 0 ||
             elementsWide <= 0 ||
             elementsHigh <= 0 ||
             bytesPerElement <= 0 ||

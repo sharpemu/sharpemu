@@ -13,15 +13,42 @@ namespace SharpEmu.Libs.Agc;
 // This partial builds translated guest draws from submitted AGC graphics state.
 public static partial class AgcExports
 {
+    internal readonly record struct GuestColorMetadataClear(
+        byte FillCode,
+        uint ClearWord0,
+        uint ClearWord1);
+
+    private enum ColorMetadataKind : byte
+    {
+        None,
+        Cmask,
+        Dcc,
+    }
+
     private record struct MetaSurfaceInfo(
-        ulong CmaskAddress,
+        ulong MetadataAddress,
+        ColorMetadataKind Kind,
         uint ClearWord0,
         uint ClearWord1,
+        byte FillCode,
         bool IsCleared);
 
+    private readonly record struct PendingDccFill(ulong ByteCount, byte FillCode);
+
     private static readonly Dictionary<ulong, MetaSurfaceInfo> _metaSurfaces = new();
-    private static readonly Dictionary<ulong, ulong> _cmaskToColorBuffer = new();
+    private static readonly Dictionary<ulong, ulong> _dccToColorBuffer = new();
+    private static readonly Dictionary<ulong, PendingDccFill> _pendingDccFills = new();
     private static readonly object _metaSurfaceGate = new();
+    private static readonly bool _traceMetaSurfaces = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_META_SURFACES"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly ulong? _traceMetaSurfaceAddress = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_META_SURFACE_ADDRESS"));
+    private static readonly HashSet<
+        (ulong Surface, ulong Metadata, ColorMetadataKind Kind,
+         uint ClearWord0, uint ClearWord1, byte FillCode, bool IsCleared)>
+        _tracedMetaRegistrations = new();
 
     private static readonly HashSet<(ulong Es, ulong Ps, ulong Target, ulong Texture, uint VertexCount)> _tracedShaderDraws = new();
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
@@ -244,7 +271,7 @@ public static partial class AgcExports
         var hasPsInputAddr = state.CxRegisters.TryGetValue(SpiPsInputAddr, out var psInputAddr);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
 var renderTargets = GetRenderTargets(state.CxRegisters);
-        TrackCmaskAddresses(state.CxRegisters, renderTargets);
+        TrackColorMetadataAddresses(state.CxRegisters, renderTargets);
         var drawSequence = ++gpuState.WorkSequence;
         if (state.PendingTargetlessDraw is { } stalePendingDraw)
         {
@@ -1866,8 +1893,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     /// GFX10 CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit 12) set on
     /// one or more targets. The CB clears via CMASK before the draw writes;
     /// mark targets for clear-on-first-use. Unlike DCC, the draw content
-    /// IS written (not dropped). Dead Cells uses DbRenderControl CLEARON
-    /// instead (bit0), not this mechanism.
+    /// is written rather than dropped.
     /// </summary>
     private static bool IsCmaskFastClearDraw(
         IReadOnlyDictionary<uint, uint> registers,
@@ -1887,11 +1913,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     }
 
     /// <summary>
-    /// Registers the CMASK metadata mapping for each colour buffer.
-    /// Does NOT mark as cleared — clearing only happens on actual clear
-    /// events (DMA fill, compute write, EFC draw).
+    /// Registers the active colour metadata mapping for each colour buffer.
+    /// A metadata fill can arrive before the first draw binds its target, so
+    /// pending DCC fills are adopted when the mapping becomes known.
     /// </summary>
-    private static void TrackCmaskAddresses(
+    private static void TrackColorMetadataAddresses(
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> renderTargets)
     {
@@ -1915,8 +1941,19 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             var dccAddress = ((ulong)(dccExt & 0xFFu) << 40) |
                              ((ulong)(dccLow & 0x1FFFFFFFu) << 8);
 
-            // Prefer CMASK if present; fall back to DCC.
-            var metaAddress = cmaskAddress != 0 ? cmaskAddress : dccAddress;
+            registers.TryGetValue(CbColor0Info + stride, out var colorInfo);
+            var dccEnabled = (colorInfo & CbColorInfoDccEnableMask) != 0;
+            var kind = dccEnabled && dccAddress != 0
+                ? ColorMetadataKind.Dcc
+                : cmaskAddress != 0
+                    ? ColorMetadataKind.Cmask
+                    : ColorMetadataKind.None;
+            var metaAddress = kind switch
+            {
+                ColorMetadataKind.Dcc => dccAddress,
+                ColorMetadataKind.Cmask => cmaskAddress,
+                _ => 0UL,
+            };
 
             var cw0Addr = CbColor0ClearWord0 + stride;
             var cw1Addr = CbColor0ClearWord1 + stride;
@@ -1925,129 +1962,176 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
             lock (_metaSurfaceGate)
             {
-                _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
-                    metaAddress, cw0, cw1,
-                    // Re-registration runs on every draw; keep the cleared state
-                    // so a mark-clear event survives until the pass consumes it.
-                    // If the metadata binding changed, the old state refers to
-                    // the old metadata and must be reset.
-                    IsCleared: _metaSurfaces.TryGetValue(rt.Address, out var prev) &&
-                               prev.IsCleared &&
-                               prev.CmaskAddress == metaAddress);
-                if (metaAddress != 0)
+                _pendingDccFills.Remove(rt.Address);
+
+                var preserved = _metaSurfaces.TryGetValue(rt.Address, out var previous) &&
+                    previous.IsCleared &&
+                    previous.MetadataAddress == metaAddress &&
+                    previous.Kind == kind;
+                var fillCode = preserved ? previous.FillCode : (byte)0;
+                var isCleared = preserved;
+
+                if (kind == ColorMetadataKind.Dcc &&
+                    _pendingDccFills.Remove(metaAddress, out var pending))
                 {
-                    _cmaskToColorBuffer[metaAddress] = rt.Address;
+                    fillCode = pending.FillCode;
+                    isCleared = true;
+                }
+
+                if (_metaSurfaces.TryGetValue(rt.Address, out previous) &&
+                    previous.Kind == ColorMetadataKind.Dcc &&
+                    previous.MetadataAddress != metaAddress)
+                {
+                    _dccToColorBuffer.Remove(previous.MetadataAddress);
+                }
+
+                _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
+                    metaAddress,
+                    kind,
+                    cw0,
+                    cw1,
+                    fillCode,
+                    isCleared);
+                if (kind == ColorMetadataKind.Dcc)
+                {
+                    _dccToColorBuffer[metaAddress] = rt.Address;
+                }
+
+                if (ShouldTraceMetaSurface(rt.Address, metaAddress) &&
+                    _tracedMetaRegistrations.Add(
+                        (rt.Address, metaAddress, kind, cw0, cw1, fillCode, isCleared)))
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] agc.meta_register " +
+                        $"surface=0x{rt.Address:X16} meta=0x{metaAddress:X16} " +
+                        $"kind={kind.ToString().ToLowerInvariant()} " +
+                        $"clear=0x{cw1:X8}{cw0:X8} pending={isCleared} " +
+                        $"code=0x{fillCode:X2}");
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Checks if a write targets a registered CMASK address. If so,
-    /// marks the owning colour buffer's metadata as "all clear".
-    /// </summary>
-    private static void CheckCmaskWrite(
-        ulong writeAddress,
-        SubmittedGpuState? gpuState)
+    private static bool IsRecognizedDccFill(uint fillValue, out byte fillCode)
     {
-        if (writeAddress == 0)
+        fillCode = (byte)fillValue;
+        if (fillValue != (uint)fillCode * 0x01010101u)
+        {
+            return false;
+        }
+
+        return fillCode is 0x00 or 0x20 or 0x40 or 0x80 or 0xC0;
+    }
+
+    /// <summary>
+    /// Records a uniform DCC metadata fill. The fill may precede render-target
+    /// registration, so an unmatched address remains pending until the target
+    /// registers its DCC base.
+    /// </summary>
+    private static void RecordDccFill(
+        ulong writeAddress,
+        ulong byteCount,
+        uint fillValue)
+    {
+        if (writeAddress == 0 ||
+            byteCount == 0 ||
+            !IsRecognizedDccFill(fillValue, out var fillCode))
         {
             return;
         }
 
         lock (_metaSurfaceGate)
         {
-            // Exact match: write directly to a registered CMASK address.
-            if (_cmaskToColorBuffer.TryGetValue(writeAddress, out var cbAddr))
+            ulong surfaceAddress = 0;
+            MetaSurfaceInfo metadata = default;
+            var registered = _dccToColorBuffer.TryGetValue(writeAddress, out surfaceAddress) &&
+                _metaSurfaces.TryGetValue(surfaceAddress, out metadata) &&
+                metadata.Kind == ColorMetadataKind.Dcc &&
+                metadata.MetadataAddress == writeAddress;
+            if (registered)
             {
-                if (_metaSurfaces.TryGetValue(cbAddr, out var meta))
+                _metaSurfaces[surfaceAddress] = metadata with
                 {
-                    _metaSurfaces[cbAddr] = meta with { IsCleared = true };
-                }
-
-                return;
+                    FillCode = fillCode,
+                    IsCleared = true,
+                };
+            }
+            else
+            {
+                _pendingDccFills[writeAddress] = new PendingDccFill(byteCount, fillCode);
             }
 
-            // CMASK surfaces are small (typically ≤ 4 KiB).  Check the ±1024
-            // window around each registered address to catch partial writes.
-            foreach (var (cmaskAddr, colorBufAddr) in _cmaskToColorBuffer)
+            if (ShouldTraceMetaSurface(surfaceAddress, writeAddress))
             {
-                if (writeAddress >= cmaskAddr && writeAddress < cmaskAddr + 1024)
-                {
-                    if (_metaSurfaces.TryGetValue(colorBufAddr, out var meta))
-                    {
-                        _metaSurfaces[colorBufAddr] = meta with { IsCleared = true };
-                    }
-
-                    return;
-                }
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] agc.meta_fill " +
+                    $"meta=0x{writeAddress:X16} bytes={byteCount} " +
+                    $"code=0x{fillCode:X2} " +
+                    $"surface=0x{surfaceAddress:X16} " +
+                    $"state={(registered ? "registered" : "pending")}");
             }
         }
     }
 
-    /// <summary>
-    /// Returns true if the colour buffer at <paramref name="colorBufferAddress"/>
-    /// has pending CMASK "all clear" metadata — i.e. the surface was fast-cleared
-    /// but not yet rendered into.
-    /// </summary>
-    internal static bool IsMetaClearedForSurface(ulong colorBufferAddress)
+    internal static bool TryPeekColorMetadataClear(
+        ulong colorBufferAddress,
+        out GuestColorMetadataClear clear)
     {
         lock (_metaSurfaceGate)
         {
-            return _metaSurfaces.TryGetValue(colorBufferAddress, out var meta) &&
-                   meta.IsCleared;
-        }
-    }
-
-    /// <summary>
-    /// Consumes the "all clear" state for the given surface, marking it dirty.
-    /// Called after the first render pass uses LoadOp.Clear.
-    /// </summary>
-    internal static void ConsumeMetaClear(ulong colorBufferAddress)
-    {
-        lock (_metaSurfaceGate)
-        {
-            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var metadata) &&
+                metadata.Kind == ColorMetadataKind.Dcc &&
+                metadata.IsCleared)
             {
-                _metaSurfaces[colorBufferAddress] = meta with { IsCleared = false };
-            }
-        }
-    }
-
-    /// <summary>
-    /// Returns the CB clear word values for the given colour buffer.
-    /// </summary>
-    internal static (uint Cw0, uint Cw1) GetMetaClearValue(ulong colorBufferAddress)
-    {
-        lock (_metaSurfaceGate)
-        {
-            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
-            {
-                return (meta.ClearWord0, meta.ClearWord1);
+                clear = new GuestColorMetadataClear(
+                    metadata.FillCode,
+                    metadata.ClearWord0,
+                    metadata.ClearWord1);
+                return true;
             }
         }
 
-        return (0, 0);
+        clear = default;
+        return false;
     }
 
-    /// <summary>
-    /// Marks all registered surfaces as "all clear".  Called at guest flip
-    /// (frame boundary).  Real hardware applies a fast clear / load-clear to
-    /// its per-frame surfaces every frame; the emulator restores that
-    /// per-frame clear here, per surface, at flip time.  This is the
-    /// per-surface successor of the removed flip-arm heuristic (which reset
-    /// only the first multi-attachment group).
-    /// </summary>
-    internal static void MarkAllSurfacesCleared()
+    internal static bool TryConsumeColorMetadataClear(
+        ulong colorBufferAddress,
+        GuestColorMetadataClear expected)
     {
         lock (_metaSurfaceGate)
         {
-            foreach (var (addr, meta) in _metaSurfaces)
+            if (!_metaSurfaces.TryGetValue(colorBufferAddress, out var metadata) ||
+                metadata.Kind != ColorMetadataKind.Dcc ||
+                !metadata.IsCleared ||
+                metadata.FillCode != expected.FillCode ||
+                metadata.ClearWord0 != expected.ClearWord0 ||
+                metadata.ClearWord1 != expected.ClearWord1)
             {
-                _metaSurfaces[addr] = meta with { IsCleared = true };
+                return false;
             }
+
+            _metaSurfaces[colorBufferAddress] = metadata with { IsCleared = false };
+            if (ShouldTraceMetaSurface(colorBufferAddress, metadata.MetadataAddress))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] agc.meta_consume " +
+                    $"surface=0x{colorBufferAddress:X16} " +
+                    $"meta=0x{metadata.MetadataAddress:X16} " +
+                    $"code=0x{metadata.FillCode:X2}");
+            }
+
+            return true;
         }
     }
+
+    private static bool ShouldTraceMetaSurface(
+        ulong surfaceAddress,
+        ulong metadataAddress) =>
+        _traceMetaSurfaces &&
+        (!_traceMetaSurfaceAddress.HasValue ||
+         _traceMetaSurfaceAddress.Value == surfaceAddress ||
+         _traceMetaSurfaceAddress.Value == metadataAddress);
 
     /// <summary>
     /// True when the draw's float32x3 position stream spans the full clip

@@ -585,6 +585,32 @@ internal static unsafe partial class VulkanVideoPresenter
                 address);
         }
 
+        private static bool ShouldTraceGuestImageStateForDiagnostics(
+            GuestImageResource image)
+        {
+            if (_traceGuestImageAddressFilterEnabled)
+            {
+                return ShouldTraceGuestImageAddressForDiagnostics(image.Address);
+            }
+
+            var hasShapeFilter = _traceGuestImageWidth != 0 ||
+                _traceGuestImageHeight != 0 ||
+                !string.IsNullOrWhiteSpace(_traceGuestImageFormat);
+            if (!hasShapeFilter ||
+                (_traceGuestImageWidth != 0 && image.Width != _traceGuestImageWidth) ||
+                (_traceGuestImageHeight != 0 && image.Height != _traceGuestImageHeight))
+            {
+                return false;
+            }
+
+            return string.IsNullOrWhiteSpace(_traceGuestImageFormat) ||
+                (Enum.TryParse<Format>(
+                    _traceGuestImageFormat,
+                    ignoreCase: true,
+                    out var expectedFormat) &&
+                 image.Format == expectedFormat);
+        }
+
         private static bool ShouldTraceGuestImageWriteForDiagnostics(ulong address)
         {
             return AddressListContains(
@@ -674,49 +700,6 @@ internal static unsafe partial class VulkanVideoPresenter
             RecordTranslatedDrawInPass(resources, extent);
             _vk.CmdEndRenderPass(_commandBuffer);
         }
-
-        /// <summary>
-        /// Decodes the CB CLEAR_WORD0/1 pair into a float RGBA clear value
-        /// according to the surface pixel format.  CLEAR_WORD holds the clear
-        /// colour packed in the surface's native layout, so the two 32-bit
-        /// words must be unpacked channel-by-channel; passing the raw word as
-        /// a single float channel clears to a garbage colour.
-        /// </summary>
-        private static ClearColorValue UnpackMetaClearValue(
-            uint format, uint cw0, uint cw1)
-        {
-            switch (format)
-            {
-                // Gen5 8_8_8_8 (R8G8B8A8): four UNORM bytes packed in WORD0,
-                // little-endian channel order R,G,B,A.
-                case Agc.AgcExports.Gen5TextureFormatR8G8B8A8Unorm:
-                    return new ClearColorValue(
-                        float32_0: ((cw0 >> 0) & 0xFF) / 255f,
-                        float32_1: ((cw0 >> 8) & 0xFF) / 255f,
-                        float32_2: ((cw0 >> 16) & 0xFF) / 255f,
-                        float32_3: ((cw0 >> 24) & 0xFF) / 255f);
-
-                // Gen5 16_16_16_16 float (R16G16B16A16F): R,G as halfs in
-                // WORD0 and B,A as halfs in WORD1.
-                case Agc.AgcExports.Gen5TextureFormatR16G16B16A16Float:
-                    return new ClearColorValue(
-                        float32_0: HalfToFloat((ushort)(cw0 >> 0)),
-                        float32_1: HalfToFloat((ushort)(cw0 >> 16)),
-                        float32_2: HalfToFloat((ushort)(cw1 >> 0)),
-                        float32_3: HalfToFloat((ushort)(cw1 >> 16)));
-
-                default:
-                    // Unknown format: fall back to the common 8_8_8_8 layout.
-                    return new ClearColorValue(
-                        float32_0: ((cw0 >> 0) & 0xFF) / 255f,
-                        float32_1: ((cw0 >> 8) & 0xFF) / 255f,
-                        float32_2: ((cw0 >> 16) & 0xFF) / 255f,
-                        float32_3: ((cw0 >> 24) & 0xFF) / 255f);
-            }
-        }
-
-        private static float HalfToFloat(ushort halfBits) =>
-            (float)BitConverter.UInt16BitsToHalf(halfBits);
 
         private void BeginTranslatedRenderPass(
             RenderPass renderPass,

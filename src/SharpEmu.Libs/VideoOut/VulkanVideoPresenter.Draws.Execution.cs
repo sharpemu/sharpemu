@@ -141,6 +141,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var targets = new GuestImageResource[work.Targets.Count];
+            ClearColorValue[]? metadataClearValues = null;
             EnsureGuestSubmissionCapacity();
             for (var index = 0; index < targets.Length; index++)
             {
@@ -149,6 +150,30 @@ internal static unsafe partial class VulkanVideoPresenter
                         ? GetDepthOnlyColorTarget(depthOnlyTarget)
                         : work.Targets[index];
                 targets[index] = GetOrCreateGuestImage(targetDescriptor, formats[index]);
+                if (ShouldTraceGuestImageStateForDiagnostics(targets[index]))
+                {
+                    var hasWriteGeneration = SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+                        targets[index].Address,
+                        out var writeGeneration);
+                    bool hasUploadedGeneration;
+                    long uploadedGeneration;
+                    lock (_gate)
+                    {
+                        hasUploadedGeneration = _cpuBackedUploadGenerations.TryGetValue(
+                            targets[index].Address,
+                            out uploadedGeneration);
+                    }
+
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.guest_image_target_bind " +
+                        $"addr=0x{targets[index].Address:X16} " +
+                        $"initialized={targets[index].Initialized} " +
+                        $"upload_pending={targets[index].InitialUploadPending} " +
+                        $"cpu_backed={targets[index].IsCpuBacked} " +
+                        $"write_generation={(hasWriteGeneration ? writeGeneration : -1)} " +
+                        $"uploaded_generation={(hasUploadedGeneration ? uploadedGeneration : -1)} " +
+                        $"format={targets[index].Format}");
+                }
                 // A view-compatible alias accept can return an image whose
                 // identity differs from the request (sRGB vs UNORM
                 // counterpart). The render pass, framebuffer views, and
@@ -168,16 +193,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     targets[index].Initialized = false;
                 }
 
-                // CMASK meta-state: if the surface's metadata says "all clear",
-                // start this pass from LoadOp.Clear and consume the state.
-                // CPU-backed targets are skipped (their guest memory contents
-                // are uploaded, not cleared) — same rule the flip-arm used.
+                // Materialize a deferred DCC clear only after its fill code and
+                // target format produce a usable host clear value. An
+                // unsupported state must preserve the attachment rather than
+                // silently replacing it with black.
                 if (work.Targets[index].Address != 0 &&
                     !targets[index].IsCpuBacked &&
-                    Agc.AgcExports.IsMetaClearedForSurface(work.Targets[index].Address))
+                    Agc.AgcExports.TryPeekColorMetadataClear(
+                        work.Targets[index].Address,
+                        out var metadataClear) &&
+                    TryDecodeDccMetadataClear(
+                        targets[index].Format,
+                        metadataClear,
+                        out var clearValue) &&
+                    Agc.AgcExports.TryConsumeColorMetadataClear(
+                        work.Targets[index].Address,
+                        metadataClear))
                 {
                     targets[index].Initialized = false;
-                    Agc.AgcExports.ConsumeMetaClear(work.Targets[index].Address);
+                    metadataClearValues ??= new ClearColorValue[targets.Length];
+                    metadataClearValues[index] = clearValue;
                 }
 
                 if (work.Targets[index].Address != 0 &&
@@ -583,25 +618,6 @@ internal static unsafe partial class VulkanVideoPresenter
                             &toDepthAttachment);
                     }
 
-                    ClearColorValue[]? metaClearValues = null;
-                    for (var colorIndex = 0; colorIndex < targets.Length; colorIndex++)
-                    {
-                        if (!targets[colorIndex].Initialized &&
-                            work.Targets[colorIndex].Address != 0)
-                        {
-                            var (clearWord0, clearWord1) = Agc.AgcExports.GetMetaClearValue(
-                                work.Targets[colorIndex].Address);
-                            if (clearWord0 != 0 || clearWord1 != 0)
-                            {
-                                metaClearValues ??= new ClearColorValue[targets.Length];
-                                metaClearValues[colorIndex] = UnpackMetaClearValue(
-                                    work.Targets[colorIndex].Format,
-                                    clearWord0,
-                                    clearWord1);
-                            }
-                        }
-                    }
-
                     BeginTranslatedRenderPass(
                         renderPass,
                         framebuffer,
@@ -609,7 +625,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         colorAttachmentCount: targets.Length,
                         hasDepthAttachment: hasDepthAttachment,
                         clearDepth: depth?.ClearDepth ?? 1f,
-                        colorClearValues: metaClearValues);
+                        colorClearValues: metadataClearValues);
                 }
 
                 RecordTranslatedDrawInPass(resources, extent);
@@ -1011,8 +1027,30 @@ internal static unsafe partial class VulkanVideoPresenter
         [MethodImpl(MethodImplOptions.NoInlining)]
         private void ExecuteGuestImageWrite(VulkanGuestImageWrite work)
         {
-            if (_deviceLost || !_guestImages.TryGetValue(work.Address, out var target))
+            if (_deviceLost)
             {
+                return;
+            }
+
+            if (!_guestImages.TryGetValue(work.Address, out var target))
+            {
+                if (work.Pixels is null && work.ExactByteCount != 0)
+                {
+                    _pendingGuestImageBufferClears[work.Address] =
+                        new PendingGuestImageBufferClear(
+                            work.ExactByteCount,
+                            work.FillValue,
+                            work.FillValue1,
+                            work.FillValue2,
+                            work.FillValue3);
+                    TraceGuestImageBufferClear(
+                        work.Address,
+                        work.ExactByteCount,
+                        registeredBytes: 0,
+                        work.FillValue,
+                        "pending-no-image");
+                }
+
                 return;
             }
 
@@ -1026,6 +1064,164 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            ClearColorValue clearValue;
+            if (work.ExactByteCount != 0)
+            {
+                _pendingGuestImageBufferClears.TryRemove(work.Address, out _);
+                if (target.GuestAllocationByteCount != work.ExactByteCount)
+                {
+                    TraceGuestImageBufferClear(
+                        work.Address,
+                        work.ExactByteCount,
+                        target.GuestAllocationByteCount,
+                        work.FillValue,
+                        "reject-size");
+                    return;
+                }
+
+                if (!TryDecodePackedGuestImageClearPattern(
+                        target.Format,
+                        work.FillValue,
+                        work.FillValue1,
+                        work.FillValue2,
+                        work.FillValue3,
+                        out clearValue))
+                {
+                    if (work.FillValue == work.FillValue1 &&
+                        work.FillValue == work.FillValue2 &&
+                        work.FillValue == work.FillValue3 &&
+                        TryCreatePackedGuestImageUpload(
+                            target.Format,
+                            target.Width,
+                            target.Height,
+                            target.Depth,
+                            work.FillValue,
+                            out var uploadPixels))
+                    {
+                        UploadGuestImageInitialData(target, uploadPixels);
+                        target.InitialUploadPending = false;
+                        TraceGuestImageBufferClear(
+                            work.Address,
+                            work.ExactByteCount,
+                            target.GuestAllocationByteCount,
+                            work.FillValue,
+                            "applied-upload");
+                        return;
+                    }
+
+                    TraceGuestImageBufferClear(
+                        work.Address,
+                        work.ExactByteCount,
+                        target.GuestAllocationByteCount,
+                        work.FillValue,
+                        "reject-format");
+                    return;
+                }
+            }
+            else
+            {
+                clearValue = new ClearColorValue(
+                    (work.FillValue & 0xFF) / 255f,
+                    ((work.FillValue >> 8) & 0xFF) / 255f,
+                    ((work.FillValue >> 16) & 0xFF) / 255f,
+                    ((work.FillValue >> 24) & 0xFF) / 255f);
+            }
+
+            ClearGuestImage(target, clearValue, work.ExactByteCount != 0);
+            if (work.ExactByteCount != 0)
+            {
+                var result = work.FillValue == work.FillValue1 &&
+                    work.FillValue == work.FillValue2 &&
+                    work.FillValue == work.FillValue3
+                        ? "applied"
+                        : "applied-pattern";
+                TraceGuestImageBufferClear(
+                    work.Address,
+                    work.ExactByteCount,
+                    target.GuestAllocationByteCount,
+                    work.FillValue,
+                    result);
+            }
+        }
+
+        private void ApplyPendingGuestImageBufferClear(GuestImageResource target)
+        {
+            if (!_pendingGuestImageBufferClears.TryRemove(
+                    target.Address,
+                    out var pending))
+            {
+                return;
+            }
+
+            if (target.GuestAllocationByteCount != pending.ByteCount)
+            {
+                TraceGuestImageBufferClear(
+                    target.Address,
+                    pending.ByteCount,
+                    target.GuestAllocationByteCount,
+                    pending.PackedValue0,
+                    "reject-pending-size");
+                return;
+            }
+
+            if (!TryDecodePackedGuestImageClearPattern(
+                    target.Format,
+                    pending.PackedValue0,
+                    pending.PackedValue1,
+                    pending.PackedValue2,
+                    pending.PackedValue3,
+                    out var clearValue))
+            {
+                if (pending.PackedValue0 == pending.PackedValue1 &&
+                    pending.PackedValue0 == pending.PackedValue2 &&
+                    pending.PackedValue0 == pending.PackedValue3 &&
+                    TryCreatePackedGuestImageUpload(
+                        target.Format,
+                        target.Width,
+                        target.Height,
+                        target.Depth,
+                        pending.PackedValue0,
+                        out var uploadPixels))
+                {
+                    UploadGuestImageInitialData(target, uploadPixels);
+                    target.InitialUploadPending = false;
+                    TraceGuestImageBufferClear(
+                        target.Address,
+                        pending.ByteCount,
+                        target.GuestAllocationByteCount,
+                        pending.PackedValue0,
+                        "applied-pending-upload");
+                    return;
+                }
+
+                TraceGuestImageBufferClear(
+                    target.Address,
+                    pending.ByteCount,
+                    target.GuestAllocationByteCount,
+                    pending.PackedValue0,
+                    "reject-pending-format");
+                return;
+            }
+
+            ClearGuestImage(target, clearValue, exactBufferClear: true);
+            var result = pending.PackedValue0 == pending.PackedValue1 &&
+                pending.PackedValue0 == pending.PackedValue2 &&
+                pending.PackedValue0 == pending.PackedValue3
+                    ? "applied-pending"
+                    : "applied-pending-pattern";
+            TraceGuestImageBufferClear(
+                target.Address,
+                pending.ByteCount,
+                target.GuestAllocationByteCount,
+                pending.PackedValue0,
+                result);
+        }
+
+        private void ClearGuestImage(
+            GuestImageResource target,
+            ClearColorValue clearValue,
+            bool exactBufferClear)
+        {
             // Recorded into the shared batch command buffer: recording order
             // preserves queue-order semantics against earlier batched draws,
             // and the fill no longer costs a submit + full queue drain.
@@ -1059,11 +1255,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 1,
                 &toTransferDst);
 
-            var clearValue = new ClearColorValue(
-                (work.FillValue & 0xFF) / 255f,
-                ((work.FillValue >> 8) & 0xFF) / 255f,
-                ((work.FillValue >> 16) & 0xFF) / 255f,
-                ((work.FillValue >> 24) & 0xFF) / 255f);
             var range = ColorSubresourceRange(0, target.MipLevels);
             _vk.CmdClearColorImage(
                 commandBuffer,
@@ -1097,7 +1288,222 @@ internal static unsafe partial class VulkanVideoPresenter
                 1,
                 &toShaderRead);
             target.Initialized = true;
+            if (exactBufferClear)
+            {
+                target.InitialUploadPending = false;
+            }
         }
+
+        internal static bool TryDecodePackedGuestImageClear(
+            Format format,
+            uint packed,
+            out ClearColorValue clear)
+        {
+            static float Unorm8(uint value) => (value & 0xFFu) / 255f;
+            static float Srgb8(uint value)
+            {
+                var encoded = Unorm8(value);
+                return encoded <= 0.04045f
+                    ? encoded / 12.92f
+                    : MathF.Pow((encoded + 0.055f) / 1.055f, 2.4f);
+            }
+
+            clear = default;
+            switch (format)
+            {
+                case Format.R32Sfloat:
+                case Format.R32G32Sfloat:
+                case Format.R32G32B32A32Sfloat:
+                    var scalar = BitConverter.UInt32BitsToSingle(packed);
+                    clear = new ClearColorValue(scalar, scalar, scalar, scalar);
+                    return true;
+                case Format.R16G16Sfloat:
+                    clear = new ClearColorValue(
+                        (float)BitConverter.UInt16BitsToHalf((ushort)packed),
+                        (float)BitConverter.UInt16BitsToHalf((ushort)(packed >> 16)),
+                        0f,
+                        0f);
+                    return true;
+                case Format.R16G16B16A16Sfloat:
+                    var low = (float)BitConverter.UInt16BitsToHalf((ushort)packed);
+                    var high = (float)BitConverter.UInt16BitsToHalf((ushort)(packed >> 16));
+                    clear = new ClearColorValue(low, high, low, high);
+                    return true;
+                case Format.R32Uint:
+                    clear.Uint32_0 = packed;
+                    return true;
+                case Format.R32Sint:
+                    clear.Int32_0 = unchecked((int)packed);
+                    return true;
+                case Format.R8G8B8A8Srgb:
+                    clear = new ClearColorValue(
+                        Srgb8(packed),
+                        Srgb8(packed >> 8),
+                        Srgb8(packed >> 16),
+                        Unorm8(packed >> 24));
+                    return true;
+                case Format.B8G8R8A8Srgb:
+                    clear = new ClearColorValue(
+                        Srgb8(packed >> 16),
+                        Srgb8(packed >> 8),
+                        Srgb8(packed),
+                        Unorm8(packed >> 24));
+                    return true;
+                case Format.R8G8B8A8Unorm:
+                    clear = new ClearColorValue(
+                        Unorm8(packed),
+                        Unorm8(packed >> 8),
+                        Unorm8(packed >> 16),
+                        Unorm8(packed >> 24));
+                    return true;
+                case Format.B8G8R8A8Unorm:
+                    clear = new ClearColorValue(
+                        Unorm8(packed >> 16),
+                        Unorm8(packed >> 8),
+                        Unorm8(packed),
+                        Unorm8(packed >> 24));
+                    return true;
+                case Format.A2B10G10R10UnormPack32:
+                    clear = new ClearColorValue(
+                        (packed & 0x3FFu) / 1023f,
+                        ((packed >> 10) & 0x3FFu) / 1023f,
+                        ((packed >> 20) & 0x3FFu) / 1023f,
+                        ((packed >> 30) & 0x3u) / 3f);
+                    return true;
+                case Format.A2R10G10B10UnormPack32:
+                    clear = new ClearColorValue(
+                        ((packed >> 20) & 0x3FFu) / 1023f,
+                        ((packed >> 10) & 0x3FFu) / 1023f,
+                        (packed & 0x3FFu) / 1023f,
+                        ((packed >> 30) & 0x3u) / 3f);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        internal static bool TryDecodePackedGuestImageClearPattern(
+            Format format,
+            uint packed0,
+            uint packed1,
+            uint packed2,
+            uint packed3,
+            out ClearColorValue clear)
+        {
+            if (packed0 == packed1 &&
+                packed0 == packed2 &&
+                packed0 == packed3)
+            {
+                return TryDecodePackedGuestImageClear(format, packed0, out clear);
+            }
+
+            clear = default;
+            switch (format)
+            {
+                case Format.R16G16B16A16Sfloat
+                    when packed0 == packed2 && packed1 == packed3:
+                    clear = new ClearColorValue(
+                        (float)BitConverter.UInt16BitsToHalf((ushort)packed0),
+                        (float)BitConverter.UInt16BitsToHalf((ushort)(packed0 >> 16)),
+                        (float)BitConverter.UInt16BitsToHalf((ushort)packed1),
+                        (float)BitConverter.UInt16BitsToHalf((ushort)(packed1 >> 16)));
+                    return true;
+                case Format.R32G32Sfloat
+                    when packed0 == packed2 && packed1 == packed3:
+                    clear = new ClearColorValue(
+                        BitConverter.UInt32BitsToSingle(packed0),
+                        BitConverter.UInt32BitsToSingle(packed1),
+                        0f,
+                        0f);
+                    return true;
+                case Format.R32G32B32A32Sfloat:
+                    clear = new ClearColorValue(
+                        BitConverter.UInt32BitsToSingle(packed0),
+                        BitConverter.UInt32BitsToSingle(packed1),
+                        BitConverter.UInt32BitsToSingle(packed2),
+                        BitConverter.UInt32BitsToSingle(packed3));
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        internal static bool TryCreatePackedGuestImageUpload(
+            Format format,
+            uint width,
+            uint height,
+            uint depth,
+            uint packed,
+            out byte[] pixels)
+        {
+            var byteCount = GetVulkanImageByteCount(
+                format,
+                width,
+                height,
+                Math.Max(depth, 1u));
+            if (byteCount == 0 || byteCount > int.MaxValue)
+            {
+                pixels = [];
+                return false;
+            }
+
+            pixels = GC.AllocateUninitializedArray<byte>((int)byteCount);
+            var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(pixels.AsSpan());
+            words.Fill(packed);
+
+            var writtenBytes = words.Length * sizeof(uint);
+            if (writtenBytes != pixels.Length)
+            {
+                Span<byte> packedBytes = stackalloc byte[sizeof(uint)];
+                BitConverter.TryWriteBytes(packedBytes, packed);
+                packedBytes[..(pixels.Length - writtenBytes)].CopyTo(pixels.AsSpan(writtenBytes));
+            }
+
+            return true;
+        }
+
+        internal static bool TryDecodeDccMetadataClear(
+            Format format,
+            Agc.AgcExports.GuestColorMetadataClear metadata,
+            out ClearColorValue clear)
+        {
+            clear = default;
+            switch (metadata.FillCode)
+            {
+                case 0x00:
+                    return true;
+                case 0x20:
+                    return TryDecodePackedGuestImageClear(
+                        format,
+                        metadata.ClearWord0,
+                        out clear);
+                case 0x40:
+                case 0x80:
+                case 0xC0:
+                    if (!SupportsFixedDccMetadataClear(format))
+                    {
+                        return false;
+                    }
+
+                    clear = metadata.FillCode switch
+                    {
+                        0x40 => new ClearColorValue(0f, 0f, 0f, 1f),
+                        0x80 => new ClearColorValue(1f, 1f, 1f, 0f),
+                        _ => new ClearColorValue(1f, 1f, 1f, 1f),
+                    };
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool SupportsFixedDccMetadataClear(Format format) =>
+            format is Format.R8G8B8A8Unorm or
+                Format.R8G8B8A8Srgb or
+                Format.B8G8R8A8Unorm or
+                Format.B8G8R8A8Srgb or
+                Format.A2B10G10R10UnormPack32 or
+                Format.A2R10G10B10UnormPack32;
 
         // Returns the source row length in texels when the upload is a linear
         // image whose rows are padded to a wider hardware pitch, or 0 when the
@@ -1294,4 +1700,46 @@ internal static unsafe partial class VulkanVideoPresenter
             return (renderPass, framebuffer);
         }
     }
+
+    internal static bool TryDecodePackedGuestImageClear(
+        Format format,
+        uint packed,
+        out ClearColorValue clear) =>
+        Presenter.TryDecodePackedGuestImageClear(format, packed, out clear);
+
+    internal static bool TryDecodePackedGuestImageClearPattern(
+        Format format,
+        uint packed0,
+        uint packed1,
+        uint packed2,
+        uint packed3,
+        out ClearColorValue clear) =>
+        Presenter.TryDecodePackedGuestImageClearPattern(
+            format,
+            packed0,
+            packed1,
+            packed2,
+            packed3,
+            out clear);
+
+    internal static bool TryDecodeDccMetadataClear(
+        Format format,
+        Agc.AgcExports.GuestColorMetadataClear metadata,
+        out ClearColorValue clear) =>
+        Presenter.TryDecodeDccMetadataClear(format, metadata, out clear);
+
+    internal static bool TryCreatePackedGuestImageUpload(
+        Format format,
+        uint width,
+        uint height,
+        uint depth,
+        uint packed,
+        out byte[] pixels) =>
+        Presenter.TryCreatePackedGuestImageUpload(
+            format,
+            width,
+            height,
+            depth,
+            packed,
+            out pixels);
 }

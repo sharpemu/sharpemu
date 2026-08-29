@@ -287,19 +287,9 @@ public static partial class AgcExports
         workSequence = 0;
         description = string.Empty;
         var instructions = program.Instructions;
-        string[] expectedOpcodes =
-        [
-            "VLshlAddU32",
-            "VMovB32",
-            "VMovB32",
-            "VMovB32",
-            "VMovB32",
-            "BufferStoreFormatXyzw",
-            "SEndpgm",
-        ];
-        if (instructions.Count != expectedOpcodes.Length ||
+        if (instructions.Count != ConstantFillExpectedOpcodes.Length ||
             !instructions.Select(static instruction => instruction.Opcode)
-                .SequenceEqual(expectedOpcodes) ||
+                .SequenceEqual(ConstantFillExpectedOpcodes) ||
             !IsExactConstantFillInstructionShape(instructions) ||
             dispatch.BaseGroupX != 0 ||
             dispatch.BaseGroupY != 0 ||
@@ -356,6 +346,19 @@ public static partial class AgcExports
         }
 
         var destinationAddress = destination.BaseAddress;
+        var isFullFill =
+            outputRecords == numRecords &&
+            dispatchedThreads == numRecords;
+        var isFullUniformFill =
+            isFullFill &&
+            scalars[4] == scalars[5] &&
+            scalars[4] == scalars[6] &&
+            scalars[4] == scalars[7];
+        var isRepeatedPairFill =
+            isFullFill &&
+            scalars[4] == scalars[6] &&
+            scalars[5] == scalars[7];
+        var descriptorByteCount = checked((ulong)numRecords * FillRecordBytes);
         workSequence = VulkanVideoPresenter.SubmitOrderedGuestAction(
             () =>
             {
@@ -376,8 +379,28 @@ public static partial class AgcExports
                     (ulong)output.Length,
                     VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
                     "agc.constant-fill");
+
+                if (isFullUniformFill)
+                {
+                    RecordDccFill(
+                        destinationAddress,
+                        descriptorByteCount,
+                        scalars[4]);
+                }
             },
             $"constant_fill dst=0x{destinationAddress:X16} bytes={output.Length}");
+        if (workSequence > 0 && isRepeatedPairFill)
+        {
+            var clearSequence = VulkanVideoPresenter.SubmitGuestImagePatternFromBuffer(
+                destinationAddress,
+                descriptorByteCount,
+                scalars[4],
+                scalars[5],
+                scalars[6],
+                scalars[7]);
+            workSequence = Math.Max(workSequence, clearSequence);
+        }
+
         description =
             $"dst=0x{destinationAddress:X16} bytes={output.Length} " +
             $"records={outputRecords} pattern=0x{scalars[7]:X8}{scalars[6]:X8}{scalars[5]:X8}{scalars[4]:X8} " +
@@ -386,6 +409,120 @@ public static partial class AgcExports
     }
 
     private const int FillRecordBytes = 4 * sizeof(uint);
+
+    private static readonly string[] ConstantFillExpectedOpcodes =
+    [
+        "VLshlAddU32",
+        "VMovB32",
+        "VMovB32",
+        "VMovB32",
+        "VMovB32",
+        "BufferStoreFormatXyzw",
+        "SEndpgm",
+    ];
+
+    private static bool HasConstantFillOpcodeSequence(Gen5ShaderProgram program) =>
+        program.Instructions.Count == ConstantFillExpectedOpcodes.Length &&
+        program.Instructions.Select(static instruction => instruction.Opcode)
+            .SequenceEqual(ConstantFillExpectedOpcodes);
+
+    private static string GetConstantFillDiagnosticReason(
+        Gen5ShaderProgram program,
+        Gen5ShaderEvaluation evaluation,
+        ComputeDispatch dispatch,
+        uint localSizeX,
+        uint localSizeY,
+        uint localSizeZ)
+    {
+        var instructions = program.Instructions;
+        if (instructions.Count != ConstantFillExpectedOpcodes.Length)
+        {
+            return $"instruction-count:{instructions.Count}";
+        }
+
+        if (!instructions.Select(static instruction => instruction.Opcode)
+                .SequenceEqual(ConstantFillExpectedOpcodes))
+        {
+            return "opcode-sequence";
+        }
+
+        if (!IsExactConstantFillInstructionShape(instructions))
+        {
+            return "instruction-shape";
+        }
+
+        if (dispatch.BaseGroupX != 0 ||
+            dispatch.BaseGroupY != 0 ||
+            dispatch.BaseGroupZ != 0)
+        {
+            return "base-group";
+        }
+
+        if (dispatch.GroupCountY != 1 || dispatch.GroupCountZ != 1)
+        {
+            return "group-dimensions";
+        }
+
+        if (localSizeX != 64 || localSizeY != 1 || localSizeZ != 1)
+        {
+            return "local-size";
+        }
+
+        if (evaluation.ComputeSystemRegisters?.WorkGroupXRegister != 8)
+        {
+            return "workgroup-register";
+        }
+
+        var destinations = evaluation.GlobalMemoryBindings
+            .Where(static binding =>
+                binding.ScalarAddress == 0 &&
+                binding.Writable &&
+                binding.WriteBackToGuest)
+            .ToArray();
+        if (destinations.Length == 0)
+        {
+            return "destination-missing";
+        }
+
+        if (destinations.Length != 1)
+        {
+            return $"destination-count:{destinations.Length}";
+        }
+
+        var destination = destinations[0];
+        if (destination.BaseAddress == 0)
+        {
+            return "destination-base-zero";
+        }
+
+        if (destination.DataLength < FillRecordBytes)
+        {
+            return $"destination-data-short:{destination.DataLength}";
+        }
+
+        var scalars = evaluation.InitialScalarRegisters;
+        if (scalars.Count < 8)
+        {
+            return $"scalar-count:{scalars.Count}";
+        }
+
+        if (!IsExactConstantFillDescriptor(scalars, destination.BaseAddress))
+        {
+            return "descriptor-mismatch";
+        }
+
+        var numRecords = scalars[2];
+        var dispatchedThreads = dispatch.ThreadCountX != uint.MaxValue
+            ? dispatch.ThreadCountX
+            : Math.Min(
+                (ulong)uint.MaxValue,
+                (ulong)dispatch.GroupCountX * localSizeX);
+        var writableRecords = (uint)(destination.DataLength / FillRecordBytes);
+        var outputRecords = (uint)Math.Min(
+            Math.Min((ulong)numRecords, dispatchedThreads),
+            writableRecords);
+        return outputRecords == 0 ? "output-empty" : "eligible";
+    }
 
     private static bool IsExactConstantFillInstructionShape(
         IReadOnlyList<Gen5ShaderInstruction> instructions)

@@ -14,6 +14,44 @@ namespace SharpEmu.Libs.Tests.Agc;
 public sealed class GnmTilingDetileTests
 {
     [Fact]
+    public void PhysicalTiledByteCount_RoundsToWholeSwizzleBlocks()
+    {
+        var ok = GnmTiling.TryGetPhysicalTiledByteCount(
+            swizzleMode: 8,
+            elementsWide: 642,
+            elementsHigh: 362,
+            bytesPerElement: 4,
+            out var byteCount);
+
+        Assert.True(ok);
+        Assert.Equal(0x120000UL, byteCount);
+    }
+
+    [Fact]
+    public void GuestSurfaceByteCount_UsesPhysicalTiledAllocation()
+    {
+        var byteCount = AgcExports.GetGuestSurfaceByteCount(
+            format: AgcExports.Gen5TextureFormatR8G8B8A8Unorm,
+            width: 642,
+            height: 362,
+            tileMode: 8);
+
+        Assert.Equal(0x120000UL, byteCount);
+    }
+
+    [Fact]
+    public void GuestRenderTargetByteCount_UsesPhysicalTiledAllocation()
+    {
+        var byteCount = AgcExports.GetGuestSurfaceByteCount(
+            format: AgcExports.Gen5TextureFormatR8G8B8A8Unorm,
+            width: 642,
+            height: 362,
+            tileMode: 27);
+
+        Assert.Equal(0x120000UL, byteCount);
+    }
+
+    [Fact]
     public void BaseMipPlacement_Depth64KbR16Chain_UsesReducedTailLimit()
     {
         var ok = GnmTiling.TryGetBaseMipPlacement(

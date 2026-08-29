@@ -416,7 +416,53 @@ internal static unsafe partial class VulkanVideoPresenter
         ulong Address,
         byte[]? Pixels,
         uint FillValue,
-        uint RowOffset = 0);
+        uint RowOffset = 0,
+        ulong ExactByteCount = 0,
+        uint FillValue1 = 0,
+        uint FillValue2 = 0,
+        uint FillValue3 = 0);
+
+    private readonly record struct PendingGuestImageBufferClear(
+        ulong ByteCount,
+        uint PackedValue0,
+        uint PackedValue1,
+        uint PackedValue2,
+        uint PackedValue3);
+
+    private static readonly ConcurrentDictionary<ulong, PendingGuestImageBufferClear>
+        _pendingGuestImageBufferClears = new();
+    private static readonly bool _traceGuestImageBufferClears =
+        _traceGuestImageEvents ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_META_SURFACES"),
+            "1",
+            StringComparison.Ordinal);
+    private static readonly ConcurrentDictionary<
+        (ulong Address, ulong RequestedBytes, ulong RegisteredBytes,
+         uint PackedValue, string Result), byte>
+        _tracedGuestImageBufferClearResults = new();
+
+    private static void TraceGuestImageBufferClear(
+        ulong address,
+        ulong requestedBytes,
+        ulong registeredBytes,
+        uint packedValue,
+        string result)
+    {
+        if (!_traceGuestImageBufferClears ||
+            !_tracedGuestImageBufferClearResults.TryAdd(
+                (address, requestedBytes, registeredBytes, packedValue, result),
+                0))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] vk.guest_image_buffer_clear " +
+            $"addr=0x{address:X16} requested={requestedBytes} " +
+            $"registered={registeredBytes} packed=0x{packedValue:X8} " +
+            $"result={result}");
+    }
 
     /// <summary>
     /// Reports the extent of a live guest image so DMA writes to its backing
@@ -454,6 +500,50 @@ internal static unsafe partial class VulkanVideoPresenter
         if (address != 0)
         {
             _pendingGuestColorClears[address] = 0;
+        }
+    }
+
+    internal static long SubmitGuestImageClearFromBuffer(
+        ulong address,
+        ulong byteCount,
+        uint packedValue) =>
+        SubmitGuestImagePatternFromBuffer(
+            address,
+            byteCount,
+            packedValue,
+            packedValue,
+            packedValue,
+            packedValue);
+
+    internal static long SubmitGuestImagePatternFromBuffer(
+        ulong address,
+        ulong byteCount,
+        uint packedValue0,
+        uint packedValue1,
+        uint packedValue2,
+        uint packedValue3)
+    {
+        if (address == 0 || byteCount == 0)
+        {
+            return 0;
+        }
+
+        lock (_gate)
+        {
+            if (_closed)
+            {
+                return 0;
+            }
+
+            return EnqueueGuestWorkLocked(
+                new VulkanGuestImageWrite(
+                    address,
+                    Pixels: null,
+                    FillValue: packedValue0,
+                    ExactByteCount: byteCount,
+                    FillValue1: packedValue1,
+                    FillValue2: packedValue2,
+                    FillValue3: packedValue3));
         }
     }
 
