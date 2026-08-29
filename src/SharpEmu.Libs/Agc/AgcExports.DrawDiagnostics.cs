@@ -407,7 +407,9 @@ public static partial class AgcExports
             state.CxRegisters.TryGetValue(DbDepthSizeXy, out var rawDepthSize);
             state.CxRegisters.TryGetValue(DbDepthView, out var rawDepthView);
             var depthState = DecodeDepthState(state.CxRegisters);
-            var depthTarget = DecodeDepthTarget(state.CxRegisters);
+            var depthTarget = DecodeDepthTarget(
+                state.CxRegisters,
+                state.CompositeDepthSizeXy);
             TraceAgcShader(
                 $"agc.shader_depth_state control=0x{rawDepthControl:X8} " +
                 $"zinfo=0x{rawZInfo:X8} size=0x{rawDepthSize:X8} " +

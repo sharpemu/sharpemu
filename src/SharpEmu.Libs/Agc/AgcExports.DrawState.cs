@@ -330,7 +330,8 @@ public static partial class AgcExports
     }
 
     private static GuestDepthTarget? DecodeDepthTarget(
-        IReadOnlyDictionary<uint, uint> registers)
+        IReadOnlyDictionary<uint, uint> registers,
+        uint? compositeSizeXy = null)
     {
         var depthState = DecodeDepthState(registers);
         if (!depthState.TestEnable &&
@@ -341,10 +342,13 @@ public static partial class AgcExports
         }
 
         if (!registers.TryGetValue(DbZInfo, out var zInfo) ||
-            !registers.TryGetValue(DbDepthSizeXy, out var sizeXy))
+            (compositeSizeXy is null &&
+             !registers.TryGetValue(DbDepthSizeXy, out _)))
         {
             return null;
         }
+
+        var sizeXy = compositeSizeXy ?? registers[DbDepthSizeXy];
 
         var guestFormat = zInfo & 0x3u;
         if (guestFormat == 0)

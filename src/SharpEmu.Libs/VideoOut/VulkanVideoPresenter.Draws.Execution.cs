@@ -272,29 +272,47 @@ internal static unsafe partial class VulkanVideoPresenter
                         firstTarget.LogicalWidth,
                         firstTarget.LogicalHeight,
                         draw.Textures);
-                    var effectiveDepthTarget = resolution.IsUsable &&
-                        (resolution.Width != depthTarget.Width ||
-                         resolution.Height != depthTarget.Height)
-                            ? depthTarget with
-                            {
-                                Width = resolution.Width,
-                                Height = resolution.Height,
-                            }
-                            : depthTarget;
-
-                    depth = GetOrCreateGuestDepth(effectiveDepthTarget);
-                    PrepareFirstUseDepth(depth, draw.RenderState.Depth);
-                    if (clearDepthForDraw)
+                    if (!resolution.IsUsable)
                     {
-                        depth.GuestClearDepth = effectiveDepthTarget.ClearDepth;
-                        depth.ClearDepth = effectiveDepthTarget.ClearDepth;
+                        if (_tracedDepthExtentFallbacks.Add(
+                                (depthTarget.Address,
+                                 depthTarget.Width,
+                                 depthTarget.Height)))
+                        {
+                            Console.Error.WriteLine(
+                                $"[LOADER][WARN] vk.depth_extent_mismatch " +
+                                $"addr=0x{depthTarget.Address:X16} " +
+                                $"depth={depthTarget.Width}x{depthTarget.Height} " +
+                                $"color={firstTarget.LogicalWidth}x{firstTarget.LogicalHeight} " +
+                                $"action=detach");
+                        }
                     }
-                    clearDepthSeparately = clearDepthForDraw &&
-                        (depth.Width < firstTarget.Width ||
-                         depth.Height < firstTarget.Height);
-                    if (targets.Length == 1 && !clearDepthSeparately)
+                    else
                     {
-                        depthFramebuffer = GetOrCreateDepthFramebuffer(firstTarget, depth);
+                        var effectiveDepthTarget =
+                            resolution.Width != depthTarget.Width ||
+                            resolution.Height != depthTarget.Height
+                                ? depthTarget with
+                                {
+                                    Width = resolution.Width,
+                                    Height = resolution.Height,
+                                }
+                                : depthTarget;
+
+                        depth = GetOrCreateGuestDepth(effectiveDepthTarget);
+                        PrepareFirstUseDepth(depth, draw.RenderState.Depth);
+                        if (clearDepthForDraw)
+                        {
+                            depth.GuestClearDepth = effectiveDepthTarget.ClearDepth;
+                            depth.ClearDepth = effectiveDepthTarget.ClearDepth;
+                        }
+                        clearDepthSeparately = clearDepthForDraw &&
+                            (depth.Width < firstTarget.Width ||
+                             depth.Height < firstTarget.Height);
+                        if (targets.Length == 1 && !clearDepthSeparately)
+                        {
+                            depthFramebuffer = GetOrCreateDepthFramebuffer(firstTarget, depth);
+                        }
                     }
                 }
 

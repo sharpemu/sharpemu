@@ -988,6 +988,7 @@ public static partial class AgcExports
         state.CxRegisters.Clear();
         state.ShRegisters.Clear();
         state.UcRegisters.Clear();
+        state.CompositeDepthSizeXy = null;
         state.PresenterTexture = null;
         state.GuestDrawKind = GuestDrawKind.None;
         state.TranslatedDraw = null;

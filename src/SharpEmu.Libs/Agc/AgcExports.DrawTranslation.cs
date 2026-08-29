@@ -368,7 +368,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
         var translationError = string.Empty;
         var depthState = DecodeDepthState(state.CxRegisters);
-        var depthTarget = DecodeDepthTarget(state.CxRegisters);
+        var depthTarget = DecodeDepthTarget(
+            state.CxRegisters,
+            state.CompositeDepthSizeXy);
         var hasDepthOnlyCandidate = hasExportShader &&
             !hasPixelShader &&
             depthTarget is not null &&
@@ -1503,7 +1505,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             pixelUserData[index] = pixelEvaluation.InitialScalarRegisters[index];
         }
 
-        var depthTarget = DecodeDepthTarget(state.CxRegisters);
+        var depthTarget = DecodeDepthTarget(
+            state.CxRegisters,
+            state.CompositeDepthSizeXy);
         var decodedRenderState = renderTargets.Length == 0 && depthTarget is not null
             ? CreateDepthTargetRenderState(state.CxRegisters, depthTarget)
             : CreateRenderState(

@@ -385,6 +385,13 @@ public static partial class AgcExports
             }
 
             ApplySubmittedRegisters(ctx, state, currentAddress, length, op, register);
+            ApplySubmittedCompositeDepthExtent(
+                ctx,
+                state,
+                currentAddress,
+                dwordCount - offset,
+                length,
+                op);
 
             if (op == ItSetBase &&
                 length >= 4 &&
@@ -978,6 +985,13 @@ public static partial class AgcExports
                 }
 
                 directDestination[startRegister + index] = value;
+                if (op == ItSetContextReg &&
+                    startRegister + index is DbZInfo or DbDepthSizeXy)
+                {
+                    // A standalone attachment or extent write supersedes the
+                    // extent carried by an earlier composite binding packet.
+                    state.CompositeDepthSizeXy = null;
+                }
                 if (op is ItSetUconfigReg or ItSetUconfigRegIndex)
                 {
                     ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
@@ -1023,6 +1037,51 @@ public static partial class AgcExports
         }
     }
 
+    private static void ApplySubmittedCompositeDepthExtent(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint remainingDwords,
+        uint packetLength,
+        uint op)
+    {
+        const uint DbDepthInfo = 0x00Fu;
+        const uint compositeDwordCount = 24;
+        if (op != ItSetContextReg ||
+            packetLength != 10 ||
+            remainingDwords < compositeDwordCount ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var startRegister) ||
+            startRegister != DbZInfo ||
+            !TryReadUInt32(ctx, packetAddress + 40, out var depthInfoHeader) ||
+            depthInfoHeader != Pm4(3, ItSetContextReg, 0) ||
+            !TryReadUInt32(ctx, packetAddress + 44, out var depthInfoRegister) ||
+            depthInfoRegister != DbDepthInfo ||
+            !TryReadUInt32(ctx, packetAddress + 52, out var depthViewHeader) ||
+            depthViewHeader != Pm4(3, ItSetContextReg, 0) ||
+            !TryReadUInt32(ctx, packetAddress + 56, out var depthViewRegister) ||
+            depthViewRegister != DbDepthView ||
+            !TryReadUInt32(ctx, packetAddress + 64, out var htileBaseHeader) ||
+            htileBaseHeader != Pm4(3, ItSetContextReg, 0) ||
+            !TryReadUInt32(ctx, packetAddress + 68, out var htileBaseRegister) ||
+            htileBaseRegister != DbHtileDataBase ||
+            !TryReadUInt32(ctx, packetAddress + 76, out var htileSurfaceHeader) ||
+            htileSurfaceHeader != Pm4(3, ItSetContextReg, 0) ||
+            !TryReadUInt32(ctx, packetAddress + 80, out var htileSurfaceRegister) ||
+            htileSurfaceRegister != DbHtileSurface ||
+            !TryReadUInt32(ctx, packetAddress + 88, out var extentHeader) ||
+            extentHeader != Pm4(2, ItNop, 0) ||
+            !TryReadUInt32(ctx, packetAddress + 92, out var sizeXy) ||
+            sizeXy == 0)
+        {
+            return;
+        }
+
+        // The final NOP payload belongs to the composite depth binding and
+        // carries x/y maxima, not padding. Keep it separate from independent
+        // DB_DEPTH_SIZE_XY state so later standalone writes can supersede it.
+        state.CompositeDepthSizeXy = sizeXy;
+    }
+
     /// <summary>
     /// Test-only view of a parsed graphics context register. False when the
     /// register was never written.
@@ -1041,6 +1100,28 @@ public static partial class AgcExports
         lock (gpuState.Gate)
         {
             return gpuState.Graphics.CxRegisters.TryGetValue(registerOffset, out value);
+        }
+    }
+
+    internal static bool TryGetGraphicsCompositeDepthSizeForTests(
+        CpuContext ctx,
+        out uint sizeXy)
+    {
+        sizeXy = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            if (gpuState.Graphics.CompositeDepthSizeXy is not { } value)
+            {
+                return false;
+            }
+
+            sizeXy = value;
+            return true;
         }
     }
 

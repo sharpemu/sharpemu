@@ -29,6 +29,8 @@ public sealed class AgcContextRegisterTests
     private const uint RCxRegsIndirect = 0x12;
     private const uint CbTargetMask = 0x8E;
     private const uint CbColorControl = 0x202;
+    private const uint DbDepthSizeXy = 0x007;
+    private const uint DbZInfo = 0x010;
 
     // PM4 type-3 header: 0xC0000000 | ((dwords - 2) << 16) | (opcode << 8), with the
     // NOP sub-register in bits 2..7 — the parser reads it as (header >> 2) & 0x3F.
@@ -155,6 +157,58 @@ public sealed class AgcContextRegisterTests
             AgcExports.TryGetGraphicsContextRegisterForTests(ctx, CbColorControl, out var value));
         Assert.Equal(0x00CC_0020u, value);
         Assert.Equal(2u, (value >> 4) & 0x7u);
+    }
+
+    [Fact]
+    public void CompositeDepthTargetRetainsTrailingExtent()
+    {
+        var ctx = CreateContext(out var memory);
+        var sizeXy = 1919u | (1079u << 16);
+        WriteDwords(
+            memory,
+            CommandAddress,
+            Pm4Header(10, ItSetContextReg), DbZInfo,
+            3, 0, 0x10000, 0, 0x10000, 0, 0, 0,
+            Pm4Header(3, ItSetContextReg), 0x00F, 0,
+            Pm4Header(3, ItSetContextReg), 0x002, 0,
+            Pm4Header(3, ItSetContextReg), 0x005, 0,
+            Pm4Header(3, ItSetContextReg), 0x2AF, 0,
+            Pm4Header(2, ItNop), sizeXy);
+        Submit(ctx, memory, dwordCount: 24);
+
+        Assert.True(AgcExports.TryGetGraphicsCompositeDepthSizeForTests(ctx, out var value));
+        Assert.Equal(sizeXy, value);
+    }
+
+    [Fact]
+    public void StandaloneDepthSizeSupersedesCompositeExtent()
+    {
+        var ctx = CreateContext(out var memory);
+        var sizeXy = 1919u | (1079u << 16);
+        WriteDwords(
+            memory,
+            CommandAddress,
+            Pm4Header(10, ItSetContextReg), DbZInfo,
+            3, 0, 0x10000, 0, 0x10000, 0, 0, 0,
+            Pm4Header(3, ItSetContextReg), 0x00F, 0,
+            Pm4Header(3, ItSetContextReg), 0x002, 0,
+            Pm4Header(3, ItSetContextReg), 0x005, 0,
+            Pm4Header(3, ItSetContextReg), 0x2AF, 0,
+            Pm4Header(2, ItNop), sizeXy);
+        Submit(ctx, memory, dwordCount: 24);
+
+        WriteDwords(
+            memory,
+            CommandAddress,
+            Pm4Header(3, ItSetContextReg),
+            DbDepthSizeXy,
+            7u);
+        Submit(ctx, memory, dwordCount: 3);
+
+        Assert.False(AgcExports.TryGetGraphicsCompositeDepthSizeForTests(ctx, out _));
+        Assert.True(
+            AgcExports.TryGetGraphicsContextRegisterForTests(ctx, DbDepthSizeXy, out var value));
+        Assert.Equal(7u, value);
     }
 
     private static void WriteIndirectRegisterCommand(
