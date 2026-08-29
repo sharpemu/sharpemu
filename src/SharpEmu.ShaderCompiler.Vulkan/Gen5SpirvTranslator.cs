@@ -1175,6 +1175,14 @@ public static partial class Gen5SpirvTranslator
                     _subgroupInvocationIdInput,
                     SpirvDecoration.BuiltIn,
                     (uint)SpirvBuiltIn.SubgroupLocalInvocationId);
+                if (_stage == Gen5SpirvStage.Pixel)
+                {
+                    // Vulkan requires integer fragment inputs, including subgroup
+                    // built-ins, to use flat interpolation.
+                    _module.AddDecoration(
+                        _subgroupInvocationIdInput,
+                        SpirvDecoration.Flat);
+                }
                 _interfaces.Add(_subgroupInvocationIdInput);
 
                 if (_emulateWave64)
@@ -1186,6 +1194,12 @@ public static partial class Gen5SpirvTranslator
                         _subgroupSizeInput,
                         SpirvDecoration.BuiltIn,
                         (uint)SpirvBuiltIn.SubgroupSize);
+                    if (_stage == Gen5SpirvStage.Pixel)
+                    {
+                        _module.AddDecoration(
+                            _subgroupSizeInput,
+                            SpirvDecoration.Flat);
+                    }
                     _interfaces.Add(_subgroupSizeInput);
                 }
 

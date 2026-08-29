@@ -100,7 +100,7 @@ public sealed class Gen5PixelOutputMappingTests
                 instruction.Opcode == SpirvOp.Capability &&
                 instruction.Operands[0] ==
                     (uint)SpirvCapability.GroupNonUniformBallot);
-        Assert.Contains(
+        var subgroupBuiltIn = Assert.Single(
             instructions,
             instruction =>
                 instruction.Opcode == SpirvOp.Decorate &&
@@ -108,6 +108,13 @@ public sealed class Gen5PixelOutputMappingTests
                 instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
                 instruction.Operands[2] ==
                     (uint)SpirvBuiltIn.SubgroupLocalInvocationId);
+        Assert.Contains(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Decorate &&
+                instruction.Operands.Length >= 2 &&
+                instruction.Operands[0] == subgroupBuiltIn.Operands[0] &&
+                instruction.Operands[1] == (uint)SpirvDecoration.Flat);
     }
 
     private static byte[] Compile(
