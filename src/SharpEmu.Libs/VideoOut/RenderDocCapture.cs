@@ -10,6 +10,7 @@ public static unsafe class RenderDocCapture
     private const int ApiVersion1_4_2 = 10402;
 
     private const int IndexUnloadCrashHandler = 10;
+    private const int IndexSetCaptureKeys = 6;
     private const int IndexSetCaptureFilePathTemplate = 11;
     private const int IndexGetNumCaptures = 13;
     private const int IndexGetCapture = 14;
@@ -78,10 +79,16 @@ public static unsafe class RenderDocCapture
 
         _api = (IntPtr*)api;
 
+        // Host-present captures can bisect an asynchronously drained guest
+        // frame. Disable RenderDoc's own hotkey and let the window route the
+        // capture request through the guest-flip state machine below.
+        ((delegate* unmanaged[Cdecl]<int*, int, void>)_api[IndexSetCaptureKeys])(
+            null,
+            0);
         ((delegate* unmanaged[Cdecl]<void>)_api[IndexUnloadCrashHandler])();
 
         Console.Error.WriteLine(
-            "[LOADER][INFO] renderdoc: in-app capture ready. Press F10 to capture the next complete guest frame.");
+            "[LOADER][INFO] renderdoc: in-app capture ready. Press F10 or F12 to capture the next complete guest frame.");
     }
 
     public static void SetCaptureDirectory(string titleId)

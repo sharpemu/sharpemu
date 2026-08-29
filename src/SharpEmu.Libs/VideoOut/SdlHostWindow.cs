@@ -487,7 +487,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             {
                 PerfOverlay.Toggle();
             }
-            else if (keyEvent.key == SDL_Keycode.SDLK_F10)
+            else if (keyEvent.key is SDL_Keycode.SDLK_F10 or SDL_Keycode.SDLK_F12)
             {
                 RenderDocCapture.RequestCapture();
             }
