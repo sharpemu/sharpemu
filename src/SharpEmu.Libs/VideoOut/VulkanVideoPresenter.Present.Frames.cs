@@ -877,6 +877,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
                     $"work_sequence={_activeGuestWorkSequence} addr=0x{work.Address:X16} " +
                     $"size={work.Width}x{work.Height} pitch={effectivePitch}");
+                RenderDocCapture.OnGuestFlipBoundary(work.Version);
             }
             finally
             {

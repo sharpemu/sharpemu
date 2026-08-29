@@ -26,6 +26,7 @@ public static unsafe class RenderDocCapture
     private static int _state = StateIdle;
     private static bool _initialized;
     private static long _captureStartedTick;
+    private static long _captureStartGuestFlipVersion;
     private static readonly long _captureTimeoutMilliseconds =
         long.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_RENDERDOC_CAPTURE_TIMEOUT_SECONDS"),
@@ -80,7 +81,7 @@ public static unsafe class RenderDocCapture
         ((delegate* unmanaged[Cdecl]<void>)_api[IndexUnloadCrashHandler])();
 
         Console.Error.WriteLine(
-            "[LOADER][INFO] renderdoc: in-app capture ready. Press F10 to capture the next presented frame.");
+            "[LOADER][INFO] renderdoc: in-app capture ready. Press F10 to capture the next complete guest frame.");
     }
 
     public static void SetCaptureDirectory(string titleId)
@@ -134,18 +135,31 @@ public static unsafe class RenderDocCapture
         if (Interlocked.CompareExchange(ref _state, StateRequested, StateIdle) == StateIdle)
         {
             Console.Error.WriteLine(
-                "[LOADER][INFO] renderdoc: capture requested; the next complete presented frame will be captured.");
+                "[LOADER][INFO] renderdoc: capture requested; waiting for the next guest-flip boundary.");
         }
     }
 
-    public static void BeginFrame()
+    /// <summary>
+    /// Marks a successfully submitted guest-flip boundary. A requested
+    /// capture starts after the first boundary and ends after the next one,
+    /// so asynchronous guest work remains inside one capture even when it is
+    /// drained across several host-presenter ticks.
+    /// </summary>
+    public static void OnGuestFlipBoundary(long version)
     {
         if (_api is null)
         {
             return;
         }
 
-        if (Volatile.Read(ref _state) != StateRequested)
+        var state = Volatile.Read(ref _state);
+        if (state == StateCapturing)
+        {
+            EndGuestFrame(version);
+            return;
+        }
+
+        if (state != StateRequested)
         {
             return;
         }
@@ -167,7 +181,9 @@ public static unsafe class RenderDocCapture
 
         Volatile.Write(ref _state, StateCapturing);
         Volatile.Write(ref _captureStartedTick, Environment.TickCount64);
-        Console.Error.WriteLine("[LOADER][INFO] renderdoc: frame capture started.");
+        Volatile.Write(ref _captureStartGuestFlipVersion, version);
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] renderdoc: guest-frame capture started after flip v{version}.");
     }
 
     public static void DiscardTimedOutFrame()
@@ -188,10 +204,10 @@ public static unsafe class RenderDocCapture
         _ = ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint>)
             _api[IndexDiscardFrameCapture])(IntPtr.Zero, IntPtr.Zero);
         Console.Error.WriteLine(
-            $"[LOADER][WARN] renderdoc: discarded a frame capture after {elapsed} ms without a presentation.");
+            $"[LOADER][WARN] renderdoc: discarded a guest-frame capture after {elapsed} ms without the next guest flip.");
     }
 
-    public static void EndFrame()
+    private static void EndGuestFrame(long version)
     {
         if (_api is null ||
             Interlocked.CompareExchange(ref _state, StateIdle, StateCapturing) !=
@@ -202,6 +218,10 @@ public static unsafe class RenderDocCapture
 
         if (EndFrameCapture() != 0)
         {
+            var startVersion = Volatile.Read(ref _captureStartGuestFlipVersion);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] renderdoc: guest-frame capture ended at flip v{version} " +
+                $"(v{startVersion}->v{version}).");
             LogNewestCapture();
         }
         else

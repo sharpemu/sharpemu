@@ -42,6 +42,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             catch (Exception exception)
             {
+                RenderDocCapture.DiscardFrame();
                 // Device loss can strike between any two Vulkan calls in the frame;
                 // keep the window loop pumping instead of tearing the presenter down.
                 if (!TryMarkDeviceLost(exception))
@@ -49,21 +50,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw;
                 }
             }
-            finally
-            {
-                // EndFrame clears a completed capture. DiscardFrame only acts
-                // when this render attempt ended before it presented a frame.
-                RenderDocCapture.DiscardFrame();
-            }
         }
 
         private void RenderCore()
         {
             RenderDocCapture.DiscardTimedOutFrame();
-            RenderDocCapture.BeginFrame();
 
             if (Volatile.Read(ref _presenterCloseRequested))
             {
+                RenderDocCapture.DiscardFrame();
                 Console.Error.WriteLine("[LOADER][WARN] Vulkan VideoOut closing on host shutdown request.");
                 _window.Close();
                 return;
@@ -76,6 +71,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (_deviceLost)
             {
+                RenderDocCapture.DiscardFrame();
                 // Drain queued work so producers aren't back-pressured, then
                 // return without any Vulkan call (fences never signal post-loss).
                 while (TryTakeGuestWork(out var lostWork))
@@ -749,7 +745,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 presentResult = _swapchainApi.QueuePresent(_queue, &presentInfo);
             }
-            RenderDocCapture.EndFrame();
 
             if (presentResult == Result.ErrorOutOfDateKhr)
             {
