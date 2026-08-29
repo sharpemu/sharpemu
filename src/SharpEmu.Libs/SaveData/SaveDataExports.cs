@@ -80,8 +80,8 @@ public static class SaveDataExports
     private const uint EventTypeSaveDataMemorySyncEnd = 3;
     private const int SaveDataEventSize = 0x60;
     private const int MountInfoSize = 0x40;
-    private const uint DefaultBlockSize = 32768;
-    private const ulong DefaultTotalBlocks = 0x8000; // 1 GiB of 32 KiB blocks
+    private const uint SaveDataBlockSize = 65536;
+    private const ulong SaveDataBlocksMax = 16384;
 
     private static readonly object _eventGate = new();
     private static readonly Queue<SaveDataEvent> _events = new();
@@ -234,12 +234,15 @@ public static class SaveDataExports
             return SetReturn(ctx, OrbisSaveDataErrorBadMounted);
         }
 
-        var used = SafeDirectorySize(entry.SlotDir);
-        var usedBlocks = (ulong)((used + DefaultBlockSize - 1) / DefaultBlockSize);
+        var usedBlocks = GetUsedBlocks(SafeDirectorySize(entry.SlotDir));
+        var freeBlocks = GetFreeBlocks(usedBlocks);
         Span<byte> info = stackalloc byte[MountInfoSize];
         info.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], DefaultTotalBlocks);       // blocks
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], usedBlocks);               // freeBlocks slot reused as used
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], SaveDataBlocksMax);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], freeBlocks);
+        TraceSaveData(
+            $"get_mount_info mount='{mountPoint}' blocks={SaveDataBlocksMax} " +
+            $"used_blocks={usedBlocks} free_blocks={freeBlocks}");
         return ctx.Memory.TryWrite(infoAddress, info)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -610,6 +613,11 @@ public static class SaveDataExports
     [SysAbiExport(
         Nid = "dyIhnXq-0SM",
         ExportName = "sceSaveDataDirNameSearch",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    [SysAbiExport(
+        Nid = "X4MYzukPc3g",
+        ExportName = "sceSaveDataDirNameSearchPs4",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveData")]
     public static int SaveDataDirNameSearch(CpuContext ctx)
@@ -1062,15 +1070,26 @@ public static class SaveDataExports
 
     private static bool TryWriteSearchInfo(CpuContext ctx, ulong address, SaveEntry entry)
     {
-        var size = GetDirectorySize(entry.Path);
-        var usedBlocks = checked((ulong)((size + 32767) / 32768));
-        var blocks = Math.Max(96UL, usedBlocks);
+        var usedBlocks = GetUsedBlocks(GetDirectorySize(entry.Path));
         Span<byte> info = stackalloc byte[SaveDataSearchInfoSize];
         info.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], blocks);
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], blocks - usedBlocks);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], SaveDataBlocksMax);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], GetFreeBlocks(usedBlocks));
         return ctx.Memory.TryWrite(address, info);
     }
+
+    private static ulong GetUsedBlocks(long byteCount)
+    {
+        if (byteCount <= 0)
+        {
+            return 0;
+        }
+
+        return checked(((ulong)byteCount + SaveDataBlockSize - 1) / SaveDataBlockSize);
+    }
+
+    private static ulong GetFreeBlocks(ulong usedBlocks) =>
+        usedBlocks >= SaveDataBlocksMax ? 0 : SaveDataBlocksMax - usedBlocks;
 
     private static long GetDirectorySize(string root)
     {

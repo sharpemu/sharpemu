@@ -39,6 +39,11 @@ public sealed class SaveDataExportsTests : IDisposable
     private const ulong SecondMountParam = Base + 0xF00;
     private const ulong SecondMountResult = Base + 0xF80;
     private const ulong SecondDirNamePtr = Base + 0x1000;
+    private const ulong MountInfo = Base + 0x1080;
+    private const ulong SearchCond = Base + 0x1100;
+    private const ulong SearchResult = Base + 0x1140;
+    private const ulong SearchDirNames = Base + 0x1180;
+    private const ulong SearchInfos = Base + 0x1200;
 
     private const int NoEvent = unchecked((int)0x809F0008);
     private const int ParameterError = unchecked((int)0x809F0000);
@@ -152,6 +157,51 @@ public sealed class SaveDataExportsTests : IDisposable
         Assert.Equal(0, SaveDataExports.SaveDataIsMounted(Reg(rsi: EventOut)));
         Assert.True(_ctx.TryReadUInt32(EventOut, out var mounted));
         Assert.Equal(1u, mounted);
+    }
+
+    [Fact]
+    public void GetMountInfo_ReportsBlockCapacityAndRemainingBlocks()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+        File.WriteAllBytes(Path.Combine(SlotDir, "payload.bin"), new byte[65537]);
+
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataGetMountInfo(
+                Reg(rdi: MountPointStr, rsi: MountInfo)));
+        Assert.True(_ctx.TryReadUInt64(MountInfo, out var blocks));
+        Assert.True(_ctx.TryReadUInt64(MountInfo + 0x08, out var freeBlocks));
+        Assert.Equal(16384UL, blocks);
+        Assert.Equal(16382UL, freeBlocks);
+    }
+
+    [Fact]
+    public void DirNameSearch_ReportsBlockCapacityAndRemainingBlocks()
+    {
+        Directory.CreateDirectory(SlotDir);
+        File.WriteAllBytes(Path.Combine(SlotDir, "payload.bin"), new byte[65537]);
+
+        Span<byte> cond = stackalloc byte[0x40];
+        cond.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(cond, UserId);
+        Assert.True(_memory.TryWrite(SearchCond, cond));
+
+        Span<byte> result = stackalloc byte[0x40];
+        result.Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(result[0x08..], SearchDirNames);
+        BinaryPrimitives.WriteUInt32LittleEndian(result[0x10..], 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(result[0x20..], SearchInfos);
+        Assert.True(_memory.TryWrite(SearchResult, result));
+
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataDirNameSearch(
+                Reg(rdi: SearchCond, rsi: SearchResult)));
+        Assert.True(_ctx.TryReadUInt64(SearchInfos, out var blocks));
+        Assert.True(_ctx.TryReadUInt64(SearchInfos + 0x08, out var freeBlocks));
+        Assert.Equal(16384UL, blocks);
+        Assert.Equal(16382UL, freeBlocks);
     }
 
     [Fact]

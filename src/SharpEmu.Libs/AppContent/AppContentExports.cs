@@ -10,6 +10,7 @@ namespace SharpEmu.Libs.AppContent;
 
 public static class AppContentExports
 {
+    private const ulong FallbackAvailableSpaceKb = 1024UL * 1024UL; // 1 GiB
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
     private const uint AppParamSkuFlag = 0;
@@ -121,22 +122,31 @@ public static class AppContentExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Download data is not emulated as a real quota; report a comfortable
-    // fixed amount of free space so titles never take the "storage full" path.
+    [SysAbiExport(
+        Nid = "SaKib2Ug0yI",
+        ExportName = "sceAppContentTemporaryDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentTemporaryDataGetAvailableSpaceKb(CpuContext ctx) =>
+        WriteAvailableSpaceKb(ctx, "temporary_data");
+
     [SysAbiExport(
         Nid = "Gl6w5i0JokY",
         ExportName = "sceAppContentDownloadDataGetAvailableSpaceKb",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAppContent")]
     public static int AppContentDownloadDataGetAvailableSpaceKb(CpuContext ctx)
+        => WriteAvailableSpaceKb(ctx, "download_data");
+
+    private static int WriteAvailableSpaceKb(CpuContext ctx, string storageKind)
     {
-        const ulong availableSpaceKb = 1024UL * 1024UL; // 1 GiB
         var availableSpaceAddress = ctx[CpuRegister.Rsi];
         if (availableSpaceAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var availableSpaceKb = GetHostAvailableSpaceKb();
         Span<byte> spaceBytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(spaceBytes, availableSpaceKb);
         if (!ctx.Memory.TryWrite(availableSpaceAddress, spaceBytes))
@@ -144,8 +154,33 @@ public static class AppContentExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        TraceAppContent($"{storageKind}_available_space_kb value={availableSpaceKb}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static ulong GetHostAvailableSpaceKb()
+    {
+        try
+        {
+            var storageRoot = ResolveTemp0Root();
+            Directory.CreateDirectory(storageRoot);
+            var volumeRoot = Path.GetPathRoot(Path.GetFullPath(storageRoot));
+            if (!string.IsNullOrWhiteSpace(volumeRoot))
+            {
+                var availableBytes = new DriveInfo(volumeRoot).AvailableFreeSpace;
+                if (availableBytes > 0)
+                {
+                    return checked((ulong)availableBytes / 1024UL);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            TraceAppContent($"available_space_fallback error='{exception.Message}'");
+        }
+
+        return FallbackAvailableSpaceKb;
     }
 
     private static bool TryReadUserDefinedParam(uint paramId, out int value)
