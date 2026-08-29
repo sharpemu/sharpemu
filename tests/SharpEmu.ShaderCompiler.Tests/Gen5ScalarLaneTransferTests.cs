@@ -12,6 +12,44 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5ScalarLaneTransferTests
 {
     [Fact]
+    public void DecoderContinuesPastEndProgramForForwardBranchTarget()
+    {
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x100);
+        uint[] words =
+        [
+            0xBF880001, // s_cbranch_execz +1 -> pc 0x8
+            0xBF810000, // s_endpgm on the fallthrough path
+            0xBF800000, // s_nop 0 at the taken target
+            0xBF810000, // s_endpgm on the taken path
+        ];
+        Span<byte> shader = stackalloc byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                shader[(index * sizeof(uint))..],
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(shaderAddress, shader));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                shaderAddress,
+                out var program,
+                out var decodeError),
+            decodeError);
+
+        Assert.Equal(
+            ["SCbranchExecz", "SEndpgm", "SNop", "SEndpgm"],
+            program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal(
+            [0u, 4u, 8u, 12u],
+            program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
+    [Fact]
     public void ScalarBlockerOpcodesDecodeAndCompile()
     {
         const ulong shaderAddress = 0x1000;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Ir;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -735,6 +736,7 @@ public static class Gen5ShaderTranslator
 
         var instructions = new List<Gen5ShaderInstruction>();
         var instructionCount = 0;
+        uint furthestForwardBranchTarget = 0;
         for (uint pc = 0;
              instructionCount < MaxInstructions &&
              (!maximumBytes.HasValue || pc < maximumBytes.Value);)
@@ -794,8 +796,19 @@ public static class Gen5ShaderTranslator
             instructions.Add(instruction);
             instructionCount++;
 
+            if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(
+                    instruction,
+                    out var branchTargetPc) &&
+                branchTargetPc > instruction.Pc)
+            {
+                furthestForwardBranchTarget = Math.Max(
+                    furthestForwardBranchTarget,
+                    branchTargetPc);
+            }
+
             pc += sizeDwords * sizeof(uint);
-            if (string.Equals(name, "SEndpgm", StringComparison.Ordinal))
+            if (string.Equals(name, "SEndpgm", StringComparison.Ordinal) &&
+                pc > furthestForwardBranchTarget)
             {
                 program = new Gen5ShaderProgram(address, instructions);
                 termination = ProgramTermination.EndProgram;
