@@ -31,6 +31,17 @@ internal readonly record struct VulkanRenderTargetFormat(
     public bool IsInteger => OutputKind is Gen5PixelOutputKind.Uint or Gen5PixelOutputKind.Sint;
 }
 
+internal static class VulkanGraphicsSubgroupPolicy
+{
+    internal static bool Resolve(uint nativeSubgroupSize, string? overrideValue) =>
+        overrideValue switch
+        {
+            "0" => false,
+            "1" => true,
+            _ => nativeSubgroupSize == 32,
+        };
+}
+
 internal sealed record VulkanTranslatedGuestDraw(
     byte[] VertexSpirv,
     byte[] PixelSpirv,
@@ -241,6 +252,16 @@ internal readonly record struct VulkanGuestQueueIdentity(
 
 internal static unsafe partial class VulkanVideoPresenter
 {
+    private static int _nativeSubgroupSize;
+
+    internal static bool GraphicsSubgroupOperationsEnabled =>
+        VulkanGraphicsSubgroupPolicy.Resolve(
+            unchecked((uint)Volatile.Read(ref _nativeSubgroupSize)),
+            Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS"));
+
+    private static void SetNativeSubgroupSize(uint subgroupSize) =>
+        Volatile.Write(ref _nativeSubgroupSize, checked((int)subgroupSize));
+
     // Standalone launches use a desktop-sized SDL surface unless configured.
     internal const uint Gen5DepthTileMode = 24;
     internal const uint Gen5TextureType2D = 9;

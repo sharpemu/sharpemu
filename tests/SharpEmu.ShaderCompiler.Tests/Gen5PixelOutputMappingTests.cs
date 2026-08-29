@@ -117,12 +117,46 @@ public sealed class Gen5PixelOutputMappingTests
                 instruction.Operands[1] == (uint)SpirvDecoration.Flat);
     }
 
+    [Fact]
+    public void PixelWaveMaskControlCanDisableGraphicsSubgroups()
+    {
+        var moveVcc = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Sop1,
+            "SMovB64",
+            [0u],
+            [Gen5Operand.Scalar(106)],
+            [Gen5Operand.Scalar(0)],
+            null);
+        var instructions = ReadInstructions(
+            Compile(
+                Gen5ColorComponentMapping.Identity,
+                prefix: [moveVcc],
+                enableGraphicsSubgroupOperations: false));
+
+        Assert.DoesNotContain(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Capability &&
+                instruction.Operands[0] ==
+                    (uint)SpirvCapability.GroupNonUniformBallot);
+        Assert.DoesNotContain(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Decorate &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+                instruction.Operands[2] ==
+                    (uint)SpirvBuiltIn.SubgroupLocalInvocationId);
+    }
+
     private static byte[] Compile(
         Gen5ColorComponentMapping componentMapping,
         uint enableMask = 0xF,
         uint target = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? outputs = null,
-        IReadOnlyList<Gen5ShaderInstruction>? prefix = null)
+        IReadOnlyList<Gen5ShaderInstruction>? prefix = null,
+        bool enableGraphicsSubgroupOperations = true)
     {
         var prefixInstructions = prefix ?? [];
         var export = new Gen5ShaderInstruction(
@@ -168,7 +202,8 @@ public sealed class Gen5PixelOutputMappingTests
                     Gen5PixelOutputKind.Float,
                     componentMapping)],
                 out var shader,
-                out var error),
+                out var error,
+                enableGraphicsSubgroupOperations: enableGraphicsSubgroupOperations),
             error);
         return shader.Spirv;
     }

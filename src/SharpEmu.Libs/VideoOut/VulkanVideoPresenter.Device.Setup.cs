@@ -567,6 +567,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &subgroup,
             };
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
+            SetNativeSubgroupSize(subgroup.SubgroupSize);
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];
             _maxComputeWorkGroupCountZ = properties.Limits.MaxComputeWorkGroupCount[2];
@@ -600,6 +601,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"required_stages={subgroupSizeControl.RequiredSubgroupSizeStages} " +
                 $"max_compute_subgroups=" +
                 $"{subgroupSizeControl.MaxComputeWorkgroupSubgroups}");
+            var graphicsSubgroupOverride =
+                Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS");
+            var graphicsSubgroupMode = graphicsSubgroupOverride switch
+            {
+                "0" => "forced-off",
+                "1" => "forced-on",
+                _ when subgroup.SubgroupSize == 32 => "auto-native-wave32",
+                _ => "auto-fallback",
+            };
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan graphics subgroup operations " +
+                $"enabled={GraphicsSubgroupOperationsEnabled} " +
+                $"mode={graphicsSubgroupMode} compute_subgroups=unchanged");
         }
 
         private void CreateDevice()

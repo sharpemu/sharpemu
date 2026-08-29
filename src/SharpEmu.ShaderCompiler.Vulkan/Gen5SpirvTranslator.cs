@@ -32,7 +32,8 @@ public static partial class Gen5SpirvTranslator
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
         IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1) =>
+        ulong storageBufferOffsetAlignment = 1,
+        bool enableGraphicsSubgroupOperations = true) =>
         TryCompilePixelShader(
             state,
             evaluation,
@@ -46,7 +47,8 @@ public static partial class Gen5SpirvTranslator
             pixelInputEnable,
             pixelInputAddress,
             pixelInputCntl,
-            storageBufferOffsetAlignment);
+            storageBufferOffsetAlignment,
+            enableGraphicsSubgroupOperations);
 
     public static bool TryCompilePixelShader(
         Gen5ShaderState state,
@@ -61,7 +63,8 @@ public static partial class Gen5SpirvTranslator
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
         IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        bool enableGraphicsSubgroupOperations = true)
     {
         if (outputs.Count > 8 || outputs.Any(output => output.GuestSlot > 7))
         {
@@ -103,7 +106,8 @@ public static partial class Gen5SpirvTranslator
             pixelInputEnable: pixelInputEnable,
             pixelInputAddress: pixelInputAddress,
             pixelInputCntl: pixelInputCntl,
-            storageBufferOffsetAlignment: storageBufferOffsetAlignment);
+            storageBufferOffsetAlignment: storageBufferOffsetAlignment,
+            enableGraphicsSubgroupOperations: enableGraphicsSubgroupOperations);
         return context.TryCompile(out shader, out error);
     }
 
@@ -117,7 +121,8 @@ public static partial class Gen5SpirvTranslator
         int imageBindingBase = 0,
         int initialScalarBufferIndex = -1,
         int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        bool enableGraphicsSubgroupOperations = true)
     {
         var context = new CompilationContext(
             Gen5SpirvStage.Vertex,
@@ -132,7 +137,8 @@ public static partial class Gen5SpirvTranslator
             imageBindingBase,
             initialScalarBufferIndex,
             requiredVertexOutputCount: requiredVertexOutputCount,
-            storageBufferOffsetAlignment: storageBufferOffsetAlignment);
+            storageBufferOffsetAlignment: storageBufferOffsetAlignment,
+            enableGraphicsSubgroupOperations: enableGraphicsSubgroupOperations);
         return context.TryCompile(out shader, out error);
     }
 
@@ -191,6 +197,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Gen5ShaderEvaluation _evaluation;
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
+        private readonly bool _enableGraphicsSubgroupOperations;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
 
@@ -359,7 +366,8 @@ public static partial class Gen5SpirvTranslator
             IReadOnlyList<uint>? pixelInputCntl = null,
             int requiredVertexOutputCount = 0,
             uint waveLaneCount = 32,
-            ulong storageBufferOffsetAlignment = 1)
+            ulong storageBufferOffsetAlignment = 1,
+            bool enableGraphicsSubgroupOperations = true)
         {
             _stage = stage;
             _requiredVertexOutputCount = requiredVertexOutputCount;
@@ -370,6 +378,8 @@ public static partial class Gen5SpirvTranslator
                 stage == Gen5SpirvStage.Pixel &&
                 state.Program.Instructions.Any(static instruction =>
                     instruction.Control is Gen5ExportControl { ValidMask: true });
+            _enableGraphicsSubgroupOperations =
+                stage == Gen5SpirvStage.Compute || enableGraphicsSubgroupOperations;
             _waveLaneCount = waveLaneCount == 64 ? 64u : 32u;
             _emulateWave64 =
                 stage == Gen5SpirvStage.Compute &&
@@ -5769,11 +5779,12 @@ public static partial class Gen5SpirvTranslator
                 instruction.Destinations.Any(IsWaveMaskOperand));
 
         private bool UsesSubgroupOperations() =>
-            UsesSubgroupShuffle() ||
-            UsesSubgroupBroadcast() ||
-            UsesWaveControl() ||
-            _state.Program.Instructions.Any(static instruction =>
-                instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32");
+            _enableGraphicsSubgroupOperations &&
+            (UsesSubgroupShuffle() ||
+             UsesSubgroupBroadcast() ||
+             UsesWaveControl() ||
+             _state.Program.Instructions.Any(static instruction =>
+                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
