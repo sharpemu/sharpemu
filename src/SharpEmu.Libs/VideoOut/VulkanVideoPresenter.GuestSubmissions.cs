@@ -100,6 +100,29 @@ internal static unsafe partial class VulkanVideoPresenter
             var resources = CollectGuestCacheResourceRanges();
             foreach (var operation in work.Operations)
             {
+                foreach (var image in _guestImages.Values)
+                {
+                    if (!ShouldTraceGuestImageStateForDiagnostics(image) ||
+                        (!operation.CoversAllMemory &&
+                         !VulkanGuestCacheBarrierPlanner.RangesOverlap(
+                             operation.BaseAddress,
+                             operation.SizeBytes,
+                             image.Address,
+                             image.GuestAllocationByteCount)))
+                    {
+                        continue;
+                    }
+
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.guest_cache_image_overlap " +
+                        $"addr=0x{image.Address:X16} " +
+                        $"operation_base=0x{operation.BaseAddress:X16} " +
+                        $"operation_size=0x{operation.SizeBytes:X16} " +
+                        $"all={operation.CoversAllMemory} " +
+                        $"domains={operation.Domains} actions={operation.Actions} " +
+                        $"scope={operation.Scope} order={operation.Order}");
+                }
+
                 if (TryRecordResourceGuestCacheBarrier(
                         commandBuffer,
                         operation,

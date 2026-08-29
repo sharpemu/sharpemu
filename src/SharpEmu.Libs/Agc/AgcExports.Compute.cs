@@ -426,8 +426,12 @@ public static partial class AgcExports
         }
 
         var bindings = evaluation.ImageBindings;
+        var traceConstantFill =
+            _traceMetaSurfaces && HasConstantFillOpcodeSequence(shaderState.Program);
         var describeBindings =
-            _traceAgcShader || _traceComputeShaderAddress == shaderAddress;
+            _traceAgcShader ||
+            _traceComputeShaderAddress == shaderAddress ||
+            traceConstantFill;
         var descriptions = describeBindings
             ? new List<string>(bindings.Count)
             : null;
@@ -482,6 +486,45 @@ public static partial class AgcExports
         var localSizeX = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadX);
         var localSizeY = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadY);
         var localSizeZ = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadZ);
+        if (traceConstantFill)
+        {
+            var scalars = evaluation.InitialScalarRegisters;
+            var rawBaseAddress = scalars.Count >= 2
+                ? scalars[0] | ((ulong)(scalars[1] & 0xFFFFu) << 32)
+                : 0;
+            var reason = GetConstantFillDiagnosticReason(
+                shaderState.Program,
+                evaluation,
+                dispatch,
+                localSizeX,
+                localSizeY,
+                localSizeZ);
+            var scalarState = string.Join(
+                ',',
+                scalars.Take(12).Select((value, index) => $"s{index}=0x{value:X8}"));
+            var globalState = evaluation.GlobalMemoryBindings.Count == 0
+                ? "none"
+                : string.Join(
+                    ',',
+                    evaluation.GlobalMemoryBindings.Select(binding =>
+                        $"s{binding.ScalarAddress}:0x{binding.BaseAddress:X16}+" +
+                        $"0x{binding.DataLength:X}:w={binding.Writable}:" +
+                        $"wb={binding.WriteBackToGuest}"));
+            var imageState = descriptions is { Count: > 0 }
+                ? string.Join(',', descriptions)
+                : "none";
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.constant_fill_dispatch " +
+                $"seq={sequence} cs=0x{shaderAddress:X16} " +
+                $"queue={state.QueueName} " +
+                $"source={(dispatch.IsIndirect ? "indirect" : "direct")} " +
+                $"groups={dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ} " +
+                $"base={dispatch.BaseGroupX}x{dispatch.BaseGroupY}x{dispatch.BaseGroupZ} " +
+                $"local={localSizeX}x{localSizeY}x{localSizeZ} " +
+                $"raw_dst=0x{rawBaseAddress:X16} reason={reason} " +
+                $"globals=[{globalState}] images=[{imageState}] scalars=[{scalarState}]");
+        }
+
         if (_traceComputeShaderAddress == shaderAddress && descriptions is not null)
         {
             var globalHeads = evaluation.GlobalMemoryBindings.Count == 0

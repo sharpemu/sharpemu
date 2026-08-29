@@ -469,7 +469,40 @@ internal static unsafe partial class VulkanVideoPresenter
                         view,
                         out var refreshResource))
                 {
+                    if (ShouldTraceGuestImageStateForDiagnostics(guestImage))
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] vk.guest_image_sample_bind " +
+                            $"addr=0x{texture.Address:X16} action=refresh " +
+                            $"initialized={guestImage.Initialized} " +
+                            $"upload_pending={guestImage.InitialUploadPending} " +
+                            $"cpu_backed={guestImage.IsCpuBacked} " +
+                            $"write_generation={texture.WriteGeneration} " +
+                            $"pixels={texture.RgbaPixels.Length}");
+                    }
                     return refreshResource;
+                }
+
+                if (ShouldTraceGuestImageStateForDiagnostics(guestImage))
+                {
+                    bool hasUploadedGeneration;
+                    long uploadedGeneration;
+                    lock (_gate)
+                    {
+                        hasUploadedGeneration = _cpuBackedUploadGenerations.TryGetValue(
+                            texture.Address,
+                            out uploadedGeneration);
+                    }
+
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.guest_image_sample_bind " +
+                        $"addr=0x{texture.Address:X16} action=reuse " +
+                        $"initialized={guestImage.Initialized} " +
+                        $"upload_pending={guestImage.InitialUploadPending} " +
+                        $"cpu_backed={guestImage.IsCpuBacked} " +
+                        $"write_generation={texture.WriteGeneration} " +
+                        $"uploaded_generation={(hasUploadedGeneration ? uploadedGeneration : -1)} " +
+                        $"pixels={texture.RgbaPixels.Length}");
                 }
 
                 return new TextureResource
