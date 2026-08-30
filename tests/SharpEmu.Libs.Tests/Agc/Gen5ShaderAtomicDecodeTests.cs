@@ -22,6 +22,41 @@ public sealed class Gen5ShaderAtomicDecodeTests
     internal const uint ComputePgmRsrc2Register = 0x213;
 
     [Fact]
+    public void ShaderChecksumSeparatesProgramsReusingOneGuestAddress()
+    {
+        var memory = new FakeCpuMemory(ShaderAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var registers = new Dictionary<uint, uint> { [ComputePgmRsrc2Register] = 0 };
+
+        WriteProgram(memory, ShaderAddress, [0xBF800000]);
+        Assert.True(Gen5ShaderTranslator.TryCreateState(
+            ctx,
+            ShaderAddress,
+            0,
+            registers,
+            ComputeUserDataRegister,
+            out var first,
+            out var firstError,
+            shaderChecksum: 0x11111111), firstError);
+
+        WriteProgram(memory, ShaderAddress, [0xBF8C0000]);
+        Assert.True(Gen5ShaderTranslator.TryCreateState(
+            ctx,
+            ShaderAddress,
+            0,
+            registers,
+            ComputeUserDataRegister,
+            out var second,
+            out var secondError,
+            shaderChecksum: 0x22222222), secondError);
+
+        Assert.Equal("SNop", first.Program.Instructions[0].Opcode);
+        Assert.Equal("SWaitcnt", second.Program.Instructions[0].Opcode);
+        Assert.Equal(0x11111111u, first.ShaderChecksum);
+        Assert.Equal(0x22222222u, second.ShaderChecksum);
+    }
+
+    [Fact]
     public void BufferAtomicUmax_DecodesControlAndDestination()
     {
         // BUFFER_ATOMIC_UMAX v1, off, s[0:3], 128 offset:8 glc

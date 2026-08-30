@@ -30,7 +30,7 @@ public static partial class AgcExports
         _rejectedDispatchArguments = new();
 
     private static readonly ConcurrentDictionary<
-        (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
+        (ulong Cs, uint Checksum, ulong State, uint LocalX, uint LocalY, uint LocalZ,
          uint WaveLanes, ulong AliasAlignment),
         IGuestCompiledShader> _computeShaderCache = new();
 
@@ -398,6 +398,7 @@ public static partial class AgcExports
         }
 
         var computeSystemRegisters = DecodeComputeSystemRegisters(state.ShRegisters);
+        state.ShRegisters.TryGetValue(ComputeShaderChksum, out var shaderChecksum);
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
                 shaderAddress,
@@ -406,7 +407,8 @@ public static partial class AgcExports
                 ComputeUserDataRegister,
                 out var shaderState,
                 out var error,
-                computeSystemRegisters) ||
+                computeSystemRegisters,
+                shaderChecksum: shaderChecksum) ||
             !Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 shaderState,
@@ -643,15 +645,16 @@ public static partial class AgcExports
             (ulong)localSizeX * localSizeY * localSizeZ <= 1024)
         {
             var shaderKey = (
-                shaderAddress,
-                _bakeScalars
+                Cs: shaderAddress,
+                Checksum: shaderState.ShaderChecksum,
+                State: _bakeScalars
                     ? ComputeShaderStateFingerprint(evaluation)
                     : ComputeShaderStructuralFingerprint(evaluation),
-                localSizeX,
-                localSizeY,
-                localSizeZ,
-                dispatch.WaveLaneCount,
-                _storageBufferOffsetAlignment);
+                LocalX: localSizeX,
+                LocalY: localSizeY,
+                LocalZ: localSizeZ,
+                WaveLanes: dispatch.WaveLaneCount,
+                AliasAlignment: _storageBufferOffsetAlignment);
             var guestGlobalBufferCount = evaluation.GlobalMemoryBindings.Count;
             var totalGlobalBufferCount = _bakeScalars
                 ? guestGlobalBufferCount
@@ -678,7 +681,7 @@ public static partial class AgcExports
                 DumpCompiledShader(
                     "cs",
                     shaderAddress,
-                    shaderKey.Item2,
+                    shaderKey.State,
                     computeShader!,
                     shaderState.Program);
             }

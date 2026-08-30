@@ -563,6 +563,7 @@ public static partial class AgcExports
         {
             _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
         }
+        state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
 
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
@@ -572,7 +573,8 @@ public static partial class AgcExports
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out _,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
+                shaderChecksum: exportShaderChecksum) ||
             !TryGetRequiredVertexRecordCount(
                 ctx,
                 state,

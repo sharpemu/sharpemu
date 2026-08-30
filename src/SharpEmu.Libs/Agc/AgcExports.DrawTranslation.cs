@@ -61,12 +61,13 @@ public static partial class AgcExports
     // Concurrent so the per-draw/per-dispatch hit path is lock-free (and no longer
     // shares _submitTraceGate with tracing).
     private static readonly ConcurrentDictionary<
-        (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
+        (ulong Es, uint EsChecksum, ulong EsState,
+         ulong Ps, uint PsChecksum, ulong PsState, ulong OutputLayout,
          ulong OutputMappings, uint OutputCount, uint Attributes, uint PsInputEna,
          uint PsInputAddr, ulong PsInputCntl, ulong AliasAlignment),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
-        (ulong Es, ulong State, ulong AliasAlignment),
+        (ulong Es, uint Checksum, ulong State, ulong AliasAlignment),
         IGuestCompiledShader> _depthOnlyVertexShaderCache = new();
 
     // Drop a draw on an undecodable texture descriptor instead of substituting
@@ -832,6 +833,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         TryRegisterEmbeddedFusedProgram(ctx, exportShaderAddress, exportShaderHeader);
+        state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
 
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
@@ -841,7 +843,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out error,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
+                shaderChecksum: exportShaderChecksum) ||
             !Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -865,6 +868,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             : ComputeShaderStructuralFingerprint(exportEvaluation);
         var cacheKey = (
             exportShaderAddress,
+            exportState.ShaderChecksum,
             exportFingerprint,
             _storageBufferOffsetAlignment);
         _depthOnlyVertexShaderCache.TryGetValue(cacheKey, out var vertexShader);
@@ -1034,6 +1038,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         TryRegisterEmbeddedFusedProgram(ctx, exportShaderAddress, exportShaderHeader);
+        state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
+        state.ShRegisters.TryGetValue(SpiShaderPgmChksumPs, out var pixelShaderChecksum);
 
         // Sequential (not short-circuited into one condition) so a failure
         // after an evaluation succeeded can return that evaluation's pooled
@@ -1046,7 +1052,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out error,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase))
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
+                shaderChecksum: exportShaderChecksum))
         {
             return false;
         }
@@ -1081,7 +1088,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 state.ShRegisters,
                 PsTextureUserDataRegister,
                 out var pixelState,
-                out error))
+                out error,
+                shaderChecksum: pixelShaderChecksum))
         {
             ReturnPooledEvaluationArrays(exportEvaluation);
             return false;
@@ -1304,8 +1312,10 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         var psInputCntlFingerprint = ComputePsInputCntlFingerprint(psInputCntl);
         var shaderKey = (
             exportShaderAddress,
+            exportState.ShaderChecksum,
             exportStateFingerprint,
             pixelShaderAddress,
+            pixelState.ShaderChecksum,
             pixelStateFingerprint,
             outputLayout,
             outputMappings,

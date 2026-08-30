@@ -120,10 +120,12 @@ public static partial class AgcExports
     private const uint SpiShaderPgmHiGs = 0x89;
     private const uint SpiShaderPgmRsrc1Gs = 0x8A;
     private const uint SpiShaderPgmChksumGs = 0x80;
+    private const uint SpiShaderPgmChksumPs = 0x06;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
     private const uint ComputePgmLo = 0x20C;
     private const uint ComputePgmHi = 0x20D;
+    private const uint ComputeShaderChksum = 0x22A;
     private const uint SpiPsInputCntl0 = 0x191;
     private const uint VgtPrimitiveType = 0x242;
     private const uint VgtIndexType = 0x243;
