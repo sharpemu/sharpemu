@@ -531,6 +531,9 @@ public static partial class AgcExports
             descriptor.Depth > 1 &&
             !_arrayUploadUnsupported.ContainsKey(descriptor.Address);
         var arrayUploadLayers = wantsArrayUpload ? descriptor.Depth : 1u;
+        var isVideoBuffer =
+            SharpEmu.Libs.AvPlayer.AvPlayerExports.IsVideoBufferAddress(
+                descriptor.Address);
 
         // Upload-known (not plain availability): the presenter's answer goes
         // generation-stale when the guest CPU rewrites a CPU-backed image
@@ -541,6 +544,7 @@ public static partial class AgcExports
         // Cells menus) while changing CPU content (GTA Bink) forces a copy.
         if (!isStorage &&
             !wantsArrayUpload &&
+            !isVideoBuffer &&
             descriptor.Address != 0 &&
             GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
@@ -695,7 +699,11 @@ public static partial class AgcExports
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
+        // Decoded video buffers rotate while older guest draws can still be
+        // queued. Keep the texels that belonged to this draw instead of using
+        // an address-only cache shortcut after the decoder reuses the buffer.
         if (!_textureCopySkipDisabled &&
+            !isVideoBuffer &&
             descriptor.Address != 0 &&
             GuestGpu.Current.IsTextureContentCached(
                 new TextureCacheLookupIdentity(

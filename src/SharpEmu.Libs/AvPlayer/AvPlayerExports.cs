@@ -215,8 +215,11 @@ public static class AvPlayerExports
     }
 
     internal static bool ShouldTraceVideoBufferAddress(ulong address)
+        => TraceVideoImages && IsVideoBufferAddress(address);
+
+    internal static bool IsVideoBufferAddress(ulong address)
     {
-        if (!TraceVideoImages || address == 0)
+        if (address == 0)
         {
             return false;
         }
