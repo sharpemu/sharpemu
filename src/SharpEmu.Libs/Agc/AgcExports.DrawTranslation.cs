@@ -1250,7 +1250,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 attributeCount))
         {
             intentionallySkipped = true;
-            if (_traceAgcShader)
+            if (_traceVideoDrawChain || _traceAgcShader)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] agc.rect_list_skip " +

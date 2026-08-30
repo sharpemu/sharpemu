@@ -24,6 +24,9 @@ public static partial class AgcExports
     private static long _renderTargetSampleTraceCount;
     private static long _indirectDrawProbeCount;
     private static long _indirectMultiProbeCount;
+    private static readonly object _videoDrawChainGate = new();
+    private static readonly Dictionary<ulong, (int Depth, long Frame)> _videoDrawChainTargets = new();
+    private static long _videoDrawChainFrame;
 
     private static void NoteRenderTargetAddress(ulong address)
     {
@@ -198,6 +201,7 @@ public static partial class AgcExports
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
+        TraceVideoDrawChain(sequence, draw, textures);
         if (!_traceDraws)
         {
             return;
@@ -246,6 +250,174 @@ public static partial class AgcExports
             $"mask=0x{blend.WriteMask:X} viewport={viewport} textures={textureList} pos={positions} " +
             $"ps_s0..3={string.Join(',', draw.PixelUserData.Take(4).Select(value => BitConverter.UInt32BitsToSingle(value).ToString("0.###")))} " +
             $"rawblend=0x{draw.RawBlendControl:X8} info=0x{draw.RawColorInfo:X8}");
+    }
+
+    private static void TraceVideoDrawChain(
+        ulong sequence,
+        TranslatedGuestDraw draw,
+        IReadOnlyList<GuestDrawTexture> textures)
+    {
+        if (!_traceVideoDrawChain)
+        {
+            return;
+        }
+
+        var sourceDepth = int.MaxValue;
+        var targetDepth = int.MaxValue;
+        var hasSourcePlane = false;
+        var frame = Volatile.Read(ref _videoDrawChainFrame);
+        var inputChain = new Dictionary<ulong, (int Depth, long Frame)>();
+        lock (_videoDrawChainGate)
+        {
+            foreach (var texture in textures)
+            {
+                if (IsVideoPlaneCandidate(texture))
+                {
+                    hasSourcePlane = true;
+                    sourceDepth = 0;
+                    continue;
+                }
+
+                if (_videoDrawChainTargets.TryGetValue(texture.Address, out var inputState) &&
+                    frame - inputState.Frame <= 3)
+                {
+                    sourceDepth = Math.Min(sourceDepth, inputState.Depth);
+                    inputChain[texture.Address] = inputState;
+                }
+            }
+
+            foreach (var target in draw.RenderTargets)
+            {
+                if (_videoDrawChainTargets.TryGetValue(target.Address, out var targetState) &&
+                    frame - targetState.Frame <= 3)
+                {
+                    targetDepth = Math.Min(targetDepth, targetState.Depth);
+                }
+            }
+
+            if (sourceDepth == int.MaxValue && targetDepth == int.MaxValue)
+            {
+                return;
+            }
+
+            if (sourceDepth != int.MaxValue)
+            {
+                var outputDepth = sourceDepth + 1;
+                foreach (var target in draw.RenderTargets)
+                {
+                    if (target.Address == 0)
+                    {
+                        continue;
+                    }
+
+                    if (!_videoDrawChainTargets.TryGetValue(target.Address, out var priorState) ||
+                        outputDepth < priorState.Depth ||
+                        frame > priorState.Frame)
+                    {
+                        _videoDrawChainTargets[target.Address] = (outputDepth, frame);
+                    }
+                }
+            }
+        }
+
+        var targets = draw.RenderTargets.Count == 0
+            ? "none"
+            : string.Join(
+                '|',
+                draw.RenderTargets
+                    .Where(target => target.Address != 0)
+                    .Select(target =>
+                        $"0x{target.Address:X}:{target.Width}x{target.Height}:" +
+                        $"f{target.Format}/n{target.NumberType}"));
+        var inputs = string.Join(
+            '|',
+            textures.Select(texture =>
+                $"0x{texture.Address:X}:{texture.Width}x{texture.Height}:" +
+                $"f{texture.Format}/n{texture.NumberType}:g{texture.WriteGeneration}:" +
+                $"stable={(texture.CpuSnapshotStable ? 1 : 0)}:" +
+                $"payload={DescribeVideoTexturePayload(texture.RgbaPixels)}" +
+                (inputChain.TryGetValue(texture.Address, out var chain)
+                    ? $":chain={chain.Depth}@{chain.Frame}"
+                    : string.Empty) +
+                (texture.IsFallback ? ":fallback" : string.Empty)));
+        var blend = draw.RenderState.Blend;
+        var viewport = draw.RenderState.Viewport is { } vp
+            ? $"{vp.X:0.#},{vp.Y:0.#},{vp.Width:0.#}x{vp.Height:0.#}"
+            : "none";
+        var depth = sourceDepth != int.MaxValue
+            ? sourceDepth + 1
+            : targetDepth;
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.video_draw_chain frame={frame} seq={sequence} depth={depth} " +
+            $"source_plane={(hasSourcePlane ? 1 : 0)} " +
+            $"overwrite={(sourceDepth == int.MaxValue ? 1 : 0)} " +
+            $"es=0x{draw.ExportShaderAddress:X} ps=0x{draw.PixelShaderAddress:X} " +
+            $"targets=[{targets}] inputs=[{inputs}] " +
+            $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc}" +
+            $":a{blend.AlphaSrcFactor}/{blend.AlphaDstFactor}/{blend.AlphaFunc} " +
+            $"mask=0x{blend.WriteMask:X} viewport={viewport}");
+    }
+
+    private static string DescribeVideoTexturePayload(byte[] pixels)
+    {
+        if (pixels.Length == 0)
+        {
+            return "cached";
+        }
+
+        const int SampleCount = 256;
+        ulong hash = 14695981039346656037UL;
+        var minimum = byte.MaxValue;
+        var maximum = byte.MinValue;
+        var zeroes = 0;
+        var samples = Math.Min(SampleCount, pixels.Length);
+        for (var index = 0; index < samples; index++)
+        {
+            var offset = samples == 1
+                ? 0
+                : (int)((long)index * (pixels.Length - 1) / (samples - 1));
+            var value = pixels[offset];
+            minimum = Math.Min(minimum, value);
+            maximum = Math.Max(maximum, value);
+            if (value == 0)
+            {
+                zeroes++;
+            }
+
+            hash ^= value;
+            hash *= 1099511628211UL;
+        }
+
+        return $"{pixels.Length}:h{hash:X16}:min{minimum}:max{maximum}:z{zeroes}/{samples}";
+    }
+
+    private static bool IsVideoPlaneCandidate(GuestDrawTexture texture) =>
+        !texture.IsStorage &&
+        !texture.IsFallback &&
+        texture.ArrayLayers == 1 &&
+        texture.Depth == 1 &&
+        (texture.Format == 1 && texture.Height >= 1_000 && texture.Width is >= 1_900 and <= 2_048 ||
+         texture.Format == 2 && texture.Height is >= 500 and <= 1_080 && texture.Width is >= 900 and <= 2_048);
+
+    private static void ResetVideoDrawChainAtFlip()
+    {
+        if (!_traceVideoDrawChain)
+        {
+            return;
+        }
+
+        lock (_videoDrawChainGate)
+        {
+            _videoDrawChainFrame++;
+            var oldestFrame = _videoDrawChainFrame - 3;
+            foreach (var address in _videoDrawChainTargets
+                         .Where(entry => entry.Value.Frame < oldestFrame)
+                         .Select(entry => entry.Key)
+                         .ToArray())
+            {
+                _videoDrawChainTargets.Remove(address);
+            }
+        }
     }
 
     private static void TraceDrawCompactMiss(ulong sequence, uint vertexCount, string error)

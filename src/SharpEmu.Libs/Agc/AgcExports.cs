@@ -234,6 +234,10 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
         StringComparison.Ordinal);
+    private static readonly bool _traceVideoDrawChain = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VIDEO_DRAW_CHAIN"),
+        "1",
+        StringComparison.Ordinal);
     private static readonly object _softwarePresenterGate = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 

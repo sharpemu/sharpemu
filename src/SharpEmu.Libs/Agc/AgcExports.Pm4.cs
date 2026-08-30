@@ -828,6 +828,7 @@ public static partial class AgcExports
                 if (!state.IsForceSubmittedRing)
                 {
                     _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);
+                    ResetVideoDrawChainAtFlip();
                 }
 
                 state.SawIndexedDraw = false;
