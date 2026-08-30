@@ -23,6 +23,18 @@ internal static class AgcPrimitiveHelpers
     internal static bool IsRectListPrimitive(uint primitiveType) =>
         primitiveType is PrimitiveRectList or PrimitiveRectListLegacy;
 
+    internal static bool ShouldSkipRectListWithoutParameterExports(
+        uint primitiveType,
+        bool indexed,
+        int vertexBufferCount,
+        uint parameterExportMask,
+        uint pixelInputCount) =>
+        primitiveType == PrimitiveRectList &&
+        !indexed &&
+        vertexBufferCount == 0 &&
+        parameterExportMask == 0 &&
+        pixelInputCount != 0;
+
     /// <summary>
     /// Maps draw prim type to VGT_GS_OUT_PRIM_TYPE when NGG is not enabled
     /// on the GS (GraphicsPrimitiveTypeToGsOut).

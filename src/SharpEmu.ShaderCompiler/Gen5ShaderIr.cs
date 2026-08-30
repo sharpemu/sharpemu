@@ -437,10 +437,13 @@ public sealed record Gen5ShaderProgram(
     private const uint PixelColorTargetCount = 8;
     private const int PixelColorMaskBits = 4;
     private readonly uint _pixelColorExportMasks = ComputePixelColorExportMasks(Instructions);
+    private readonly uint _parameterExportMask = ComputeParameterExportMask(Instructions);
     private const int ScalarRegisterCount = 256;
     private IReadOnlySet<uint>? _runtimeScalarRegisters;
 
     public uint PixelColorExportMasks => _pixelColorExportMasks;
+
+    public uint ParameterExportMask => _parameterExportMask;
 
     private static uint ComputePixelColorExportMasks(
         IReadOnlyList<Gen5ShaderInstruction> instructions)
@@ -457,6 +460,23 @@ public sealed record Gen5ShaderProgram(
         }
 
         return masks;
+    }
+
+    private static uint ComputeParameterExportMask(
+        IReadOnlyList<Gen5ShaderInstruction> instructions)
+    {
+        var mask = 0u;
+        foreach (var instruction in instructions)
+        {
+            if (instruction.Control is Gen5ExportControl export &&
+                export.Target is >= 32 and < 64 &&
+                export.EnableMask != 0)
+            {
+                mask |= 1u << (int)(export.Target - 32);
+            }
+        }
+
+        return mask;
     }
 
     public IEnumerable<Gen5ImageControl> ImageResources =>

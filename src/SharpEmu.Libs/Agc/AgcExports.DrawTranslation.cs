@@ -449,6 +449,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return;
         }
 
+        var intentionallySkipped = false;
         if (hasExportShader &&
             hasPixelShader &&
             hasPsInputEna &&
@@ -463,6 +464,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 vertexCount,
                 indexed,
                 out var translatedDraw,
+                out intentionallySkipped,
                 out translationError))
         {
             state.TranslatedDraw = translatedDraw;
@@ -789,6 +791,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return;
         }
 
+        if (intentionallySkipped)
+        {
+            return;
+        }
+
         TraceDrawCompactMiss(
             drawSequence,
             vertexCount,
@@ -1025,9 +1032,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         uint vertexCount,
         bool indexed,
         out TranslatedGuestDraw draw,
+        out bool intentionallySkipped,
         out string error)
     {
         draw = default!;
+        intentionallySkipped = false;
         error = string.Empty;
         ulong exportShaderHeader;
         ulong pixelShaderHeader;
@@ -1231,6 +1240,29 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             }
         }
 
+        var attributeCount = GetInterpolatedAttributeCount(pixelState);
+        state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
+        if (AgcPrimitiveHelpers.ShouldSkipRectListWithoutParameterExports(
+                primitiveType,
+                indexed,
+                exportEvaluation.VertexInputs?.Count ?? 0,
+                exportState.Program.ParameterExportMask,
+                attributeCount))
+        {
+            intentionallySkipped = true;
+            if (_traceAgcShader)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] agc.rect_list_skip " +
+                    $"es=0x{exportShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
+                    $"ps_inputs={attributeCount}");
+            }
+
+            ReturnPooledEvaluationArrays(exportEvaluation);
+            ReturnPooledEvaluationArrays(pixelEvaluation);
+            return false;
+        }
+
         // Every bound color target the shader exports to. Deferred renderers
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
@@ -1301,7 +1333,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
         var outputMappings = PackPixelOutputMappings(renderTargetOutputMappings);
 
-        var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(exportEvaluation)
             : ComputeShaderStructuralFingerprint(exportEvaluation);
@@ -1501,7 +1532,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             vertexInputs = exportEvaluation.VertexInputs ?? [];
         }
 
-        state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
         var guestTargets = new GuestRenderTarget[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {
