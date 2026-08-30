@@ -15,6 +15,7 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class Gen5NativeReturnSmokeTests
 {
+    private const ulong CallbackReturnValue = 0xFEDC_BA98_7654_3210UL;
     private const string WorkerEnvironmentVariable = "SHARPEMU_NATIVE_RETURN_SMOKE_WORKER";
     private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(30);
 
@@ -84,6 +85,22 @@ public sealed class Gen5NativeReturnSmokeTests
         Assert.Null(dispatcher.LastTrapInfo);
         Assert.Null(dispatcher.LastMemoryFaultInfo);
         Assert.Null(dispatcher.LastNotImplementedInfo);
+
+        var callerContext = new CpuContext(new TrackedCpuMemory(memory), Generation.Gen5);
+        Assert.True(
+            backend.TryCallGuestFunction(
+                callerContext,
+                image.EntryPoint + 3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                "synthetic-native-callback-return",
+                out var callbackReturn,
+                out var callbackError),
+            callbackError);
+        Assert.Equal(CallbackReturnValue, callbackReturn);
     }
 
     private static async Task<WorkerResult> RunIsolatedWorker()
@@ -153,7 +170,14 @@ public sealed class Gen5NativeReturnSmokeTests
         const int programHeaderSize = 0x38;
         const int fileOffset = 0x1000;
         const ulong entryPoint = 0x1000;
-        ReadOnlySpan<byte> payload = [0x31, 0xC0, 0xC3]; // xor eax, eax; ret
+        Span<byte> payload = stackalloc byte[14];
+        payload[0] = 0x31; // xor eax, eax
+        payload[1] = 0xC0;
+        payload[2] = 0xC3; // ret
+        payload[3] = 0x48; // mov rax, imm64
+        payload[4] = 0xB8;
+        BinaryPrimitives.WriteUInt64LittleEndian(payload[5..], CallbackReturnValue);
+        payload[13] = 0xC3; // ret
         var image = new byte[fileOffset + payload.Length];
 
         image[0] = 0x7F;

@@ -79,7 +79,7 @@ public sealed partial class DirectExecutionBackend
 	// Callers set the Active* thread-statics before emitting the stub and read the
 	// yield/forced-exit flags right after this returns, so the worker outcome is
 	// copied back into this thread's statics before returning.
-	private unsafe int RunGuestEntryStub(void* entryStub, ulong hostRspSlot, bool requireNativeWorker = false)
+	private unsafe ulong RunGuestEntryStub(void* entryStub, ulong hostRspSlot, bool requireNativeWorker = false)
 	{
 		// Limit in-flight native Runs before renting so the idle pool is not
 		// drained by threads blocked on the concurrency gate.
@@ -124,7 +124,7 @@ public sealed partial class DirectExecutionBackend
 					_activeGuestThreadYieldRequested = true;
 					_activeGuestThreadYieldReason = "tbb_native_worker_unavailable";
 					_activeForcedGuestExit = true;
-					return unchecked((int)0x80020012);
+					return 0x80020012UL;
 				}
 
 				TlsSetValue(_hostRspSlotTlsIndex, (nint)hostRspSlot);
@@ -302,8 +302,8 @@ public sealed partial class DirectExecutionBackend
 	//   loop: WaitForSingleObject(work);
 	//         if (*stopFlag) { SetEvent(done); ExitThread(0); }
 	//         rax = RunPrologue(self);      // managed: binds per-run ambient, returns stub
-	//         if (rax != 0) eax = rax();    // guest entry stub — zero managed frames below
-	//         RunEpilogue(self, eax);       // managed: captures outcome, restores ambient
+	//         if (rax != 0) rax = rax();    // guest entry stub — zero managed frames below
+	//         RunEpilogue(self, rax);       // managed: captures outcome, restores ambient
 	//         SetEvent(done); goto loop;
 	//
 	// Workers carry no per-guest identity of their own: the prologue rebinds guest TLS,
@@ -348,7 +348,7 @@ public sealed partial class DirectExecutionBackend
 		private nint _runHostRspSlot;
 		private nint _runEntryStub;
 		private ulong _runAffinityMask;
-		private int _runNativeResult;
+		private ulong _runNativeResult;
 		private bool _runYieldRequested;
 		private string? _runYieldReason;
 		private bool _runForcedExit;
@@ -425,7 +425,7 @@ public sealed partial class DirectExecutionBackend
 			}
 
 			var prologuePtr = (nint)(delegate* unmanaged<nint, nint>)&RunPrologue;
-			var epiloguePtr = (nint)(delegate* unmanaged<nint, int, void>)&RunEpilogue;
+			var epiloguePtr = (nint)(delegate* unmanaged<nint, ulong, void>)&RunEpilogue;
 			var executorHandle = GCHandle.ToIntPtr(_selfHandle);
 			nint workHandle;
 			nint doneHandle;
@@ -504,9 +504,9 @@ public sealed partial class DirectExecutionBackend
 			Emit(0x0F); Emit(0x84);                         // je skipEntry
 			int skipJump = offset;
 			offset += sizeof(int);
-			EmitCallRax();                                  // guest entry stub -> eax
+			EmitCallRax();                                  // guest entry stub -> rax
 			int skipEntryOffset = offset;
-			Emit(0x89); Emit(0xC2);                         // mov edx, eax
+			Emit(0x48); Emit(0x89); Emit(0xC2);             // mov rdx, rax
 			EmitMovRcxImm64((ulong)executorHandle);
 			EmitMovRaxImm64((ulong)epiloguePtr);
 			EmitCallRax();
@@ -565,7 +565,7 @@ public sealed partial class DirectExecutionBackend
 			return true;
 		}
 
-		public int Run(
+		public ulong Run(
 			CpuContext context,
 			GuestThreadState? state,
 			ulong guestThreadHandle,
@@ -657,7 +657,7 @@ public sealed partial class DirectExecutionBackend
 				yieldRequested = true;
 				yieldReason = "tbb_worker_prologue_fault";
 				forcedExit = true;
-				return unchecked((int)0x80020012);
+				return 0x80020012UL;
 			}
 			return _runNativeResult;
 		}
@@ -707,7 +707,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		[UnmanagedCallersOnly]
-		private static void RunEpilogue(nint executorHandle, int nativeResult)
+		private static void RunEpilogue(nint executorHandle, ulong nativeResult)
 		{
 			try
 			{
@@ -781,7 +781,7 @@ public sealed partial class DirectExecutionBackend
 			return _runEntryStub;
 		}
 
-		private void ExitRun(int nativeResult)
+		private void ExitRun(ulong nativeResult)
 		{
 			_runNativeResult = nativeResult;
 			_runYieldRequested = _activeGuestThreadYieldRequested;
@@ -821,7 +821,7 @@ public sealed partial class DirectExecutionBackend
 			if (LogThreadMode)
 			{
 				TraceThreadMode(
-					$"worker_exit guest=0x{_runGuestThreadHandle:X16} result=0x{nativeResult:X8} yield={_runYieldRequested}");
+					$"worker_exit guest=0x{_runGuestThreadHandle:X16} result=0x{nativeResult:X16} yield={_runYieldRequested}");
 			}
 		}
 

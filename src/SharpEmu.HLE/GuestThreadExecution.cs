@@ -103,6 +103,19 @@ public interface IGuestThreadScheduler
         out ulong returnValue,
         out string? error);
 
+    bool TryCallGuestFunction(
+        CpuContext callerContext,
+        ulong entryPoint,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3,
+        ulong stackAddress,
+        ulong stackSize,
+        string reason,
+        out ulong returnValue,
+        out string? error);
+
     bool TryCallGuestContinuation(
         CpuContext callerContext,
         GuestCpuContinuation continuation,
