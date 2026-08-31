@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.VideoOut;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -38,6 +39,7 @@ public static class AvPlayerExports
     private const int Gen5StreamInfoSize = 32;
     private const int StreamInfoExSize = 104;
     private const int MaxGuestPathLength = 4096;
+    private const int ReplacementFileReadBufferSize = 1024 * 1024;
     private const int VideoPitchAlignment = 256;
     private static readonly object StateGate = new();
     private static readonly HashSet<string> TracedOnce = new();
@@ -385,9 +387,17 @@ public static class AvPlayerExports
         public ulong AllocatorObject { get; init; }
         public ulong AllocateTextureCallback { get; init; }
         public ulong AllocateCallback { get; init; }
+        public ulong FileObject { get; init; }
+        public ulong FileOpenCallback { get; init; }
+        public ulong FileCloseCallback { get; init; }
+        public ulong FileReadOffsetCallback { get; init; }
+        public ulong FileSizeCallback { get; init; }
+        public object FileReplacementGate { get; } = new();
         public ulong EventObject { get; init; }
         public ulong EventCallback { get; init; }
         public string? SourcePath { get; set; }
+        public string? OwnedSourcePath { get; set; }
+        public ulong ReplacementFileReadBuffer { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
         public double FramesPerSecond { get; set; } = 30.0;
@@ -435,6 +445,12 @@ public static class AvPlayerExports
         public void Dispose()
         {
             DisposePlaybackResources();
+            if (OwnedSourcePath is { } ownedSourcePath)
+            {
+                TryDeleteMaterializedSource(ownedSourcePath);
+                OwnedSourcePath = null;
+            }
+            SourcePath = null;
         }
 
         private void DisposePlaybackResources()
@@ -503,6 +519,11 @@ public static class AvPlayerExports
                 AllocatorObject = TryReadUInt64(ctx, initDataAddress, out var allocatorObject) ? allocatorObject : 0,
                 AllocateTextureCallback = TryReadUInt64(ctx, initDataAddress + 24, out var allocateTexture) ? allocateTexture : 0,
                 AllocateCallback = TryReadUInt64(ctx, initDataAddress + 8, out var allocate) ? allocate : 0,
+                FileObject = TryReadUInt64(ctx, initDataAddress + 40, out var fileObject) ? fileObject : 0,
+                FileOpenCallback = TryReadUInt64(ctx, initDataAddress + 48, out var fileOpen) ? fileOpen : 0,
+                FileCloseCallback = TryReadUInt64(ctx, initDataAddress + 56, out var fileClose) ? fileClose : 0,
+                FileReadOffsetCallback = TryReadUInt64(ctx, initDataAddress + 64, out var fileReadOffset) ? fileReadOffset : 0,
+                FileSizeCallback = TryReadUInt64(ctx, initDataAddress + 72, out var fileSize) ? fileSize : 0,
                 EventObject = TryReadUInt64(ctx, initDataAddress + 80, out var eventObject) ? eventObject : 0,
                 EventCallback = TryReadUInt64(ctx, initDataAddress + 88, out var eventCallback) ? eventCallback : 0,
             });
@@ -511,6 +532,11 @@ public static class AvPlayerExports
         Trace(
             $"init handle=0x{handle:X16} " +
             $"alloc_texture=0x{Players[handle].AllocateTextureCallback:X16} " +
+            $"file_object=0x{Players[handle].FileObject:X16} " +
+            $"file_open=0x{Players[handle].FileOpenCallback:X16} " +
+            $"file_close=0x{Players[handle].FileCloseCallback:X16} " +
+            $"file_read=0x{Players[handle].FileReadOffsetCallback:X16} " +
+            $"file_size=0x{Players[handle].FileSizeCallback:X16} " +
             $"video_buffers={Players[handle].GuestBuffers.Length}");
         ctx[CpuRegister.Rax] = handle;
         return unchecked((int)handle);
@@ -567,6 +593,11 @@ public static class AvPlayerExports
                 AllocatorObject = TryReadUInt64(ctx, initDataAddress + 8, out var allocatorObject) ? allocatorObject : 0,
                 AllocateTextureCallback = TryReadUInt64(ctx, initDataAddress + 32, out var allocateTexture) ? allocateTexture : 0,
                 AllocateCallback = TryReadUInt64(ctx, initDataAddress + 16, out var allocate) ? allocate : 0,
+                FileObject = TryReadUInt64(ctx, initDataAddress + 48, out var fileObject) ? fileObject : 0,
+                FileOpenCallback = TryReadUInt64(ctx, initDataAddress + 56, out var fileOpen) ? fileOpen : 0,
+                FileCloseCallback = TryReadUInt64(ctx, initDataAddress + 64, out var fileClose) ? fileClose : 0,
+                FileReadOffsetCallback = TryReadUInt64(ctx, initDataAddress + 72, out var fileReadOffset) ? fileReadOffset : 0,
+                FileSizeCallback = TryReadUInt64(ctx, initDataAddress + 80, out var fileSize) ? fileSize : 0,
                 EventObject = TryReadUInt64(ctx, initDataAddress + 88, out var eventObject) ? eventObject : 0,
                 EventCallback = TryReadUInt64(ctx, initDataAddress + 96, out var eventCallback) ? eventCallback : 0,
             });
@@ -575,6 +606,11 @@ public static class AvPlayerExports
         Trace(
             $"init_ex handle=0x{handle:X16} " +
             $"alloc_texture=0x{Players[handle].AllocateTextureCallback:X16} " +
+            $"file_object=0x{Players[handle].FileObject:X16} " +
+            $"file_open=0x{Players[handle].FileOpenCallback:X16} " +
+            $"file_close=0x{Players[handle].FileCloseCallback:X16} " +
+            $"file_read=0x{Players[handle].FileReadOffsetCallback:X16} " +
+            $"file_size=0x{Players[handle].FileSizeCallback:X16} " +
             $"video_buffers={Players[handle].GuestBuffers.Length}");
         return SetReturn(ctx, 0);
     }
@@ -1065,6 +1101,11 @@ public static class AvPlayerExports
         ulong durationMilliseconds,
         ulong allocateTextureCallback = 0,
         ulong allocateCallback = 0,
+        ulong fileObject = 0,
+        ulong fileOpenCallback = 0,
+        ulong fileCloseCallback = 0,
+        ulong fileReadOffsetCallback = 0,
+        ulong fileSizeCallback = 0,
         bool hasAudio = false,
         double framesPerSecond = 30.0,
         bool isGen5 = true)
@@ -1084,6 +1125,11 @@ public static class AvPlayerExports
                 FramesPerSecond = framesPerSecond,
                 AllocateTextureCallback = allocateTextureCallback,
                 AllocateCallback = allocateCallback,
+                FileObject = fileObject,
+                FileOpenCallback = fileOpenCallback,
+                FileCloseCallback = fileCloseCallback,
+                FileReadOffsetCallback = fileReadOffsetCallback,
+                FileSizeCallback = fileSizeCallback,
             };
         }
 
@@ -1173,6 +1219,41 @@ public static class AvPlayerExports
         }
     }
 
+    internal static bool MaterializeReplacementSourceForTest(
+        CpuContext ctx,
+        ulong handle,
+        string guestPath,
+        out string path)
+    {
+        path = string.Empty;
+        PlayerState? player;
+        lock (StateGate)
+        {
+            Players.TryGetValue(handle, out player);
+        }
+
+        if (player is null ||
+            !TryMaterializeReplacementSource(ctx, player, guestPath, out path))
+        {
+            return false;
+        }
+
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(handle, out var currentPlayer) ||
+                !ReferenceEquals(currentPlayer, player))
+            {
+                TryDeleteMaterializedSource(path);
+                path = string.Empty;
+                return false;
+            }
+
+            player.SourcePath = path;
+            player.OwnedSourcePath = path;
+            return true;
+        }
+    }
+
     private static int AddSource(CpuContext ctx, string guestPath)
     {
         PlayerState player;
@@ -1184,23 +1265,68 @@ public static class AvPlayerExports
                 return SetReturn(ctx, InvalidParameters);
             }
             player = foundPlayer;
+        }
 
-            var hostPath = ResolveGuestPath(guestPath);
-            if (hostPath is null ||
-                !ProbeVideo(
-                    hostPath,
-                    out var width,
-                    out var height,
-                    out var fps,
-                    out var duration,
-                    out var hasAudio))
+        var ownsHostPath = false;
+        string? hostPath;
+        if (player.FileOpenCallback != 0)
+        {
+            if (TryMaterializeReplacementSource(
+                    ctx,
+                    player,
+                    guestPath,
+                    out var materializedPath))
             {
-                Console.Error.WriteLine($"[AVPLAYER][ERROR] Could not open guest video '{guestPath}' (resolved '{hostPath ?? "<none>"}').");
-                return SetReturn(ctx, OperationFailed);
+                hostPath = materializedPath;
+                ownsHostPath = true;
+            }
+            else
+            {
+                // A replacement interface is optional and may reject paths it
+                // does not own. Preserve the ordinary sandboxed file path when
+                // the same source is directly available and decodable.
+                hostPath = ResolveGuestPath(guestPath);
+            }
+        }
+        else
+        {
+            hostPath = ResolveGuestPath(guestPath);
+        }
+
+        if (hostPath is null ||
+            !ProbeVideo(
+                hostPath,
+                out var width,
+                out var height,
+                out var fps,
+                out var duration,
+                out var hasAudio))
+        {
+            if (ownsHostPath && hostPath is not null)
+            {
+                TryDeleteMaterializedSource(hostPath);
+            }
+            Console.Error.WriteLine($"[AVPLAYER][ERROR] Could not open guest video '{guestPath}' (resolved '{hostPath ?? "<none>"}').");
+            return SetReturn(ctx, OperationFailed);
+        }
+
+        string? previousOwnedSource;
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var currentPlayer) ||
+                !ReferenceEquals(currentPlayer, player))
+            {
+                if (ownsHostPath)
+                {
+                    TryDeleteMaterializedSource(hostPath);
+                }
+                return SetReturn(ctx, InvalidParameters);
             }
 
             player.ResetPlayback();
+            previousOwnedSource = player.OwnedSourcePath;
             player.SourcePath = hostPath;
+            player.OwnedSourcePath = ownsHostPath ? hostPath : null;
             player.Width = width;
             player.Height = height;
             player.FramesPerSecond = fps;
@@ -1212,12 +1338,216 @@ public static class AvPlayerExports
                 $"source guest='{guestPath}' host='{hostPath}' {width}x{height} " +
                 $"fps={fps:F3} duration_ms={duration} audio={hasAudio} auto_start={player.AutoStart}");
         }
+        if (previousOwnedSource is not null && previousOwnedSource != hostPath)
+        {
+            TryDeleteMaterializedSource(previousOwnedSource);
+        }
         NotifyEvent(ctx, player, 2); // StateReady
         if (autoStart)
         {
             NotifyEvent(ctx, player, 3); // StatePlay
         }
         return SetReturn(ctx, 0);
+    }
+
+    private static bool TryMaterializeReplacementSource(
+        CpuContext ctx,
+        PlayerState player,
+        string guestPath,
+        out string path)
+    {
+        lock (player.FileReplacementGate)
+        {
+            return TryMaterializeReplacementSourceCore(
+                ctx,
+                player,
+                guestPath,
+                out path);
+        }
+    }
+
+    private static bool TryMaterializeReplacementSourceCore(
+        CpuContext ctx,
+        PlayerState player,
+        string guestPath,
+        out string path)
+    {
+        path = string.Empty;
+        if (player.FileOpenCallback == 0 ||
+            player.FileCloseCallback == 0 ||
+            player.FileReadOffsetCallback == 0 ||
+            player.FileSizeCallback == 0 ||
+            GuestThreadExecution.Scheduler is not { } scheduler)
+        {
+            Console.Error.WriteLine(
+                "[AVPLAYER][WARN] Replacement file interface is incomplete or the guest scheduler is unavailable.");
+            return false;
+        }
+
+        if (player.ReplacementFileReadBuffer == 0)
+        {
+            if (!KernelMemoryCompatExports.TryAllocateHleData(
+                    ctx,
+                    ReplacementFileReadBufferSize,
+                    0x1000,
+                    out var readBuffer))
+            {
+                return false;
+            }
+
+            player.ReplacementFileReadBuffer = readBuffer;
+        }
+
+        var encodedPath = Encoding.UTF8.GetBytes(guestPath + '\0');
+        if (encodedPath.Length > ReplacementFileReadBufferSize ||
+            !ctx.Memory.TryWrite(player.ReplacementFileReadBuffer, encodedPath))
+        {
+            return false;
+        }
+
+        if (!scheduler.TryCallGuestFunction(
+                ctx,
+                player.FileOpenCallback,
+                player.FileObject,
+                player.ReplacementFileReadBuffer,
+                0,
+                0,
+                0,
+                "avplayer_file_open",
+                out var openResult,
+                out var openError) ||
+            unchecked((int)openResult) < 0)
+        {
+            Console.Error.WriteLine(
+                $"[AVPLAYER][WARN] Replacement file open failed callback=0x{player.FileOpenCallback:X16}: " +
+                $"{openError ?? $"result={unchecked((int)openResult)}"}");
+            return false;
+        }
+
+        Trace(
+            $"replacement_file open object=0x{player.FileObject:X16} " +
+            $"callback=0x{player.FileOpenCallback:X16} result={unchecked((int)openResult)}");
+
+        var materializedPath = Path.Combine(
+            Path.GetTempPath(),
+            "SharpEmu",
+            "AvPlayer",
+            Path.GetRandomFileName());
+        var hostBuffer = ArrayPool<byte>.Shared.Rent(ReplacementFileReadBufferSize);
+        try
+        {
+            if (!scheduler.TryCallGuestFunction(
+                    ctx,
+                    player.FileSizeCallback,
+                    player.FileObject,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "avplayer_file_size",
+                    out var size,
+                    out var sizeError) ||
+                size == 0 || size > long.MaxValue)
+            {
+                Console.Error.WriteLine(
+                    $"[AVPLAYER][WARN] Replacement file size failed " +
+                    $"object=0x{player.FileObject:X16} callback=0x{player.FileSizeCallback:X16}: " +
+                    $"{sizeError ?? $"size={size}"}");
+                return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(materializedPath)!);
+            using var output = new FileStream(
+                materializedPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read,
+                ReplacementFileReadBufferSize,
+                FileOptions.SequentialScan);
+            for (ulong position = 0; position < size;)
+            {
+                var requested = checked((uint)Math.Min(
+                    (ulong)ReplacementFileReadBufferSize,
+                    size - position));
+                if (!scheduler.TryCallGuestFunction(
+                        ctx,
+                        player.FileReadOffsetCallback,
+                        player.FileObject,
+                        player.ReplacementFileReadBuffer,
+                        position,
+                        requested,
+                        0,
+                        0,
+                        "avplayer_file_read_offset",
+                        out var rawRead,
+                        out var readError))
+                {
+                    Console.Error.WriteLine(
+                        $"[AVPLAYER][WARN] Replacement file read failed callback=0x{player.FileReadOffsetCallback:X16}: " +
+                        $"{readError ?? "guest callback failed"}");
+                    return false;
+                }
+
+                var read = unchecked((int)rawRead);
+                if (read <= 0 || (uint)read > requested ||
+                    !ctx.Memory.TryRead(
+                        player.ReplacementFileReadBuffer,
+                        hostBuffer.AsSpan(0, read)))
+                {
+                    Console.Error.WriteLine(
+                        $"[AVPLAYER][WARN] Replacement file read returned invalid length {read} at offset {position}.");
+                    return false;
+                }
+
+                output.Write(hostBuffer, 0, read);
+                position += checked((uint)read);
+            }
+
+            output.Flush();
+            path = materializedPath;
+            materializedPath = string.Empty;
+            Trace($"replacement_source materialized bytes={size}");
+            return true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(hostBuffer);
+            if (!scheduler.TryCallGuestFunction(
+                    ctx,
+                    player.FileCloseCallback,
+                    player.FileObject,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "avplayer_file_close",
+                    out var closeResult,
+                    out var closeError) ||
+                unchecked((int)closeResult) < 0)
+            {
+                Console.Error.WriteLine(
+                    $"[AVPLAYER][WARN] Replacement file close failed callback=0x{player.FileCloseCallback:X16}: " +
+                    $"{closeError ?? $"result={unchecked((int)closeResult)}"}");
+            }
+            if (materializedPath.Length != 0)
+            {
+                TryDeleteMaterializedSource(materializedPath);
+            }
+        }
+    }
+
+    private static void TryDeleteMaterializedSource(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static int GetVideoData(CpuContext ctx, bool extended)
