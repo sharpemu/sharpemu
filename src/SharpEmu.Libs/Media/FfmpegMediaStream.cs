@@ -62,6 +62,60 @@ internal sealed unsafe class FfmpegMediaStream : Stream
     internal static bool TryOpenAudio(string path, out FfmpegMediaStream? stream) =>
         TryOpen(path, AVMediaType.AVMEDIA_TYPE_AUDIO, 0, 0, out stream);
 
+    internal bool TrySeekMilliseconds(ulong milliseconds)
+    {
+        lock (_decodeGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0 ||
+                _formatContext is null ||
+                _codecContext is null ||
+                _streamIndex < 0)
+            {
+                return false;
+            }
+
+            var stream = _formatContext->streams[_streamIndex];
+            if (stream is null || stream->time_base.num <= 0 || stream->time_base.den <= 0)
+            {
+                return false;
+            }
+
+            var targetMilliseconds = checked((long)Math.Min(milliseconds, (ulong)long.MaxValue));
+            var targetTimestamp = ffmpeg.av_rescale_q(
+                targetMilliseconds,
+                new AVRational { num = 1, den = 1000 },
+                stream->time_base);
+            if (ffmpeg.av_seek_frame(
+                    _formatContext,
+                    _streamIndex,
+                    targetTimestamp,
+                    ffmpeg.AVSEEK_FLAG_BACKWARD) < 0)
+            {
+                return false;
+            }
+
+            ffmpeg.avcodec_flush_buffers(_codecContext);
+            if (_packet is not null)
+            {
+                ffmpeg.av_packet_unref(_packet);
+            }
+            if (_frame is not null)
+            {
+                ffmpeg.av_frame_unref(_frame);
+            }
+            if (_swrContext is not null)
+            {
+                ffmpeg.swr_close(_swrContext);
+            }
+
+            _pending = [];
+            _pendingOffset = 0;
+            _draining = false;
+            _finished = false;
+            return true;
+        }
+    }
+
     private static bool TryOpen(
         string path,
         AVMediaType mediaType,
