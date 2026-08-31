@@ -891,17 +891,30 @@ public static class AvPlayerExports
 
             Span<byte> info = stackalloc byte[StreamInfoExSize];
             info.Clear();
-            WriteGen5StreamInfoEx(
-                info,
-                GetStreamType(ctx.TargetGeneration, streamIndex),
-                streamIndex == 0 ? checked((uint)player.Width) : 0,
-                streamIndex == 0 ? checked((uint)player.Height) : 0,
-                streamIndex == 0 ? player.FramesPerSecond : 0,
-                player.DurationMilliseconds,
-                streamIndex == 0 ? player.AspectRatio : 0,
-                streamIndex == 0 && player.VideoFullRange,
-                streamIndex == 0 ? player.ColorPrimaries : 0,
-                streamIndex == 0 ? player.TransferCharacteristics : 0);
+            if (streamIndex == 0)
+            {
+                WriteGen5StreamInfoEx(
+                    info,
+                    GetStreamType(ctx.TargetGeneration, streamIndex),
+                    checked((uint)player.Width),
+                    checked((uint)player.Height),
+                    player.FramesPerSecond,
+                    player.DurationMilliseconds,
+                    player.AspectRatio,
+                    player.VideoFullRange,
+                    player.ColorPrimaries,
+                    player.TransferCharacteristics);
+            }
+            else
+            {
+                WriteGen5AudioStreamInfoEx(
+                    info,
+                    GetStreamType(ctx.TargetGeneration, streamIndex),
+                    channelCount: 2,
+                    sampleRate: AudioSampleRate,
+                    durationMilliseconds: player.DurationMilliseconds);
+            }
+
             return SetReturn(
                 ctx,
                 ctx.Memory.TryWrite(infoAddress, info) ? 0 : InvalidParameters);
@@ -2655,6 +2668,27 @@ public static class AvPlayerExports
         BinaryPrimitives.WriteDoubleLittleEndian(info[0x40..], framesPerSecond);
         BinaryPrimitives.WriteUInt32LittleEndian(info[0x48..], colorPrimaries);
         BinaryPrimitives.WriteUInt32LittleEndian(info[0x4C..], transferCharacteristics);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x60..], durationMilliseconds);
+    }
+
+    internal static void WriteGen5AudioStreamInfoEx(
+        Span<byte> info,
+        uint streamType,
+        ushort channelCount,
+        uint sampleRate,
+        ulong durationMilliseconds)
+    {
+        if (info.Length < StreamInfoExSize)
+        {
+            throw new ArgumentException(
+                $"Stream-info buffer must contain at least {StreamInfoExSize} bytes.",
+                nameof(info));
+        }
+
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0..], StreamInfoExSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[8..], streamType);
+        BinaryPrimitives.WriteUInt16LittleEndian(info[16..], channelCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[20..], sampleRate);
         BinaryPrimitives.WriteUInt64LittleEndian(info[0x60..], durationMilliseconds);
     }
 

@@ -146,6 +146,26 @@ public sealed class AvPlayerAbiTests
     }
 
     [Fact]
+    public void Gen5StreamInfoExCarriesAudioFormat()
+    {
+        var info = new byte[104];
+
+        AvPlayerExports.WriteGen5AudioStreamInfoEx(
+            info,
+            streamType: 2,
+            channelCount: 2,
+            sampleRate: 48_000,
+            durationMilliseconds: 38_767);
+
+        Assert.Equal(104UL, BinaryPrimitives.ReadUInt64LittleEndian(info));
+        Assert.Equal(2u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(8)));
+        Assert.Equal(2, BinaryPrimitives.ReadUInt16LittleEndian(info.AsSpan(16)));
+        Assert.Equal(48_000u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(20)));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(24)));
+        Assert.Equal(38_767UL, BinaryPrimitives.ReadUInt64LittleEndian(info.AsSpan(0x60)));
+    }
+
+    [Fact]
     public void Gen5FrameInfoExCarriesPitchCropAndFrameRate()
     {
         var info = new byte[104];
