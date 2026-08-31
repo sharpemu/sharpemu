@@ -359,7 +359,13 @@ public sealed record Gen5ScalarMemoryControl(
 public sealed record Gen5DataShareControl(
     uint Offset0,
     uint Offset1,
-    bool Gds) : Gen5InstructionControl;
+    bool Gds) : Gen5InstructionControl
+{
+    // Single-address DS instructions encode one 16-bit byte offset across
+    // OFFSET0 and OFFSET1. The paired read2/write2 forms instead interpret
+    // them as two independent scaled 8-bit offsets.
+    public uint SingleOffsetBytes => Offset0 | (Offset1 << 8);
+}
 
 public sealed record Gen5ImageBinding(
     uint Pc,

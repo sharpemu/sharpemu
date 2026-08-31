@@ -138,6 +138,19 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(3) }, instruction.Destinations);
     }
 
+    [Fact]
+    public void DsWriteB32_CombinesBothOffsetBytes()
+    {
+        // DS_WRITE_B32 v0, v1 offset:0x0808.
+        var instruction = DecodeSingle(0xD8340808, 0x00000100);
+
+        Assert.Equal("DsWriteB32", instruction.Opcode);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.Equal(0x08u, control.Offset0);
+        Assert.Equal(0x08u, control.Offset1);
+        Assert.Equal(0x0808u, control.SingleOffsetBytes);
+    }
+
     [Theory]
     [InlineData(0xD8FA3412u, "DsAppend")]
     [InlineData(0xD8F63412u, "DsConsume")]
@@ -151,6 +164,7 @@ public sealed class Gen5ShaderAtomicDecodeTests
         var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
         Assert.Equal(0x12u, control.Offset0);
         Assert.Equal(0x34u, control.Offset1);
+        Assert.Equal(0x3412u, control.SingleOffsetBytes);
         Assert.False(control.Gds);
     }
 

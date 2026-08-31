@@ -1968,7 +1968,7 @@ public static partial class Gen5SpirvTranslator
 
                     var address = GetRawSource(instruction, 0);
                     StoreLds(
-                        LdsPointer(address, control.Offset0),
+                        LdsPointer(address, control.SingleOffsetBytes),
                         GetRawSource(instruction, 1));
                     return true;
                 }
@@ -1981,7 +1981,7 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     var address = GetRawSource(instruction, 0);
-                    var offset = control.Offset0;
+                    var offset = control.SingleOffsetBytes;
                     StoreLds(LdsPointer(address, offset), GetRawSource(instruction, 1));
                     StoreLds(
                         LdsPointer(address, offset + sizeof(uint)),
@@ -2001,7 +2001,7 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     var address = GetRawSource(instruction, 0);
-                    var offset = control.Offset0;
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreLds(
@@ -2046,7 +2046,7 @@ public static partial class Gen5SpirvTranslator
                     var address = GetRawSource(instruction, 0);
                     var value = Load(
                         _uintType,
-                        LdsPointer(address, control.Offset0));
+                        LdsPointer(address, control.SingleOffsetBytes));
                     StoreV(instruction.Destinations[0].Value, value);
                     return true;
                 }
@@ -2064,7 +2064,7 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     var address = GetRawSource(instruction, 0);
-                    var offset = control.Offset0;
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         var value = Load(
@@ -2127,7 +2127,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var offset = control.Offset0 | (control.Offset1 << 8);
+            var offset = control.SingleOffsetBytes;
             var m0 = GetRawSource(instruction, 0);
             var baseAddress = ShiftRightLogical(m0, UInt(16));
             var sizeBytes = BitwiseAnd(m0, UInt(0xFFFF));
@@ -2313,7 +2313,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var address = GetRawSource(instruction, 0);
-            var pointer = LdsPointer(address, control.Offset0);
+            var pointer = LdsPointer(address, control.SingleOffsetBytes);
             EmitExecConditional(() =>
             {
                 var original = EmitAtomic(

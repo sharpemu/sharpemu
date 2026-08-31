@@ -52,6 +52,17 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Fact]
+    public void DataShareSingleAddressOffset_UsesBothEncodedBytes()
+    {
+        // DS_WRITE_B32 v0, v1 offset:0x0808.
+        var spirv = CompileComputeSpirv(
+            [0xD8340808, 0x00000100],
+            new Dictionary<uint, uint>());
+
+        Assert.True(ContainsConstant(spirv, 0x0808u));
+    }
+
+    [Fact]
     public void DataShareWaveCounters_EmitOneWaveAtomicAndBroadcast()
     {
         var opcodes = CompileCompute(
@@ -117,6 +128,11 @@ public sealed class Gen5SpirvAtomicTranslationTests
 
     private static HashSet<ushort> CompileCompute(
         uint[] programWords,
+        Dictionary<uint, uint> userDataSgprs) =>
+        CollectOpcodes(CompileComputeSpirv(programWords, userDataSgprs));
+
+    private static byte[] CompileComputeSpirv(
+        uint[] programWords,
         Dictionary<uint, uint> userDataSgprs)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
@@ -156,7 +172,7 @@ public sealed class Gen5SpirvAtomicTranslationTests
                 out var shader,
                 out error),
             error);
-        return CollectOpcodes(shader.Spirv);
+        return shader.Spirv;
     }
 
     private static HashSet<ushort> CompileVertex(uint[] programWords)
@@ -205,5 +221,26 @@ public sealed class Gen5SpirvAtomicTranslationTests
         }
 
         return opcodes;
+    }
+
+    private static bool ContainsConstant(byte[] spirv, uint expected)
+    {
+        for (var offset = 5 * sizeof(uint); offset + sizeof(uint) <= spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset, sizeof(uint)));
+            var wordCount = Math.Max((int)(word >> 16), 1);
+            if ((ushort)word == (ushort)SpirvOp.Constant &&
+                wordCount >= 4 &&
+                BinaryPrimitives.ReadUInt32LittleEndian(
+                    spirv.AsSpan(offset + (3 * sizeof(uint)), sizeof(uint))) == expected)
+            {
+                return true;
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return false;
     }
 }

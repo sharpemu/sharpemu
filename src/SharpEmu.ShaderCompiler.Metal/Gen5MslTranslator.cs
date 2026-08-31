@@ -1541,7 +1541,7 @@ public static partial class Gen5MslTranslator
                         return false;
                     }
 
-                    var offset = control.Offset0 | (control.Offset1 << 8);
+                    var offset = control.SingleOffsetBytes;
                     var m0 = Temp("uint", RawSource(instruction, 0));
                     var baseAddress = Temp("uint", $"{m0} >> 16u");
                     var sizeBytes = Temp("uint", $"{m0} & 0xFFFFu");
@@ -1601,7 +1601,7 @@ public static partial class Gen5MslTranslator
                     Line("if (exec)");
                     Line("{");
                     _indent++;
-                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.Offset0)}], {value}, memory_order_relaxed);");
+                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}], {value}, memory_order_relaxed);");
                     _indent--;
                     Line("}");
                     return true;
@@ -1609,14 +1609,15 @@ public static partial class Gen5MslTranslator
                 case "DsWriteB32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
-                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
+                    StoreLds(LdsIndex(address, control.SingleOffsetBytes), RawSource(instruction, 1));
                     return true;
                 }
                 case "DsWriteB64":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
-                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
-                    StoreLds(LdsIndex(address, control.Offset0 + sizeof(uint)), RawSource(instruction, 2));
+                    var offset = control.SingleOffsetBytes;
+                    StoreLds(LdsIndex(address, offset), RawSource(instruction, 1));
+                    StoreLds(LdsIndex(address, offset + sizeof(uint)), RawSource(instruction, 2));
                     return true;
                 }
                 case "DsWriteB96":
@@ -1624,10 +1625,11 @@ public static partial class Gen5MslTranslator
                 {
                     var dwordCount = instruction.Opcode == "DsWriteB128" ? 4 : 3;
                     var address = Temp("uint", RawSource(instruction, 0));
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreLds(
-                            LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint))),
+                            LdsIndex(address, offset + (uint)(dword * sizeof(uint))),
                             RawSource(instruction, 1 + dword));
                     }
 
@@ -1651,7 +1653,7 @@ public static partial class Gen5MslTranslator
                     var address = Temp("uint", RawSource(instruction, 0));
                     StoreVector(
                         instruction.Destinations[0].Value,
-                        $"sharpemu_lds[{LdsIndex(address, control.Offset0)}]");
+                        $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");
                     return true;
                 }
                 case "DsReadB96":
@@ -1665,11 +1667,12 @@ public static partial class Gen5MslTranslator
                     }
 
                     var address = Temp("uint", RawSource(instruction, 0));
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreVector(
                             instruction.Destinations[dword].Value,
-                            $"sharpemu_lds[{LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint)))}]");
+                            $"sharpemu_lds[{LdsIndex(address, offset + (uint)(dword * sizeof(uint)))}]");
                     }
 
                     return true;
