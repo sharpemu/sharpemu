@@ -121,6 +121,31 @@ public sealed class AvPlayerAbiTests
     }
 
     [Fact]
+    public void Gen5StreamInfoExCarriesVideoColorMetadata()
+    {
+        var info = new byte[104];
+
+        AvPlayerExports.WriteGen5StreamInfoEx(
+            info,
+            streamType: 1,
+            width: 3840,
+            height: 2160,
+            framesPerSecond: 59.94,
+            durationMilliseconds: 8_508,
+            aspectRatio: 16f / 9f,
+            videoFullRange: true,
+            colorPrimaries: 9,
+            transferCharacteristics: 16);
+
+        Assert.Equal(16f / 9f, BinaryPrimitives.ReadSingleLittleEndian(info.AsSpan(24)));
+        Assert.Equal(1, info[58]);
+        Assert.Equal(59.94, BinaryPrimitives.ReadDoubleLittleEndian(info.AsSpan(0x40)));
+        Assert.Equal(9u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x48)));
+        Assert.Equal(16u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x4C)));
+        Assert.Equal(8_508UL, BinaryPrimitives.ReadUInt64LittleEndian(info.AsSpan(0x60)));
+    }
+
+    [Fact]
     public void Gen5FrameInfoExCarriesPitchCropAndFrameRate()
     {
         var info = new byte[104];
@@ -131,21 +156,29 @@ public sealed class AvPlayerAbiTests
             extended: true,
             bufferAddress: 0x1234_5000,
             timestamp: 2_903,
-            width: 512,
+            width: 378,
             visibleWidth: 378,
             height: 150,
             pitch: 512,
-            framesPerSecond: 29.97);
+            framesPerSecond: 29.97,
+            aspectRatio: 2.52f,
+            videoFullRange: true,
+            colorPrimaries: 1,
+            transferCharacteristics: 16);
 
         Assert.Equal(0x1234_5000UL, BinaryPrimitives.ReadUInt64LittleEndian(info));
         Assert.Equal(2_903UL, BinaryPrimitives.ReadUInt64LittleEndian(info.AsSpan(16)));
-        Assert.Equal(512u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(24)));
+        Assert.Equal(378u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(24)));
         Assert.Equal(150u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(28)));
+        Assert.Equal(2.52f, BinaryPrimitives.ReadSingleLittleEndian(info.AsSpan(32)));
         Assert.Equal(134u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(48)));
         Assert.Equal(512u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(60)));
         Assert.Equal(8, info[64]);
         Assert.Equal(8, info[65]);
+        Assert.Equal(1, info[66]);
         Assert.Equal(29.97, BinaryPrimitives.ReadDoubleLittleEndian(info.AsSpan(0x48)));
+        Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x50)));
+        Assert.Equal(16u, BinaryPrimitives.ReadUInt32LittleEndian(info.AsSpan(0x54)));
     }
 
     [Fact]

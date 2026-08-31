@@ -401,6 +401,10 @@ public static class AvPlayerExports
         public int Width { get; set; }
         public int Height { get; set; }
         public double FramesPerSecond { get; set; } = 30.0;
+        public float AspectRatio { get; set; }
+        public bool VideoFullRange { get; set; }
+        public uint ColorPrimaries { get; set; }
+        public uint TransferCharacteristics { get; set; }
         public ulong DurationMilliseconds { get; set; }
         public bool HasAudio { get; set; }
         public uint AvSyncMode { get; set; } = AvSyncModeDefault;
@@ -893,7 +897,11 @@ public static class AvPlayerExports
                 streamIndex == 0 ? checked((uint)player.Width) : 0,
                 streamIndex == 0 ? checked((uint)player.Height) : 0,
                 streamIndex == 0 ? player.FramesPerSecond : 0,
-                player.DurationMilliseconds);
+                player.DurationMilliseconds,
+                streamIndex == 0 ? player.AspectRatio : 0,
+                streamIndex == 0 && player.VideoFullRange,
+                streamIndex == 0 ? player.ColorPrimaries : 0,
+                streamIndex == 0 ? player.TransferCharacteristics : 0);
             return SetReturn(
                 ctx,
                 ctx.Memory.TryWrite(infoAddress, info) ? 0 : InvalidParameters);
@@ -1123,6 +1131,7 @@ public static class AvPlayerExports
                 DurationMilliseconds = durationMilliseconds,
                 HasAudio = hasAudio,
                 FramesPerSecond = framesPerSecond,
+                AspectRatio = height > 0 ? (float)width / height : 0,
                 AllocateTextureCallback = allocateTextureCallback,
                 AllocateCallback = allocateCallback,
                 FileObject = fileObject,
@@ -1198,7 +1207,7 @@ public static class AvPlayerExports
             {
                 BinaryPrimitives.WriteUInt32LittleEndian(info[8..], checked((uint)player.Width));
                 BinaryPrimitives.WriteUInt32LittleEndian(info[12..], checked((uint)player.Height));
-                BinaryPrimitives.WriteSingleLittleEndian(info[16..], (float)player.Width / player.Height);
+                BinaryPrimitives.WriteSingleLittleEndian(info[16..], player.AspectRatio);
             }
             else
             {
@@ -1300,7 +1309,11 @@ public static class AvPlayerExports
                 out var height,
                 out var fps,
                 out var duration,
-                out var hasAudio))
+                out var hasAudio,
+                out var aspectRatio,
+                out var videoFullRange,
+                out var colorPrimaries,
+                out var transferCharacteristics))
         {
             if (ownsHostPath && hostPath is not null)
             {
@@ -1330,13 +1343,19 @@ public static class AvPlayerExports
             player.Width = width;
             player.Height = height;
             player.FramesPerSecond = fps;
+            player.AspectRatio = aspectRatio;
+            player.VideoFullRange = videoFullRange;
+            player.ColorPrimaries = colorPrimaries;
+            player.TransferCharacteristics = transferCharacteristics;
             player.DurationMilliseconds = duration;
             player.HasAudio = hasAudio;
             player.Started = player.AutoStart;
             autoStart = player.AutoStart;
             Trace(
                 $"source guest='{guestPath}' host='{hostPath}' {width}x{height} " +
-                $"fps={fps:F3} duration_ms={duration} audio={hasAudio} auto_start={player.AutoStart}");
+                $"fps={fps:F3} aspect={aspectRatio:F3} full_range={videoFullRange} " +
+                $"primaries={colorPrimaries} transfer={transferCharacteristics} " +
+                $"duration_ms={duration} audio={hasAudio} auto_start={player.AutoStart}");
         }
         if (previousOwnedSource is not null && previousOwnedSource != hostPath)
         {
@@ -1935,11 +1954,15 @@ public static class AvPlayerExports
             extended,
             bufferAddress,
             timestamp,
-            checked((uint)pitch),
+            checked((uint)(extended && player.IsGen5 ? player.Width : AlignUp(player.Width, 16))),
             checked((uint)player.Width),
             checked((uint)(extended ? player.Height : bufferHeight)),
             checked((uint)pitch),
-            player.FramesPerSecond);
+            player.FramesPerSecond,
+            player.AspectRatio,
+            player.VideoFullRange,
+            player.ColorPrimaries,
+            player.TransferCharacteristics);
         if (!ctx.Memory.TryWrite(infoAddress, info))
         {
             return false;
@@ -1982,11 +2005,15 @@ public static class AvPlayerExports
             extended,
             player.LastGuestBuffer,
             player.LastVideoTimestamp,
-            checked((uint)pitch),
+            checked((uint)(extended && player.IsGen5 ? player.Width : AlignUp(player.Width, 16))),
             checked((uint)player.Width),
             checked((uint)(extended ? player.Height : bufferHeight)),
             checked((uint)pitch),
-            player.FramesPerSecond);
+            player.FramesPerSecond,
+            player.AspectRatio,
+            player.VideoFullRange,
+            player.ColorPrimaries,
+            player.TransferCharacteristics);
         return ctx.Memory.TryWrite(infoAddress, info);
     }
 
@@ -2194,15 +2221,32 @@ public static class AvPlayerExports
         out int height,
         out double framesPerSecond,
         out ulong durationMilliseconds,
-        out bool hasAudio)
+        out bool hasAudio,
+        out float aspectRatio,
+        out bool videoFullRange,
+        out uint colorPrimaries,
+        out uint transferCharacteristics)
     {
         width = 0;
         height = 0;
         framesPerSecond = 30.0;
         durationMilliseconds = 0;
         hasAudio = false;
+        aspectRatio = 0;
+        videoFullRange = false;
+        colorPrimaries = 0;
+        transferCharacteristics = 0;
 
-        if (!FfmpegMediaStream.TryProbe(path, out width, out height, out var rate, out var duration))
+        if (!FfmpegMediaStream.TryProbe(
+                path,
+                out width,
+                out height,
+                out var rate,
+                out var duration,
+                out aspectRatio,
+                out videoFullRange,
+                out colorPrimaries,
+                out transferCharacteristics))
         {
             return false;
         }
@@ -2589,7 +2633,11 @@ public static class AvPlayerExports
         uint width,
         uint height,
         double framesPerSecond,
-        ulong durationMilliseconds)
+        ulong durationMilliseconds,
+        float aspectRatio = 0,
+        bool videoFullRange = false,
+        uint colorPrimaries = 0,
+        uint transferCharacteristics = 0)
     {
         if (info.Length < StreamInfoExSize)
         {
@@ -2602,7 +2650,11 @@ public static class AvPlayerExports
         BinaryPrimitives.WriteUInt32LittleEndian(info[8..], streamType);
         BinaryPrimitives.WriteUInt32LittleEndian(info[16..], width);
         BinaryPrimitives.WriteUInt32LittleEndian(info[20..], height);
+        BinaryPrimitives.WriteSingleLittleEndian(info[24..], aspectRatio);
+        info[58] = videoFullRange ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteDoubleLittleEndian(info[0x40..], framesPerSecond);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[0x48..], colorPrimaries);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[0x4C..], transferCharacteristics);
         BinaryPrimitives.WriteUInt64LittleEndian(info[0x60..], durationMilliseconds);
     }
 
@@ -2616,7 +2668,11 @@ public static class AvPlayerExports
         uint visibleWidth,
         uint height,
         uint pitch,
-        double framesPerSecond)
+        double framesPerSecond,
+        float aspectRatio = 0,
+        bool videoFullRange = false,
+        uint colorPrimaries = 0,
+        uint transferCharacteristics = 0)
     {
         var requiredSize = extended ? FrameInfoExSize : FrameInfoSize;
         if (info.Length < requiredSize)
@@ -2630,7 +2686,7 @@ public static class AvPlayerExports
         BinaryPrimitives.WriteUInt64LittleEndian(info[16..], timestamp);
         BinaryPrimitives.WriteUInt32LittleEndian(info[24..], width);
         BinaryPrimitives.WriteUInt32LittleEndian(info[28..], height);
-        BinaryPrimitives.WriteSingleLittleEndian(info[32..], 1.0f);
+        BinaryPrimitives.WriteSingleLittleEndian(info[32..], aspectRatio);
         if (!extended)
         {
             return;
@@ -2638,13 +2694,16 @@ public static class AvPlayerExports
 
         BinaryPrimitives.WriteUInt32LittleEndian(
             info[48..],
-            width > visibleWidth ? width - visibleWidth : 0);
+            pitch > visibleWidth ? pitch - visibleWidth : 0);
         BinaryPrimitives.WriteUInt32LittleEndian(info[60..], pitch);
         info[64] = 8;
         info[65] = 8;
+        info[66] = videoFullRange ? (byte)1 : (byte)0;
         if (IsGen5Target(generation))
         {
             BinaryPrimitives.WriteDoubleLittleEndian(info[0x48..], framesPerSecond);
+            BinaryPrimitives.WriteUInt32LittleEndian(info[0x50..], colorPrimaries);
+            BinaryPrimitives.WriteUInt32LittleEndian(info[0x54..], transferCharacteristics);
         }
     }
 

@@ -198,12 +198,20 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         out int width,
         out int height,
         out double frameRate,
-        out double durationSeconds)
+        out double durationSeconds,
+        out float aspectRatio,
+        out bool videoFullRange,
+        out uint colorPrimaries,
+        out uint transferCharacteristics)
     {
         width = 0;
         height = 0;
         frameRate = 0;
         durationSeconds = 0;
+        aspectRatio = 0;
+        videoFullRange = false;
+        colorPrimaries = 0;
+        transferCharacteristics = 0;
         FfmpegRuntime.EnsureInitialized();
 
         AVFormatContext* formatContext = null;
@@ -229,8 +237,26 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             var stream = formatContext->streams[streamIndex];
             width = stream->codecpar->width;
             height = stream->codecpar->height;
+            if (height > 0)
+            {
+                var ratio = (double)width / height;
+                if (stream->sample_aspect_ratio.num > 0 &&
+                    stream->sample_aspect_ratio.den > 0)
+                {
+                    ratio *= (double)stream->sample_aspect_ratio.num /
+                        stream->sample_aspect_ratio.den;
+                }
+                aspectRatio = checked((float)ratio);
+            }
+            videoFullRange = stream->codecpar->color_range == AVColorRange.AVCOL_RANGE_JPEG;
+            colorPrimaries = unchecked((uint)stream->codecpar->color_primaries);
+            transferCharacteristics = unchecked((uint)stream->codecpar->color_trc);
 
             var rate = stream->avg_frame_rate;
+            if (rate.den <= 0 || rate.num <= 0)
+            {
+                rate = stream->r_frame_rate;
+            }
             if (rate.den > 0 && rate.num > 0)
             {
                 frameRate = (double)rate.num / rate.den;
