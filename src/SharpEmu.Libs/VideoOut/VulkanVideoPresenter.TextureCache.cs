@@ -90,20 +90,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return CreateTextureResource(texture);
             }
 
-            var key = new TextureContentIdentity(
-                texture.Address,
-                texture.Width,
-                texture.Height,
-                texture.Format,
-                texture.NumberType,
-                texture.DstSelect,
-                texture.TileMode,
-                texture.Pitch,
-                texture.ArrayedView,
-                Math.Max(texture.ArrayLayers, 1),
-                Type: texture.Type,
-                Depth: GetGuestTextureDepth(texture.Type, texture.Depth),
-                ResourceMipLevels: texture.ResourceMipLevels);
+            var key = CreateTextureContentIdentity(texture);
             if (_textureCache.TryGetValue(key, out var cached))
             {
                 if (!texture.CpuSnapshotStable)
@@ -392,6 +379,23 @@ internal static unsafe partial class VulkanVideoPresenter
                 SamplerState = sampler,
             };
 
+        private static TextureContentIdentity CreateTextureContentIdentity(
+            GuestDrawTexture texture) =>
+            new(
+                texture.Address,
+                texture.Width,
+                texture.Height,
+                texture.Format,
+                texture.NumberType,
+                texture.DstSelect,
+                texture.TileMode,
+                texture.Pitch,
+                texture.ArrayedView,
+                Math.Max(texture.ArrayLayers, 1),
+                Type: texture.Type,
+                Depth: GetGuestTextureDepth(texture.Type, texture.Depth),
+                ResourceMipLevels: texture.ResourceMipLevels);
+
         [MethodImpl(MethodImplOptions.NoInlining)]
         private TextureResource ResolveTextureResource(GuestDrawTexture texture)
         {
@@ -403,6 +407,10 @@ internal static unsafe partial class VulkanVideoPresenter
             if (texture.Address != 0 &&
                 TryResolveGuestDepthTexture(texture, out var depthTexture))
             {
+                MarkTextureContentCached(
+                    CreateTextureContentIdentity(texture),
+                    texture.Sampler,
+                    texture.WriteGeneration);
                 return depthTexture;
             }
 
