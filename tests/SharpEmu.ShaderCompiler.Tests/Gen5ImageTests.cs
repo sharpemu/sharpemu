@@ -63,6 +63,48 @@ public sealed class Gen5ImageTests
     }
 
     [Theory]
+    [InlineData(1u, SpirvOp.FOrdLessThan)]
+    [InlineData(2u, SpirvOp.FOrdEqual)]
+    [InlineData(3u, SpirvOp.FOrdLessThanEqual)]
+    [InlineData(4u, SpirvOp.FOrdGreaterThan)]
+    [InlineData(5u, SpirvOp.FOrdNotEqual)]
+    [InlineData(6u, SpirvOp.FOrdGreaterThanEqual)]
+    public void ImageSampleCompareUsesSamplerCompareFunction(
+        uint compareFunction,
+        SpirvOp expectedOperation)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageSampleCLz",
+                dimension: 1,
+                samplerWord0: compareFunction << 12));
+
+        Assert.Contains(instructions, item => item.Opcode == expectedOperation);
+    }
+
+    [Fact]
+    public void ImageSampleCompareLzAppliesLinearDepthFilteringPerTexel()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageSampleCLz",
+                dimension: 1,
+                samplerWord0: 0x00006012,
+                samplerWord2: 0x00500000));
+
+        Assert.Equal(
+            4,
+            instructions.Count(item => item.Opcode == SpirvOp.ImageFetch));
+        Assert.DoesNotContain(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
+        Assert.Equal(
+            4,
+            instructions.Count(
+                item => item.Opcode == SpirvOp.FOrdGreaterThanEqual));
+    }
+
+    [Theory]
     [InlineData(0xFACu, 0xFu, 4, 5, 6, 7)]
     [InlineData(0x9F5u, 0xFu, 7, 4, 5, 6)]
     [InlineData(0xF2Eu, 0xFu, 6, 5, 4, 7)]
@@ -128,11 +170,16 @@ public sealed class Gen5ImageTests
         uint dimension,
         uint dmask = 0xF,
         uint dstSelect = Gen5ShaderTranslator.IdentityImageDstSelect,
-        uint unifiedFormat = 71u)
+        uint unifiedFormat = 71u,
+        uint samplerWord0 = 0u,
+        uint samplerWord2 = 0u)
     {
-        var addressRegisters = dimension == 2
-            ? new uint[] { 0, 1, 2 }
-            : [0, 1];
+        var coordinateCount = dimension == 2 ? 3 : 2;
+        var addressCount = coordinateCount +
+            (opcode.Contains("SampleC", StringComparison.Ordinal) ? 1 : 0);
+        var addressRegisters = Enumerable.Range(0, addressCount)
+            .Select(static value => (uint)value)
+            .ToArray();
         var control = new Gen5ImageControl(
             Dmask: dmask,
             VectorAddress: 0,
@@ -179,7 +226,7 @@ public sealed class Gen5ImageTests
                     imageInstruction.Opcode,
                     control,
                     descriptor,
-                    new uint[4],
+                    [samplerWord0, 0u, samplerWord2, 0u],
                     null),
             ],
             []);

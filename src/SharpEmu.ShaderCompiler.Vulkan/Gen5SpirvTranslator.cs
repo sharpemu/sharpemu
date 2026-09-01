@@ -334,7 +334,9 @@ public static partial class Gen5SpirvTranslator
             ImageComponentKind ComponentKind,
             bool IsStorage,
             bool Arrayed,
-            SpirvImageDim Dimension);
+            SpirvImageDim Dimension,
+            uint DepthCompareFunction,
+            bool UsesLinearClampDepthComparison);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -1087,7 +1089,12 @@ public static partial class Gen5SpirvTranslator
                         componentKind,
                         isStorage,
                         isArrayed,
-                        dimension));
+                        dimension,
+                        binding.SamplerDescriptor.Count > 0
+                            ? (binding.SamplerDescriptor[0] >> 12) & 0x7u
+                            : 0u,
+                        UsesLinearClampDepthComparison(
+                            binding.SamplerDescriptor)));
                 _interfaces.Add(variable);
             }
         }
@@ -1098,6 +1105,26 @@ public static partial class Gen5SpirvTranslator
                 not SpirvImageFormat.Rgba32f and
                 not SpirvImageFormat.Rgba32i and
                 not SpirvImageFormat.Rgba32ui;
+
+        private static bool UsesLinearClampDepthComparison(
+            IReadOnlyList<uint> sampler)
+        {
+            if (sampler.Count < 3)
+            {
+                return false;
+            }
+
+            var word0 = sampler[0];
+            var word2 = sampler[2];
+            var clampX = word0 & 0x7u;
+            var clampY = (word0 >> 3) & 0x7u;
+            var magFilter = (word2 >> 20) & 0x3u;
+            var minFilter = (word2 >> 22) & 0x3u;
+            return clampX == 2 &&
+                clampY == 2 &&
+                magFilter is 1 or 3 &&
+                minFilter is 1 or 3;
+        }
 
         private static (SpirvImageFormat Format, ImageComponentKind Kind)
             DecodeImageFormat(IReadOnlyList<uint> descriptor)
@@ -3889,15 +3916,34 @@ public static partial class Gen5SpirvTranslator
 
                 }
 
-                sampled = _module.AddInstruction(
-                    explicitLod
-                        ? SpirvOp.ImageSampleExplicitLod
-                        : SpirvOp.ImageSampleImplicitLod,
-                    resource.VectorType,
-                    [.. operands]);
-                if (hasCompare)
+                if (hasCompare &&
+                    hasZeroLod &&
+                    resource.Dimension == SpirvImageDim.Dim2D &&
+                    !resource.Arrayed &&
+                    resource.ComponentKind == ImageComponentKind.Float &&
+                    resource.UsesLinearClampDepthComparison)
                 {
-                    sampled = EmitManualDepthCompare(resource, sampled, reference);
+                    sampled = EmitLinearClampDepthCompareLodZero(
+                        resource,
+                        imageObject,
+                        coordinates,
+                        reference);
+                }
+                else
+                {
+                    sampled = _module.AddInstruction(
+                        explicitLod
+                            ? SpirvOp.ImageSampleExplicitLod
+                            : SpirvOp.ImageSampleImplicitLod,
+                        resource.VectorType,
+                        [.. operands]);
+                    if (hasCompare)
+                    {
+                        sampled = EmitManualDepthCompare(
+                            resource,
+                            sampled,
+                            reference);
+                    }
                 }
             }
             else if (instruction.Opcode.StartsWith(
@@ -4082,11 +4128,41 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.ConvertSToF, _floatType, texel),
                 _ => texel,
             };
-            var passes = _module.AddInstruction(
-                SpirvOp.FOrdLessThanEqual,
-                _boolType,
-                reference,
-                texelAsFloat);
+            var passes = resource.DepthCompareFunction switch
+            {
+                0 => _module.ConstantBool(false),
+                1 => _module.AddInstruction(
+                    SpirvOp.FOrdLessThan,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                2 => _module.AddInstruction(
+                    SpirvOp.FOrdEqual,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                3 => _module.AddInstruction(
+                    SpirvOp.FOrdLessThanEqual,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                4 => _module.AddInstruction(
+                    SpirvOp.FOrdGreaterThan,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                5 => _module.AddInstruction(
+                    SpirvOp.FOrdNotEqual,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                6 => _module.AddInstruction(
+                    SpirvOp.FOrdGreaterThanEqual,
+                    _boolType,
+                    reference,
+                    texelAsFloat),
+                _ => _module.ConstantBool(true),
+            };
             return _module.AddInstruction(
                 SpirvOp.Select,
                 resource.ComponentType,
@@ -4129,6 +4205,219 @@ public static partial class Gen5SpirvTranslator
                     _ => Float(1),
                 });
         }
+
+        private uint EmitLinearClampDepthCompareLodZero(
+            SpirvImageResource resource,
+            uint sampledImage,
+            uint coordinates,
+            uint reference)
+        {
+            var int2 = _module.TypeVector(_intType, 2);
+            var float2 = _module.TypeVector(_floatType, 2);
+            var image = _module.AddInstruction(
+                SpirvOp.Image,
+                resource.ImageType,
+                sampledImage);
+            var size = _module.AddInstruction(
+                SpirvOp.ImageQuerySizeLod,
+                int2,
+                image,
+                _module.Constant(_intType, 0));
+            var sizeFloat = _module.AddInstruction(
+                SpirvOp.ConvertSToF,
+                float2,
+                size);
+            var half = _module.ConstantComposite(
+                float2,
+                Float(0.5f),
+                Float(0.5f));
+            var samplePosition = _module.AddInstruction(
+                SpirvOp.FSub,
+                float2,
+                _module.AddInstruction(
+                    SpirvOp.FMul,
+                    float2,
+                    coordinates,
+                    sizeFloat),
+                half);
+
+            var baseComponents = new uint[2];
+            var nextComponents = new uint[2];
+            var fractionComponents = new uint[2];
+            for (var component = 0u; component < 2; component++)
+            {
+                var position = _module.AddInstruction(
+                    SpirvOp.CompositeExtract,
+                    _floatType,
+                    samplePosition,
+                    component);
+                var extent = _module.AddInstruction(
+                    SpirvOp.CompositeExtract,
+                    _intType,
+                    size,
+                    component);
+                var last = _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _intType,
+                    extent,
+                    _module.Constant(_intType, 1));
+                var lastFloat = _module.AddInstruction(
+                    SpirvOp.ConvertSToF,
+                    _floatType,
+                    last);
+                var belowZero = _module.AddInstruction(
+                    SpirvOp.FOrdLessThan,
+                    _boolType,
+                    position,
+                    Float(0));
+                var atLeastZero = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _floatType,
+                    belowZero,
+                    Float(0),
+                    position);
+                var aboveLast = _module.AddInstruction(
+                    SpirvOp.FOrdGreaterThan,
+                    _boolType,
+                    atLeastZero,
+                    lastFloat);
+                var clamped = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _floatType,
+                    aboveLast,
+                    lastFloat,
+                    atLeastZero);
+                var baseCoordinate = _module.AddInstruction(
+                    SpirvOp.ConvertFToS,
+                    _intType,
+                    clamped);
+                var nextCandidate = _module.AddInstruction(
+                    SpirvOp.IAdd,
+                    _intType,
+                    baseCoordinate,
+                    _module.Constant(_intType, 1));
+                var nextPastLast = _module.AddInstruction(
+                    SpirvOp.SGreaterThan,
+                    _boolType,
+                    nextCandidate,
+                    last);
+                var nextCoordinate = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    nextPastLast,
+                    last,
+                    nextCandidate);
+                var baseFloat = _module.AddInstruction(
+                    SpirvOp.ConvertSToF,
+                    _floatType,
+                    baseCoordinate);
+
+                baseComponents[component] = baseCoordinate;
+                nextComponents[component] = nextCoordinate;
+                fractionComponents[component] = _module.AddInstruction(
+                    SpirvOp.FSub,
+                    _floatType,
+                    clamped,
+                    baseFloat);
+            }
+
+            var baseX = baseComponents[0];
+            var baseY = baseComponents[1];
+            var nextX = nextComponents[0];
+            var nextY = nextComponents[1];
+            var compare00 = FetchAndCompareDepth(
+                resource,
+                image,
+                int2,
+                baseX,
+                baseY,
+                reference);
+            var compare10 = FetchAndCompareDepth(
+                resource,
+                image,
+                int2,
+                nextX,
+                baseY,
+                reference);
+            var compare01 = FetchAndCompareDepth(
+                resource,
+                image,
+                int2,
+                baseX,
+                nextY,
+                reference);
+            var compare11 = FetchAndCompareDepth(
+                resource,
+                image,
+                int2,
+                nextX,
+                nextY,
+                reference);
+            var row0 = EmitFloatLerp(
+                compare00,
+                compare10,
+                fractionComponents[0]);
+            var row1 = EmitFloatLerp(
+                compare01,
+                compare11,
+                fractionComponents[0]);
+            var result = EmitFloatLerp(
+                row0,
+                row1,
+                fractionComponents[1]);
+            return _module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                resource.VectorType,
+                result,
+                result,
+                result,
+                Float(1));
+        }
+
+        private uint FetchAndCompareDepth(
+            SpirvImageResource resource,
+            uint image,
+            uint coordinateType,
+            uint x,
+            uint y,
+            uint reference)
+        {
+            var coordinates = _module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                coordinateType,
+                x,
+                y);
+            var texel = _module.AddInstruction(
+                SpirvOp.ImageFetch,
+                resource.VectorType,
+                image,
+                coordinates,
+                2u,
+                _module.Constant(_intType, 0));
+            return EmitDepthCompareScalar(
+                resource,
+                _module.AddInstruction(
+                    SpirvOp.CompositeExtract,
+                    resource.ComponentType,
+                    texel,
+                    0u),
+                reference);
+        }
+
+        private uint EmitFloatLerp(uint left, uint right, uint weight) =>
+            _module.AddInstruction(
+                SpirvOp.FAdd,
+                _floatType,
+                left,
+                _module.AddInstruction(
+                    SpirvOp.FMul,
+                    _floatType,
+                    _module.AddInstruction(
+                        SpirvOp.FSub,
+                        _floatType,
+                        right,
+                        left),
+                    weight));
 
         private static uint ImageSpatialComponentCount(
             SpirvImageResource resource) =>
