@@ -506,41 +506,164 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Symbol name unconfirmed (not in ps5_names.txt); resolved from the
-    // decrypted eboot's call site only. On Ghost of Yotei, the caller scans
-    // this same buffer right after sceAgcCreatePrimState for 32 (offset,value)
-    // pairs (a hardcoded size, not read from any header) and open-address-
-    // probes them as a register hash table -- an out-of-bounds probe index
-    // sourced from an unwritten pair was the AV. CreatePrimState only
-    // populates the first 3 pairs; zero the rest of the scanned window so
-    // every unpopulated slot is a harmless failed probe instead of
-    // guest-stack garbage.
+    #pragma warning disable SHEM006
     [SysAbiExport(
         Nid = "dbOlWdppb4o",
-        ExportName = "sceAgcAddPrimStateRegisters",
+        ExportName = "sceAgcCreateInterpolantMapping2",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int AddPrimStateRegisters(CpuContext ctx)
+    public static int CreateInterpolantMapping2(CpuContext ctx)
     {
-        var ucRegistersAddress = ctx[CpuRegister.Rdi];
-        if (ucRegistersAddress == 0)
+        var registersAddress = ctx[CpuRegister.Rdi];
+        var geometryShaderAddress = ctx[CpuRegister.Rsi];
+        var pixelShaderAddress = ctx[CpuRegister.Rdx];
+
+        if (registersAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        const int prefilledPairBytes = 3 * 8; // sceAgcCreatePrimState's 3 (offset,value) pairs
-        const int scannedTableBytes = 0x20 * 8; // caller's hardcoded probe-window size
-        Span<byte> zero = stackalloc byte[scannedTableBytes - prefilledPairBytes];
-        zero.Clear();
-        if (!ctx.Memory.TryWrite(ucRegistersAddress + prefilledPairBytes, zero))
+        uint inputSemanticsCount = 0;
+        ulong inputSemanticsAddress = 0;
+        if (pixelShaderAddress != 0 &&
+            (!TryReadUInt64(ctx, pixelShaderAddress + ShaderInputSemanticsOffset, out inputSemanticsAddress) ||
+             !TryReadUInt32(ctx, pixelShaderAddress + ShaderNumInputSemanticsOffset, out inputSemanticsCount)))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.add_prim_state_registers uc=0x{ucRegistersAddress:X16}");
+        if (inputSemanticsCount == 0)
+        {
+            if (!TryWriteIdentityInterpolantRegisters(ctx, registersAddress, 0))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            TraceAgc(
+                $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} " +
+                $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} inputs=0");
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (inputSemanticsAddress == 0 || geometryShaderAddress == 0 || inputSemanticsCount > 32)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!TryReadUInt64(ctx, geometryShaderAddress + ShaderOutputSemanticsOffset, out var outputSemanticsAddress) ||
+            !TryReadUInt16(ctx, geometryShaderAddress + ShaderNumOutputSemanticsOffset, out var outputSemanticsCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (outputSemanticsCount != 0 && outputSemanticsAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        for (uint inputIndex = 0; inputIndex < inputSemanticsCount; inputIndex++)
+        {
+            if (!TryReadUInt32(
+                    ctx,
+                    inputSemanticsAddress + (inputIndex * sizeof(uint)),
+                    out var source))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            var hasMask = false;
+            var mask = 0u;
+            for (uint outputIndex = 0; outputIndex < outputSemanticsCount; outputIndex++)
+            {
+                if (!TryReadUInt32(
+                        ctx,
+                        outputSemanticsAddress + (outputIndex * sizeof(uint)),
+                        out var candidate))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                if ((byte)candidate == (byte)source)
+                {
+                    hasMask = true;
+                    mask = candidate;
+                    break;
+                }
+            }
+
+            var mode = (source >> 20) & 0x3u;
+            uint flags;
+            if (mode == 0)
+            {
+                flags = (((source >> 24) & 0x1u) | (hasMask ? 0u : 1u)) << 5;
+                flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
+            }
+            else
+            {
+                flags = ((source << 4) & 0x0300_0000u) + 0x0008_0000u;
+                if (mode == 2)
+                {
+                    flags &= 0xFFEF_FFDFu;
+                    flags |= hasMask ? ((~(mask & source) >> 16) & 0x20u) : 0x20u;
+                    flags = ApplyInterpolantTwoBitField(flags, source >> 30, 8);
+                    flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
+                }
+                else
+                {
+                    if (hasMask)
+                    {
+                        var masked = mask & source;
+                        flags = (flags & 0xFFFF_FFDFu) | ((masked >> 15) & 0x20u);
+                        flags ^= 0x20u;
+                        flags = (flags & 0xFFEF_FFFFu) | ((~masked >> 1) & 0x0010_0000u);
+                    }
+                    else
+                    {
+                        flags |= 0x0010_0020u;
+                    }
+
+                    flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
+                    flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
+                }
+            }
+
+            flags = hasMask
+                ? ApplyInterpolantFinalMask(flags, source, mask)
+                : flags & 0xFFFF_FBE0u;
+            if (!TryWriteInterpolantRegister(ctx, registersAddress, inputIndex, flags))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        if (!TryWriteIdentityInterpolantRegisters(ctx, registersAddress, inputSemanticsCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc(
+            $"agc.create_interpolant_mapping2 regs=0x{registersAddress:X16} " +
+            $"gs=0x{geometryShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
+            $"inputs={inputSemanticsCount} outputs={outputSemanticsCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    private static uint ApplyInterpolantTwoBitField(uint value, uint field, int shift)
+    {
+        var mask = 0x3u << shift;
+        return (value & ~mask) | ((field & 0x3u) << shift);
+    }
+
+    private static uint ApplyInterpolantFinalMask(uint flags, uint source, uint mask)
+    {
+        flags = (flags & 0xFFFF_FFE0u) | ((mask >> 8) & 0x1Fu);
+        flags = (flags & 0xFFFF_FBFFu) |
+                ((source & 0x0040_0000u) != 0 ? 0x400u : (source >> 14) & 0x400u);
+        return flags;
+    }
+    #pragma warning restore SHEM006
 
     // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
     #pragma warning disable SHEM004
