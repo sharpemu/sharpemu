@@ -514,6 +514,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		public CpuContext Context { get; set; } = null!;
 
+		public string Name { get; set; } = string.Empty;
+
+		public int HostThreadId;
+
 		public ulong ExceptionStackBase { get; set; }
 	}
 
@@ -3952,6 +3956,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		using (LockGate("TryStartThread"))
 		{
 			_guestThreads[request.ThreadHandle] = thread;
+			ProfileGuestThreadReady(thread);
 			_readyGuestThreads.Enqueue(thread);
 			Interlocked.Increment(ref _readyGuestThreadCount);
 		}
@@ -3981,6 +3986,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		lock (_guestThreadGate)
 		{
 			_currentExternalGuestThreadHandle = threadHandle;
+			var hostThreadId = unchecked((int)GetCurrentThreadId());
 			if (_guestThreads.ContainsKey(threadHandle))
 			{
 				return;
@@ -3989,12 +3995,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (_externalGuestThreads.TryGetValue(threadHandle, out var existing))
 			{
 				existing.Context = context;
+				Volatile.Write(ref existing.HostThreadId, hostThreadId);
 				return;
 			}
 
 			_externalGuestThreads[threadHandle] = new ExternalGuestThreadState
 			{
 				Context = context,
+				Name = $"External-{threadHandle:X}",
+				HostThreadId = hostThreadId,
 			};
 		}
 	}
@@ -4146,6 +4155,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
+				ProfileGuestThreadReady(thread);
 				_readyGuestThreads.Enqueue(thread);
 				Interlocked.Increment(ref _readyGuestThreadCount);
 				wakeCount++;
@@ -4265,6 +4275,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
+				ProfileGuestThreadReady(thread);
 				_readyGuestThreads.Enqueue(thread);
 				Interlocked.Increment(ref _readyGuestThreadCount);
 				wakeCount++;
@@ -5064,6 +5075,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				target.State = GuestThreadRunState.Ready;
 				target.BlockReason = null;
 				target.BlockDeadlineTimestamp = 0;
+				ProfileGuestThreadReady(target);
 				_readyGuestThreads.Enqueue(target);
 				Interlocked.Increment(ref _readyGuestThreadCount);
 			}
@@ -5783,6 +5795,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			return;
 		}
+		ProfileGuestThreadRunStarted(thread);
 
 		lock (_guestThreadGate)
 		{
@@ -5860,6 +5873,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
+							ProfileGuestThreadReady(thread);
 							_readyGuestThreads.Enqueue(thread);
 							Interlocked.Increment(ref _readyGuestThreadCount);
 						}
@@ -5897,6 +5911,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					pendingAfterExecutorRelease = pending;
 				}
 			}
+			ProfileGuestThreadRunStopped(thread);
 
 			if (pendingAfterExecutorRelease is { } pendingException &&
 				!TryRaiseGuestException(
@@ -7058,6 +7073,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.Name,
 				MapGuestThreadPriority(thread.Priority));
 		}
+		ProfileGuestThreadScheduled(thread);
 		runner.Schedule(() => RunGuestThread(thread, reason));
 	}
 
@@ -7100,6 +7116,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 			candidate.ExecutorActive = true;
 			candidate.State = GuestThreadRunState.Running;
+			ProfileGuestThreadClaimed(candidate);
 			thread = candidate;
 			return true;
 		}
