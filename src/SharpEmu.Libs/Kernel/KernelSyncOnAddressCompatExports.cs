@@ -16,7 +16,10 @@ public static class KernelSyncOnAddressCompatExports
         private readonly ulong _expected;
         private readonly bool _is64Bit;
         private readonly object _hostGate = new();
+        private readonly long _registeredTicks;
+        private readonly int _registeredManagedThread;
         private int _wakeRequested;
+        private int _resumeRecorded;
 
         public SyncWaiter(CpuContext context, ulong address, ulong expected, bool is64Bit)
         {
@@ -24,6 +27,12 @@ public static class KernelSyncOnAddressCompatExports
             Address = address;
             _expected = expected;
             _is64Bit = is64Bit;
+            _registeredTicks = KernelSyncOnAddressProfile.Enabled
+                ? Stopwatch.GetTimestamp()
+                : 0L;
+            _registeredManagedThread = KernelSyncOnAddressProfile.Enabled
+                ? Environment.CurrentManagedThreadId
+                : 0;
             Id = Interlocked.Increment(ref _nextWaiterId);
         }
 
@@ -40,15 +49,23 @@ public static class KernelSyncOnAddressCompatExports
             Unregister(this);
             if (Volatile.Read(ref _wakeRequested) != 0)
             {
+                RecordResume(explicitWake: true, valueChanged: false, timedOut: false, faulted: false);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
             if (!TryReadValue(_context, Address, _is64Bit, out var value))
             {
+                RecordResume(explicitWake: false, valueChanged: false, timedOut: false, faulted: true);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            return value != _expected
+            var valueChanged = value != _expected;
+            RecordResume(
+                explicitWake: false,
+                valueChanged,
+                timedOut: !valueChanged,
+                faulted: false);
+            return valueChanged
                 ? (int)OrbisGen2Result.ORBIS_GEN2_OK
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
         }
@@ -104,6 +121,28 @@ public static class KernelSyncOnAddressCompatExports
             }
 
             return Resume();
+        }
+
+        private void RecordResume(
+            bool explicitWake,
+            bool valueChanged,
+            bool timedOut,
+            bool faulted)
+        {
+            if (!KernelSyncOnAddressProfile.Enabled ||
+                Interlocked.Exchange(ref _resumeRecorded, 1) != 0)
+            {
+                return;
+            }
+
+            KernelSyncOnAddressProfile.RecordResume(
+                Address,
+                _registeredManagedThread,
+                Stopwatch.GetTimestamp() - _registeredTicks,
+                explicitWake,
+                valueChanged,
+                timedOut,
+                faulted);
         }
     }
 
@@ -187,7 +226,79 @@ public static class KernelSyncOnAddressCompatExports
             }
         }
 
+        var returnRip = 0UL;
+        var outerCallerRip = 0UL;
+        var parentCallerRip = 0UL;
+        var ancestorCallerRip = 0UL;
+        var outerCallerRip1 = 0UL;
+        var outerCallerRip2 = 0UL;
+        var outerCallerRip3 = 0UL;
+        if (KernelSyncOnAddressProfile.DetailedEnabled)
+        {
+            CaptureCallStack(
+                ctx,
+                out returnRip,
+                out outerCallerRip,
+                out parentCallerRip,
+                out ancestorCallerRip,
+                out outerCallerRip1,
+                out outerCallerRip2,
+                out outerCallerRip3);
+        }
+        KernelSyncOnAddressProfile.RecordWake(
+            address,
+            requested,
+            selected?.Count ?? 0,
+            returnRip,
+            outerCallerRip,
+            parentCallerRip,
+            ancestorCallerRip,
+            outerCallerRip1,
+            outerCallerRip2,
+            outerCallerRip3,
+            GuestThreadExecution.CurrentGuestThreadHandle,
+            Environment.CurrentManagedThreadId);
+
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    private static void CaptureCallStack(
+        CpuContext ctx,
+        out ulong returnRip,
+        out ulong callerRip,
+        out ulong parentRip,
+        out ulong ancestorRip,
+        out ulong outerRip1,
+        out ulong outerRip2,
+        out ulong outerRip3)
+    {
+        returnRip = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out var immediateReturnRip)
+            ? immediateReturnRip
+            : 0UL;
+        var framePointer = ctx[CpuRegister.Rbp];
+        callerRip = TryReadFrameReturnRip(ctx, framePointer, out var parentFramePointer);
+        parentRip = TryReadFrameReturnRip(ctx, parentFramePointer, out var ancestorFramePointer);
+        ancestorRip = TryReadFrameReturnRip(ctx, ancestorFramePointer, out var outerFramePointer1);
+        outerRip1 = TryReadFrameReturnRip(ctx, outerFramePointer1, out var outerFramePointer2);
+        outerRip2 = TryReadFrameReturnRip(ctx, outerFramePointer2, out var outerFramePointer3);
+        outerRip3 = TryReadFrameReturnRip(ctx, outerFramePointer3, out _);
+    }
+
+    private static ulong TryReadFrameReturnRip(
+        CpuContext ctx,
+        ulong framePointer,
+        out ulong parentFramePointer)
+    {
+        parentFramePointer = 0;
+        if (framePointer == 0 || framePointer > ulong.MaxValue - sizeof(ulong))
+        {
+            return 0;
+        }
+
+        _ = ctx.TryReadUInt64(framePointer, out parentFramePointer);
+        return ctx.TryReadUInt64(framePointer + sizeof(ulong), out var returnRip)
+            ? returnRip
+            : 0UL;
     }
 
     private static int Wait(CpuContext ctx, bool is64Bit)
@@ -209,6 +320,7 @@ public static class KernelSyncOnAddressCompatExports
 
         if (current != expected)
         {
+            KernelSyncOnAddressProfile.RecordImmediate(address);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
         }
 
@@ -242,8 +354,32 @@ public static class KernelSyncOnAddressCompatExports
         if (current != expected || waiter.TryWake())
         {
             Unregister(waiter);
+            KernelSyncOnAddressProfile.RecordImmediate(address);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
         }
+
+        var returnRip = 0UL;
+        var callerRip = 0UL;
+        var parentRip = 0UL;
+        if (KernelSyncOnAddressProfile.DetailedEnabled)
+        {
+            CaptureCallStack(
+                ctx,
+                out returnRip,
+                out callerRip,
+                out parentRip,
+                out _,
+                out _,
+                out _,
+                out _);
+        }
+        KernelSyncOnAddressProfile.RecordBlocked(
+            address,
+            returnRip,
+            callerRip,
+            parentRip,
+            GuestThreadExecution.CurrentGuestThreadHandle,
+            Environment.CurrentManagedThreadId);
 
         if (GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
