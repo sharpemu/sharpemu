@@ -167,6 +167,7 @@ public static partial class AgcExports
         fallbackTextureCount = 0;
         foreach (var binding in bindings)
         {
+            var profileStart = TexturePreparationProfile.Begin();
             var reuseKey = new GuestTextureSnapshotReuseKey(
                 binding.Descriptor,
                 binding.IsStorage,
@@ -182,6 +183,9 @@ public static partial class AgcExports
                 {
                     Sampler = ToGuestSampler(binding.SamplerDescriptor),
                 };
+                TexturePreparationProfile.RecordBinding(
+                    TexturePreparationProfile.BindingOutcome.Reused,
+                    profileStart);
             }
             else if (TryCreateGuestDrawTexture(
                     ctx,
@@ -200,9 +204,22 @@ public static partial class AgcExports
                 {
                     snapshots?.Add(reuseKey, texture);
                 }
+
+                var outcome = texture.IsFallback
+                    ? TexturePreparationProfile.BindingOutcome.Fallback
+                    : texture.TiledSource is not null
+                        ? TexturePreparationProfile.BindingOutcome.Tiled
+                        : texture.RgbaPixels.Length != 0
+                            ? TexturePreparationProfile.BindingOutcome.Linear
+                            : TexturePreparationProfile.BindingOutcome.Empty;
+                var payloadBytes = texture.TiledSource?.LongLength ?? texture.RgbaPixels.LongLength;
+                TexturePreparationProfile.RecordBinding(outcome, profileStart, payloadBytes);
             }
             else
             {
+                TexturePreparationProfile.RecordBinding(
+                    TexturePreparationProfile.BindingOutcome.Skipped,
+                    profileStart);
                 continue;
             }
 
@@ -543,14 +560,21 @@ public static partial class AgcExports
         // With the write tracker off (Windows default), IsGuestImageUploadKnown
         // uses a cheap guest-memory probe so static UI can still skip (Dead
         // Cells menus) while changing CPU content (GTA Bink) forces a copy.
+        var sampledUploadKnown = false;
         if (!isStorage &&
             !wantsArrayUpload &&
             !isVideoBuffer &&
-            descriptor.Address != 0 &&
-            GuestGpu.Current.IsGuestImageUploadKnown(
+            descriptor.Address != 0)
+        {
+            var lookupStart = TexturePreparationProfile.Begin();
+            sampledUploadKnown = GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
-                descriptor.NumberType))
+                descriptor.NumberType);
+            TexturePreparationProfile.RecordUploadKnown(lookupStart, sampledUploadKnown);
+        }
+
+        if (sampledUploadKnown)
         {
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
@@ -579,11 +603,13 @@ public static partial class AgcExports
         if (isStorage)
         {
             var initialPixels = Array.Empty<byte>();
+            var uploadKnownStart = TexturePreparationProfile.Begin();
             var uploadKnown = descriptor.Address != 0 &&
                 GuestGpu.Current.IsGuestImageUploadKnown(
                     descriptor.Address,
                     descriptor.Format,
                     descriptor.NumberType);
+            TexturePreparationProfile.RecordUploadKnown(uploadKnownStart, uploadKnown);
             var readSucceeded = false;
             var linearNonzero = false;
             var storageSnapshot = default(SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot);
@@ -703,10 +729,13 @@ public static partial class AgcExports
         // Decoded video buffers rotate while older guest draws can still be
         // queued. Keep the texels that belonged to this draw instead of using
         // an address-only cache shortcut after the decoder reuses the buffer.
+        var contentCached = false;
         if (!_textureCopySkipDisabled &&
             !isVideoBuffer &&
-            descriptor.Address != 0 &&
-            GuestGpu.Current.IsTextureContentCached(
+            descriptor.Address != 0)
+        {
+            var lookupStart = TexturePreparationProfile.Begin();
+            contentCached = GuestGpu.Current.IsTextureContentCached(
                 new TextureCacheLookupIdentity(
                     new TextureContentIdentity(
                         descriptor.Address,
@@ -722,7 +751,11 @@ public static partial class AgcExports
                         descriptor.Type,
                         textureDepth,
                         descriptor.ResourceMipLevels),
-                    sampler)))
+                    sampler));
+            TexturePreparationProfile.RecordContentCache(lookupStart, contentCached);
+        }
+
+        if (contentCached)
         {
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(

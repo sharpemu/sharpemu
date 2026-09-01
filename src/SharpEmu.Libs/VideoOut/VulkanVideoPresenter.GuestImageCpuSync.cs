@@ -3,6 +3,7 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using Silk.NET.Vulkan;
 
@@ -297,6 +298,13 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_textureCache.Count <= 2048)
             {
                 return;
+            }
+
+            if (TexturePreparationProfile.Enabled)
+            {
+                Console.Error.WriteLine(
+                    $"[PERF][TEXTURE_CACHE] action=clear entries={_textureCache.Count} " +
+                    $"capacity=2048 identities={_cachedTextureIdentities.Count}");
             }
 
             // Destruction is deferred until every submission that may still

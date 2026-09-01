@@ -29,13 +29,24 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         if (!_cachedTextureIdentities.TryGetValue(identity, out var uploadedGeneration))
         {
+            TexturePreparationProfile.RecordContentCacheStatus(
+                identity.Content,
+                TexturePreparationProfile.ContentCacheStatus.Absent);
             return false;
         }
 
-        return !SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
+        if (!SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 identity.Content.Address,
                 out var currentGeneration) ||
-            currentGeneration == uploadedGeneration;
+            currentGeneration == uploadedGeneration)
+        {
+            return true;
+        }
+
+        TexturePreparationProfile.RecordContentCacheStatus(
+            identity.Content,
+            TexturePreparationProfile.ContentCacheStatus.Stale);
+        return false;
     }
 
     private static void MarkTextureContentCached(
