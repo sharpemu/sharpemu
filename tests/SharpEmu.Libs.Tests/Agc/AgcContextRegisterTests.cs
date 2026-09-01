@@ -26,7 +26,9 @@ public sealed class AgcContextRegisterTests
 
     private const uint ItNop = 0x10;
     private const uint ItSetContextReg = 0x69;
+    private const uint ItSetContextRegIndirect = 0x9F;
     private const uint RCxRegsIndirect = 0x12;
+    private const uint RUcRegsIndirect = 0x13;
     private const uint CbTargetMask = 0x8E;
     private const uint CbColorControl = 0x202;
     private const uint DbDepthSizeXy = 0x007;
@@ -69,6 +71,19 @@ public sealed class AgcContextRegisterTests
         Assert.True(
             AgcExports.TryGetGraphicsContextRegisterForTests(ctx, CbTargetMask, out var value));
         Assert.Equal(0xFFFF_FFFFu, value);
+    }
+
+    [Fact]
+    public void NativeIndirectRegisterWriteRetainsDepthExtent()
+    {
+        var ctx = CreateContext(out var memory);
+        var sizeXy = 1919u | (1079u << 16);
+        WriteNativeIndirectContextRegisterCommand(memory, (DbDepthSizeXy, sizeXy));
+        Submit(ctx, memory, dwordCount: 5);
+
+        Assert.True(
+            AgcExports.TryGetGraphicsContextRegisterForTests(ctx, DbDepthSizeXy, out var value));
+        Assert.Equal(sizeXy, value);
     }
 
     /// <summary>
@@ -211,17 +226,65 @@ public sealed class AgcContextRegisterTests
         Assert.Equal(7u, value);
     }
 
+    [Fact]
+    public void IndirectUcDepthSizeUpdatesContextState()
+    {
+        var ctx = CreateContext(out var memory);
+        WriteIndirectRegisterCommand(memory, RCxRegsIndirect, (DbDepthSizeXy, 7u));
+        Submit(ctx, memory, dwordCount: 4);
+
+        var sizeXy = 1919u | (1079u << 16);
+        WriteIndirectRegisterCommand(
+            memory,
+            RUcRegsIndirect,
+            (0x7000_0000u | DbDepthSizeXy, sizeXy));
+        Submit(ctx, memory, dwordCount: 4);
+
+        Assert.True(
+            AgcExports.TryGetGraphicsContextRegisterForTests(ctx, DbDepthSizeXy, out var value));
+        Assert.Equal(sizeXy, value);
+    }
+
     private static void WriteIndirectRegisterCommand(
+        FakeCpuMemory memory,
+        params (uint Offset, uint Value)[] registers)
+    {
+        WriteIndirectRegisterCommand(memory, RCxRegsIndirect, registers);
+    }
+
+    private static void WriteIndirectRegisterCommand(
+        FakeCpuMemory memory,
+        uint indirectRegister,
+        params (uint Offset, uint Value)[] registers)
+    {
+        WriteDwords(
+            memory,
+            CommandAddress,
+            Pm4Header(4, ItNop, indirectRegister),
+            (uint)registers.Length,
+            (uint)(IndirectTableAddress & 0xFFFF_FFFFu),
+            (uint)(IndirectTableAddress >> 32));
+
+        for (var index = 0; index < registers.Length; index++)
+        {
+            var entry = IndirectTableAddress + ((ulong)index * 8);
+            WriteUInt32(memory, entry, registers[index].Offset);
+            WriteUInt32(memory, entry + 4, registers[index].Value);
+        }
+    }
+
+    private static void WriteNativeIndirectContextRegisterCommand(
         FakeCpuMemory memory,
         params (uint Offset, uint Value)[] registers)
     {
         WriteDwords(
             memory,
             CommandAddress,
-            Pm4Header(4, ItNop, RCxRegsIndirect),
-            (uint)registers.Length,
-            (uint)(IndirectTableAddress & 0xFFFF_FFFFu),
-            (uint)(IndirectTableAddress >> 32));
+            Pm4Header(5, ItSetContextRegIndirect),
+            (uint)(IndirectTableAddress & 0xFFFF_FFFCu),
+            (uint)(IndirectTableAddress >> 32),
+            0x8000_0000u,
+            (uint)registers.Length);
 
         for (var index = 0; index < registers.Length; index++)
         {

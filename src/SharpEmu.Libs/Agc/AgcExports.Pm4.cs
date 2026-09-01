@@ -25,8 +25,10 @@ public static partial class AgcExports
         ItDispatchDirect, ItDispatchIndirect, ItSetPredication, ItCondExec,
         ItWaitRegMem,
         ItIndirectBuffer, ItCondWrite, ItEventWrite, ItReleaseMem, ItDmaData,
-        ItRewind, ItSetContextReg, ItSetShReg, ItSetUconfigReg,
+        ItRewind, ItSetShRegIndirect, ItSetUconfigRegIndirect,
+        ItSetContextReg, ItSetShReg, ItSetUconfigReg,
         ItSetUconfigRegIndex, ItGetLodStats,
+        ItSetContextRegIndirect,
     ];
 
     private static readonly HashSet<(int Handle, int Index, ulong Address, string Path)> _tracedDisplayBuffers = new();
@@ -926,6 +928,7 @@ public static partial class AgcExports
 
     private static readonly Dictionary<(uint Op, uint Register), long> _submittedOpcodeCounts = new();
     private static long _submittedOpcodeTotal;
+    private static int _depthRegisterStateTraceCount;
 
     private static void CountSubmittedOpcode(uint op, uint register)
     {
@@ -997,21 +1000,59 @@ public static partial class AgcExports
                 {
                     ApplyUcIndexTypeIfNeeded(state, startRegister + index, value);
                 }
+
+                if (op == ItSetContextReg)
+                {
+                    TraceSubmittedDepthRegisterState(
+                        state,
+                        packetAddress,
+                        "direct",
+                        startRegister + index,
+                        value);
+                }
             }
 
             return;
         }
 
-        if (op != ItNop ||
-            register is not (RCxRegsIndirect or RShRegsIndirect or RUcRegsIndirect) ||
-            packetLength < 4 ||
-            !TryReadUInt32(ctx, packetAddress + sizeof(uint), out var registerCount) ||
-            !TryReadUInt64(ctx, packetAddress + 8, out var registersAddress))
+        Dictionary<uint, uint> destination;
+        uint registerCount;
+        ulong registersAddress;
+        uint indirectRegister;
+        if (op is ItSetContextRegIndirect or ItSetShRegIndirect or ItSetUconfigRegIndirect)
+        {
+            if (packetLength < 5 ||
+                !TryReadUInt64(ctx, packetAddress + 4, out registersAddress) ||
+                !TryReadUInt32(ctx, packetAddress + 16, out registerCount))
+            {
+                return;
+            }
+
+            registersAddress &= ~0x3UL;
+            registerCount &= 0x3FFFu;
+            indirectRegister = op switch
+            {
+                ItSetContextRegIndirect => RCxRegsIndirect,
+                ItSetShRegIndirect => RShRegsIndirect,
+                _ => RUcRegsIndirect,
+            };
+        }
+        else if (op == ItNop &&
+                 register is RCxRegsIndirect or RShRegsIndirect or RUcRegsIndirect &&
+                 packetLength >= 4 &&
+                 TryReadUInt32(ctx, packetAddress + sizeof(uint), out registerCount) &&
+                 TryReadUInt64(ctx, packetAddress + 8, out registersAddress))
+        {
+            // Accept command buffers produced by older builds. New packets use
+            // the native five-dword SET_*_REG_INDIRECT encoding above.
+            indirectRegister = register;
+        }
+        else
         {
             return;
         }
 
-        var destination = register switch
+        destination = indirectRegister switch
         {
             RCxRegsIndirect => state.CxRegisters,
             RShRegsIndirect => state.ShRegisters,
@@ -1020,8 +1061,10 @@ public static partial class AgcExports
         for (uint index = 0; index < registerCount; index++)
         {
             var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var registerOffset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
+            uint registerOffset;
+            uint value;
+            if (!TryReadUInt32(ctx, entryAddress, out registerOffset) ||
+                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out value))
             {
                 return;
             }
@@ -1030,8 +1073,34 @@ public static partial class AgcExports
             // context-register index (DB_RENDER_CONTROL), not a terminator.
             // Dropping it leaves stale depth/render-control state active in
             // later passes.
+            registerOffset &= ~0x7000_0000u;
+            if (indirectRegister == RUcRegsIndirect && registerOffset == DbDepthSizeXy)
+            {
+                // Indirect UC tables may carry recognized context registers.
+                // Apply the depth extent to the state consumed by draw setup
+                // instead of leaving a stale value in the context register set.
+                state.CxRegisters[registerOffset] = value;
+                state.CompositeDepthSizeXy = null;
+                TraceSubmittedDepthRegisterState(
+                    state,
+                    entryAddress,
+                    "indirect-uc",
+                    registerOffset,
+                    value);
+                continue;
+            }
+
             destination[registerOffset] = value;
-            if (register == RUcRegsIndirect)
+            if (indirectRegister == RCxRegsIndirect)
+            {
+                TraceSubmittedDepthRegisterState(
+                    state,
+                    entryAddress,
+                    "indirect",
+                    registerOffset,
+                    value);
+            }
+            if (indirectRegister == RUcRegsIndirect)
             {
                 ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
             }
@@ -1081,6 +1150,57 @@ public static partial class AgcExports
         // carries x/y maxima, not padding. Keep it separate from independent
         // DB_DEPTH_SIZE_XY state so later standalone writes can supersede it.
         state.CompositeDepthSizeXy = sizeXy;
+        TraceSubmittedDepthRegisterState(
+            state,
+            packetAddress,
+            "composite",
+            DbDepthSizeXy,
+            sizeXy);
+    }
+
+    private static void TraceSubmittedDepthRegisterState(
+        SubmittedDcbState state,
+        ulong packetAddress,
+        string source,
+        uint registerOffset,
+        uint value)
+    {
+        if (!_traceDepthMetadata ||
+            registerOffset is not (DbZInfo or
+                                    DbZReadBase or
+                                    DbZWriteBase or
+                                    DbZReadBaseHi or
+                                    DbZWriteBaseHi or
+                                    DbDepthSizeXy) ||
+            Interlocked.Increment(ref _depthRegisterStateTraceCount) > 4096)
+        {
+            return;
+        }
+
+        state.CxRegisters.TryGetValue(DbZReadBase, out var readBase);
+        state.CxRegisters.TryGetValue(DbZWriteBase, out var writeBase);
+        state.CxRegisters.TryGetValue(DbZReadBaseHi, out var readBaseHi);
+        state.CxRegisters.TryGetValue(DbZWriteBaseHi, out var writeBaseHi);
+        state.CxRegisters.TryGetValue(DbDepthSizeXy, out var rawSizeXy);
+        var readAddress =
+            ((ulong)(readBaseHi & 0xFFu) << 40) | ((ulong)readBase << 8);
+        var writeAddress =
+            ((ulong)(writeBaseHi & 0xFFu) << 40) | ((ulong)writeBase << 8);
+        var effectiveSizeXy = state.CompositeDepthSizeXy ?? rawSizeXy;
+        var width = (effectiveSizeXy & 0x3FFFu) + 1;
+        var height = ((effectiveSizeXy >> 16) & 0x3FFFu) + 1;
+        var composite = state.CompositeDepthSizeXy is { } compositeSize
+            ? $"0x{compositeSize:X8}"
+            : "none";
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.depth_register_state " +
+            $"queue={state.QueueName} submission={state.ActiveSubmissionId} " +
+            $"packet=0x{packetAddress:X16} source={source} " +
+            $"reg=0x{registerOffset:X3} value=0x{value:X8} " +
+            $"read=0x{readAddress:X16} write=0x{writeAddress:X16} " +
+            $"raw_size=0x{rawSizeXy:X8} composite={composite} " +
+            $"effective={width}x{height}");
     }
 
     /// <summary>

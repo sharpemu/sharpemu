@@ -59,6 +59,8 @@ public static partial class AgcExports
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
     private const uint ItRewind = 0x59;
+    private const uint ItSetShRegIndirect = 0x63;
+    private const uint ItSetUconfigRegIndirect = 0x64;
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
@@ -66,6 +68,7 @@ public static partial class AgcExports
     private const uint RewindValidBit = 1u << 31;
     private const uint RewindOffloadEnableBit = 1u << 24;
     private const uint ItGetLodStats = 0x8E;
+    private const uint ItSetContextRegIndirect = 0x9F;
 
     private const uint RZero = 0x00;
     private const uint RDrawIndexAuto = 0x04;

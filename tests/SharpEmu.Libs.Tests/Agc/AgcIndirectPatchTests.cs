@@ -12,15 +12,17 @@ public sealed class AgcIndirectPatchTests
 {
     private const ulong BaseAddress = 0x2_2000_0000;
     private const ulong CommandAddress = BaseAddress + 0x100;
+    private const uint SetContextRegIndirectHeader = 0xC003_9F00u;
 
     [Fact]
     public void SetCxRegisterCount_ReplacesCountAndPreservesOtherFields()
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        WriteUInt32(memory, CommandAddress, 0x1122_3344);
-        WriteUInt32(memory, CommandAddress + 4, 3);
-        WriteUInt64(memory, CommandAddress + 8, 0x5566_7788_99AA_BBCC);
+        WriteUInt32(memory, CommandAddress, SetContextRegIndirectHeader);
+        WriteUInt64(memory, CommandAddress + 4, 0x5566_7788_99AA_BBCC);
+        WriteUInt32(memory, CommandAddress + 12, 0x8000_0000u);
+        WriteUInt32(memory, CommandAddress + 16, 0xCAFE_0003u);
         ctx[CpuRegister.Rdi] = CommandAddress;
         ctx[CpuRegister.Rsi] = 0x4C;
 
@@ -28,9 +30,10 @@ public sealed class AgcIndirectPatchTests
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
         Assert.Equal(0UL, ctx[CpuRegister.Rax]);
-        Assert.Equal(0x1122_3344u, ReadUInt32(memory, CommandAddress));
-        Assert.Equal(0x4Cu, ReadUInt32(memory, CommandAddress + 4));
-        Assert.Equal(0x5566_7788_99AA_BBCCUL, ReadUInt64(memory, CommandAddress + 8));
+        Assert.Equal(SetContextRegIndirectHeader, ReadUInt32(memory, CommandAddress));
+        Assert.Equal(0x5566_7788_99AA_BBCCUL, ReadUInt64(memory, CommandAddress + 4));
+        Assert.Equal(0x8000_0000u, ReadUInt32(memory, CommandAddress + 12));
+        Assert.Equal(0xCAFE_004Cu, ReadUInt32(memory, CommandAddress + 16));
     }
 
     [Fact]
@@ -38,20 +41,38 @@ public sealed class AgcIndirectPatchTests
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        WriteUInt32(memory, CommandAddress + 4, 9);
+        WriteUInt32(memory, CommandAddress, SetContextRegIndirectHeader);
+        WriteUInt32(memory, CommandAddress + 16, 9);
         ctx[CpuRegister.Rdi] = CommandAddress;
         ctx[CpuRegister.Rsi] = 0;
 
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
             AgcExports.SetCxRegIndirectPatchSetNumRegisters(ctx));
-        Assert.Equal(0u, ReadUInt32(memory, CommandAddress + 4));
+        Assert.Equal(0u, ReadUInt32(memory, CommandAddress + 16));
 
         ctx[CpuRegister.Rsi] = 7;
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
             AgcExports.SetCxRegIndirectPatchAddRegisters(ctx));
-        Assert.Equal(7u, ReadUInt32(memory, CommandAddress + 4));
+        Assert.Equal(7u, ReadUInt32(memory, CommandAddress + 16));
+    }
+
+    [Fact]
+    public void SetCxAddress_PatchesNativeAddressAndPreservesLowControlBits()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, CommandAddress, SetContextRegIndirectHeader);
+        WriteUInt32(memory, CommandAddress + 4, 3u);
+        WriteUInt32(memory, CommandAddress + 8, 0u);
+        ctx[CpuRegister.Rdi] = CommandAddress;
+        ctx[CpuRegister.Rsi] = 0x0000_0002_3456_789CUL;
+
+        var result = AgcExports.SetCxRegIndirectPatchSetAddress(ctx);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(0x0000_0002_3456_789FUL, ReadUInt64(memory, CommandAddress + 4));
     }
 
     [Fact]

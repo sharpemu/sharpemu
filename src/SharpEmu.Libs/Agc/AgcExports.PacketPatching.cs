@@ -432,13 +432,30 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryWriteUInt32(ctx, commandAddress + 8, (uint)(registersAddress & 0xFFFF_FFFFUL)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(registersAddress >> 32)))
+        if (!TryReadUInt32(ctx, commandAddress, out _))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        if (!TryGetIndirectPatchLayout(
+                ctx,
+                commandAddress,
+                registerSpace,
+                out var addressOffset,
+                out _,
+                out _) ||
+            !TryReadUInt32(ctx, commandAddress + addressOffset, out var currentLow) ||
+            !TryWriteUInt32(
+                ctx,
+                commandAddress + addressOffset,
+                (currentLow & 0x3u) | (uint)(registersAddress & 0xFFFF_FFFCUL)) ||
+            !TryWriteUInt32(ctx, commandAddress + addressOffset + 4, (uint)(registersAddress >> 32)))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
         TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
+        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-address");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -452,12 +469,29 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryWriteUInt32(ctx, commandAddress + 4, registerCount))
+        if (!TryReadUInt32(ctx, commandAddress, out _))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        if (!TryGetIndirectPatchLayout(
+                ctx,
+                commandAddress,
+                registerSpace,
+                out _,
+                out var countOffset,
+                out var countMask) ||
+            !TryReadUInt32(ctx, commandAddress + countOffset, out var currentCount) ||
+            !TryWriteUInt32(
+                ctx,
+                commandAddress + countOffset,
+                (currentCount & ~countMask) | (registerCount & countMask)))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
         TraceAgc($"agc.patch_{registerSpace}_count cmd=0x{commandAddress:X16} count={registerCount}");
+        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-count");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -527,15 +561,118 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadUInt32(ctx, commandAddress + 4, out var currentCount) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, currentCount + registerCount))
+        if (!TryReadUInt32(ctx, commandAddress, out _))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.patch_{registerSpace}_add cmd=0x{commandAddress:X16} add={registerCount} total={currentCount + registerCount}");
+        if (!TryGetIndirectPatchLayout(
+                ctx,
+                commandAddress,
+                registerSpace,
+                out _,
+                out var countOffset,
+                out var countMask) ||
+            !TryReadUInt32(ctx, commandAddress + countOffset, out var currentCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var newCount = ((currentCount & countMask) + registerCount) & countMask;
+        if (!TryWriteUInt32(
+                ctx,
+                commandAddress + countOffset,
+                (currentCount & ~countMask) | newCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc($"agc.patch_{registerSpace}_add cmd=0x{commandAddress:X16} add={registerCount} total={newCount}");
+        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-add");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static void TraceIndirectDepthPatchedPacket(
+        CpuContext ctx,
+        ulong commandAddress,
+        string registerSpace,
+        string source)
+    {
+        if (!_traceDepthMetadata ||
+            registerSpace != "cx" ||
+            !TryGetIndirectPatchLayout(
+                ctx,
+                commandAddress,
+                registerSpace,
+                out var addressOffset,
+                out var countOffset,
+                out var countMask) ||
+            !TryReadUInt32(ctx, commandAddress + addressOffset, out var addressLow) ||
+            !TryReadUInt32(ctx, commandAddress + addressOffset + sizeof(uint), out var addressHigh) ||
+            !TryReadUInt32(ctx, commandAddress + countOffset, out var rawCount))
+        {
+            return;
+        }
+
+        var registersAddress = ((ulong)addressHigh << 32) | (addressLow & 0xFFFF_FFFCu);
+        TraceIndirectDepthTable(
+            ctx,
+            source,
+            RCxRegsIndirect,
+            commandAddress,
+            registersAddress,
+            rawCount & countMask);
+    }
+
+    private static bool TryGetIndirectPatchLayout(
+        CpuContext ctx,
+        ulong commandAddress,
+        string registerSpace,
+        out ulong addressOffset,
+        out ulong countOffset,
+        out uint countMask)
+    {
+        addressOffset = 0;
+        countOffset = 0;
+        countMask = 0;
+        if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register) ||
+            !TryReadUInt32(ctx, commandAddress, out var header))
+        {
+            return false;
+        }
+
+        var expectedOp = registerSpace switch
+        {
+            "cx" => ItSetContextRegIndirect,
+            "sh" => ItSetShRegIndirect,
+            "uc" => ItSetUconfigRegIndirect,
+            _ => 0u,
+        };
+        if (op == expectedOp && Pm4Length(header) == 5)
+        {
+            addressOffset = 4;
+            countOffset = 16;
+            countMask = 0x3FFFu;
+            return true;
+        }
+
+        var expectedLegacyRegister = registerSpace switch
+        {
+            "cx" => RCxRegsIndirect,
+            "sh" => RShRegsIndirect,
+            "uc" => RUcRegsIndirect,
+            _ => uint.MaxValue,
+        };
+        if (op == ItNop && register == expectedLegacyRegister && Pm4Length(header) == 4)
+        {
+            addressOffset = 8;
+            countOffset = 4;
+            countMask = uint.MaxValue;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryGetPacketIdentity(
