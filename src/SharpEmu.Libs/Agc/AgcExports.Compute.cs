@@ -413,7 +413,8 @@ public static partial class AgcExports
                 ctx,
                 shaderState,
                 out var evaluation,
-                out error))
+                out error,
+                profileStage: Gen5ShaderEvaluationStage.Compute))
         {
             lock (_submitTraceGate)
             {

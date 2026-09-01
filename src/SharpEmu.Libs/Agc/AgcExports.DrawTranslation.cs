@@ -893,7 +893,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     indexed,
                     out var depthVertexRecords)
                         ? depthVertexRecords
-                        : null))
+                        : null,
+                profileStage: Gen5ShaderEvaluationStage.Vertex))
         {
             return false;
         }
@@ -1109,7 +1110,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     indexed,
                     out var vertexRecords)
                         ? vertexRecords
-                        : null))
+                        : null,
+                profileStage: Gen5ShaderEvaluationStage.Vertex))
         {
             return false;
         }
@@ -1137,7 +1139,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 ctx,
                 pixelState,
                 out var pixelEvaluation,
-                out error))
+                out error,
+                profileStage: Gen5ShaderEvaluationStage.Pixel))
         {
             ReturnPooledEvaluationArrays(exportEvaluation);
             return false;

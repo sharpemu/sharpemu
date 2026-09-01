@@ -11,7 +11,7 @@ using System.Runtime.CompilerServices;
 
 namespace SharpEmu.ShaderCompiler;
 
-public static class Gen5ShaderScalarEvaluator
+public static partial class Gen5ShaderScalarEvaluator
 {
     // When a scalar POINTER load can't be resolved statically (its descriptor
     // register read back garbage — e.g. 0 or 0xFFFFFFFF, a per-draw descriptor
@@ -276,7 +276,79 @@ public static class Gen5ShaderScalarEvaluator
         out string error,
         bool resolveVertexInputs = false,
         uint? requiredVertexRecordCount = null,
-        bool captureVertexInputsOnly = false)
+        bool captureVertexInputsOnly = false,
+        Gen5ShaderEvaluationStage profileStage = Gen5ShaderEvaluationStage.Unknown)
+    {
+        var profileEnabled = Gen5ShaderEvaluationProfile.Enabled;
+        var detailedProfileEnabled = Gen5ShaderEvaluationProfile.DetailedEnabled;
+        if (!profileEnabled)
+        {
+            return TryEvaluateCore(
+                ctx,
+                state,
+                out evaluation,
+                out error,
+                resolveVertexInputs,
+                requiredVertexRecordCount,
+                captureVertexInputsOnly);
+        }
+
+        var inputSignature = default(Gen5EvaluationInputSignature);
+        if (detailedProfileEnabled)
+        {
+            inputSignature = Gen5ShaderEvaluationProfile.CreateInputSignature(
+                profileStage,
+                state,
+                resolveVertexInputs,
+                requiredVertexRecordCount,
+                captureVertexInputsOnly);
+        }
+
+        var started = profileEnabled ? Stopwatch.GetTimestamp() : 0L;
+        var succeeded = false;
+        Gen5ShaderEvaluation? evaluationForProfile = null;
+        try
+        {
+            succeeded = TryEvaluateCore(
+                ctx,
+                state,
+                out evaluation,
+                out error,
+                resolveVertexInputs,
+                requiredVertexRecordCount,
+                captureVertexInputsOnly);
+            if (succeeded)
+            {
+                evaluationForProfile = evaluation;
+            }
+
+            return succeeded;
+        }
+        finally
+        {
+            if (detailedProfileEnabled && evaluationForProfile is not null)
+            {
+                Gen5ShaderEvaluationProfile.RecordSignature(inputSignature, evaluationForProfile);
+            }
+
+            if (profileEnabled)
+            {
+                Gen5ShaderEvaluationProfile.RecordEvaluation(
+                    profileStage,
+                    Stopwatch.GetTimestamp() - started,
+                    succeeded);
+            }
+        }
+    }
+
+    private static bool TryEvaluateCore(
+        CpuContext ctx,
+        Gen5ShaderState state,
+        out Gen5ShaderEvaluation evaluation,
+        out string error,
+        bool resolveVertexInputs,
+        uint? requiredVertexRecordCount,
+        bool captureVertexInputsOnly)
     {
         evaluation = default!;
         error = string.Empty;
@@ -1353,6 +1425,38 @@ public static class Gen5ShaderScalarEvaluator
         out byte[] data,
         out int dataLength)
     {
+        if (!Gen5ShaderEvaluationProfile.Enabled)
+        {
+            return TryReadUnknownSizeGlobalMemoryCore(
+                ctx,
+                baseAddress,
+                out data,
+                out dataLength);
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        var succeeded = TryReadUnknownSizeGlobalMemoryCore(
+            ctx,
+            baseAddress,
+            out data,
+            out dataLength);
+        Gen5ShaderEvaluationProfile.RecordMemoryRead(
+            Gen5GlobalMemoryReadKind.UnknownSize,
+            succeeded
+                ? Gen5GlobalMemoryReadSource.PhysicalMemory
+                : Gen5GlobalMemoryReadSource.None,
+            dataLength,
+            Stopwatch.GetTimestamp() - started,
+            succeeded);
+        return succeeded;
+    }
+
+    private static bool TryReadUnknownSizeGlobalMemoryCore(
+        CpuContext ctx,
+        ulong baseAddress,
+        out byte[] data,
+        out int dataLength)
+    {
         var rented = GlobalMemoryPool.Rent(MaxGlobalMemoryBindingBytes);
         for (var size = MaxGlobalMemoryBindingBytes; size >= 4096; size >>= 1)
         {
@@ -1380,8 +1484,45 @@ public static class Gen5ShaderScalarEvaluator
         out byte[] data,
         out int dataLength)
     {
+        if (!Gen5ShaderEvaluationProfile.Enabled)
+        {
+            return TryReadSizedGlobalMemoryCore(
+                ctx,
+                baseAddress,
+                sizeBytes,
+                out data,
+                out dataLength,
+                out _);
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        var succeeded = TryReadSizedGlobalMemoryCore(
+            ctx,
+            baseAddress,
+            sizeBytes,
+            out data,
+            out dataLength,
+            out var source);
+        Gen5ShaderEvaluationProfile.RecordMemoryRead(
+            Gen5GlobalMemoryReadKind.DescriptorSized,
+            source,
+            dataLength,
+            Stopwatch.GetTimestamp() - started,
+            succeeded);
+        return succeeded;
+    }
+
+    private static bool TryReadSizedGlobalMemoryCore(
+        CpuContext ctx,
+        ulong baseAddress,
+        ulong sizeBytes,
+        out byte[] data,
+        out int dataLength,
+        out Gen5GlobalMemoryReadSource source)
+    {
         data = [];
         dataLength = 0;
+        source = Gen5GlobalMemoryReadSource.None;
         if (sizeBytes == 0)
         {
             return false;
@@ -1407,10 +1548,12 @@ public static class Gen5ShaderScalarEvaluator
                 if (readFromPvm)
                 {
                     Interlocked.Add(ref GlobalMemoryReadPvmBytes, sizeof(uint));
+                    source = Gen5GlobalMemoryReadSource.PhysicalMemory;
                 }
                 else
                 {
                     Interlocked.Add(ref GlobalMemoryReadLibcBytes, sizeof(uint));
+                    source = Gen5GlobalMemoryReadSource.Fallback;
                 }
                 data = rented;
                 dataLength = sizeof(uint);
@@ -1433,10 +1576,12 @@ public static class Gen5ShaderScalarEvaluator
                 if (readFromPvm)
                 {
                     Interlocked.Add(ref GlobalMemoryReadPvmBytes, candidateSize);
+                    source = Gen5GlobalMemoryReadSource.PhysicalMemory;
                 }
                 else
                 {
                     Interlocked.Add(ref GlobalMemoryReadLibcBytes, candidateSize);
+                    source = Gen5GlobalMemoryReadSource.Fallback;
                 }
                 data = rented;
                 dataLength = candidateSize;

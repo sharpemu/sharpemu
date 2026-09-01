@@ -588,7 +588,8 @@ public static partial class AgcExports
                 out _,
                 resolveVertexInputs: true,
                 requiredVertexRecordCount: recordCount,
-                captureVertexInputsOnly: true))
+                captureVertexInputsOnly: true,
+                profileStage: Gen5ShaderEvaluationStage.Vertex))
         {
             return;
         }

@@ -819,7 +819,8 @@ public static partial class AgcExports
                             ctx,
                             pixelState,
                             out var evaluation,
-                            out var bindingError))
+                            out var bindingError,
+                            profileStage: Gen5ShaderEvaluationStage.Pixel))
                     {
                         foreach (var binding in evaluation.ImageBindings)
                         {
