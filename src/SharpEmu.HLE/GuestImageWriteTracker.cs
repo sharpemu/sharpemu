@@ -155,6 +155,10 @@ public static unsafe partial class GuestImageWriteTracker
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_IMAGE_TRACKER"),
             "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
             StringComparison.Ordinal);
     private static readonly long _lifetimeTraceEpochNanoseconds =
         _enabled && _lifetimeTraceEnabled ? GetMonotonicNanoseconds() : 0;

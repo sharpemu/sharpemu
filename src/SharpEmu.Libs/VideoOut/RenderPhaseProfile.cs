@@ -7,10 +7,11 @@ namespace SharpEmu.Libs.VideoOut;
 
 /// <summary>
 /// Self-time accounting for the render thread, enabled with
-/// SHARPEMU_PROFILE_RENDER=1. The existing videoout counters report how much
-/// work was done (draws, pipelines, SPIR-V) but not where the render thread's
-/// second went, which is the number that decides whether a low frame rate is
-/// the emulator recording commands, the GPU executing them, or neither.
+/// SHARPEMU_PROFILE_RENDER=1 or the unified performance profile. The existing
+/// videoout counters report how much work was done (draws, pipelines, SPIR-V)
+/// but not where the render thread's second went, which is the number that
+/// decides whether a low frame rate is the emulator recording commands, the
+/// GPU executing them, or neither.
 ///
 /// Scopes nest: entering a phase suspends the enclosing one and resumes it on
 /// dispose, so a <see cref="Phase.QueueSubmit"/> inside
@@ -56,20 +57,30 @@ internal static class RenderPhaseProfile
         Count,
     }
 
-    public static readonly bool Enabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER"),
-        "1",
-        StringComparison.Ordinal);
+    public static readonly bool Enabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER"),
+            "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
+            StringComparison.Ordinal);
 
     /// <summary>
     /// Breaks down the CPU-visible actions which are deliberately serialized
-    /// behind guest GPU work. This stays opt-in because it is diagnostic data,
-    /// not a normal render-thread cost.
+    /// behind guest GPU work. The dedicated and unified performance switches
+    /// both opt into this bounded, render-thread-local category accounting.
     /// </summary>
-    public static readonly bool OrderedActionDetailsEnabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_ORDERED_ACTION"),
-        "1",
-        StringComparison.Ordinal);
+    public static readonly bool OrderedActionDetailsEnabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_ORDERED_ACTION"),
+            "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
+            StringComparison.Ordinal);
 
     private static readonly double _reportSeconds =
         double.TryParse(

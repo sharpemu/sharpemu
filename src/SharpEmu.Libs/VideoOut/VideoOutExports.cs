@@ -84,10 +84,15 @@ public static class VideoOutExports
     private static string _applicationWindowTitle = "VideoOut";
     private static string _selectedGpuName = string.Empty;
     private static string _applicationTitleId = "UNKNOWN";
-    private static readonly bool _logFrameRate = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
-        "1",
-        StringComparison.Ordinal);
+    private static readonly bool _logFrameRate =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
+            "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
+            StringComparison.Ordinal);
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;

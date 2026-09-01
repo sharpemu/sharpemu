@@ -7,7 +7,7 @@ namespace SharpEmu.Libs.Agc;
 
 /// <summary>
 /// Aggregate accounting for suspended WAIT_REG_MEM packets, enabled with
-/// SHARPEMU_PROFILE_GPU_WAIT=1.
+/// SHARPEMU_PROFILE_GPU_WAIT=1 or the unified performance profile.
 ///
 /// The existing <c>agc.wait_suspended</c> warning is deduplicated per label, so
 /// a label that suspends every frame is reported once and then goes silent —
@@ -17,10 +17,15 @@ namespace SharpEmu.Libs.Agc;
 /// </summary>
 internal static class GpuWaitProfile
 {
-    public static readonly bool Enabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GPU_WAIT"),
-        "1",
-        StringComparison.Ordinal);
+    public static readonly bool Enabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GPU_WAIT"),
+            "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
+            StringComparison.Ordinal);
 
     private static readonly double _reportSeconds =
         double.TryParse(
