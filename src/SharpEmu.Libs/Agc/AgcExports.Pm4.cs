@@ -48,6 +48,37 @@ public static partial class AgcExports
         uint dwordCount,
         bool tracePackets)
     {
+        if (!DcbParseProfile.Enabled)
+        {
+            return ParseSubmittedDcbChain(
+                ctx, gpuState, state, commandAddress, dwordCount, tracePackets);
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var suspended = false;
+        try
+        {
+            suspended = ParseSubmittedDcbChain(
+                ctx, gpuState, state, commandAddress, dwordCount, tracePackets);
+            return suspended;
+        }
+        finally
+        {
+            DcbParseProfile.RecordParse(
+                dwordCount,
+                System.Diagnostics.Stopwatch.GetTimestamp() - started,
+                suspended);
+        }
+    }
+
+    private static bool ParseSubmittedDcbChain(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        uint dwordCount,
+        bool tracePackets)
+    {
         if (commandAddress == 0 || dwordCount == 0 || dwordCount > 1_000_000)
         {
             return false;
@@ -621,12 +652,14 @@ public static partial class AgcExports
                     ItDrawIndexIndirect or
                     ItDrawIndexIndirectMulti;
                 state.SawIndexedDraw |= indexed;
+                var drawStarted = DcbParseProfile.Begin();
                 try
                 {
                     TryTranslateGuestDraw(ctx, gpuState, state, indexCount, indexed);
                 }
                 finally
                 {
+                    DcbParseProfile.RecordDraw(drawStarted);
                     state.CurrentIndexSnapshot = null;
                     state.CurrentVertexSnapshot = null;
                 }
@@ -639,12 +672,14 @@ public static partial class AgcExports
                 autoIndexCount != 0)
             {
                 state.FrameDrawCount++;
+                var drawStarted = DcbParseProfile.Begin();
                 TryTranslateGuestDraw(
                     ctx,
                     gpuState,
                     state,
                     autoIndexCount,
                     indexed: false);
+                DcbParseProfile.RecordDraw(drawStarted);
             }
 
             if (op is ItDispatchDirect or ItDispatchIndirect)
@@ -659,7 +694,9 @@ public static partial class AgcExports
                         out _))
                 {
                     state.FrameDispatchCount++;
+                    var dispatchStarted = DcbParseProfile.Begin();
                     ObserveComputeDispatch(ctx, gpuState, state, dispatch);
+                    DcbParseProfile.RecordDispatch(dispatchStarted);
                 }
             }
 
@@ -681,6 +718,7 @@ public static partial class AgcExports
 
             if (op == ItNop && register == RFlip && length >= 6)
             {
+                var flipStarted = DcbParseProfile.Begin();
                 TraceFramePacketSummary(state);
                 SyncCpuWrittenGuestImages(ctx);
                 GpuWaitRegistry.AdvanceFrame();
@@ -845,6 +883,7 @@ public static partial class AgcExports
                     state.PendingTargetlessDraw = null;
                 }
                 state.TranslatedDraw = null;
+                DcbParseProfile.RecordFlip(flipStarted);
             }
 
             offset += length;

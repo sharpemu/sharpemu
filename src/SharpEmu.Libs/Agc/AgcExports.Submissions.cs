@@ -59,6 +59,10 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSubmitDcb(CpuContext ctx)
     {
+        var profileEnabled = DcbSubmissionProfile.Enabled;
+        var callStartTicks = profileEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0L;
         Interlocked.Increment(ref _dcbSubmitCount);
         Volatile.Write(ref _lastDcbSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
 
@@ -92,14 +96,29 @@ public static partial class AgcExports
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        var setupEndTicks = profileEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0L;
         var submittedIndexSnapshots = CaptureSubmittedIndexPackets(
             ctx,
             commandAddress,
             dwordCount,
             gpuState.Graphics.IndexSize,
             out var submittedVertexSnapshots);
+        var snapshotEndTicks = profileEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0L;
+        var lockStartTicks = snapshotEndTicks;
+        var lockAcquiredTicks = 0L;
+        var queuePumpEndTicks = 0L;
+        var drainEndTicks = 0L;
         lock (gpuState.Gate)
         {
+            if (profileEnabled)
+            {
+                lockAcquiredTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             gpuState.Graphics.QueueName = "dcb.graphics";
             EnqueueSubmittedDcb(
                 ctx,
@@ -111,7 +130,28 @@ public static partial class AgcExports
                 tracePackets,
                 submittedIndexSnapshots,
                 submittedVertexSnapshots);
+            if (profileEnabled)
+            {
+                queuePumpEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             DrainResumableDcbs(ctx, gpuState, tracePackets);
+            if (profileEnabled)
+            {
+                drainEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+        }
+
+        if (profileEnabled)
+        {
+            DcbSubmissionProfile.Record(
+                dwordCount,
+                setupEndTicks - callStartTicks,
+                snapshotEndTicks - setupEndTicks,
+                lockAcquiredTicks - lockStartTicks,
+                queuePumpEndTicks - lockAcquiredTicks,
+                drainEndTicks - queuePumpEndTicks,
+                drainEndTicks - callStartTicks);
         }
 
         // No orphan-preamble drain here — this runs on a native guest worker

@@ -376,16 +376,24 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             !hasPixelShader &&
             depthTarget is not null &&
             (depthState.TestEnable || depthState.WriteEnable || depthState.ClearEnable);
-        if (hasDepthOnlyCandidate &&
-            TryCreateTranslatedDepthOnlyGuestDraw(
+        var createdDepthOnlyDraw = false;
+        TranslatedGuestDraw depthOnlyDraw = default!;
+        if (hasDepthOnlyCandidate)
+        {
+            var phaseStart = DcbParseProfile.Begin();
+            createdDepthOnlyDraw = TryCreateTranslatedDepthOnlyGuestDraw(
                 ctx,
                 state,
                 exportShaderAddress,
                 vertexCount,
                 indexed,
                 depthTarget!,
-                out var depthOnlyDraw,
-                out translationError))
+                out depthOnlyDraw,
+                out translationError);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Create, phaseStart);
+        }
+
+        if (createdDepthOnlyDraw)
         {
             depthOnlyDraw = ApplyHtileMetadataClear(
                 gpuState,
@@ -393,14 +401,17 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 depthOnlyDraw);
             state.TranslatedDraw = depthOnlyDraw;
             var activeDepthTarget = depthOnlyDraw.DepthTarget!;
-            var textures = CreateGuestDrawTextures(
-                ctx,
-                depthOnlyDraw.Textures,
-                out _);
+            var phaseStart = DcbParseProfile.Begin();
+            var textures = CreateGuestDrawTextures(ctx, depthOnlyDraw.Textures, out _);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Textures, phaseStart);
+            phaseStart = DcbParseProfile.Begin();
             var globalMemoryBuffers =
                 CreateTranslatedDrawGlobalBuffers(depthOnlyDraw);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.GlobalBuffers, phaseStart);
+            phaseStart = DcbParseProfile.Begin();
             var vertexBuffers =
                 CreateGuestVertexBuffers(depthOnlyDraw.VertexInputs);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.VertexBuffers, phaseStart);
             var renderState = depthOnlyDraw.RenderState;
             if (activeDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
             {
@@ -416,6 +427,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 depthOnlyDraw,
                 textures,
                 vertexBuffers);
+            phaseStart = DcbParseProfile.Begin();
             GuestGpu.Current.SubmitDepthOnlyTranslatedDraw(
                 depthOnlyDraw.PixelShader,
                 textures,
@@ -431,6 +443,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 renderState,
                 depthOnlyDraw.PixelShaderAddress,
                 depthOnlyDraw.BaseVertex);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Submit, phaseStart);
 
             if (_traceAgcShader &&
                 (_traceVertexShaderAddress is not { } traceVertexShaderAddress ||
@@ -451,11 +464,12 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         var intentionallySkipped = false;
-        if (hasExportShader &&
-            hasPixelShader &&
-            hasPsInputEna &&
-            hasPsInputAddr &&
-            TryCreateTranslatedGuestDraw(
+        var createdTranslatedDraw = false;
+        TranslatedGuestDraw translatedDraw = default!;
+        if (hasExportShader && hasPixelShader && hasPsInputEna && hasPsInputAddr)
+        {
+            var phaseStart = DcbParseProfile.Begin();
+            createdTranslatedDraw = TryCreateTranslatedGuestDraw(
                 ctx,
                 state,
                 exportShaderAddress,
@@ -464,9 +478,13 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 psInputAddr,
                 vertexCount,
                 indexed,
-                out var translatedDraw,
+                out translatedDraw,
                 out intentionallySkipped,
-                out translationError))
+                out translationError);
+            DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Create, phaseStart);
+        }
+
+        if (createdTranslatedDraw)
         {
             state.TranslatedDraw = translatedDraw;
             if (TryGetHardwareColorResolveTargets(
@@ -624,14 +642,17 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     }
                 }
 
-                var sharedTextures = CreateGuestDrawTextures(
-                    ctx,
-                    translatedDraw.Textures,
-                    out _);
+                var phaseStart = DcbParseProfile.Begin();
+                var sharedTextures = CreateGuestDrawTextures(ctx, translatedDraw.Textures, out _);
+                DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Textures, phaseStart);
+                phaseStart = DcbParseProfile.Begin();
                 var sharedGlobalMemoryBuffers =
                     CreateTranslatedDrawGlobalBuffers(translatedDraw);
+                DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.GlobalBuffers, phaseStart);
+                phaseStart = DcbParseProfile.Begin();
                 var sharedVertexBuffers =
                     CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.VertexBuffers, phaseStart);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
@@ -640,6 +661,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     translatedDraw,
                     sharedTextures,
                     sharedVertexBuffers);
+                phaseStart = DcbParseProfile.Begin();
                 foreach (var renderTarget in drawRenderTargets)
                 {
                     if (renderTarget.Address != 0)
@@ -647,7 +669,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                         ProvideRenderTargetInitialData(ctx, renderTarget);
                     }
                 }
+                DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.TargetData, phaseStart);
 
+                phaseStart = DcbParseProfile.Begin();
                 if (translatedDraw.IsFullscreenColorClear)
                 {
                     VulkanVideoPresenter.SubmitOffscreenColorClear(
@@ -677,6 +701,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                         translatedDraw.PixelShaderAddress,
                         translatedDraw.BaseVertex);
                 }
+                DcbParseProfile.RecordDrawPhase(DcbParseProfile.DrawPhase.Submit, phaseStart);
             }
             else
             {
