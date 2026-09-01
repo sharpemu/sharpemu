@@ -24,6 +24,14 @@ public static partial class AgcExports
     private static long _renderTargetSampleTraceCount;
     private static long _indirectDrawProbeCount;
     private static long _indirectMultiProbeCount;
+    private static readonly ulong? _traceDrawDetailEs = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAW_DETAIL_ES"));
+    private static readonly uint? _traceDrawDetailCount = uint.TryParse(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAW_DETAIL_COUNT"),
+        out var traceDrawDetailCount)
+        ? traceDrawDetailCount
+        : null;
+    private static int _drawDetailTraceCount;
     private static readonly object _videoDrawChainGate = new();
     private static readonly Dictionary<ulong, (int Depth, long Frame)> _videoDrawChainTargets = new();
     private static long _videoDrawChainFrame;
@@ -197,11 +205,13 @@ public static partial class AgcExports
 
     private static void TraceDrawCompact(
         ulong sequence,
+        SubmittedDcbState state,
         TranslatedGuestDraw draw,
         IReadOnlyList<GuestDrawTexture> textures,
         IReadOnlyList<GuestVertexBuffer> vertexBuffers)
     {
         TraceVideoDrawChain(sequence, draw, textures);
+        TraceDrawOracle(sequence, state, draw);
         if (!_traceDraws)
         {
             return;
@@ -250,6 +260,171 @@ public static partial class AgcExports
             $"mask=0x{blend.WriteMask:X} viewport={viewport} textures={textureList} pos={positions} " +
             $"ps_s0..3={string.Join(',', draw.PixelUserData.Take(4).Select(value => BitConverter.UInt32BitsToSingle(value).ToString("0.###")))} " +
             $"rawblend=0x{draw.RawBlendControl:X8} info=0x{draw.RawColorInfo:X8}");
+    }
+
+    private static void TraceDrawOracle(
+        ulong sequence,
+        SubmittedDcbState state,
+        TranslatedGuestDraw draw)
+    {
+        if (!_traceDrawOracle)
+        {
+            return;
+        }
+
+        const ulong fnvOffset = 14695981039346656037UL;
+        var targetHash = fnvOffset;
+        foreach (var target in draw.RenderTargets)
+        {
+            targetHash = HashDrawOracleWord(targetHash, target.Slot);
+            targetHash = HashDrawOracleWord(targetHash, target.Address);
+            targetHash = HashDrawOracleWord(targetHash, target.Width);
+            targetHash = HashDrawOracleWord(targetHash, target.Height);
+            targetHash = HashDrawOracleWord(targetHash, target.Format);
+        }
+
+        var textureHash = fnvOffset;
+        foreach (var binding in draw.Textures)
+        {
+            var descriptor = binding.Descriptor;
+            textureHash = HashDrawOracleWord(textureHash, descriptor.Address);
+            textureHash = HashDrawOracleWord(textureHash, descriptor.Width);
+            textureHash = HashDrawOracleWord(textureHash, descriptor.Height);
+            textureHash = HashDrawOracleWord(textureHash, descriptor.Format);
+            textureHash = HashDrawOracleWord(textureHash, descriptor.NumberType);
+            textureHash = HashDrawOracleWord(textureHash, descriptor.TileMode);
+            textureHash = HashDrawOracleWord(textureHash, binding.IsStorage ? 1UL : 0UL);
+        }
+
+        var bufferHash = fnvOffset;
+        foreach (var binding in draw.GlobalMemoryBindings)
+        {
+            bufferHash = HashDrawOracleWord(bufferHash, binding.BaseAddress);
+            bufferHash = HashDrawOracleWord(bufferHash, (ulong)binding.DataLength);
+        }
+
+        var vertexHash = fnvOffset;
+        foreach (var input in draw.VertexInputs)
+        {
+            vertexHash = HashDrawOracleWord(vertexHash, input.Location);
+            vertexHash = HashDrawOracleWord(vertexHash, input.BaseAddress);
+            vertexHash = HashDrawOracleWord(vertexHash, input.Stride);
+            vertexHash = HashDrawOracleWord(vertexHash, input.OffsetBytes);
+            vertexHash = HashDrawOracleWord(vertexHash, input.ComponentCount);
+            vertexHash = HashDrawOracleWord(vertexHash, input.DataFormat);
+            vertexHash = HashDrawOracleWord(vertexHash, input.NumberFormat);
+        }
+
+        var targetMask = 0u;
+        var shaderMask = 0u;
+        state.CxRegisters.TryGetValue(CbTargetMask, out targetMask);
+        state.CxRegisters.TryGetValue(0x8Fu, out shaderMask);
+
+        var depth = draw.DepthTarget;
+        var depthState = draw.RenderState.Depth;
+        var blend = draw.RenderState.Blend;
+        var viewport = draw.RenderState.Viewport;
+        var indexType = draw.IndexBuffer?.Is32Bit == true ? 1u : 0u;
+        var depthFormat = depth is null
+            ? 0u
+            : depth.HasStencil
+                ? 130u
+                : depth.GuestFormat switch
+                {
+                    1u => 124u,
+                    3u => 126u,
+                    _ => depth.GuestFormat,
+                };
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.draw_oracle seq={sequence} " +
+            $"name={(draw.IndexBuffer is null ? "DrawIndexAuto" : "DrawIndex")} " +
+            $"es=0x{draw.ExportShaderAddress:X16} ps=0x{draw.PixelShaderAddress:X16} " +
+            $"ps_active={(draw.PixelShaderAddress != 0 ? 1 : 0)} prim={draw.PrimitiveType} " +
+            $"index_type={indexType} count={draw.VertexCount} instances={draw.InstanceCount} " +
+            $"rt_count={draw.RenderTargets.Count} rt_hash={targetHash:X16} " +
+            $"target_mask=0x{targetMask:X8} shader_mask=0x{shaderMask:X8} " +
+            $"depth=0x{depth?.Address ?? 0:X10}:{depth?.Width ?? 0}x{depth?.Height ?? 0}:{depthFormat} " +
+            $"depth_state={(depthState.TestEnable ? 1 : 0)}/{(depthState.WriteEnable ? 1 : 0)}/{depthState.CompareOp} " +
+            $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc} " +
+            $"write_mask=0x{blend.WriteMask:X} " +
+            $"viewport={viewport?.X ?? 0:0.000},{viewport?.Y ?? 0:0.000}," +
+            $"{viewport?.Width ?? 0:0.000},{viewport?.Height ?? 0:0.000} " +
+            $"vs_user={HashDrawOracleWords(draw.VertexInitialScalars):X16} " +
+            $"ps_user={HashDrawOracleWords(draw.PixelInitialScalars):X16} " +
+            $"textures={textureHash:X16} buffers={bufferHash:X16} vertex={vertexHash:X16}");
+
+        TraceDrawOracleDetail(sequence, draw);
+    }
+
+    private static void TraceDrawOracleDetail(ulong sequence, TranslatedGuestDraw draw)
+    {
+        if (_traceDrawDetailEs != draw.ExportShaderAddress ||
+            (_traceDrawDetailCount.HasValue && _traceDrawDetailCount != draw.VertexCount) ||
+            Interlocked.Increment(ref _drawDetailTraceCount) > 8)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.draw_detail seq={sequence} es=0x{draw.ExportShaderAddress:X16} " +
+            $"ps=0x{draw.PixelShaderAddress:X16} count={draw.VertexCount} " +
+            $"vs_user=[{FormatShaderDwords(draw.VertexInitialScalars)}] " +
+            $"ps_user=[{FormatShaderDwords(draw.PixelInitialScalars)}]");
+
+        for (var index = 0; index < draw.Textures.Count; index++)
+        {
+            var binding = draw.Textures[index];
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.draw_detail_image seq={sequence} index={index} " +
+                $"storage={(binding.IsStorage ? 1 : 0)} array={(binding.IsArrayed ? 1 : 0)} " +
+                $"mip={binding.MipLevel} decoded={FormatTextureDescriptor(binding.Descriptor)} " +
+                $"resource=[{FormatShaderDwords(binding.ResourceDescriptor ?? [])}] " +
+                $"sampler=[{FormatShaderDwords(binding.SamplerDescriptor)}]");
+        }
+
+        for (var index = 0; index < draw.GlobalMemoryBindings.Count; index++)
+        {
+            var binding = draw.GlobalMemoryBindings[index];
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.draw_detail_buffer seq={sequence} index={index} " +
+                $"scalar={binding.ScalarAddress} base=0x{binding.BaseAddress:X16} " +
+                $"bytes={binding.DataLength} writable={(binding.Writable ? 1 : 0)} " +
+                $"pcs=[{string.Join(',', binding.InstructionPcs.Select(pc => $"0x{pc:X}"))}]");
+        }
+
+        for (var index = 0; index < draw.VertexInputs.Count; index++)
+        {
+            var input = draw.VertexInputs[index];
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.draw_detail_vertex seq={sequence} index={index} " +
+                $"pc=0x{input.Pc:X} location={input.Location} base=0x{input.BaseAddress:X16} " +
+                $"stride={input.Stride} offset={input.OffsetBytes} components={input.ComponentCount} " +
+                $"format={input.DataFormat}/{input.NumberFormat}");
+        }
+    }
+
+    private static ulong HashDrawOracleWords(IReadOnlyList<uint> words)
+    {
+        var hash = 14695981039346656037UL;
+        foreach (var word in words)
+        {
+            hash = HashDrawOracleWord(hash, word);
+        }
+
+        return hash;
+    }
+
+    private static ulong HashDrawOracleWord(ulong hash, ulong value)
+    {
+        const ulong prime = 1099511628211UL;
+        for (var index = 0; index < sizeof(ulong); index++)
+        {
+            hash ^= (byte)(value >> (index * 8));
+            hash *= prime;
+        }
+
+        return hash;
     }
 
     private static void TraceVideoDrawChain(

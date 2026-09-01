@@ -99,6 +99,12 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.init state=0x{stateAddress:X16} version={version}");
+        if (_traceDepthMetadata)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.register_defaults_source source=init " +
+                $"rip=0x{ctx.Rip:X16} state=0x{stateAddress:X16} version={version}");
+        }
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
     #pragma warning restore SHEM004
@@ -149,6 +155,13 @@ public static partial class AgcExports
 
         var address = internalDefaults ? allocation.Internal : allocation.Primary;
         TraceAgc($"agc.get_register_defaults internal={internalDefaults} version={version} address=0x{address:X16}");
+        if (_traceDepthMetadata)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.register_defaults_source source=handoff " +
+                $"rip=0x{ctx.Rip:X16} internal={internalDefaults} " +
+                $"version={version} address=0x{address:X16}");
+        }
         return ReturnPointer(ctx, address);
     }
 

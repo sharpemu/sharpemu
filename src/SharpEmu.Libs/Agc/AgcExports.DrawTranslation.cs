@@ -412,6 +412,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
             TraceDrawCompact(
                 drawSequence,
+                state,
                 depthOnlyDraw,
                 textures,
                 vertexBuffers);
@@ -635,6 +636,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
                     drawSequence,
+                    state,
                     translatedDraw,
                     sharedTextures,
                     sharedVertexBuffers);
@@ -705,6 +707,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
                     TraceDrawCompact(
                         drawSequence,
+                        state,
                         translatedDraw,
                         textures,
                         vertexBuffers);
@@ -736,7 +739,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                             out _);
                         var globalMemoryBuffers =
                             CreateTranslatedDrawGlobalBuffers(translatedDraw);
-                        TraceDrawCompact(drawSequence, translatedDraw, textures, []);
+                        TraceDrawCompact(drawSequence, state, translatedDraw, textures, []);
                         GuestGpu.Current.SubmitStorageTranslatedDraw(
                             translatedDraw.PixelShader,
                             textures,
@@ -944,7 +947,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 binding.MipLevel ?? 0,
                 NormalizeSamplerDescriptorForImageOperation(
                     binding.SamplerDescriptor),
-                Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
+                Gen5ShaderTranslator.IsArrayedImageBinding(binding),
+                binding.ResourceDescriptor));
         }
 
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
@@ -1651,7 +1655,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     binding.MipLevel ?? 0,
                 NormalizeSamplerDescriptorForImageOperation(
                     binding.SamplerDescriptor),
-                    Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
+                    Gen5ShaderTranslator.IsArrayedImageBinding(binding),
+                    binding.ResourceDescriptor));
         }
 
         error = string.Empty;

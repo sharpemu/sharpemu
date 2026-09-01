@@ -40,6 +40,9 @@ public sealed partial class DirectExecutionBackend
 			? report
 			: 15;
 
+	private static readonly string? _profileGuestRipThreadFilter =
+		Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_RIP_THREAD");
+
 	private const ulong GuestImageBase = 0x0000_0008_0000_0000UL;
 	private const ulong GuestImageLimit = 0x0000_0009_0000_0000UL;
 
@@ -116,7 +119,8 @@ public sealed partial class DirectExecutionBackend
 		sampler.Start();
 		Console.Error.WriteLine(
 			$"[PERF][GUEST] RIP sampler started: interval={_profileGuestRipIntervalMs}ms " +
-			$"report={_profileGuestRipReportSeconds}s");
+			$"report={_profileGuestRipReportSeconds}s " +
+			$"thread={_profileGuestRipThreadFilter ?? "<all>"}");
 	}
 
 	private void GuestRipSampleLoop()
@@ -130,6 +134,14 @@ public sealed partial class DirectExecutionBackend
 			try
 			{
 				var guestThreads = SnapshotGuestThreads();
+				if (!string.IsNullOrWhiteSpace(_profileGuestRipThreadFilter))
+				{
+					guestThreads = guestThreads
+						.Where(thread => thread.Name.Contains(
+							_profileGuestRipThreadFilter,
+							StringComparison.OrdinalIgnoreCase))
+						.ToArray();
+				}
 				var sampleIndex = guestThreads.Length == 0
 					? 0
 					: (int)((uint)Interlocked.Increment(ref _guestRipSampleCursor) % (uint)guestThreads.Length);
@@ -203,8 +215,7 @@ public sealed partial class DirectExecutionBackend
 
 	private void ReportGuestRipSamples(long windowSamples, double windowSeconds)
 	{
-		var total = Interlocked.Read(ref _guestRipTotalSamples);
-		if (total == 0)
+		if (windowSamples == 0)
 		{
 			return;
 		}
@@ -233,7 +244,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		Console.Error.WriteLine(
-			$"[PERF][GUEST] samples={total} window={windowSamples} in {windowSeconds:F1}s " +
+			$"[PERF][GUEST] window={windowSamples} in {windowSeconds:F1}s " +
 			$"capture_failures={Interlocked.Read(ref _guestRipCaptureFailures)}");
 
 		Console.Error.WriteLine(
@@ -243,7 +254,7 @@ public sealed partial class DirectExecutionBackend
 				byRip.OrderByDescending(pair => pair.Value)
 					.Take(12)
 					.Select(pair =>
-						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / total:F1}%")));
+						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / windowSamples:F1}%")));
 
 		Console.Error.WriteLine(
 			"[PERF][GUEST] top_page: " +
@@ -252,7 +263,7 @@ public sealed partial class DirectExecutionBackend
 				byPage.OrderByDescending(pair => pair.Value)
 					.Take(8)
 					.Select(pair =>
-						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / total:F1}%")));
+						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / windowSamples:F1}%")));
 
 		var byWait = new List<KeyValuePair<string, long>>(_guestWaitSamples.Count + 16);
 		foreach (var pair in _guestWaitSamples)
@@ -262,12 +273,12 @@ public sealed partial class DirectExecutionBackend
 
 		var waitTotal = Interlocked.Read(ref _guestWaitTotalSamples);
 		Console.Error.WriteLine(
-			$"[PERF][GUEST] waiting={waitTotal * 100.0 / total:F1}% of guest thread-time; top_wait: " +
+			$"[PERF][GUEST] waiting={waitTotal * 100.0 / windowSamples:F1}% of guest thread-time; top_wait: " +
 			string.Join(
 				" | ",
 				byWait.OrderByDescending(pair => pair.Value)
 					.Take(12)
-					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / total:F1}%")));
+					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / windowSamples:F1}%")));
 
 		// Per-thread spin/park split. The global wait share mixes the job pool in
 		// with a dozen dormant threads, which hides the number that matters:
@@ -291,7 +302,13 @@ public sealed partial class DirectExecutionBackend
 				" | ",
 				byThread.OrderByDescending(pair => pair.Value)
 					.Take(10)
-					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / total:F1}%")));
+					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / windowSamples:F1}%")));
+
+		_guestRipSamples.Clear();
+		_guestRipThreadSamples.Clear();
+		_guestWaitSamples.Clear();
+		_guestThreadWaitSamples.Clear();
+		Interlocked.Exchange(ref _guestWaitTotalSamples, 0);
 	}
 
 	/// <summary>

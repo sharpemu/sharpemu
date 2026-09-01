@@ -139,7 +139,8 @@ public static partial class AgcExports
         bool IsStorage,
         uint MipLevel,
         IReadOnlyList<uint> SamplerDescriptor,
-        bool IsArrayed = false);
+        bool IsArrayed = false,
+        IReadOnlyList<uint>? ResourceDescriptor = null);
 
     private readonly record struct GuestTextureSnapshotReuseKey(
         TextureDescriptor Descriptor,

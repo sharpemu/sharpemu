@@ -458,7 +458,8 @@ public static partial class AgcExports
                     binding.MipLevel ?? 0,
                 NormalizeSamplerDescriptorForImageOperation(
                     binding.SamplerDescriptor),
-                    Gen5ShaderTranslator.IsArrayedImageBinding(binding)));
+                    Gen5ShaderTranslator.IsArrayedImageBinding(binding),
+                    binding.ResourceDescriptor));
             hasStorageBinding |= isStorage;
 
             if (descriptions is not null)
