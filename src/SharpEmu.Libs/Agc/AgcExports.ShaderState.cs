@@ -46,6 +46,8 @@ public static partial class AgcExports
     private const ulong ShaderSpecialVgtShaderStagesEnOffset = 0x08;
     private const uint VgtShaderStagesHsW32EnBit = 1u << 21;
     private const uint VgtShaderStagesGsW32EnBit = 1u << 22;
+    private const uint VgtShaderStagesGsEnableBit = 1u << 5;
+    private const uint VgtGsOutPrimType = 0x29B;
     private const ulong ShaderSpecialVgtGsOutPrimTypeOffset = 0x20;
     private const ulong ShaderSpecialGeUserVgprEnOffset = 0x28;
 
@@ -473,11 +475,13 @@ public static partial class AgcExports
         var geometryShaderAddress = ctx[CpuRegister.Rcx];
         var primitiveType = (uint)ctx[CpuRegister.R8];
 
-        // Hull is optional: tessellation pipelines (GTA fused HS, Ghost of Yōtei)
-        // pass a non-null hull-state block here. Geometry-derived CX/UC writes
-        // stay the same; the hull stage itself is not modelled yet, so it is
-        // only recorded in the trace (#583).
-        if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || geometryShaderAddress == 0)
+        if (cxRegistersAddress == 0 && ucRegistersAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (geometryShaderAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -489,12 +493,36 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!CopyShaderRegister(ctx, specialsAddress + ShaderSpecialVgtShaderStagesEnOffset, cxRegistersAddress) ||
-            !CopyShaderRegister(ctx, specialsAddress + ShaderSpecialVgtGsOutPrimTypeOffset, cxRegistersAddress + 8) ||
-            !CopyShaderRegister(ctx, specialsAddress + ShaderSpecialGeCntlOffset, ucRegistersAddress) ||
-            !CopyShaderRegister(ctx, specialsAddress + ShaderSpecialGeUserVgprEnOffset, ucRegistersAddress + 8) ||
-            !TryWriteUInt32(ctx, ucRegistersAddress + 16, VgtPrimitiveType) ||
-            !TryWriteUInt32(ctx, ucRegistersAddress + 20, primitiveType))
+        ulong hullSpecialsAddress = 0;
+        if (hullShaderAddress != 0 &&
+            (!TryReadByte(ctx, hullShaderAddress + ShaderTypeOffset, out var hullShaderType) ||
+             hullShaderType != HsShaderType ||
+             !TryReadUInt64(ctx, hullShaderAddress + ShaderSpecialsOffset, out hullSpecialsAddress) ||
+             hullSpecialsAddress == 0))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (cxRegistersAddress != 0 &&
+            !TryCreatePrimCxState(
+                ctx,
+                cxRegistersAddress,
+                specialsAddress,
+                hullSpecialsAddress,
+                primitiveType))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (ucRegistersAddress != 0 &&
+            (!CopyShaderRegister(ctx, specialsAddress + ShaderSpecialGeCntlOffset, ucRegistersAddress) ||
+             !CopyShaderRegister(
+                 ctx,
+                 (hullSpecialsAddress != 0 ? hullSpecialsAddress : specialsAddress) +
+                     ShaderSpecialGeUserVgprEnOffset,
+                 ucRegistersAddress + 8) ||
+             !TryWriteUInt32(ctx, ucRegistersAddress + 16, VgtPrimitiveType) ||
+             !TryWriteUInt32(ctx, ucRegistersAddress + 20, primitiveType)))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -650,6 +678,62 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    private static bool TryCreatePrimCxState(
+        CpuContext ctx,
+        ulong destinationAddress,
+        ulong geometrySpecialsAddress,
+        ulong hullSpecialsAddress,
+        uint primitiveType)
+    {
+        var stagesAddress = geometrySpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset;
+        if (!TryReadUInt32(ctx, stagesAddress, out var stagesOffset) ||
+            !TryReadUInt32(ctx, stagesAddress + sizeof(uint), out var stagesValue) ||
+            !TryWriteUInt32(ctx, destinationAddress, stagesOffset))
+        {
+            return false;
+        }
+
+        uint outputPrimitiveOffset;
+        uint outputPrimitiveValue;
+        if ((stagesValue & VgtShaderStagesGsEnableBit) != 0)
+        {
+            var outputAddress = geometrySpecialsAddress + ShaderSpecialVgtGsOutPrimTypeOffset;
+            if (!TryReadUInt32(ctx, outputAddress, out outputPrimitiveOffset) ||
+                !TryReadUInt32(ctx, outputAddress + sizeof(uint), out outputPrimitiveValue))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            outputPrimitiveOffset = VgtGsOutPrimType;
+            outputPrimitiveValue = AgcPrimitiveHelpers.PrimitiveTypeToGsOut(primitiveType);
+        }
+
+        if (hullSpecialsAddress != 0)
+        {
+            var hullStagesAddress = hullSpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset;
+            if (!TryReadUInt32(ctx, hullStagesAddress + sizeof(uint), out var hullStagesValue))
+            {
+                return false;
+            }
+
+            stagesValue |= hullStagesValue;
+            if ((stagesValue & VgtShaderStagesGsEnableBit) == 0)
+            {
+                var hullOutputAddress = hullSpecialsAddress + ShaderSpecialVgtGsOutPrimTypeOffset;
+                if (!TryReadUInt32(ctx, hullOutputAddress, out outputPrimitiveOffset) ||
+                    !TryReadUInt32(ctx, hullOutputAddress + sizeof(uint), out outputPrimitiveValue))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return TryWriteUInt32(ctx, destinationAddress + sizeof(uint), stagesValue) &&
+               TryWriteUInt32(ctx, destinationAddress + 8, outputPrimitiveOffset) &&
+               TryWriteUInt32(ctx, destinationAddress + 12, outputPrimitiveValue);
+    }
     private static uint ApplyInterpolantTwoBitField(uint value, uint field, int shift)
     {
         var mask = 0x3u << shift;
