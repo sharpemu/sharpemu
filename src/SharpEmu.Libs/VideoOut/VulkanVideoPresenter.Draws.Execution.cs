@@ -247,7 +247,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 var depthClearMode = GuestDepthClearMode.Resolve(
                     draw.RenderState.Depth,
                     work.DepthTarget);
-                var clearDepthForDraw = depthClearMode.ClearAttachment;
+                var clearDepthForDraw = depthClearMode.ClearDepthAttachment;
+                var clearStencilForDraw = depthClearMode.ClearStencilAttachment;
                 if (work.DepthTarget?.ReadOnly == true && draw.RenderState.Depth.WriteEnable)
                 {
                     draw = draw with
@@ -255,6 +256,27 @@ internal static unsafe partial class VulkanVideoPresenter
                         RenderState = draw.RenderState with
                         {
                             Depth = draw.RenderState.Depth with { WriteEnable = false },
+                        },
+                    };
+                }
+                if (work.DepthTarget?.StencilReadOnly == true &&
+                    draw.RenderState.Depth.StencilTestEnable)
+                {
+                    draw = draw with
+                    {
+                        RenderState = draw.RenderState with
+                        {
+                            Depth = draw.RenderState.Depth with
+                            {
+                                StencilFront = draw.RenderState.Depth.StencilFront with
+                                {
+                                    WriteMask = 0,
+                                },
+                                StencilBack = draw.RenderState.Depth.StencilBack with
+                                {
+                                    WriteMask = 0,
+                                },
+                            },
                         },
                     };
                 }
@@ -306,6 +328,10 @@ internal static unsafe partial class VulkanVideoPresenter
                             depth.GuestClearDepth = effectiveDepthTarget.ClearDepth;
                             depth.ClearDepth = effectiveDepthTarget.ClearDepth;
                         }
+                        if (clearStencilForDraw)
+                        {
+                            depth.ClearStencil = draw.RenderState.Depth.StencilClearValue;
+                        }
                         clearDepthSeparately = clearDepthForDraw &&
                             (depth.Width < firstTarget.Width ||
                              depth.Height < firstTarget.Height);
@@ -345,6 +371,20 @@ internal static unsafe partial class VulkanVideoPresenter
                         },
                     };
                 }
+                if (depthClearMode.SuppressDrawStencilState)
+                {
+                    draw = draw with
+                    {
+                        RenderState = draw.RenderState with
+                        {
+                            Depth = draw.RenderState.Depth with
+                            {
+                                StencilTestEnable = false,
+                                StencilClearEnable = false,
+                            },
+                        },
+                    };
+                }
 
                 var hasAttachedDepth = depth is not null && !clearDepthSeparately;
                 var hasCompatibleDepthSample = depth is not null &&
@@ -362,7 +402,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         draw.RenderState.Depth.WriteEnable,
                         clearDepthForDraw,
                         targets.Length,
-                        hasCompatibleDepthSample);
+                        hasCompatibleDepthSample) &&
+                    !draw.RenderState.Depth.StencilTestEnable &&
+                    !clearStencilForDraw;
 
                 RenderPass renderPass;
                 Framebuffer framebuffer;
@@ -379,13 +421,13 @@ internal static unsafe partial class VulkanVideoPresenter
                         ? firstTarget.Initialized
                             ? firstTarget.RenderPass
                             : firstTarget.InitialRenderPass
-                            : firstTarget.Initialized
-                            ? depth!.Initialized && !clearDepthForDraw
-                                ? depthFramebuffer.LoadRenderPass
-                                : depthFramebuffer.DepthClearRenderPass
-                            : depth!.Initialized && !clearDepthForDraw
-                                ? depthFramebuffer.ColorClearRenderPass
-                                : depthFramebuffer.BothClearRenderPass;
+                            : SelectDepthRenderPass(
+                                depthFramebuffer,
+                                clearColor: !firstTarget.Initialized,
+                                clearDepth: !depth!.Initialized || clearDepthForDraw,
+                                clearStencil:
+                                    depth.HasStencil &&
+                                    (!depth.Initialized || clearStencilForDraw));
                     framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
                     if (targets.Length > 1)
                     {
@@ -400,7 +442,13 @@ internal static unsafe partial class VulkanVideoPresenter
                             targets.Select(target =>
                                 target.Initialized || target.InitialUploadPending).ToArray(),
                             attachedDepth,
-                            attachedDepth?.Initialized == true && !clearDepthForDraw);
+                            attachedDepth?.Initialized == true,
+                            clearDepth:
+                                attachedDepth is not null &&
+                                (!attachedDepth.Initialized || clearDepthForDraw),
+                            clearStencil:
+                                attachedDepth?.HasStencil == true &&
+                                (!attachedDepth.Initialized || clearStencilForDraw));
                         transientRenderPass = renderPass;
                         transientFramebuffer = framebuffer;
                     }
@@ -413,6 +461,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     extent,
                     targets,
                     hasDepthAttachment: hasAttachedDepth,
+                    attachedDepth: hasAttachedDepth ? depth : null,
                     feedbackDepth: directReadOnlyDepthFeedback || clearDepthSeparately
                         ? null
                         : depth,
@@ -472,6 +521,7 @@ internal static unsafe partial class VulkanVideoPresenter
                           depthFramebuffer is not null &&
                           depth.Initialized &&
                           !clearDepthForDraw &&
+                          !clearStencilForDraw &&
                           renderPass.Handle == depthFramebuffer.LoadRenderPass.Handle &&
                           framebuffer.Handle == depthFramebuffer.Framebuffer.Handle);
                 var needsGlobalBufferBarrier =
@@ -574,7 +624,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                             Image = depth.Image,
                             SubresourceRange = new ImageSubresourceRange(
-                                ImageAspectFlags.DepthBit, 0, 1, 0, 1),
+                                depth.AspectMask, 0, 1, 0, 1),
                         };
                         _vk.CmdPipelineBarrier(
                             _commandBuffer,
@@ -617,7 +667,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                             Image = depth.Image,
                             SubresourceRange = new ImageSubresourceRange(
-                                ImageAspectFlags.DepthBit, 0, 1, 0, 1),
+                                depth.AspectMask, 0, 1, 0, 1),
                         };
                         _vk.CmdPipelineBarrier(
                             _commandBuffer,
@@ -643,6 +693,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         colorAttachmentCount: targets.Length,
                         hasDepthAttachment: hasDepthAttachment,
                         clearDepth: depth?.ClearDepth ?? 1f,
+                        clearStencil: depth?.ClearStencil ?? 0,
                         colorClearValues: metadataClearValues);
                 }
 
@@ -1619,7 +1670,9 @@ internal static unsafe partial class VulkanVideoPresenter
             uint height,
             IReadOnlyList<bool> initialized,
             GuestDepthResource? depth,
-            bool depthInitialized)
+            bool depthInitialized,
+            bool clearDepth = false,
+            bool clearStencil = false)
         {
             if (formats.Count == 0 ||
                 formats.Count != attachmentViews.Count ||
@@ -1661,17 +1714,23 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 attachments[formats.Count] = new AttachmentDescription
                 {
-                    Format = DepthFormat,
+                    Format = depth.Format,
                     Samples = SampleCountFlags.Count1Bit,
-                    LoadOp = depthInitialized
-                        ? AttachmentLoadOp.Load
-                        : AttachmentLoadOp.Clear,
+                    LoadOp = clearDepth || !depthInitialized
+                        ? AttachmentLoadOp.Clear
+                        : AttachmentLoadOp.Load,
                     StoreOp = AttachmentStoreOp.Store,
-                    StencilLoadOp = AttachmentLoadOp.DontCare,
-                    StencilStoreOp = AttachmentStoreOp.DontCare,
-                    InitialLayout = depthInitialized
-                        ? ImageLayout.DepthStencilAttachmentOptimal
-                        : ImageLayout.Undefined,
+                    StencilLoadOp = depth.HasStencil
+                        ? clearStencil || !depthInitialized
+                            ? AttachmentLoadOp.Clear
+                            : AttachmentLoadOp.Load
+                        : AttachmentLoadOp.DontCare,
+                    StencilStoreOp = depth.HasStencil
+                        ? AttachmentStoreOp.Store
+                        : AttachmentStoreOp.DontCare,
+                    InitialLayout = !depthInitialized
+                        ? ImageLayout.Undefined
+                        : ImageLayout.DepthStencilAttachmentOptimal,
                     FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
                 };
                 depthReference = new AttachmentReference

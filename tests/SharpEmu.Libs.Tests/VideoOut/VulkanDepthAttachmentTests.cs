@@ -66,6 +66,19 @@ public sealed class VulkanDepthAttachmentTests
         Assert.True(VulkanVideoPresenter.ShouldAttachGuestDepth(Target, state));
     }
 
+    [Fact]
+    public void GuestDepthTarget_AttachesForStencilWork()
+    {
+        var state = GuestDepthState.Default with
+        {
+            StencilTestEnable = true,
+        };
+
+        Assert.True(VulkanVideoPresenter.ShouldAttachGuestDepth(
+            Target with { HasStencil = true },
+            state));
+    }
+
     [Theory]
     [InlineData(0x41u, true)]
     [InlineData(0x40u, false)]
@@ -85,6 +98,72 @@ public sealed class VulkanDepthAttachmentTests
         Assert.True(state.WriteEnable);
         Assert.Equal(7u, state.CompareOp);
         Assert.Equal(clearEnable, state.ClearEnable);
+    }
+
+    [Fact]
+    public void DepthState_DecodesFrontAndBackStencilState()
+    {
+        var registers = new Dictionary<uint, uint>
+        {
+            [0x000] = 0x2,
+            [0x00A] = 0x7F,
+            [0x011] = 0x1,
+            [0x10B] =
+                0x3u |
+                (0x4u << 4) |
+                (0x5u << 8) |
+                (0x6u << 12) |
+                (0x7u << 16) |
+                (0x8u << 20),
+            [0x10C] = 0x44332211,
+            [0x10D] = 0x88776655,
+            [0x200] = 0x1u | (1u << 7) | (2u << 8) | (6u << 20),
+        };
+
+        var state = AgcExports.DecodeDepthState(registers);
+
+        Assert.True(state.StencilTestEnable);
+        Assert.True(state.StencilClearEnable);
+        Assert.Equal(0x7F, state.StencilClearValue);
+        Assert.Equal(
+            new GuestStencilFaceState(3, 4, 5, 2, 0x22, 0x33, 0x11, 0x44),
+            state.StencilFront);
+        Assert.Equal(
+            new GuestStencilFaceState(6, 7, 8, 6, 0x66, 0x77, 0x55, 0x88),
+            state.StencilBack);
+    }
+
+    [Fact]
+    public void DepthState_CopiesFrontStencilStateWhenBackfaceModeIsDisabled()
+    {
+        var registers = new Dictionary<uint, uint>
+        {
+            [0x011] = 0x1,
+            [0x10B] = 0x765,
+            [0x10C] = 0x44332211,
+            [0x10D] = 0x88776655,
+            [0x200] = 0x1u | (3u << 8) | (6u << 20),
+        };
+
+        var state = AgcExports.DecodeDepthState(registers);
+
+        Assert.Equal(state.StencilFront, state.StencilBack);
+    }
+
+    [Fact]
+    public void DepthState_DisablesStencilWithoutAStencilAttachmentFormat()
+    {
+        var registers = new Dictionary<uint, uint>
+        {
+            [0x000] = 0x2,
+            [0x011] = 0x0,
+            [0x200] = 0x1,
+        };
+
+        var state = AgcExports.DecodeDepthState(registers);
+
+        Assert.False(state.StencilTestEnable);
+        Assert.False(state.StencilClearEnable);
     }
 
     [Fact]

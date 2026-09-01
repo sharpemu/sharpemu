@@ -565,6 +565,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public GuestRasterState Raster = GuestRasterState.Default;
             public GuestDepthState Depth = GuestDepthState.Default;
             public bool HasDepthAttachment;
+            public Format DepthAttachmentFormat = Format.Undefined;
             // Layout keys are needed twice per draw (pipeline lookup and
             // descriptor-layout lookup); cache the built strings.
             public string? ResourceLayoutKey;

@@ -708,6 +708,7 @@ internal static unsafe partial class VulkanVideoPresenter
             int colorAttachmentCount = 1,
             bool hasDepthAttachment = false,
             float clearDepth = 1f,
+            byte clearStencil = 0,
             ClearColorValue[]? colorClearValues = null)
         {
             colorAttachmentCount = Math.Max(colorAttachmentCount, 1);
@@ -726,7 +727,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 clearValues[colorAttachmentCount] = new ClearValue
                 {
-                    DepthStencil = new ClearDepthStencilValue(clearDepth, 0),
+                    DepthStencil = new ClearDepthStencilValue(
+                        clearDepth,
+                        clearStencil),
                 };
             }
             var renderPassInfo = new RenderPassBeginInfo
@@ -788,6 +791,35 @@ internal static unsafe partial class VulkanVideoPresenter
                 resources.BlendConstant.Alpha,
             };
             _vk.CmdSetBlendConstants(_commandBuffer, blendConstants);
+            if (resources.Depth.StencilTestEnable)
+            {
+                var front = resources.Depth.StencilFront;
+                var back = resources.Depth.StencilBack;
+                _vk.CmdSetStencilCompareMask(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceFrontBit,
+                    front.CompareMask);
+                _vk.CmdSetStencilCompareMask(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceBackBit,
+                    back.CompareMask);
+                _vk.CmdSetStencilWriteMask(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceFrontBit,
+                    front.WriteMask);
+                _vk.CmdSetStencilWriteMask(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceBackBit,
+                    back.WriteMask);
+                _vk.CmdSetStencilReference(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceFrontBit,
+                    front.Reference);
+                _vk.CmdSetStencilReference(
+                    _commandBuffer,
+                    StencilFaceFlags.FaceBackBit,
+                    back.Reference);
+            }
             if (resources.VertexBuffers.Length != 0)
             {
                 var buffers = stackalloc VkBuffer[resources.VertexBuffers.Length];

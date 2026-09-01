@@ -213,13 +213,29 @@ internal readonly record struct GuestRasterState(
     }
 }
 
+internal readonly record struct GuestStencilFaceState(
+    uint FailOp,
+    uint PassOp,
+    uint DepthFailOp,
+    uint CompareOp,
+    uint CompareMask,
+    uint WriteMask,
+    uint Reference,
+    uint OperationValue);
+
 // CompareOp uses the GCN DB_DEPTH_CONTROL ZFUNC encoding, which matches the
-// Vulkan CompareOp ordering (0=Never through 7=Always).
+// Vulkan CompareOp ordering (0=Never through 7=Always). Stencil operations
+// retain their raw DB_STENCIL_CONTROL encodings for backend translation.
 internal readonly record struct GuestDepthState(
     bool TestEnable,
     bool WriteEnable,
     uint CompareOp,
-    bool ClearEnable = false)
+    bool ClearEnable = false,
+    bool StencilTestEnable = false,
+    bool StencilClearEnable = false,
+    byte StencilClearValue = 0,
+    GuestStencilFaceState StencilFront = default,
+    GuestStencilFaceState StencilBack = default)
 {
     public static GuestDepthState Default { get; } = new(false, false, 7, false);
 }
@@ -301,19 +317,36 @@ internal sealed record GuestDepthTarget(
     ulong HtileAddress = 0,
     uint HtileBaseLayer = 0,
     bool HtileAcceleration = false,
-    bool MetadataClear = false)
+    bool MetadataClear = false,
+    bool HasStencil = false,
+    ulong StencilReadAddress = 0,
+    ulong StencilWriteAddress = 0,
+    bool StencilReadOnly = false)
 {
-    public ulong Address => WriteAddress != 0 ? WriteAddress : ReadAddress;
+    public ulong Address => WriteAddress != 0
+        ? WriteAddress
+        : ReadAddress != 0
+            ? ReadAddress
+            : StencilWriteAddress != 0
+                ? StencilWriteAddress
+                : StencilReadAddress;
 }
 
 /// <summary>Separates an attachment clear from a direct DB clear operation.</summary>
 internal readonly record struct GuestDepthClearMode(
-    bool ClearAttachment,
-    bool SuppressDrawDepthState)
+    bool ClearDepthAttachment,
+    bool ClearStencilAttachment,
+    bool SuppressDrawDepthState,
+    bool SuppressDrawStencilState)
 {
+    public bool ClearAttachment => ClearDepthAttachment;
+
     public static GuestDepthClearMode Resolve(
         GuestDepthState depthState,
         GuestDepthTarget? depthTarget) => new(
-            ClearAttachment: depthState.ClearEnable || depthTarget?.MetadataClear == true,
-            SuppressDrawDepthState: depthState.ClearEnable);
+            ClearDepthAttachment:
+                depthState.ClearEnable || depthTarget?.MetadataClear == true,
+            ClearStencilAttachment: depthState.StencilClearEnable,
+            SuppressDrawDepthState: depthState.ClearEnable,
+            SuppressDrawStencilState: depthState.StencilClearEnable);
 }

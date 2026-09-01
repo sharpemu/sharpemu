@@ -41,12 +41,27 @@ internal static unsafe partial class VulkanVideoPresenter
             string FragmentShader,
             string RenderTargetLayout,
             bool HasDepthAttachment,
+            Format DepthAttachmentFormat,
             PrimitiveTopology Topology,
             string BlendLayout,
             string ResourceLayout,
             string VertexLayout,
             GuestRasterState Raster,
-            GuestDepthState Depth);
+            DepthPipelineStateKey Depth);
+
+        private readonly record struct DepthPipelineStateKey(
+            bool TestEnable,
+            bool WriteEnable,
+            uint CompareOp,
+            bool StencilTestEnable,
+            StencilOp FrontFailOp,
+            StencilOp FrontPassOp,
+            StencilOp FrontDepthFailOp,
+            uint FrontCompareOp,
+            StencilOp BackFailOp,
+            StencilOp BackPassOp,
+            StencilOp BackDepthFailOp,
+            uint BackCompareOp);
 
         private readonly record struct DescriptorLayoutKey(
             ShaderStageFlags Stages,
@@ -210,6 +225,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Extent2D extent,
             IReadOnlyList<GuestImageResource>? feedbackTargets = null,
             bool hasDepthAttachment = false,
+            GuestDepthResource? attachedDepth = null,
             GuestDepthResource? feedbackDepth = null,
             GuestDepthResource? directReadOnlyDepthFeedback = null)
         {
@@ -294,6 +310,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Raster = draw.RenderState.Raster,
                 Depth = draw.RenderState.Depth,
                 HasDepthAttachment = hasDepthAttachment,
+                DepthAttachmentFormat = attachedDepth?.Format ?? Format.Undefined,
                 TargetFormats = renderTargetFormats.ToArray(),
             };
             if (forceFullscreenVertex)
@@ -806,6 +823,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 GetShaderDigest(fragmentSpirv),
                 string.Join(',', renderTargetFormats.Select(format => (uint)format)),
                 resources.HasDepthAttachment,
+                resources.DepthAttachmentFormat,
                 resources.Topology,
                 string.Join(';', resources.Blends.Select(blend =>
                     $"{(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}:{blend.ColorDstFactor}:" +
@@ -814,7 +832,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 GetResourceLayoutKey(resources),
                 GetVertexLayoutKey(resources),
                 resources.Raster,
-                resources.HasDepthAttachment ? resources.Depth : GuestDepthState.Default);
+                GetDepthPipelineStateKey(
+                    resources.HasDepthAttachment
+                        ? resources.Depth
+                        : GuestDepthState.Default));
             if (_graphicsPipelines.TryGetValue(pipelineKey, out var cachedPipeline))
             {
                 resources.Pipeline = cachedPipeline;
@@ -990,19 +1011,24 @@ internal static unsafe partial class VulkanVideoPresenter
                         AttachmentCount = (uint)resources.Blends.Length,
                         PAttachments = colorBlendAttachments,
                     };
-                    var dynamicStateValues = stackalloc DynamicState[3];
+                    var dynamicStateValues = stackalloc DynamicState[6];
                     dynamicStateValues[0] = DynamicState.Viewport;
                     dynamicStateValues[1] = DynamicState.Scissor;
                     // CB_BLEND_RED..ALPHA vary per draw without a pipeline
                     // identity change, so the constant stays dynamic.
                     dynamicStateValues[2] = DynamicState.BlendConstants;
+                    dynamicStateValues[3] = DynamicState.StencilCompareMask;
+                    dynamicStateValues[4] = DynamicState.StencilWriteMask;
+                    dynamicStateValues[5] = DynamicState.StencilReference;
                     var dynamicState = new PipelineDynamicStateCreateInfo
                     {
                         SType = StructureType.PipelineDynamicStateCreateInfo,
-                        DynamicStateCount = 3,
+                        DynamicStateCount = 6,
                         PDynamicStates = dynamicStateValues,
                     };
                     var depth = resources.Depth;
+                    var stencilFront = depth.StencilFront;
+                    var stencilBack = depth.StencilBack;
                     var depthStencil = new PipelineDepthStencilStateCreateInfo
                     {
                         SType = StructureType.PipelineDepthStencilStateCreateInfo,
@@ -1010,7 +1036,25 @@ internal static unsafe partial class VulkanVideoPresenter
                         DepthWriteEnable = depth.WriteEnable,
                         DepthCompareOp = ToVkCompareOp(depth.CompareOp),
                         DepthBoundsTestEnable = false,
-                        StencilTestEnable = false,
+                        StencilTestEnable = depth.StencilTestEnable,
+                        Front = new StencilOpState
+                        {
+                            FailOp = ToVkStencilOp(stencilFront.FailOp, stencilFront),
+                            PassOp = ToVkStencilOp(stencilFront.PassOp, stencilFront),
+                            DepthFailOp = ToVkStencilOp(
+                                stencilFront.DepthFailOp,
+                                stencilFront),
+                            CompareOp = ToVkCompareOp(stencilFront.CompareOp),
+                        },
+                        Back = new StencilOpState
+                        {
+                            FailOp = ToVkStencilOp(stencilBack.FailOp, stencilBack),
+                            PassOp = ToVkStencilOp(stencilBack.PassOp, stencilBack),
+                            DepthFailOp = ToVkStencilOp(
+                                stencilBack.DepthFailOp,
+                                stencilBack),
+                            CompareOp = ToVkCompareOp(stencilBack.CompareOp),
+                        },
                     };
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {
@@ -1056,6 +1100,53 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DestroyShaderModule(_device, fragmentModule, null);
                 _vk.DestroyShaderModule(_device, vertexModule, null);
             }
+        }
+
+        private static StencilOp ToVkStencilOp(
+            uint operation,
+            GuestStencilFaceState state)
+        {
+            if (state.WriteMask == 0)
+            {
+                return StencilOp.Keep;
+            }
+
+            return operation switch
+            {
+                0x0 => StencilOp.Keep,
+                0x1 => StencilOp.Zero,
+                0x3 or 0x4 => StencilOp.Replace,
+                0x5 => StencilOp.IncrementAndClamp,
+                0x6 => StencilOp.DecrementAndClamp,
+                0x7 => StencilOp.Invert,
+                0x8 => StencilOp.IncrementAndWrap,
+                0x9 => StencilOp.DecrementAndWrap,
+                0xC when (state.WriteMask & state.OperationValue) == 0 =>
+                    StencilOp.Keep,
+                0xC when (state.WriteMask & ~state.OperationValue) == 0 =>
+                    StencilOp.Invert,
+                _ => StencilOp.Keep,
+            };
+        }
+
+        private static DepthPipelineStateKey GetDepthPipelineStateKey(
+            GuestDepthState depth)
+        {
+            var front = depth.StencilFront;
+            var back = depth.StencilBack;
+            return new DepthPipelineStateKey(
+                depth.TestEnable,
+                depth.WriteEnable,
+                depth.CompareOp,
+                depth.StencilTestEnable,
+                ToVkStencilOp(front.FailOp, front),
+                ToVkStencilOp(front.PassOp, front),
+                ToVkStencilOp(front.DepthFailOp, front),
+                front.CompareOp,
+                ToVkStencilOp(back.FailOp, back),
+                ToVkStencilOp(back.PassOp, back),
+                ToVkStencilOp(back.DepthFailOp, back),
+                back.CompareOp);
         }
 
         private DescriptorLayoutBundle GetOrCreateDescriptorLayout(

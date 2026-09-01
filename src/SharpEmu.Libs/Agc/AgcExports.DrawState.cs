@@ -18,7 +18,16 @@ public static partial class AgcExports
         "1",
         StringComparison.Ordinal);
     private static readonly ConcurrentDictionary<
-        (ulong Depth, ulong Htile, uint ZInfo, uint Surface, uint Control, uint RenderControl), byte>
+        (ulong Depth,
+         ulong Htile,
+         uint ZInfo,
+         uint StencilInfo,
+         uint Surface,
+         uint Control,
+         uint RenderControl,
+         uint StencilControl,
+         uint FrontMask,
+         uint BackMask), byte>
         _tracedDepthMetadataStates = new();
     private static readonly ConcurrentDictionary<(ulong Htile, string Source), byte>
         _tracedHtileMetadataMarks = new();
@@ -211,9 +220,11 @@ public static partial class AgcExports
             DecodeBlendConstant(registers));
     }
 
-    // DB_DEPTH_CONTROL (context register 0x200): Z_ENABLE bit1, Z_WRITE_ENABLE
-    // bit2, ZFUNC bits[6:4] (GCN compare, matches Vulkan CompareOp ordering).
-    // DB_RENDER_CONTROL (context register 0x000): DEPTH_CLEAR_ENABLE bit0.
+    // DB_DEPTH_CONTROL (context register 0x200): STENCIL_ENABLE bit0,
+    // Z_ENABLE bit1, Z_WRITE_ENABLE bit2, ZFUNC bits[6:4], BACKFACE_ENABLE
+    // bit7, and front/back STENCILFUNC in bits[10:8]/[22:20]. Compare
+    // encodings match Vulkan (0=Never through 7=Always).
+    // DB_RENDER_CONTROL (context register 0x000): depth/stencil clear bits 0/1.
     private const uint DbDepthControl = 0x200;
 
     internal static GuestDepthState DecodeDepthState(
@@ -227,7 +238,57 @@ public static partial class AgcExports
             ? (control >> 4) & 0x7u
             : GuestDepthState.Default.CompareOp;
         var clearEnable = (renderControl & 0x1u) != 0;
-        return new GuestDepthState(testEnable, writeEnable, compareOp, clearEnable);
+        var hasStencilAttachment =
+            registers.TryGetValue(DbStencilInfo, out var stencilInfo) &&
+            (stencilInfo & 0x1u) != 0;
+        var stencilTestEnable = hasStencilAttachment && (control & 0x1u) != 0;
+        var stencilClearEnable =
+            hasStencilAttachment && (renderControl & 0x2u) != 0;
+        registers.TryGetValue(DbStencilClear, out var stencilClear);
+        registers.TryGetValue(DbStencilControl, out var stencilControl);
+        registers.TryGetValue(DbStencilRefMask, out var stencilRefMask);
+        registers.TryGetValue(DbStencilRefMaskBack, out var stencilRefMaskBack);
+
+        var front = DecodeStencilFaceState(
+            stencilControl,
+            stencilRefMask,
+            (control >> 8) & 0x7u,
+            backFace: false);
+        var back = (control & (1u << 7)) != 0
+            ? DecodeStencilFaceState(
+                stencilControl,
+                stencilRefMaskBack,
+                (control >> 20) & 0x7u,
+                backFace: true)
+            : front;
+        return new GuestDepthState(
+            testEnable,
+            writeEnable,
+            compareOp,
+            clearEnable,
+            stencilTestEnable,
+            stencilClearEnable,
+            (byte)stencilClear,
+            front,
+            back);
+    }
+
+    private static GuestStencilFaceState DecodeStencilFaceState(
+        uint control,
+        uint mask,
+        uint compareOp,
+        bool backFace)
+    {
+        var operationShift = backFace ? 12 : 0;
+        return new GuestStencilFaceState(
+            FailOp: (control >> operationShift) & 0xFu,
+            PassOp: (control >> (operationShift + 4)) & 0xFu,
+            DepthFailOp: (control >> (operationShift + 8)) & 0xFu,
+            CompareOp: compareOp,
+            CompareMask: (mask >> 8) & 0xFFu,
+            WriteMask: (mask >> 16) & 0xFFu,
+            Reference: mask & 0xFFu,
+            OperationValue: (mask >> 24) & 0xFFu);
     }
 
     internal static bool TryDecodeHtileMetadataBinding(
@@ -336,7 +397,9 @@ public static partial class AgcExports
         var depthState = DecodeDepthState(registers);
         if (!depthState.TestEnable &&
             !depthState.WriteEnable &&
-            !depthState.ClearEnable)
+            !depthState.ClearEnable &&
+            !depthState.StencilTestEnable &&
+            !depthState.StencilClearEnable)
         {
             return null;
         }
@@ -350,8 +413,10 @@ public static partial class AgcExports
 
         var sizeXy = compositeSizeXy ?? registers[DbDepthSizeXy];
 
+        registers.TryGetValue(DbStencilInfo, out var stencilInfo);
         var guestFormat = zInfo & 0x3u;
-        if (guestFormat == 0)
+        var hasStencil = (stencilInfo & 0x1u) != 0;
+        if (guestFormat == 0 && !hasStencil)
         {
             return null;
         }
@@ -360,9 +425,20 @@ public static partial class AgcExports
         registers.TryGetValue(DbZWriteBase, out var writeBase);
         registers.TryGetValue(DbZReadBaseHi, out var readBaseHi);
         registers.TryGetValue(DbZWriteBaseHi, out var writeBaseHi);
+        registers.TryGetValue(DbStencilReadBase, out var stencilReadBase);
+        registers.TryGetValue(DbStencilWriteBase, out var stencilWriteBase);
+        registers.TryGetValue(DbStencilReadBaseHi, out var stencilReadBaseHi);
+        registers.TryGetValue(DbStencilWriteBaseHi, out var stencilWriteBaseHi);
         var readAddress = ((ulong)(readBaseHi & 0xFFu) << 40) | ((ulong)readBase << 8);
         var writeAddress = ((ulong)(writeBaseHi & 0xFFu) << 40) | ((ulong)writeBase << 8);
-        if (readAddress == 0 && writeAddress == 0)
+        var stencilReadAddress =
+            ((ulong)(stencilReadBaseHi & 0xFFu) << 40) |
+            ((ulong)stencilReadBase << 8);
+        var stencilWriteAddress =
+            ((ulong)(stencilWriteBaseHi & 0xFFu) << 40) |
+            ((ulong)stencilWriteBase << 8);
+        if (readAddress == 0 && writeAddress == 0 &&
+            stencilReadAddress == 0 && stencilWriteAddress == 0)
         {
             return null;
         }
@@ -396,14 +472,21 @@ public static partial class AgcExports
             registers.TryGetValue(DbHtileSurface, out var htileSurface);
             registers.TryGetValue(DbDepthControl, out var depthControl);
             registers.TryGetValue(DbRenderControl, out var renderControl);
+            registers.TryGetValue(DbStencilControl, out var rawStencilControl);
+            registers.TryGetValue(DbStencilRefMask, out var frontStencilMask);
+            registers.TryGetValue(DbStencilRefMaskBack, out var backStencilMask);
             var depthAddress = writeAddress != 0 ? writeAddress : readAddress;
             if (_tracedDepthMetadataStates.TryAdd(
                     (depthAddress,
                      htileAddress,
                      zInfo,
+                     stencilInfo,
                      htileSurface,
                      depthControl,
-                     renderControl),
+                     renderControl,
+                     rawStencilControl,
+                     frontStencilMask,
+                     backStencilMask),
                     0) &&
                 Interlocked.Increment(ref _depthMetadataTraceCount) <= 128)
             {
@@ -411,9 +494,12 @@ public static partial class AgcExports
                     $"[LOADER][TRACE] agc.depth_metadata " +
                     $"depth=0x{depthAddress:X16} htile=0x{htileAddress:X16} " +
                     $"size={width}x{height} z_info=0x{zInfo:X8} " +
+                    $"stencil_info=0x{stencilInfo:X8} " +
                     $"htile_accel={((zInfo & 0x20000000u) != 0 ? 1 : 0)} " +
                     $"surface=0x{htileSurface:X8} control=0x{depthControl:X8} " +
                     $"render_control=0x{renderControl:X8} " +
+                    $"stencil_control=0x{rawStencilControl:X8} " +
+                    $"stencil_masks=0x{frontStencilMask:X8}/0x{backStencilMask:X8} " +
                     $"direct_clear={(depthState.ClearEnable ? 1 : 0)} " +
                     $"clear={clearDepth:R}");
             }
@@ -430,7 +516,12 @@ public static partial class AgcExports
             ReadOnly: (depthView & (1u << 24)) != 0 || writeAddress == 0,
             HtileAddress: htileAddress,
             HtileBaseLayer: htileBaseLayer,
-            HtileAcceleration: htileAcceleration);
+            HtileAcceleration: htileAcceleration,
+            HasStencil: hasStencil,
+            StencilReadAddress: stencilReadAddress,
+            StencilWriteAddress: stencilWriteAddress,
+            StencilReadOnly:
+                (depthView & (1u << 25)) != 0 || stencilWriteAddress == 0);
     }
 
     // PA_SU_SC_MODE_CNTL (context register 0x205) carries face culling, the
