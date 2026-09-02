@@ -126,6 +126,7 @@ public static partial class AgcExports
     private const uint SpiShaderPgmChksumPs = 0x06;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
+    private const uint SpiPsInControl = 0x1B6;
     private const uint ComputePgmLo = 0x20C;
     private const uint ComputePgmHi = 0x20D;
     private const uint ComputeShaderChksum = 0x22A;
@@ -440,10 +441,23 @@ public static partial class AgcExports
 
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
 
-    private static uint[] ReadPsInputCntlRegisters(IReadOnlyDictionary<uint, uint> cxRegisters)
+    internal static uint GetPsInputCount(
+        IReadOnlyDictionary<uint, uint> cxRegisters,
+        uint fallbackCount)
     {
-        var cntl = new uint[32];
-        for (uint i = 0; i < 32u; i++)
+        var count = cxRegisters.TryGetValue(SpiPsInControl, out var control)
+            ? control & 0x3Fu
+            : fallbackCount;
+        return Math.Min(count, 32u);
+    }
+
+    internal static uint[] ReadPsInputCntlRegisters(
+        IReadOnlyDictionary<uint, uint> cxRegisters,
+        uint inputCount)
+    {
+        var boundedCount = Math.Min(inputCount, 32u);
+        var cntl = new uint[boundedCount];
+        for (uint i = 0; i < boundedCount; i++)
         {
             // Unprogrammed slots default to identity (ATTR i → param i).
             cntl[i] = cxRegisters.TryGetValue(SpiPsInputCntl0 + i, out var value)

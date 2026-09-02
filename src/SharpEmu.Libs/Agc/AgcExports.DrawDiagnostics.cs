@@ -848,7 +848,11 @@ public static partial class AgcExports
                                  out var compileError,
                                  pixelInputEnable: psInputEna,
                                  pixelInputAddress: psInputAddr,
-                                 pixelInputCntl: ReadPsInputCntlRegisters(state.CxRegisters),
+                                 pixelInputCntl: ReadPsInputCntlRegisters(
+                                     state.CxRegisters,
+                                     GetPsInputCount(
+                                         state.CxRegisters,
+                                         GetInterpolatedAttributeCount(pixelState))),
                                  storageBufferOffsetAlignment:
                                      _storageBufferOffsetAlignment))
                         {

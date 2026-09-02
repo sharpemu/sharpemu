@@ -613,15 +613,19 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("struct Gen5PsIn");
                 source.AppendLine("{");
                 source.AppendLine("    float4 sharpemu_frag_coord [[position]];");
-                foreach (var attribute in _pixelAttributes)
+                var attributes = _pixelAttributes.ToArray();
+                var locations = Gen5PixelInputMapping.ResolveLocations(
+                    _pixelInputCntl,
+                    attributes);
+                for (var index = 0; index < attributes.Length; index++)
                 {
+                    var attribute = attributes[index];
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var location = cntl & 0x1Fu;
                     var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
                     source.AppendLine(
-                        $"    float4 attr{attribute} [[user(locn{location}){flat}]];");
+                        $"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
                 }
 
                 source.AppendLine("};");

@@ -1327,8 +1327,12 @@ public static partial class Gen5SpirvTranslator
                     .Distinct()
                     .Order()
                     .ToArray();
-                foreach (var attribute in attributes)
+                var locations = Gen5PixelInputMapping.ResolveLocations(
+                    _pixelInputCntl,
+                    attributes);
+                for (var index = 0; index < attributes.Length; index++)
                 {
+                    var attribute = attributes[index];
                     var variable = _module.AddGlobalVariable(
                         inputVec4Pointer,
                         SpirvStorageClass.Input);
@@ -1337,8 +1341,10 @@ public static partial class Gen5SpirvTranslator
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var location = cntl & 0x1Fu;
-                    _module.AddDecoration(variable, SpirvDecoration.Location, location);
+                    _module.AddDecoration(
+                        variable,
+                        SpirvDecoration.Location,
+                        locations[index]);
                     if ((cntl & 0x400u) != 0)
                     {
                         _module.AddDecoration(variable, SpirvDecoration.Flat);
