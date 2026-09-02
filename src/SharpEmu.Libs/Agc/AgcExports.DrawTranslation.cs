@@ -560,20 +560,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 return;
             }
 
-            // DbRenderControl CLEARON (bit0): when set, the CB clears color
-            // targets on first draw. Handle color targets (depth is already
-            // handled by DecodeDepthState).
-            if (state.CxRegisters.TryGetValue(DbRenderControl, out var rc) && (rc & 0x1u) != 0)
-            {
-                foreach (var rt in translatedDraw.RenderTargets)
-                {
-                    if (rt.Address != 0)
-                    {
-                        VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
-                    }
-                }
-            }
-
             // CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit12) set on
             // one or more targets. The CB clears via CMASK before the draw
             // writes; mark targets for clear-on-first-use.
