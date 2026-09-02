@@ -35,6 +35,126 @@ public static partial class AgcExports
     private static readonly object _videoDrawChainGate = new();
     private static readonly Dictionary<ulong, (int Depth, long Frame)> _videoDrawChainTargets = new();
     private static long _videoDrawChainFrame;
+    private static readonly bool _traceAgcInterpolantFlow = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_AGC_INTERPOLANT_FLOW"),
+        "1",
+        StringComparison.Ordinal);
+    private static long _interpolantPacketTraceSequence;
+    private static long _interpolantDrawTraceSequence;
+    private static readonly HashSet<(ulong Es, ulong Ps, uint Control, ulong Mapping)> _tracedInterpolantDraws = new();
+
+    private static long BeginInterpolantPacketTrace(
+        CpuContext ctx,
+        uint registerSpace,
+        ulong tableAddress,
+        uint registerCount)
+    {
+        if (!_traceAgcInterpolantFlow ||
+            registerSpace != RCxRegsIndirect ||
+            Volatile.Read(ref _interpolantPacketTraceSequence) >= 1024)
+        {
+            return 0;
+        }
+
+        var containsInterpolants = false;
+        var offsetHash = 14695981039346656037UL;
+        var valueHash = 14695981039346656037UL;
+        for (uint index = 0; index < registerCount; index++)
+        {
+            var entryAddress = tableAddress + ((ulong)index * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var rawOffset) ||
+                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
+            {
+                return 0;
+            }
+
+            offsetHash = (offsetHash ^ rawOffset) * 1099511628211UL;
+            valueHash = (valueHash ^ value) * 1099511628211UL;
+            var offset = rawOffset & ~0x7000_0000u;
+            if (offset >= SpiPsInputCntl0 && offset < SpiPsInputCntl0 + 32)
+            {
+                containsInterpolants = true;
+            }
+        }
+
+        if (!containsInterpolants)
+        {
+            return 0;
+        }
+
+        var sequence = Interlocked.Increment(ref _interpolantPacketTraceSequence);
+        if (sequence > 1024)
+        {
+            return 0;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] t={TraceSeconds()} agc.interpolant_packet " +
+            $"seq={sequence} table=0x{tableAddress:X16} count={registerCount} " +
+            $"offset_hash=0x{offsetHash:X16} value_hash=0x{valueHash:X16}");
+        return sequence;
+    }
+
+    private static void TraceInterpolantPacketPair(
+        long sequence,
+        uint registerOffset,
+        uint value)
+    {
+        if (sequence == 0 ||
+            registerOffset < SpiPsInputCntl0 ||
+            registerOffset >= SpiPsInputCntl0 + 32)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] t={TraceSeconds()} agc.interpolant_packet_pair " +
+            $"seq={sequence} slot={registerOffset - SpiPsInputCntl0} " +
+            $"offset=0x{registerOffset:X8} value=0x{value:X8}");
+    }
+
+    private static void TraceInterpolantDraw(
+        SubmittedDcbState state,
+        ulong exportShaderAddress,
+        ulong pixelShaderAddress,
+        uint attributeCount,
+        ReadOnlySpan<uint> mapping)
+    {
+        if (!_traceAgcInterpolantFlow)
+        {
+            return;
+        }
+
+        var hasControl = state.CxRegisters.TryGetValue(SpiPsInControl, out var control);
+        var mappingFingerprint = ComputePsInputCntlFingerprint(mapping);
+        long sequence;
+        lock (_submitTraceGate)
+        {
+            if (_tracedInterpolantDraws.Count >= 1024 ||
+                !_tracedInterpolantDraws.Add((
+                    exportShaderAddress,
+                    pixelShaderAddress,
+                    hasControl ? control : uint.MaxValue,
+                    mappingFingerprint)))
+            {
+                return;
+            }
+
+            sequence = ++_interpolantDrawTraceSequence;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] t={TraceSeconds()} agc.interpolant_draw " +
+            $"seq={sequence} es=0x{exportShaderAddress:X16} ps=0x{pixelShaderAddress:X16} " +
+            $"ps_in_control={(hasControl ? $"0x{control:X8}" : "unprogrammed")} " +
+            $"attribute_count={attributeCount} consumed={mapping.Length}");
+        for (var slot = 0; slot < mapping.Length; slot++)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] t={TraceSeconds()} agc.interpolant_draw_pair " +
+                $"seq={sequence} slot={slot} value=0x{mapping[slot]:X8}");
+        }
+    }
 
     private static void NoteRenderTargetAddress(ulong address)
     {

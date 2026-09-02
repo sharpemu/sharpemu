@@ -1359,6 +1359,12 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             : ComputeShaderStructuralFingerprint(pixelEvaluation);
         var psInputCount = GetPsInputCount(state.CxRegisters, attributeCount);
         var psInputCntl = ReadPsInputCntlRegisters(state.CxRegisters, psInputCount);
+        TraceInterpolantDraw(
+            state,
+            exportShaderAddress,
+            pixelShaderAddress,
+            attributeCount,
+            psInputCntl);
         var psInputCntlFingerprint = ComputePsInputCntlFingerprint(psInputCntl);
         var shaderKey = (
             exportShaderAddress,

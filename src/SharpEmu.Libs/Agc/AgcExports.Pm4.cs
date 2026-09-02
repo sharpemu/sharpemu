@@ -1097,6 +1097,11 @@ public static partial class AgcExports
             RShRegsIndirect => state.ShRegisters,
             _ => state.UcRegisters,
         };
+        var interpolantPacketTraceSequence = BeginInterpolantPacketTrace(
+            ctx,
+            indirectRegister,
+            registersAddress,
+            registerCount);
         for (uint index = 0; index < registerCount; index++)
         {
             var entryAddress = registersAddress + ((ulong)index * 8);
@@ -1113,6 +1118,10 @@ public static partial class AgcExports
             // Dropping it leaves stale depth/render-control state active in
             // later passes.
             registerOffset &= ~0x7000_0000u;
+            TraceInterpolantPacketPair(
+                interpolantPacketTraceSequence,
+                registerOffset,
+                value);
             if (indirectRegister == RUcRegsIndirect && registerOffset == DbDepthSizeXy)
             {
                 // Indirect UC tables may carry recognized context registers.
