@@ -16,6 +16,16 @@ using Silk.NET.Vulkan;
 // This partial creates translated Vulkan pipelines with their descriptor resources.
 internal static unsafe partial class VulkanVideoPresenter
 {
+    internal static GuestRasterState ResolvePrimitiveRasterState(
+        uint primitiveType,
+        GuestRasterState raster)
+    {
+        // Rectangle expansion must not introduce face culling.
+        return primitiveType == AgcPrimitiveHelpers.PrimitiveRectList
+            ? raster with { CullFront = false, CullBack = false }
+            : raster;
+    }
+
     private sealed partial class Presenter
     {
         private const string FullscreenBarycentricVertexSpirv =
@@ -307,7 +317,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 BlendConstant = draw.RenderState.BlendConstant,
                 Scissor = draw.RenderState.Scissor,
                 Viewport = draw.RenderState.Viewport,
-                Raster = draw.RenderState.Raster,
+                Raster = ResolvePrimitiveRasterState(draw.PrimitiveType, draw.RenderState.Raster),
                 Depth = draw.RenderState.Depth,
                 HasDepthAttachment = hasDepthAttachment,
                 DepthAttachmentFormat = attachedDepth?.Format ?? Format.Undefined,
