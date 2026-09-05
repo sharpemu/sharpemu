@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Logging;
 
@@ -1135,6 +1136,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             _gate.ExitWriteLock();
         }
+
+        GuestGpuMemoryHook.NoteUnmapped(mapStart, mapSize);
+        GuestGpuMemoryHook.NoteMapped(mapStart, mapSize);
     }
 
     private void ApplySegmentProtection(ulong mapStart, ulong mapEnd, ProgramHeaderFlags flags)

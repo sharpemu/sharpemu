@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
@@ -317,6 +318,7 @@ public static partial class KernelMemoryCompatExports
 
         lock (_memoryGate)
         {
+            GuestGpuMemoryHook.NoteUnmapped(address, length);
             ReplaceMappedRegionRangeLocked(new MappedRegion(
                 address,
                 length,
@@ -3109,7 +3111,10 @@ public static partial class KernelMemoryCompatExports
         {
             // The unchecked API ignores an unallocated range, matching the
             // kernel contract used by guest pool allocators during teardown.
-            _ = TryReleaseDirectMemoryRangeLocked(start, length);
+            if (TryReleaseDirectMemoryRangeLocked(start, length))
+            {
+                NoteDirectAliasesUnmappedLocked(start, length);
+            }
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -3141,6 +3146,8 @@ public static partial class KernelMemoryCompatExports
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
+
+            NoteDirectAliasesUnmappedLocked(start, length);
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -3301,6 +3308,7 @@ public static partial class KernelMemoryCompatExports
             }
 
             _nextVirtualAddress = Math.Max(_nextVirtualAddress, mappedAddress + length);
+            GuestGpuMemoryHook.NoteUnmapped(mappedAddress, length);
             ReplaceMappedRegionRangeLocked(new MappedRegion(
                 mappedAddress,
                 length,
@@ -3308,6 +3316,7 @@ public static partial class KernelMemoryCompatExports
                 IsFlexible: false,
                 IsDirect: true,
                 DirectStart: directMemoryStart));
+            GuestGpuMemoryHook.NoteMapped(mappedAddress, length);
         }
 
         if (!ctx.TryWriteUInt64(inOutAddressPointer, mappedAddress))
@@ -3398,6 +3407,7 @@ public static partial class KernelMemoryCompatExports
 
             _nextVirtualAddress = Math.Max(_nextVirtualAddress, mappedAddress + length);
             _allocatedFlexibleBytes = Math.Min(FlexibleMemorySizeBytes, _allocatedFlexibleBytes + length);
+            GuestGpuMemoryHook.NoteUnmapped(mappedAddress, length);
             ReplaceMappedRegionRangeLocked(new MappedRegion(
                 mappedAddress,
                 length,
@@ -3405,6 +3415,7 @@ public static partial class KernelMemoryCompatExports
                 IsFlexible: true,
                 IsDirect: false,
                 DirectStart: 0));
+            GuestGpuMemoryHook.NoteMapped(mappedAddress, length);
         }
 
         if (!ctx.TryWriteUInt64(inOutAddressPointer, mappedAddress))
@@ -3525,6 +3536,7 @@ public static partial class KernelMemoryCompatExports
 
         if (physicallyBacked || removedAny)
         {
+            GuestGpuMemoryHook.NoteUnmapped(address, length);
             KernelRuntimeCompatExports.RegisterReleasedVirtualRange(address, length);
             AgcExports.UnregisterHtileMetadataRange(ctx.Memory, address, length);
         }
@@ -6558,6 +6570,25 @@ public static partial class KernelMemoryCompatExports
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_DIRECT_MEMORY"), "1", StringComparison.Ordinal);
 
     private static bool ShouldTraceDirectMemory() => _traceDirectMemory;
+
+    private static void NoteDirectAliasesUnmappedLocked(ulong start, ulong length)
+    {
+        var end = start + length;
+        foreach (var region in _mappedRegions.Values)
+        {
+            if (!region.IsDirect)
+            {
+                continue;
+            }
+
+            var overlapStart = Math.Max(start, region.DirectStart);
+            var overlapEnd = Math.Min(end, region.DirectStart + region.Length);
+            if (overlapStart < overlapEnd)
+            {
+                GuestGpuMemoryHook.NoteUnmapped(region.Address + (overlapStart - region.DirectStart), overlapEnd - overlapStart);
+            }
+        }
+    }
 
     private static bool TryReleaseDirectMemoryRangeLocked(ulong start, ulong length)
     {

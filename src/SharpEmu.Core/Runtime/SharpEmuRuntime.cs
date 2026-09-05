@@ -7,6 +7,7 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.AppContent;
@@ -39,6 +40,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private readonly ISymbolCatalog _symbolCatalog;
     private readonly CpuExecutionOptions _cpuExecutionOptions;
     private readonly IFileSystem _fileSystem;
+    private readonly GuestGpuMemory? _gpuMemory;
     private readonly object _dynamicModuleGate = new();
     private bool _disposed;
 
@@ -59,8 +61,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IModuleManager moduleManager,
         ISymbolCatalog? symbolCatalog = null,
         CpuExecutionOptions cpuExecutionOptions = default,
-        IFileSystem? fileSystem = null)
+        IFileSystem? fileSystem = null,
+        GuestGpuMemory? gpuMemory = null)
     {
+        _gpuMemory = gpuMemory;
         _selfLoader = selfLoader ?? throw new ArgumentNullException(nameof(selfLoader));
         _virtualMemory = virtualMemory ?? throw new ArgumentNullException(nameof(virtualMemory));
         _cpuDispatcher = cpuDispatcher ?? throw new ArgumentNullException(nameof(cpuDispatcher));
@@ -92,6 +96,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         moduleManager.Freeze();
 
         var virtualMemory = new PhysicalVirtualMemory();
+        var gpuMemory = new GuestGpuMemory(virtualMemory, new IdleBufferStore(), new IdleImageStore());
+        GuestGpuMemoryHook.Attach(gpuMemory);
 
         var fileSystem = new PhysicalFileSystem();
 
@@ -102,7 +108,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             moduleManager,
             Aerolib.Instance,
             cpuExecutionOptions,
-            fileSystem);
+            fileSystem,
+            gpuMemory);
     }
 
     public SelfImage LoadImage(string ebootPath)
@@ -1365,6 +1372,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             Console.Error.WriteLine(
                 "[RUNTIME] Guest workers were still active at teardown; keeping the guest address space mapped.");
             return;
+        }
+
+        if (_gpuMemory != null)
+        {
+            if (GuestGpuMemoryHook.TryTakeShutdownSummary(out var gpuSummary))
+            {
+                Console.Error.WriteLine("[LOADER][INFO] " + gpuSummary);
+            }
+            GuestGpuMemoryHook.Attach(null);
+            _gpuMemory.Dispose();
         }
 
         if (_virtualMemory is IDisposable disposableMemory)

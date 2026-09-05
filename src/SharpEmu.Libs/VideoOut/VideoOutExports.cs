@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Logging;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Diagnostics;
@@ -197,6 +198,11 @@ public static class VideoOutExports
     private static void RequestHostShutdown(string reason)
     {
         Console.Error.WriteLine($"[LOADER][INFO] Host shutdown requested: {reason}");
+        if (GuestGpuMemoryHook.TryTakeShutdownSummary(out var gpuSummary))
+        {
+            Console.Error.WriteLine("[LOADER][INFO] " + gpuSummary);
+        }
+
         AudioOutExports.ShutdownAllPorts();
         Interlocked.Exchange(ref _vblankStopRequested, 1);
         HostSessionControl.RequestShutdown(reason);

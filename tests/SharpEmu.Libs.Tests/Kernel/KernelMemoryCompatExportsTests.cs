@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using System.Globalization;
 using System.Text;
 using Xunit;
@@ -439,5 +441,114 @@ public sealed class KernelMemoryCompatExportsTests
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void MapDirectMemory_RegistersAndMunmapUnregistersTheGpuSpan()
+    {
+        const ulong directStart = 0x0300_0000;
+        const ulong length = 0x0001_0000;
+        const ulong requestedAddress = 0x2_0000_0000;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
+        GuestGpuMemoryHook.Attach(gpuMemory);
+        var mappedAddress = 0UL;
+
+        try
+        {
+            AllocateDirectMemory(context, directStart, length);
+
+            Assert.True(context.TryWriteUInt64(AllocationOutAddress, requestedAddress));
+            context[CpuRegister.Rdi] = AllocationOutAddress;
+            context[CpuRegister.Rsi] = length;
+            context[CpuRegister.Rdx] = 0x33; // CPU read|write, GPU read|write
+            context[CpuRegister.Rcx] = 0;
+            context[CpuRegister.R8] = directStart;
+            context[CpuRegister.R9] = 0;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(context));
+            Assert.True(context.TryReadUInt64(AllocationOutAddress, out mappedAddress));
+            Assert.True(gpuMemory.Covers(mappedAddress, length));
+
+            context[CpuRegister.Rdi] = mappedAddress;
+            context[CpuRegister.Rsi] = length;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelMunmap(context));
+            Assert.False(gpuMemory.Covers(mappedAddress, length));
+            mappedAddress = 0;
+        }
+        finally
+        {
+            if (mappedAddress != 0)
+            {
+                context[CpuRegister.Rdi] = mappedAddress;
+                context[CpuRegister.Rsi] = length;
+                _ = KernelMemoryCompatExports.KernelMunmap(context);
+            }
+
+            ReleaseDirectMemory(context, directStart, length);
+            GuestGpuMemoryHook.Attach(null);
+            gpuMemory.Dispose();
+        }
+    }
+
+    [Fact]
+    public void ReleaseDirectMemory_FailedReleaseKeepsTheMappedGpuSpan()
+    {
+        const ulong directStart = 0x0400_0000;
+        const ulong length = 0x0001_0000;
+        const ulong unallocatedStart = 0x0500_0000;
+        const ulong requestedAddress = 0x2_1000_0000;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
+        GuestGpuMemoryHook.Attach(gpuMemory);
+        var mappedAddress = 0UL;
+
+        try
+        {
+            AllocateDirectMemory(context, directStart, length);
+
+            Assert.True(context.TryWriteUInt64(AllocationOutAddress, requestedAddress));
+            context[CpuRegister.Rdi] = AllocationOutAddress;
+            context[CpuRegister.Rsi] = length;
+            context[CpuRegister.Rdx] = 0x33; // CPU read|write, GPU read|write
+            context[CpuRegister.Rcx] = 0;
+            context[CpuRegister.R8] = directStart;
+            context[CpuRegister.R9] = 0;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(context));
+            Assert.True(context.TryReadUInt64(AllocationOutAddress, out mappedAddress));
+            Assert.True(gpuMemory.Covers(mappedAddress, length));
+
+            context[CpuRegister.Rdi] = unallocatedStart;
+            context[CpuRegister.Rsi] = length;
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, KernelMemoryCompatExports.KernelCheckedReleaseDirectMemory(context));
+            Assert.True(gpuMemory.Covers(mappedAddress, length));
+
+            // Overlaps the second half of the allocation and runs past its end.
+            context[CpuRegister.Rdi] = directStart + length / 2;
+            context[CpuRegister.Rsi] = length;
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, KernelMemoryCompatExports.KernelCheckedReleaseDirectMemory(context));
+            Assert.True(gpuMemory.Covers(mappedAddress, length));
+
+            context[CpuRegister.Rdi] = directStart + length / 2;
+            context[CpuRegister.Rsi] = length;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelReleaseDirectMemory(context));
+            Assert.True(gpuMemory.Covers(mappedAddress, length));
+
+            ReleaseDirectMemory(context, directStart, length);
+            Assert.False(gpuMemory.Covers(mappedAddress, length));
+        }
+        finally
+        {
+            if (mappedAddress != 0)
+            {
+                context[CpuRegister.Rdi] = mappedAddress;
+                context[CpuRegister.Rsi] = length;
+                _ = KernelMemoryCompatExports.KernelMunmap(context);
+            }
+
+            GuestGpuMemoryHook.Attach(null);
+            gpuMemory.Dispose();
+        }
     }
 }

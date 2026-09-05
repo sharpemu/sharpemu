@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -173,6 +174,10 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (exceptionCode == 3221225477u &&
 				TryRecoverGuestAllocatorHole(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
+			}
+			if (exceptionCode == 3221225477u && TryResolveGpuFault(exceptionRecord))
 			{
 				return -1;
 			}
@@ -655,6 +660,25 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.Flush();
 		}
 		return true;
+	}
+
+	// Runs after the lazy-commit branch. That branch commits the page first.
+	private unsafe static bool TryResolveGpuFault(EXCEPTION_RECORD* exceptionRecord)
+	{
+		if (exceptionRecord->NumberParameters < 2)
+		{
+			return false;
+		}
+
+		var kind = exceptionRecord->ExceptionInformation[0] switch
+		{
+			0 => FaultKind.Read,
+			1 => FaultKind.Write,
+			8 => FaultKind.Execute,
+			_ => FaultKind.Unknown,
+		};
+		return kind != FaultKind.Unknown
+			&& GuestGpuMemoryHook.TryResolveFault(kind, exceptionRecord->ExceptionInformation[1]);
 	}
 
 	private unsafe static bool TryRecoverGuestAllocatorHole(
