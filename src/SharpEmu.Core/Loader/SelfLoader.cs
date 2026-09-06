@@ -171,6 +171,7 @@ public sealed class SelfLoader : ISelfLoader
 
         if (clearVirtualMemory)
         {
+            SharpEmu.Libs.Kernel.KernelMemoryCompatExports.ResetBackingMappings(virtualMemory as IGuestBackedSpace);
             virtualMemory.Clear();
             _nextTlsModuleId = 1;
             GuestTlsTemplate.Reset();

@@ -7,6 +7,7 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Kernel;
@@ -95,7 +96,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         moduleManager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
         moduleManager.Freeze();
 
-        var virtualMemory = new PhysicalVirtualMemory();
+        var virtualMemory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create());
         var gpuMemory = new GuestGpuMemory(virtualMemory, new IdleBufferStore(), new IdleImageStore());
         GuestGpuMemoryHook.Attach(gpuMemory);
 
@@ -1384,6 +1385,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             _gpuMemory.Dispose();
         }
 
+        KernelMemoryCompatExports.ResetBackingMappings(_virtualMemory as IGuestBackedSpace);
         if (_virtualMemory is IDisposable disposableMemory)
         {
             disposableMemory.Dispose();

@@ -44,8 +44,6 @@ public static class KernelRuntimeCompatExports
     private const ulong DefaultKernelTscFrequency = 10_000_000UL;
     private const ulong PrtAreaStartAddress = 0x0000001000000000UL;
     private const ulong PrtAreaSize = 0x000000EC00000000UL;
-    private const int MapFlagFixed = 0x10;
-    private const ulong DefaultVirtualRangeAlignment = 0x4000UL;
     private const int AioInitParamSize = 0x3C;
     private const uint MemCommit = 0x1000;
     private const uint MemReserve = 0x2000;
@@ -61,8 +59,6 @@ public static class KernelRuntimeCompatExports
             : AllocateStackChkGuardObject();
     private static ulong _applicationHeapApiAddress;
     private static ulong _processProcParamAddress;
-    private static ulong _nextReservedVirtualBase = 0x6000_0000_0UL;
-    private static readonly List<ReleasedVirtualRange> _releasedVirtualRanges = new();
     private static uint _gpoStateBits;
     private static readonly HashSet<int> _loadedSysmodules = new();
     private static readonly object _prtApertureGate = new();
@@ -80,7 +76,6 @@ public static class KernelRuntimeCompatExports
     private static readonly bool _stopwatchTicksAreNanoseconds =
         Stopwatch.Frequency == 1_000_000_000L;
 
-    private readonly record struct ReleasedVirtualRange(ulong Address, ulong Length);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate ulong RdtscDelegate();
@@ -751,145 +746,9 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceKernelReserveVirtualRange",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelReserveVirtualRange(CpuContext ctx)
-    {
-        var inOutAddressPointer = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
-        var flags = unchecked((int)ctx[CpuRegister.Rdx]);
-        var alignment = ctx[CpuRegister.Rcx];
-        if (inOutAddressPointer == 0 || length == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        if (!ctx.TryReadUInt64(inOutAddressPointer, out var requestedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        var effectiveAlignment = alignment == 0 ? DefaultVirtualRangeAlignment : alignment;
-        var fixedMapping = (flags & MapFlagFixed) != 0;
-        ulong desiredAddress;
-        lock (_stateGate)
-        {
-            desiredAddress = requestedAddress != 0
-                ? requestedAddress
-                : AlignUp(_nextReservedVirtualBase, effectiveAlignment);
-        }
-
-        ulong releasedAddress = 0;
-        var reusedReleasedRange = !fixedMapping && requestedAddress == 0 &&
-            TryTakeReleasedVirtualRange(length, effectiveAlignment, out releasedAddress);
-        var alreadyBacked = fixedMapping && requestedAddress != 0 &&
-            KernelMemoryCompatExports.IsGuestRangeBacked(ctx, requestedAddress, length);
-        ulong mappedAddress;
-        if (reusedReleasedRange)
-        {
-            mappedAddress = releasedAddress;
-        }
-        else if (alreadyBacked)
-        {
-            mappedAddress = requestedAddress;
-        }
-        else if (!TryReserveVirtualRange(
-                     ctx,
-                     desiredAddress,
-                     length,
-                     effectiveAlignment,
-                     allowSearch: !fixedMapping,
-                     out mappedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-
-        if (ShouldTraceVirtualMemory())
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] reserve_virtual_range: req=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16} flags=0x{flags:X8} align=0x{effectiveAlignment:X16} already_backed={alreadyBacked} reused={reusedReleasedRange}");
-        }
-
-        if (!ctx.TryWriteUInt64(inOutAddressPointer, mappedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        lock (_stateGate)
-        {
-            _nextReservedVirtualBase = Math.Max(_nextReservedVirtualBase, mappedAddress + length);
-        }
-
-        KernelMemoryCompatExports.RegisterReservedVirtualRange(mappedAddress, length);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    internal static void RegisterReleasedVirtualRange(ulong address, ulong length)
-    {
-        if (address == 0 || length == 0 || ulong.MaxValue - address < length)
-        {
-            return;
-        }
-
-        lock (_stateGate)
-        {
-            var start = address;
-            var end = address + length;
-            for (var i = _releasedVirtualRanges.Count - 1; i >= 0; i--)
-            {
-                var existing = _releasedVirtualRanges[i];
-                var existingEnd = existing.Address + existing.Length;
-                if (end < existing.Address || existingEnd < start)
-                {
-                    continue;
-                }
-
-                start = Math.Min(start, existing.Address);
-                end = Math.Max(end, existingEnd);
-                _releasedVirtualRanges.RemoveAt(i);
-            }
-
-            _releasedVirtualRanges.Add(new ReleasedVirtualRange(start, end - start));
-        }
-    }
-
-    private static bool TryTakeReleasedVirtualRange(
-        ulong length,
-        ulong alignment,
-        out ulong address)
-    {
-        address = 0;
-        lock (_stateGate)
-        {
-            for (var i = 0; i < _releasedVirtualRanges.Count; i++)
-            {
-                var range = _releasedVirtualRanges[i];
-                var rangeEnd = range.Address + range.Length;
-                var aligned = AlignUp(range.Address, alignment);
-                if (aligned >= rangeEnd || length > rangeEnd - aligned)
-                {
-                    continue;
-                }
-
-                _releasedVirtualRanges.RemoveAt(i);
-                if (aligned > range.Address)
-                {
-                    _releasedVirtualRanges.Add(
-                        new ReleasedVirtualRange(range.Address, aligned - range.Address));
-                }
-
-                var allocationEnd = aligned + length;
-                if (allocationEnd < rangeEnd)
-                {
-                    _releasedVirtualRanges.Add(
-                        new ReleasedVirtualRange(allocationEnd, rangeEnd - allocationEnd));
-                }
-
-                address = aligned;
-                return true;
-            }
-        }
-
-        return false;
-    }
+    public static int KernelReserveVirtualRange(CpuContext ctx) =>
+        KernelMemoryCompatExports.ReserveBackingRange(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi],
+            ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx]);
 
     [SysAbiExport(
         Nid = "BohYr-F7-is",
@@ -2112,25 +1971,6 @@ public static class KernelRuntimeCompatExports
     private static unsafe nint VirtualAlloc(nint lpAddress, nuint dwSize, uint flAllocationType, uint flProtect) =>
         (nint)HostMemory.Alloc((void*)lpAddress, dwSize, flAllocationType, flProtect);
 
-    private static bool TryReserveVirtualRange(
-        CpuContext ctx,
-        ulong desiredAddress,
-        ulong length,
-        ulong alignment,
-        bool allowSearch,
-        out ulong mappedAddress)
-    {
-        return KernelVirtualRangeAllocator.TryReserve(
-            ctx,
-            desiredAddress,
-            length,
-            executable: false,
-            alignment,
-            allowSearch,
-            allowAllocateAtAlternative: allowSearch,
-            "reserve_virtual_range",
-            out mappedAddress);
-    }
 
     private static ulong AlignUp(ulong value, ulong alignment)
     {
@@ -2143,10 +1983,6 @@ public static class KernelRuntimeCompatExports
         return (value + mask) & ~mask;
     }
 
-    private static bool ShouldTraceVirtualMemory()
-    {
-        return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIRTUAL_MEMORY"), "1", StringComparison.Ordinal);
-    }
     [SysAbiExport(
         Nid = "QvsZxomvUHs",
         ExportName = "sceKernelNanosleep",

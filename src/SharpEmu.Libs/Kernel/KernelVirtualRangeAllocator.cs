@@ -108,15 +108,4 @@ internal static class KernelVirtualRangeAllocator
         return false;
     }
 
-    public static bool TryEnsureRangeCommitted(ICpuMemory rootMemory, ulong address, ulong length)
-    {
-        if (!TryResolveAddressSpace(rootMemory, out var addressSpace))
-        {
-            // A memory implementation without an address-space service is
-            // already fully backed. It cannot expose a sparse host reservation.
-            return true;
-        }
-
-        return addressSpace.TryEnsureRangeCommitted(address, length);
-    }
 }

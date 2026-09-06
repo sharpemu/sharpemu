@@ -3910,6 +3910,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var cpuContext = ActiveCpuContext;
 		if (cpuContext != null && TryGetVirtualMemory(cpuContext, out var virtualMemory))
 		{
+			if (virtualMemory.IsBackedView(address))
+			{
+				owner = string.Empty;
+				return false;
+			}
+
 			foreach (var region in virtualMemory.SnapshotRegions())
 			{
 				if (ContainsAddress(region.VirtualAddress, region.MemorySize, address))

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Core.Memory;
+using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
@@ -278,7 +280,7 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x80020016), result);
     }
 
     [Fact]
@@ -296,7 +298,7 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x80020016), result);
     }
 
     [Fact]
@@ -309,34 +311,26 @@ public sealed class KernelMemoryCompatExportsTests
         var memory = new FakeCpuMemory(memoryBase, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
         context[CpuRegister.Rdi] = unreachableInOut;
-        context[CpuRegister.Rsi] = 0x1000;
+        context[CpuRegister.Rsi] = 0x4000;
         context[CpuRegister.Rdx] = 0x03;
         context[CpuRegister.Rcx] = 0;
 
         var result = KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, result);
+        Assert.Equal(unchecked((int)0x8002000E), result);
     }
 
     [Fact]
     public void VirtualQuery_PreservesReservationPastFixedCommitAtSameBase()
     {
-        const ulong memoryBase = 0x12_0000_0000;
         const ulong reservedLength = 0x1_0000;
-        const ulong committedLength = 0x2000;
-        const ulong inOutAddress = memoryBase + 0x1_7000;
-        const ulong infoAddress = memoryBase + 0x1_8000;
-        var memory = new FakeCpuMemory(memoryBase, 0x2_0000);
-        var context = new CpuContext(memory, Generation.Gen5);
-
-        KernelMemoryCompatExports.RegisterReservedVirtualRange(memoryBase, reservedLength);
-        Assert.True(memory.TryWrite(inOutAddress, BitConverter.GetBytes(memoryBase)));
-        context[CpuRegister.Rdi] = inOutAddress;
-        context[CpuRegister.Rsi] = committedLength;
-        context[CpuRegister.Rdx] = 0x03;
-        context[CpuRegister.Rcx] = 0x10; // fixed mapping
-
-        Assert.Equal(0, KernelMemoryCompatExports.KernelMapNamedFlexibleMemory(context));
+        const ulong committedLength = 0x4000;
+        using var test = new BackedKernelMemory();
+        var context = test.Context;
+        var infoAddress = test.Output + 0x100;
+        var memoryBase = test.Reserve(reservedLength);
+        test.Allocate(0, committedLength);
+        Assert.Equal(memoryBase, test.Map(0, committedLength, memoryBase));
 
         context[CpuRegister.Rdi] = memoryBase + 0x8000;
         context[CpuRegister.Rsi] = 0;
@@ -361,7 +355,7 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMprotect(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x80020016), result);
     }
 
     [Fact]
@@ -376,16 +370,12 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMprotect(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x80020016), result);
     }
 
     [Fact]
     public void Mprotect_UnmappedRangeReturnsNotFound()
     {
-        // A plausible guest address that FakeCpuMemory does not back and that
-        // has no host reservation. TryProtectHostRange calls VirtualProtect,
-        // which fails on an unmapped range, yielding NOT_FOUND rather than
-        // mutating protection or throwing.
         const ulong unmappedAddress = 0x2_0000_0000;
         var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
@@ -395,11 +385,11 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMprotect(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+        Assert.Equal(unchecked((int)0x80020002), result);
     }
 
     [Fact]
-    public void Munmap_ZeroAddressReturnsInvalidArgument()
+    public void Munmap_ZeroAddressReturnsAccessDenied()
     {
         var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
@@ -408,7 +398,7 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x8002000D), result);
     }
 
     [Fact]
@@ -423,15 +413,12 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.Equal(unchecked((int)0x80020016), result);
     }
 
     [Fact]
-    public void Munmap_UnmappedRangeReturnsNotFound()
+    public void Munmap_UnmappedRangeReturnsAccessDenied()
     {
-        // No flexible region is registered at this address and FakeCpuMemory
-        // does not back it, so both physicallyBacked and removedRegions are
-        // empty and the export reports NOT_FOUND.
         const ulong unmappedAddress = 0x2_0000_0000;
         var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
         var context = new CpuContext(memory, Generation.Gen5);
@@ -440,7 +427,7 @@ public sealed class KernelMemoryCompatExportsTests
 
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+        Assert.Equal(unchecked((int)0x8002000D), result);
     }
 
     [Fact]
@@ -449,7 +436,8 @@ public sealed class KernelMemoryCompatExportsTests
         const ulong directStart = 0x0300_0000;
         const ulong length = 0x0001_0000;
         const ulong requestedAddress = 0x2_0000_0000;
-        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
+        Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
         var context = new CpuContext(memory, Generation.Gen5);
         var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
         GuestGpuMemoryHook.Attach(gpuMemory);
@@ -488,6 +476,7 @@ public sealed class KernelMemoryCompatExportsTests
             ReleaseDirectMemory(context, directStart, length);
             GuestGpuMemoryHook.Attach(null);
             gpuMemory.Dispose();
+            KernelMemoryCompatExports.ResetBackingMappings(memory);
         }
     }
 
@@ -498,7 +487,8 @@ public sealed class KernelMemoryCompatExportsTests
         const ulong length = 0x0001_0000;
         const ulong unallocatedStart = 0x0500_0000;
         const ulong requestedAddress = 0x2_1000_0000;
-        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
+        Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
         var context = new CpuContext(memory, Generation.Gen5);
         var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
         GuestGpuMemoryHook.Attach(gpuMemory);
@@ -549,6 +539,7 @@ public sealed class KernelMemoryCompatExportsTests
 
             GuestGpuMemoryHook.Attach(null);
             gpuMemory.Dispose();
+            KernelMemoryCompatExports.ResetBackingMappings(memory);
         }
     }
 }

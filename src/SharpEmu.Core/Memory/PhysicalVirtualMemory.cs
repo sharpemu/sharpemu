@@ -1,17 +1,19 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Loader;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IDisposable
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IGuestBackedSpace, IDisposable
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -134,9 +136,65 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly Dictionary<ulong, (ulong Offset, ulong Size)> _guestAllocations = new();
     private static readonly ulong LazyReservePrimeBytes = ResolveLazyReservePrimeBytes();
 
-    public PhysicalVirtualMemory(IHostMemory? hostMemory = null)
+    private GuestSpaceOwner? _backedSpace;
+
+    public PhysicalVirtualMemory(IHostMemory? hostMemory = null, IHostViewMemory? viewHost = null,
+        ulong backingBytes = GuestMemoryLayout.BackingBytes)
     {
         _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
+        if (viewHost != null)
+        {
+            _backedSpace = new GuestSpaceOwner(viewHost, backingBytes);
+            RunBackingSelfTest();
+        }
+    }
+
+    // Run both backing self-tests during initialization. Stop if either test fails.
+    private void RunBackingSelfTest()
+    {
+        const ulong page = GuestMemoryLayout.GuestPage;
+        const ulong marker = 0x5348_5250_5345_4C46;
+        var owner = _backedSpace!;
+        var holeBytes = Math.Max(owner.Granularity, 2 * page);
+        if (!TryHoldRangeAtOrAbove(0x2_0000_0000, holeBytes, owner.Granularity, out var address))
+        {
+            GuestSpaceOwner.OnFatal("The address-space self-test could not reserve its test range.");
+            return;
+        }
+
+        if (!owner.AllocatePrivate(address, page, HostPageProtection.ReadWrite))
+        {
+            GuestSpaceOwner.OnFatal("The address-space self-test could not commit its test range.");
+            return;
+        }
+
+        *(ulong*)address = marker;
+        var ok = *(ulong*)address == marker;
+        if (!ok || !owner.FreePrivate(address, page))
+        {
+            GuestSpaceOwner.OnFatal("The address-space self-test could not release its committed range.");
+            return;
+        }
+
+        if (owner.Granularity < 2 * page)
+        {
+            return;
+        }
+
+        var alias = address + page;
+        ok = owner.MapShared(alias, page, page, HostPageProtection.ReadWrite, out _);
+        if (ok)
+        {
+            *(ulong*)alias = marker;
+            ok = *(ulong*)alias == marker;
+            new Span<byte>((void*)alias, (int)page).Clear();
+            ok = owner.UnmapShared(alias, page) && ok;
+        }
+
+        if (!ok)
+        {
+            GuestSpaceOwner.OnFatal("The direct-memory self-test failed for a view smaller than 64 KiB.");
+        }
     }
 
     private sealed class CrossPlatformHostMemory : IHostMemory
@@ -973,6 +1031,267 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public bool IsBackedView(ulong address)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            return FindRegion(address, 1)?.IsBackedView == true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    private bool HasBackingOwner() => !_disposed && _backedSpace != null;
+
+    // A span may cross adjacent view records; the owner validates full coverage.
+    private bool IsBackedSpan(MemoryRegion? region, ulong address, ulong size)
+    {
+        if (_backedSpace == null || size == 0)
+        {
+            return false;
+        }
+
+        return region?.IsBackedView ?? FindRegion(address, 1)?.IsBackedView == true;
+    }
+
+    private void NotifyBackedWriteWatch(ulong address, ulong length)
+    {
+        if (!GuestWriteWatch.Armed)
+        {
+            return;
+        }
+
+        Span<byte> bytes = stackalloc byte[4096];
+        for (ulong done = 0; done < length;)
+        {
+            var count = (int)Math.Min((ulong)bytes.Length, length - done);
+            if (!_backedSpace!.TryReadBacking(address + done, bytes[..count]))
+            {
+                return;
+            }
+
+            GuestWriteWatch.Check(address + done, bytes[..count]);
+            done += (ulong)count;
+        }
+    }
+
+    // One side is private memory; move it in bounded pieces without a full-size buffer.
+    private bool CopyThroughStaging(ulong destinationAddress, ulong sourceAddress, ulong length)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(65536);
+        try
+        {
+            for (ulong done = 0; done < length;)
+            {
+                var count = (int)Math.Min((ulong)buffer.Length, length - done);
+                var piece = buffer.AsSpan(0, count);
+                if (!TryRead(sourceAddress + done, piece) || !TryWrite(destinationAddress + done, piece))
+                {
+                    return false;
+                }
+
+                done += (ulong)count;
+            }
+
+            return true;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    public bool TryHoldRange(ulong address, ulong size)
+    {
+        if (address == 0 || size == 0 || size > ulong.MaxValue - address ||
+            address % GuestMemoryLayout.GuestPage != 0 || size % GuestMemoryLayout.GuestPage != 0)
+        {
+            return false;
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            return HasBackingOwner() && TryReserveBackingRange(address, size);
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    private bool TryReserveBackingRange(ulong address, ulong size)
+    {
+        if (_backedSpace!.ContainsFreeRange(address, size))
+        {
+            return true;
+        }
+
+        var granularity = _backedSpace.Granularity;
+        var start = address - address % granularity;
+        var end = address + size;
+        var padding = (granularity - end % granularity) % granularity;
+        return padding <= ulong.MaxValue - end &&
+            _backedSpace.TryReserveAddressRange(start, end + padding - start) &&
+            _backedSpace.ContainsFreeRange(address, size);
+    }
+
+    public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
+    {
+        address = 0;
+        const ulong limit = 0x0000_00FC_0000_0000;
+        if (size == 0 || size % GuestMemoryLayout.GuestPage != 0 || size >= limit)
+        {
+            return false;
+        }
+
+        alignment = Math.Max(alignment, GuestMemoryLayout.GuestPage);
+        if (alignment % GuestMemoryLayout.GuestPage != 0)
+        {
+            return false;
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            if (!HasBackingOwner())
+            {
+                return false;
+            }
+
+            var start = Math.Max(searchStart, GuestMemoryLayout.GuestPage);
+            address = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
+            if (address != 0)
+            {
+                return true;
+            }
+
+            while (start < limit && size <= limit - start)
+            {
+                var padding = (alignment - start % alignment) % alignment;
+                if (padding > limit - start || size > limit - start - padding)
+                {
+                    break;
+                }
+
+                var candidate = start + padding;
+                if (TryReserveBackingRange(candidate, size))
+                {
+                    address = candidate;
+                    return true;
+                }
+
+                start = candidate + GuestMemoryLayout.GuestPage;
+                if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
+                    info.State != HostRegionState.Free && info.RegionSize <= limit - info.BaseAddress)
+                {
+                    start = Math.Max(start, info.BaseAddress + info.RegionSize);
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    public bool TryMapBacked(ulong address, ulong size, ulong backingOffset,
+        GuestPageProtection protection, out HostViewFailure failure)
+    {
+        failure = HostViewFailure.AddressUnavailable;
+        _gate.EnterWriteLock();
+        try
+        {
+            if (!TryHoldRange(address, size))
+            {
+                return false;
+            }
+
+            if (!_backedSpace!.MapShared(address, size, backingOffset, ResolveProtection(protection), out failure))
+            {
+                return false;
+            }
+
+            var executable = (protection & GuestPageProtection.Execute) != 0;
+            InsertRegionSorted(new MemoryRegion
+            {
+                VirtualAddress = address,
+                Size = size,
+                IsExecutable = executable,
+                IsBackedView = true,
+                Protection = executable ? HostMemory.PAGE_EXECUTE_READWRITE : HostMemory.PAGE_READWRITE,
+            });
+            Interlocked.Increment(ref _mappingGeneration);
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    public bool TryUnmapBacked(ulong address, ulong size)
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            if (_backedSpace?.UnmapShared(address, size) != true)
+            {
+                return false;
+            }
+
+            var end = address + size;
+            foreach (var region in _regions.Where(r => r.IsBackedView && r.VirtualAddress < end &&
+                         address < r.VirtualAddress + r.Size).ToArray())
+            {
+                var oldEnd = region.VirtualAddress + region.Size;
+                _regions.Remove(region);
+                if (region.VirtualAddress < address)
+                {
+                    InsertRegionSorted(new MemoryRegion
+                    {
+                        VirtualAddress = region.VirtualAddress, Size = address - region.VirtualAddress,
+                        IsBackedView = true, IsExecutable = region.IsExecutable, Protection = region.Protection,
+                    });
+                }
+
+                if (end < oldEnd)
+                {
+                    InsertRegionSorted(new MemoryRegion
+                    {
+                        VirtualAddress = end, Size = oldEnd - end, IsBackedView = true,
+                        IsExecutable = region.IsExecutable, Protection = region.Protection,
+                    });
+                }
+            }
+
+            Interlocked.Increment(ref _mappingGeneration);
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    public bool TryClearBacking(ulong offset, ulong size)
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            return HasBackingOwner() && _backedSpace!.TryClearBacking(offset, size);
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
     {
         if (size == 0)
@@ -980,7 +1299,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
+        _gate.EnterReadLock();
+        try
+        {
+            if (_backedSpace?.IsBacked(address, size) == true)
+            {
+                return _backedSpace.SetTransientAccess(address, size, ResolveProtection(protection));
+            }
+
+            return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
     }
 
     public bool TryEnsureRangeCommitted(ulong address, ulong size)
@@ -1050,7 +1382,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     var freedBases = new HashSet<ulong>();
                     foreach (var region in _regions)
                     {
-                        if (freedBases.Add(region.VirtualAddress))
+                        if (!region.IsBackedView && freedBases.Add(region.VirtualAddress))
                         {
                             _hostMemory.Free(region.VirtualAddress);
                         }
@@ -1065,6 +1397,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     }
 
                     _fixedGranuleReservationBases.Clear();
+                    _backedSpace?.ReleaseAddressRanges();
                     _regions.Clear();
                     _pageProtections.Clear();
                     lock (_allocationSearchHintGate)
@@ -1238,6 +1571,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
+            if (IsBackedSpan(region, virtualAddress, (ulong)destination.Length))
+            {
+                return _backedSpace!.TryReadBacking(virtualAddress, destination);
+            }
+
             if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
@@ -1308,6 +1646,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(virtualAddress, (ulong)expected.Length);
+            if (IsBackedSpan(region, virtualAddress, (ulong)expected.Length))
+            {
+                Span<byte> bytes = stackalloc byte[4096];
+                for (var compared = 0; compared < expected.Length;)
+                {
+                    var count = Math.Min(bytes.Length, expected.Length - compared);
+                    if (!_backedSpace!.TryReadBacking(virtualAddress + (ulong)compared, bytes[..count]))
+                    {
+                        return false;
+                    }
+
+                    if (!bytes[..count].SequenceEqual(expected.Slice(compared, count)))
+                    {
+                        return true;
+                    }
+
+                    compared += count;
+                }
+
+                equal = true;
+                return true;
+            }
+
             if (region is null ||
                 !TryResolveRegionOffset(
                     virtualAddress,
@@ -1361,6 +1722,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             var region = FindRegion(virtualAddress, (ulong)source.Length);
+            if (IsBackedSpan(region, virtualAddress, (ulong)source.Length))
+            {
+                var written = _backedSpace!.TryWriteBacking(virtualAddress, source);
+                if (written)
+                {
+                    NotifyGuestWriteWatch(virtualAddress, source);
+                }
+
+                return written;
+            }
+
             if (region is not null &&
                 TryResolveRegionOffset(
                     virtualAddress,
@@ -1447,6 +1819,25 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             var sourceRegion = FindRegion(sourceAddress, length);
             var destinationRegion = FindRegion(destinationAddress, length);
+            var sourceBacked = IsBackedSpan(sourceRegion, sourceAddress, length);
+            var destinationBacked = IsBackedSpan(destinationRegion, destinationAddress, length);
+            if (sourceBacked && destinationBacked)
+            {
+                var copied = _backedSpace!.TryCopyBacking(destinationAddress, sourceAddress, length);
+                if (copied)
+                {
+                    NotifyBackedWriteWatch(destinationAddress, length);
+                }
+
+                return copied;
+            }
+
+            // The staged path re-enters TryRead/TryWrite, which may need the write lock.
+            if (sourceBacked || destinationBacked)
+            {
+                goto staged;
+            }
+
             if (sourceRegion is null || destinationRegion is null ||
                 !TryResolveRegionOffset(sourceAddress, length, sourceRegion, out var sourceOffset) ||
                 !TryResolveRegionOffset(destinationAddress, length, destinationRegion, out var destinationOffset))
@@ -1479,6 +1870,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             _gate.ExitReadLock();
         }
+
+        staged:
+        return CopyThroughStaging(destinationAddress, sourceAddress, length);
     }
 
     private bool TryReadExclusive(ulong virtualAddress, Span<byte> destination)
@@ -1682,17 +2076,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
         }
 
-        if (OperatingSystem.IsWindows() && !region.IsReservedOnly)
+        if (OperatingSystem.IsWindows() && !region.IsReservedOnly && !region.IsBackedView)
         {
             var previous = low > 0 ? _regions[low - 1] : null;
             var next = low < _regions.Count ? _regions[low] : null;
             var mergePrevious = previous is not null &&
                 !previous.IsReservedOnly &&
+                !previous.IsBackedView &&
                 previous.IsExecutable == region.IsExecutable &&
                 previous.Protection == region.Protection &&
                 previous.VirtualAddress + previous.Size == region.VirtualAddress;
             var mergeNext = next is not null &&
                 !next.IsReservedOnly &&
+                !next.IsBackedView &&
                 next.IsExecutable == region.IsExecutable &&
                 next.Protection == region.Protection &&
                 region.VirtualAddress + region.Size == next.VirtualAddress;
@@ -2007,6 +2403,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         if (!_disposed)
         {
             Clear();
+            _backedSpace?.Dispose();
+            _backedSpace = null;
             _disposed = true;
         }
     }
@@ -2017,6 +2415,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         public ulong Size { get; set; }
         public bool IsExecutable { get; set; }
         public bool IsReservedOnly { get; set; }
+        public bool IsBackedView { get; set; }
         public uint Protection { get; set; }
     }
 
