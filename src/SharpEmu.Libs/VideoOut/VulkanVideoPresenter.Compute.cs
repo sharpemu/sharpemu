@@ -92,7 +92,6 @@ internal static unsafe partial class VulkanVideoPresenter
             TranslatedDrawResources? resources = null;
             CommandBuffer commandBuffer = default;
             var submitted = false;
-            var chunksSubmitted = 0;
             try
             {
                 EnsureGuestSubmissionCapacity();
@@ -125,16 +124,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         EnsureGuestSubmissionCapacity();
                     }
 
-                    commandBuffer = AllocateGuestCommandBuffer();
+                    commandBuffer = BeginBatchedGuestCommands();
                     _commandBuffer = commandBuffer;
-                    var beginInfo = new CommandBufferBeginInfo
-                    {
-                        SType = StructureType.CommandBufferBeginInfo,
-                        Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-                    };
-                    Check(
-                        _vk.BeginCommandBuffer(_commandBuffer, &beginInfo),
-                        "vkBeginCommandBuffer(compute)");
 
                     BeginDebugLabel(_commandBuffer, resources.DebugName);
                     if (isFirstBatch)
@@ -207,29 +198,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     EndDebugLabel(_commandBuffer);
-                    Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer(compute)");
 
                     TraceVulkanShader(
                         $"vk.compute_submit cs=0x{work.ShaderAddress:X16} " +
                         $"batch={batchIndex}/{batchCount} z={zStart}..{zStart + zCount}");
                     if (isLastBatch)
                     {
-                        SubmitGuestCommandBuffer(
-                            commandBuffer,
-                            [resources],
-                            GetTraceImages(resources, shaderAddress: work.ShaderAddress),
-                            useComputeQueue: true);
+                        _batchResources.Add(resources);
+                        _batchTraceImages.AddRange(
+                            GetTraceImages(resources, shaderAddress: work.ShaderAddress));
+                        FlushBatchedGuestCommands();
                         submitted = true;
                     }
                     else
                     {
-                        SubmitGuestCommandBuffer(
-                            commandBuffer,
-                            [],
-                            [],
-                            referencedResources: [resources],
-                            useComputeQueue: true);
-                        chunksSubmitted++;
+                        FlushBatchedGuestCommands(referencedResources: [resources]);
                         commandBuffer = default;
                     }
                 }
@@ -265,30 +248,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
-                _commandBuffer = _presentationCommandBuffer;
-                if (!submitted && commandBuffer.Handle != 0)
-                {
-                    _vk.FreeCommandBuffers(
-                        _device,
-                        _commandPool,
-                        1,
-                        &commandBuffer);
-                }
-
+                _commandBuffer = default;
                 if (!submitted && resources is not null)
                 {
-                    if (chunksSubmitted > 0)
-                    {
-                        // Earlier chunks were submitted with empty resource
-                        // lists and may still execute against these
-                        // pipelines/images; destroy only after every
-                        // submission issued so far has completed.
-                        _deferredResourceDestroys.Enqueue((resources, _submitTimeline));
-                    }
-                    else
-                    {
-                        DestroyTranslatedDrawResources(resources);
-                    }
+                    // Earlier chunks or the partly recorded buffer may still use
+                    // these; destroy after the current tick retires.
+                    _deferredResourceDestroys.Enqueue((resources, _scheduler.CurrentTick));
                 }
             }
         }

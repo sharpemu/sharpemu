@@ -720,19 +720,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
             EnsureGuestSubmissionCapacity();
             var snapshot = CreateGuestFlipSnapshot(source, work.Version);
-            var commandBuffer = AllocateGuestCommandBuffer();
+            var commandBuffer = BeginBatchedGuestCommands();
             var submitted = false;
             try
             {
-                var beginInfo = new CommandBufferBeginInfo
-                {
-                    SType = StructureType.CommandBufferBeginInfo,
-                    Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-                };
-                Check(
-                    _vk.BeginCommandBuffer(commandBuffer, &beginInfo),
-                    "vkBeginCommandBuffer(flip capture)");
-
                 var barriers = stackalloc ImageMemoryBarrier[2];
                 barriers[0] = new ImageMemoryBarrier
                 {
@@ -828,10 +819,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     2,
                     barriers);
 
-                Check(
-                    _vk.EndCommandBuffer(commandBuffer),
-                    "vkEndCommandBuffer(flip capture)");
-                SubmitGuestCommandBuffer(commandBuffer, [], []);
+                FlushBatchedGuestCommands();
                 submitted = true;
                 snapshot.Initialized = true;
                 _guestImageVersions.Add(work.Version, snapshot);
@@ -883,7 +871,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (!submitted)
                 {
                     MarkGuestFlipVersionSafe(work);
-                    ReleaseGuestCommandBuffer(commandBuffer);
                     DestroyGuestImage(snapshot);
                 }
             }
@@ -995,18 +982,10 @@ internal static unsafe partial class VulkanVideoPresenter
             };
         }
 
-        private void WaitFrameSlot(int slot) => TryWaitFrameSlot(slot, ulong.MaxValue);
-
-        // Returns false when the slot's fence is still unsignaled after
-        // timeoutNs (the GPU is behind, e.g. a slow-compute backlog). Callers
-        // on the macOS main thread must NOT wait forever here or the Cocoa
-        // event pump stalls and the window goes "Not Responding" (F1 overlay /
-        // close stop working). A bounded wait lets Render() skip the frame and
-        // return to the pump; the fence still signals later and the frame is
-        // retried.
-        private bool TryWaitFrameSlot(int slot, ulong timeoutNs)
+        // Wait for the GPU to complete the slot's last frame before reuse.
+        private void WaitFrameSlot(int slot)
         {
-            if (_frameFencePending.Length <= slot || !_frameFencePending[slot])
+            if (_frameInFlight.Length <= slot || !_frameInFlight[slot])
             {
                 if (_frameGuestImageVersions.Length > slot &&
                     _frameGuestImageVersions[slot] is { } unsubmittedVersion)
@@ -1018,19 +997,11 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"vk.flip_retired version={unsubmittedVersion.FlipVersion} " +
                         $"frame_slot={slot} reason=frame-not-submitted");
                 }
-                return true;
+                return;
             }
 
-            var fence = _frameFences[slot];
-            var waitResult = _vk.WaitForFences(_device, 1, &fence, true, timeoutNs);
-            if (waitResult == Result.Timeout)
-            {
-                return false;
-            }
-
-            Check(waitResult, "vkWaitForFences(frame)");
-            Check(_vk.ResetFences(_device, 1, &fence), "vkResetFences(frame)");
-            _frameFencePending[slot] = false;
+            _scheduler.Wait(_frameTimelines[slot]);
+            _frameInFlight[slot] = false;
             if (_frameTimelines[slot] > _completedTimeline)
             {
                 _completedTimeline = _frameTimelines[slot];
@@ -1053,12 +1024,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             ProcessDeferredTextureDestroys();
-            return true;
         }
 
         private void WaitAllFrameSlots()
         {
-            for (var slot = 0; slot < _frameFencePending.Length; slot++)
+            for (var slot = 0; slot < _frameInFlight.Length; slot++)
             {
                 WaitFrameSlot(slot);
             }
@@ -1100,12 +1070,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Used on teardown paths that already drained the queue (device
-        // wait-idle): releases per-slot state without touching fences that
-        // were never submitted.
         private void DrainFrameSlots()
         {
             WaitAllFrameSlots();
+            _scheduler.Wait(_submitTimeline);
             _completedTimeline = _submitTimeline;
             ProcessDeferredTextureDestroys();
         }

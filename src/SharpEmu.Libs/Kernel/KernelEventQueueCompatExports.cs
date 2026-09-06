@@ -1149,7 +1149,8 @@ public static class KernelEventQueueCompatExports
     /// </summary>
     public static int TriggerRegisteredEventsByFilter(
         short filter,
-        ulong data)
+        ulong data,
+        ulong? ident = null)
     {
         List<EventQueueState>? wakeQueues = null;
         var triggeredCount = 0;
@@ -1165,7 +1166,8 @@ public static class KernelEventQueueCompatExports
 
                 foreach (var registration in registrations.Values)
                 {
-                    if (registration.Filter != filter)
+                    if (registration.Filter != filter ||
+                        (ident is { } eventIdent && registration.Ident != eventIdent))
                     {
                         continue;
                     }

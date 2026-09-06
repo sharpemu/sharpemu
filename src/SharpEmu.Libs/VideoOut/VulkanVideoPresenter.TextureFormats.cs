@@ -67,15 +67,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var (newTyped, newMemory) = CreateTransferScratchImage(toFormat, resource.Width, resource.Height);
             try
             {
-                var commandBuffer = AllocateGuestCommandBuffer();
-                var beginInfo = new CommandBufferBeginInfo
-                {
-                    SType = StructureType.CommandBufferBeginInfo,
-                    Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-                };
-                Check(
-                    _vk.BeginCommandBuffer(commandBuffer, &beginInfo),
-                    "vkBeginCommandBuffer(format-convert)");
+                FlushBatchedGuestCommands();
+                var commandBuffer = BeginBatchedGuestCommands();
 
                 var toTransferSrc = new ImageMemoryBarrier
                 {
@@ -230,8 +223,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit,
                     0, 0, null, 0, null, 1, &resourceToGeneral);
 
-                Check(_vk.EndCommandBuffer(commandBuffer), "vkEndCommandBuffer(format-convert)");
-                SubmitGuestCommandBuffer(commandBuffer, [], []);
+                FlushBatchedGuestCommands();
 
                 if (_traceGuestImageEvents)
                 {

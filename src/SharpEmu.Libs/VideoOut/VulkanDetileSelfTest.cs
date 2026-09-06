@@ -33,18 +33,22 @@ internal static unsafe class VulkanDetileSelfTest
         (27, 16, Format.R32G32B32A32Uint),
     ];
 
+    private static object _queueGate = new();
+
     public static void RunIfRequested(
         Vk vk,
         Device device,
         Queue queue,
         PhysicalDevice physicalDevice,
-        uint queueFamilyIndex)
+        uint queueFamilyIndex,
+        object queueGate)
     {
         if (Environment.GetEnvironmentVariable("SHARPEMU_DETILE_SELFTEST") != "1")
         {
             return;
         }
 
+        _queueGate = queueGate;
         try
         {
             Run(vk, device, queue, physicalDevice, queueFamilyIndex);
@@ -62,7 +66,7 @@ internal static unsafe class VulkanDetileSelfTest
         PhysicalDevice physicalDevice,
         uint queueFamilyIndex)
     {
-        using var pass = new VulkanDetilePass(vk, device, queue, physicalDevice, queueFamilyIndex);
+        using var pass = new VulkanDetilePass(vk, device, queue, physicalDevice, queueFamilyIndex, _queueGate);
         var commandPool = CreateCommandPool(vk, device, queueFamilyIndex);
         try
         {
@@ -254,7 +258,11 @@ internal static unsafe class VulkanDetileSelfTest
                 CommandBufferCount = 1,
                 PCommandBuffers = &commandBuffer,
             };
-            Check(vk.QueueSubmit(queue, 1, &submitInfo, fence), "vkQueueSubmit(selftest record)");
+            lock (_queueGate)
+            {
+                Check(vk.QueueSubmit(queue, 1, &submitInfo, fence), "vkQueueSubmit(selftest record)");
+            }
+
             Check(vk.WaitForFences(device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(selftest record)");
         }
         finally
@@ -380,7 +388,11 @@ internal static unsafe class VulkanDetileSelfTest
                 CommandBufferCount = 1,
                 PCommandBuffers = &commandBuffer,
             };
-            Check(vk.QueueSubmit(queue, 1, &submitInfo, fence), "vkQueueSubmit(selftest readback)");
+            lock (_queueGate)
+            {
+                Check(vk.QueueSubmit(queue, 1, &submitInfo, fence), "vkQueueSubmit(selftest readback)");
+            }
+
             Check(
                 vk.WaitForFences(device, 1, &fence, true, ulong.MaxValue),
                 "vkWaitForFences(selftest readback)");

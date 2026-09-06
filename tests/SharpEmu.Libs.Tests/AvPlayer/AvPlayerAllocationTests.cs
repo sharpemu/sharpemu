@@ -17,6 +17,43 @@ public sealed class AvPlayerAllocationTests : IDisposable
     private readonly IGuestThreadScheduler? _previousScheduler = GuestThreadExecution.Scheduler;
 
     [Fact]
+    public async Task FallbackPollDoesNotWaitForThePlayerLock()
+    {
+        var gate = typeof(AvPlayerExports).GetField(
+            "StateGate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        using var locked = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var owner = new Thread(() =>
+        {
+            lock (gate)
+            {
+                locked.Set();
+                release.Wait();
+            }
+        });
+        owner.Start();
+        try
+        {
+            Assert.True(locked.Wait(TimeSpan.FromSeconds(5)));
+            var poll = Task.Run(() =>
+            {
+                var found = AvPlayerExports.TryGetFallbackPresentationFrame(
+                    out var pixels, out var width, out var height, out var serial);
+                return (found, pixels, width, height, serial);
+            });
+            var result = await poll.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(result.found);
+            Assert.Empty(result.pixels);
+            Assert.Equal((0u, 0u, 0L), (result.width, result.height, result.serial));
+        }
+        finally
+        {
+            release.Set();
+            owner.Join();
+        }
+    }
+
+    [Fact]
     public void FailedGuestAllocatorsFallBackToHleMemoryInTheSameAttempt()
     {
         using var memory = new PhysicalVirtualMemory();

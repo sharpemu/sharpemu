@@ -5,7 +5,15 @@ namespace SharpEmu.HLE.GpuMemory;
 
 public interface IGpuQueueRelay
 {
+    bool IsGpuQueueThread { get; }
+
+    void Post(Action work);
+
+    // Return after the work completes. Run it directly when called on the GPU worker.
     void RunOnGpuQueue(Action work);
+
+    // Return false if the relay rejects the work. Rejected work does not run.
+    bool TryRunOnGpuQueue(Action work);
 }
 
 public sealed class GuestGpuMemory : IDisposable
@@ -15,7 +23,10 @@ public sealed class GuestGpuMemory : IDisposable
     private readonly IGuestImageStore _images;
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
-    private IGpuQueueRelay? _gpu;
+    private sealed record GpuAttachment(IGpuQueueRelay? Gpu, IGpuTickScheduler? Scheduler);
+
+    private readonly object _attachGate = new();
+    private GpuAttachment? _attachment;
 
     public GuestGpuMemory(IGuestAddressSpace addressSpace, IGuestBufferStore buffers, IGuestImageStore images)
     {
@@ -101,9 +112,40 @@ public sealed class GuestGpuMemory : IDisposable
 
     public void Unregister(ulong address, ulong size)
     {
-        void Unmap()
+        for (;;)
         {
-            // Section 2 adds the scheduler drain here.
+            var attachment = Volatile.Read(ref _attachment);
+            if (attachment?.Scheduler?.InsideTickCallback == true)
+            {
+                PageGuard.OnFatal($"Cannot unmap memory from a GPU completion callback: addr=0x{address:X16} size=0x{size:X16}");
+                return;
+            }
+
+            if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
+            {
+                if (gpu.TryRunOnGpuQueue(() => Unmap(attachment.Scheduler)))
+                {
+                    return;
+                }
+
+                // The relay is closed. The worker completes its GPU work and detaches first.
+                WaitForDetach(attachment);
+                continue;
+            }
+
+            Unmap(attachment?.Scheduler);
+            return;
+        }
+
+        void Unmap(IGpuTickScheduler? scheduler)
+        {
+            if (scheduler is { Active: true })
+            {
+                var tick = scheduler.CurrentTick;
+                scheduler.Finish();
+                scheduler.WaitForPriorityOperations(tick);
+            }
+
             _ = _buffers.MarkCpuWrite(address, size);
             _images.Unregister(address, size);
             _pages.NoteUnmapped(address, size);
@@ -117,17 +159,28 @@ public sealed class GuestGpuMemory : IDisposable
                 _spansLock.ExitWriteLock();
             }
         }
-
-        if (_gpu == null)
-        {
-            Unmap();
-            return;
-        }
-
-        _gpu.RunOnGpuQueue(Unmap);
     }
 
-    public void AttachGpuQueue(IGpuQueueRelay? gpu) => _gpu = gpu;
+    // Publish both references together so an unmap cannot use a mismatched pair.
+    public void AttachGpuQueue(IGpuQueueRelay? gpu, IGpuTickScheduler? scheduler)
+    {
+        lock (_attachGate)
+        {
+            Volatile.Write(ref _attachment, gpu == null && scheduler == null ? null : new GpuAttachment(gpu, scheduler));
+            Monitor.PulseAll(_attachGate);
+        }
+    }
+
+    private void WaitForDetach(GpuAttachment attachment)
+    {
+        lock (_attachGate)
+        {
+            while (ReferenceEquals(Volatile.Read(ref _attachment), attachment))
+            {
+                Monitor.Wait(_attachGate);
+            }
+        }
+    }
 
     public void Dispose()
     {

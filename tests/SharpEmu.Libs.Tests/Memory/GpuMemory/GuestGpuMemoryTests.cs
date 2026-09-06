@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
@@ -42,11 +43,47 @@ public sealed class GuestGpuMemoryTests
     {
         public int Runs { get; private set; }
 
+        public bool IsGpuQueueThread { get; set; } = true;
+
+        public bool Accepting { get; set; } = true;
+
+        public void Post(Action work) => work();
+
         public void RunOnGpuQueue(Action work)
         {
             Runs++;
             work();
         }
+
+        public bool TryRunOnGpuQueue(Action work)
+        {
+            if (!Accepting)
+            {
+                return false;
+            }
+
+            RunOnGpuQueue(work);
+            return true;
+        }
+    }
+
+    private sealed class RecordingScheduler : IGpuTickScheduler
+    {
+        public List<string> Calls { get; } = new();
+
+        public bool Active { get; set; }
+
+        public ulong CurrentTick { get; set; } = 7;
+
+        public bool InsideTickCallback { get; set; }
+
+        public void Finish()
+        {
+            Calls.Add("finish");
+            CurrentTick++;
+        }
+
+        public void WaitForPriorityOperations(ulong tick) => Calls.Add($"wait_priority {tick}");
     }
 
     private readonly RecordingStores _stores = new();
@@ -162,14 +199,85 @@ public sealed class GuestGpuMemoryTests
     [Fact]
     public void Unregister_RunsOnTheGpuQueueWhenAttached()
     {
-        var queue = new InlineQueue();
+        var queue = new InlineQueue { IsGpuQueueThread = false };
         _memory.Register(0x10000, 0x1000);
-        _memory.AttachGpuQueue(queue);
+        _memory.AttachGpuQueue(queue, null);
 
         _memory.Unregister(0x10000, 0x1000);
 
         Assert.Equal(1, queue.Runs);
         Assert.False(_memory.Covers(0x10000, 0x1000));
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public void Unregister_DrainsTheSchedulerThroughTheTickItCaptured()
+    {
+        var scheduler = new RecordingScheduler { Active = true };
+        _memory.Register(0x10000, 0x1000);
+        _memory.AttachGpuQueue(new InlineQueue(), scheduler);
+
+        _memory.Unregister(0x10000, 0x1000);
+
+        Assert.Equal(new[] { "finish", "wait_priority 7" }, scheduler.Calls);
+        Assert.Equal(new[] { "buffer.write 10000+1000", "image.unregister 10000+1000" }, _stores.Calls);
+        Assert.False(_memory.Covers(0x10000, 0x1000));
+
+        scheduler.Active = false;
+        _memory.Register(0x20000, 0x1000);
+        _memory.Unregister(0x20000, 0x1000);
+        Assert.Equal(2, scheduler.Calls.Count);
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public async Task Unregister_AfterClosureWaitsForDetachAndRunsWithoutTheScheduler()
+    {
+        var scheduler = new RecordingScheduler { Active = true };
+        var queue = new InlineQueue { IsGpuQueueThread = false, Accepting = false };
+        _memory.Register(0x10000, 0x1000);
+        _memory.AttachGpuQueue(queue, scheduler);
+
+        var unregister = Task.Run(() => _memory.Unregister(0x10000, 0x1000));
+        Assert.False(await SchedulingTestSupport.CompletesWithin(unregister, 100));
+        Assert.Empty(_stores.Calls);
+
+        _memory.AttachGpuQueue(null, null);
+
+        Assert.True(await SchedulingTestSupport.CompletesWithin(unregister, 5000));
+        Assert.Equal(0, queue.Runs);
+        Assert.Empty(scheduler.Calls);
+        Assert.Equal(new[] { "buffer.write 10000+1000", "image.unregister 10000+1000" }, _stores.Calls);
+        Assert.False(_memory.Covers(0x10000, 0x1000));
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public void Unregister_RefusesToRunFromATickCallbackBeforeDispatch()
+    {
+        var previous = PageGuard.OnFatal;
+        var fatals = new List<string>();
+        PageGuard.OnFatal = fatals.Add;
+        try
+        {
+            var queue = new InlineQueue();
+            _memory.Register(0x10000, 0x1000);
+            _memory.AttachGpuQueue(queue, new RecordingScheduler { Active = true, InsideTickCallback = true });
+
+            _memory.Unregister(0x10000, 0x1000);
+
+            Assert.Single(fatals);
+            Assert.Contains("addr=0x0000000000010000", fatals[0]);
+            Assert.Equal(0, queue.Runs);
+            Assert.True(_memory.Covers(0x10000, 0x1000));
+            _memory.AttachGpuQueue(null, null);
+            _memory.Unregister(0x10000, 0x1000);
+        }
+        finally
+        {
+            PageGuard.OnFatal = previous;
+        }
+
         _memory.Dispose();
     }
 }

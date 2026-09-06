@@ -52,11 +52,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // image because the presentation engine may still wait on them after
         // the frame fence has signaled.
         private const int MaxFramesInFlight = 2;
-        private CommandBuffer[] _frameCommandBuffers = [];
         private VkSemaphore[] _frameImageAvailable = [];
         private VkSemaphore[] _renderFinishedPerImage = [];
-        private Fence[] _frameFences = [];
-        private bool[] _frameFencePending = [];
+        private bool[] _frameInFlight = [];
         private ulong[] _frameTimelines = [];
         private TranslatedDrawResources?[] _frameTranslatedResources = [];
         private GuestImageResource?[] _frameGuestImageVersions = [];
@@ -476,7 +474,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _swapchainRecreateDeferred = false;
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut recreating swapchain after {operation}: {result}");
-            _vk.DeviceWaitIdle(_device);
+            lock (_queueGate)
+            {
+                _vk.DeviceWaitIdle(_device);
+            }
+
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
             DestroySwapchainResources();
@@ -584,22 +586,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _overlayStagingMemory = [];
             _overlayStagingMapped = [];
             _overlayImageInitialized = false;
-            foreach (var fence in _frameFences)
-            {
-                if (fence.Handle != 0)
-                {
-                    _vk.DestroyFence(_device, fence, null);
-                }
-            }
-            _frameFences = [];
-            _frameFencePending = [];
+            _frameInFlight = [];
             _frameTimelines = [];
             _frameTranslatedResources = [];
             _frameGuestImageVersions = [];
-            while (_recycledGuestFences.TryPop(out var recycledFence))
-            {
-                _vk.DestroyFence(_device, recycledFence, null);
-            }
             if (_hdrPipeline.Handle != 0)
             {
                 _vk.DestroyPipeline(_device, _hdrPipeline, null);
@@ -708,14 +698,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _presentationImageMemory = [];
             if (_commandPool.Handle != 0)
             {
-                // Destroying the pool frees every command buffer allocated
-                // from it, including recycled and per-frame ones.
-                _recycledGuestCommandBuffers.Clear();
-                _frameCommandBuffers = [];
+                // Destroying the pool frees the scratch buffer allocated from it.
                 _vk.DestroyCommandPool(_device, _commandPool, null);
                 _commandPool = default;
                 _commandBuffer = default;
-                _presentationCommandBuffer = default;
+                _syncCommandBuffer = default;
             }
             if (_swapchain.Handle != 0)
             {

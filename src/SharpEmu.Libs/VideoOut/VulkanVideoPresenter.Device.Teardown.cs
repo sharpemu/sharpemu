@@ -15,12 +15,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            ShutdownScheduler();
             if (_debugUtils is not null && _debugMessenger.Handle != 0)
             {
                 _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
             }
             _vulkanReady = false;
-            _vk.DeviceWaitIdle(_device);
+            lock (_queueGate)
+            {
+                _vk.DeviceWaitIdle(_device);
+            }
+
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
@@ -69,13 +74,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _dirtyGuestBufferCandidates.Clear();
             PerfOverlay.SetGuestBufferCacheBytes(0);
             _hostBufferPool.Dispose();
-            if (_useDedicatedComputeQueue)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][PERF] vk.dedicated_compute_queue " +
-                    $"graphics_submits={_graphicsQueueSubmitCount} " +
-                    $"compute_submits={_computeQueueSubmitCount}");
-            }
             foreach (var guestImage in _guestImages.Values)
             {
                 DestroyGuestImage(guestImage);
@@ -141,9 +139,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Console.Error.WriteLine(
                         $"[LOADER][PERF] vk.gpu_label_timeline " +
                         $"signals={_gpuLabelTimelineSignalCount} " +
-                        $"cross_queue_waits={_gpuLabelTimelineCrossQueueWaitCount} " +
-                        $"graphics_value={_graphicsGuestTimelineValue} " +
-                        $"compute_value={_computeGuestTimelineValue}");
+                        $"waits={_gpuLabelTimelineWaitCount} " +
+                        $"graphics_value={_graphicsGuestTimelineValue}");
                 }
                 if (_graphicsGuestTimelineSemaphore.Handle != 0)
                 {
@@ -153,14 +150,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         null);
                     _graphicsGuestTimelineSemaphore = default;
                 }
-                if (_computeGuestTimelineSemaphore.Handle != 0)
-                {
-                    _vk.DestroySemaphore(
-                        _device,
-                        _computeGuestTimelineSemaphore,
-                        null);
-                    _computeGuestTimelineSemaphore = default;
-                }
+                _scheduler.Dispose();
                 if (_pipelineCache.Handle != 0)
                 {
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);

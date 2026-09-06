@@ -1,0 +1,136 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Collections;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.Memory.GpuMemory;
+using SharpEmu.Libs.VideoOut;
+using Silk.NET.Vulkan;
+using Xunit;
+
+namespace SharpEmu.Libs.Tests.Gpu.Scheduling;
+
+[Collection(SchedulingStateCollection.Name)]
+public sealed class PresenterSubmissionTests
+{
+    private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+    private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+
+    [Theory]
+    [InlineData("unmap")]
+    [InlineData("shutdown")]
+    [InlineData("wait")]
+    [InlineData("flush")]
+    public void EverySubmissionRoutePublishesAndRetiresTheExactBatch(string route)
+    {
+        // Use the presenter bookkeeping without creating a window or Vulkan resources.
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        foreach (var name in new[]
+        {
+            "_batchResources", "_batchTraceImages", "_batchRetireBuffers", "_batchRetireDetile",
+            "_pendingGuestSubmissions", "_lastSubmittedTimelineByGuestQueue",
+            "_lastSubmittedGpuLabelDependencyByGuestQueue", "_gpuLabelHostPublications",
+            "_dirtyGuestBufferIndex", "_recycledDescriptorPools", "_deferredTextureDestroys",
+            "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys", "_deferredGuestImageVariantDestroys",
+        })
+        {
+            var field = PresenterType.GetField(name, InstanceMembers)!;
+            field.SetValue(presenter, Activator.CreateInstance(field.FieldType, nonPublic: true));
+        }
+
+        Set(presenter, "_batchOpen", true);
+        Set(presenter, "_activeGuestQueue", new VulkanGuestQueueIdentity("test.queue", 7));
+        Set(presenter, "_gpuLabelTimelineEnabled", true);
+        Set(presenter, "_graphicsGuestTimelineSemaphore", new Silk.NET.Vulkan.Semaphore(100));
+
+        var allocation = NewNested("GuestBufferAllocation");
+        var binding = NewNested("GlobalBufferResource");
+        Set(binding, "Allocation", allocation);
+        Set(binding, "Writable", true);
+        Set(binding, "WriteBackToGuest", true);
+        Set(binding, "GuestOffset", 16UL);
+        Set(binding, "GuestSize", 32UL);
+        var resources = NewNested("TranslatedDrawResources");
+        var bindings = Array.CreateInstance(binding.GetType(), 1);
+        bindings.SetValue(binding, 0);
+        Set(resources, "GlobalMemoryBuffers", bindings);
+        Set(resources, "DescriptorPool", new DescriptorPool(123));
+        ((IList)Get(presenter, "_batchResources")).Add(resources);
+
+        var device = new FakeTickDevice { CompleteOnSubmit = route != "flush" };
+        using var scheduler = new SubmissionScheduler(
+            device,
+            (IRenderingState)presenter,
+            PresenterType.GetMethod("PrepareGuestSubmission", InstanceMembers)!.CreateDelegate<Action<SubmitBundle>>(presenter),
+            PresenterType.GetMethod("CompleteGuestSubmission", InstanceMembers)!.CreateDelegate<Action<ulong>>(presenter));
+        Set(presenter, "_scheduler", scheduler);
+        scheduler.Begin(new SubmissionContext { QueueName = "test.queue", SubmissionId = 7 });
+
+        switch (route)
+        {
+            case "unmap":
+                using (var memory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore()))
+                {
+                    memory.Register(0x10000, 0x1000);
+                    memory.AttachGpuQueue(null, scheduler);
+                    memory.Unregister(0x10000, 0x1000);
+                    Assert.False(memory.Covers(0x10000, 0x1000));
+                }
+                break;
+            case "shutdown": scheduler.Shutdown(); break;
+            case "wait": scheduler.Wait(scheduler.CurrentTick); break;
+            case "flush": Invoke(presenter, "FlushBatchedGuestCommands", new object?[] { null }); break;
+        }
+
+        Assert.Equal(1UL, Assert.Single(device.Submits).Tick);
+        Assert.Equal(2, device.Submits[0].Signals);
+        Assert.False((bool)Get(presenter, "_batchOpen"));
+        Assert.Empty((IEnumerable)Get(presenter, "_batchResources"));
+        Assert.Equal(1UL, Get(presenter, "_submitTimeline"));
+        Assert.Equal(1UL, Get(allocation, "LastUseTimeline"));
+        var dirty = Assert.Single(((IEnumerable)allocation.GetType().GetProperty("DirtyRanges")!.GetValue(allocation)!).Cast<object>());
+        Assert.Equal(1UL, dirty.GetType().GetProperty("Timeline")!.GetValue(dirty));
+        Assert.Equal("test.queue", dirty.GetType().GetProperty("QueueName")!.GetValue(dirty));
+        var pending = Assert.Single(((IEnumerable)Get(presenter, "_pendingGuestSubmissions")).Cast<object>());
+        Assert.Equal(1UL, pending.GetType().GetProperty("Tick")!.GetValue(pending));
+        Assert.Same(resources, Assert.Single(((IEnumerable)pending.GetType().GetProperty("Resources")!.GetValue(pending)!).Cast<object>()));
+
+        if (route == "flush")
+        {
+            Invoke(presenter, "CollectCompletedGuestSubmissions", false);
+            Assert.Single(((IEnumerable)Get(presenter, "_pendingGuestSubmissions")).Cast<object>());
+            Assert.Empty((IEnumerable)Get(presenter, "_recycledDescriptorPools"));
+            device.Complete(1);
+            device.CompleteOnSubmit = true;
+        }
+
+        Invoke(presenter, "CollectCompletedGuestSubmissions", false);
+        Assert.Empty((IEnumerable)Get(presenter, "_pendingGuestSubmissions"));
+        Assert.Single(((IEnumerable)Get(presenter, "_recycledDescriptorPools")).Cast<object>());
+        Assert.Equal(1UL, Get(presenter, "_completedTimeline"));
+
+        if (route != "shutdown")
+        {
+            scheduler.Finish();
+            Assert.Equal(2UL, Get(presenter, "_submitTimeline"));
+            Assert.Equal(1, device.Submits[1].Signals);
+            Assert.Equal(1UL, Get(allocation, "LastUseTimeline"));
+            Assert.Empty((IEnumerable)Get(presenter, "_pendingGuestSubmissions"));
+            Invoke(presenter, "CollectCompletedGuestSubmissions", false);
+            Assert.Equal(2UL, Get(presenter, "_completedTimeline"));
+        }
+    }
+
+    private static object NewNested(string name) =>
+        Activator.CreateInstance(PresenterType.GetNestedType(name, BindingFlags.NonPublic)!, nonPublic: true)!;
+
+    private static object Get(object target, string name) => target.GetType().GetField(name, InstanceMembers)!.GetValue(target)!;
+
+    private static void Set(object target, string name, object value) => target.GetType().GetField(name, InstanceMembers)!.SetValue(target, value);
+
+    private static void Invoke(object target, string name, params object?[] args) =>
+        target.GetType().GetMethod(name, InstanceMembers)!.Invoke(target, args);
+}

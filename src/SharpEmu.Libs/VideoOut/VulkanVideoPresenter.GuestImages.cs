@@ -159,7 +159,7 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 Check(
-                    _vk.ResetCommandBuffer(_commandBuffer, 0),
+                    _vk.ResetCommandBuffer(_syncCommandBuffer, 0),
                     "vkResetCommandBuffer(guest readback)");
                 var beginInfo = new CommandBufferBeginInfo
                 {
@@ -167,7 +167,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
                 };
                 Check(
-                    _vk.BeginCommandBuffer(_commandBuffer, &beginInfo),
+                    _vk.BeginCommandBuffer(_syncCommandBuffer, &beginInfo),
                     "vkBeginCommandBuffer(guest readback)");
 
                 var toTransfer = new ImageMemoryBarrier
@@ -183,7 +183,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     SubresourceRange = ColorSubresourceRange(),
                 };
                 _vk.CmdPipelineBarrier(
-                    _commandBuffer,
+                    _syncCommandBuffer,
                     PipelineStageFlags.FragmentShaderBit |
                     PipelineStageFlags.ComputeShaderBit,
                     PipelineStageFlags.TransferBit,
@@ -205,7 +205,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     ImageExtent = new Extent3D(image.Width, image.Height, 1),
                 };
                 _vk.CmdCopyImageToBuffer(
-                    _commandBuffer,
+                    _syncCommandBuffer,
                     image.Image,
                     ImageLayout.TransferSrcOptimal,
                     buffer,
@@ -225,7 +225,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     SubresourceRange = ColorSubresourceRange(),
                 };
                 _vk.CmdPipelineBarrier(
-                    _commandBuffer,
+                    _syncCommandBuffer,
                     PipelineStageFlags.TransferBit,
                     PipelineStageFlags.FragmentShaderBit |
                     PipelineStageFlags.ComputeShaderBit,
@@ -238,21 +238,24 @@ internal static unsafe partial class VulkanVideoPresenter
                     &toShaderRead);
 
                 Check(
-                    _vk.EndCommandBuffer(_commandBuffer),
+                    _vk.EndCommandBuffer(_syncCommandBuffer),
                     "vkEndCommandBuffer(guest readback)");
-                var commandBuffer = _commandBuffer;
+                var commandBuffer = _syncCommandBuffer;
                 var submitInfo = new SubmitInfo
                 {
                     SType = StructureType.SubmitInfo,
                     CommandBufferCount = 1,
                     PCommandBuffers = &commandBuffer,
                 };
-                Check(
-                    _vk.QueueSubmit(_queue, 1, &submitInfo, default),
-                    "vkQueueSubmit(guest readback)");
-                Check(
-                    _vk.QueueWaitIdle(_queue),
-                    "vkQueueWaitIdle(guest readback)");
+                lock (_queueGate)
+                {
+                    Check(
+                        _vk.QueueSubmit(_queue, 1, &submitInfo, default),
+                        "vkQueueSubmit(guest readback)");
+                    Check(
+                        _vk.QueueWaitIdle(_queue),
+                        "vkQueueWaitIdle(guest readback)");
+                }
 
                 void* mapped;
                 Check(
@@ -1109,15 +1112,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void TransitionNewGuestImageToSampled(Image image, uint mipLevels)
         {
-            var commandBuffer = AllocateGuestCommandBuffer();
-            var beginInfo = new CommandBufferBeginInfo
-            {
-                SType = StructureType.CommandBufferBeginInfo,
-                Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-            };
-            Check(
-                _vk.BeginCommandBuffer(commandBuffer, &beginInfo),
-                "vkBeginCommandBuffer(guest image init)");
+            // The transition joins the guest command stream ahead of every use.
+            var commandBuffer = BeginBatchedGuestCommands();
+            _scheduler.EndRendering();
             var barrier = new ImageMemoryBarrier
             {
                 SType = StructureType.ImageMemoryBarrier,
@@ -1141,12 +1138,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 null,
                 1,
                 &barrier);
-            Check(
-                _vk.EndCommandBuffer(commandBuffer),
-                "vkEndCommandBuffer(guest image init)");
-            // Same-queue submission order makes the transition visible to any
-            // later use of the image; no CPU-side wait is needed.
-            SubmitGuestCommandBuffer(commandBuffer, [], []);
         }
 
     }

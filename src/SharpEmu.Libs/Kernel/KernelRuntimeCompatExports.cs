@@ -305,16 +305,14 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelReadTsc(CpuContext ctx)
     {
-        if (TryReadHostTsc(out ulong counter))
-        {
-            ctx[CpuRegister.Rax] = counter;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        var stopwatchTicks = Stopwatch.GetTimestamp();
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, stopwatchTicks));
+        ctx[CpuRegister.Rax] = ReadTscCounter();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    internal static ulong TscFrequency => _kernelTscFrequency;
+
+    internal static ulong ReadTscCounter() =>
+        TryReadHostTsc(out var counter) ? counter : unchecked((ulong)Math.Max(0, Stopwatch.GetTimestamp()));
 
     [SysAbiExport(
         Nid = "1j3S3n-tTW4",

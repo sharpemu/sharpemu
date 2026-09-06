@@ -35,6 +35,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
     private readonly Vk _vk;
     private readonly Device _device;
     private readonly Queue _queue;
+    private readonly object _queueGate;
     private readonly PhysicalDevice _physicalDevice;
     private readonly uint _queueFamilyIndex;
 
@@ -66,11 +67,13 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         Device device,
         Queue queue,
         PhysicalDevice physicalDevice,
-        uint queueFamilyIndex)
+        uint queueFamilyIndex,
+        object queueGate)
     {
         _vk = vk;
         _device = device;
         _queue = queue;
+        _queueGate = queueGate;
         _physicalDevice = physicalDevice;
         _queueFamilyIndex = queueFamilyIndex;
     }
@@ -237,7 +240,11 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
                 CommandBufferCount = 1,
                 PCommandBuffers = &commandBuffer,
             };
-            Check(_vk.QueueSubmit(_queue, 1, &submitInfo, fence), "vkQueueSubmit(detile)");
+            lock (_queueGate)
+            {
+                Check(_vk.QueueSubmit(_queue, 1, &submitInfo, fence), "vkQueueSubmit(detile)");
+            }
+
             Check(_vk.WaitForFences(_device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(detile)");
             return true;
         }

@@ -59,7 +59,17 @@ public static class AvPlayerExports
         out uint height,
         out long serial)
     {
-        lock (StateGate)
+        // The GPU worker must remain available for guest allocation callbacks.
+        if (!Monitor.TryEnter(StateGate))
+        {
+            pixels = [];
+            width = 0;
+            height = 0;
+            serial = 0;
+            return false;
+        }
+
+        try
         {
             PlayerState? latest = null;
             foreach (var player in Players.Values)
@@ -156,6 +166,10 @@ public static class AvPlayerExports
             height = latest.FallbackPresentationHeight;
             serial = latest.FallbackPresentationSerial;
             return IsValidBgraFrame(pixels, width, height);
+        }
+        finally
+        {
+            Monitor.Exit(StateGate);
         }
     }
 

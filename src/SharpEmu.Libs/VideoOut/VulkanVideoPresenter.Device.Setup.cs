@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Text;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -47,18 +48,16 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _pipelineCacheDirty;
         private long _lastPipelineCacheSaveTick;
         private Queue _queue;
-        private Queue _computeQueue;
         private uint _queueFamilyIndex;
-        private uint _queueFamilyQueueCount;
-        private bool _queueFamilySupportsCompute;
-        private bool _useDedicatedComputeQueue;
 
         private CommandPool _commandPool;
         private CommandBuffer _commandBuffer;
-        private CommandBuffer _presentationCommandBuffer;
+        // Scratch buffer of the synchronous readback path; each use waits for the queue.
+        private CommandBuffer _syncCommandBuffer;
 
         private void Initialize()
         {
+            _relay.BindCurrentThread();
             WaitForRenderDocAttachIfRequested();
             _vk = Vk.GetApi();
             CreateInstance();
@@ -70,6 +69,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateCommandResources();
             CreateGuestDrawResources();
             _vulkanReady = true;
+            AttachGuestGpuMemory();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
         }
@@ -521,9 +521,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         bestScore = score;
                         _physicalDevice = device;
                         _queueFamilyIndex = index;
-                        _queueFamilyQueueCount = queues[index].QueueCount;
-                        _queueFamilySupportsCompute =
-                            (queues[index].QueueFlags & QueueFlags.ComputeBit) != 0;
                         found = true;
                     }
 
@@ -618,17 +615,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CreateDevice()
         {
-            _useDedicatedComputeQueue =
-                _useDedicatedComputeQueueRequested &&
-                _queueFamilySupportsCompute &&
-                _queueFamilyQueueCount >= 2;
-            var priorities = stackalloc float[2] { 1.0f, 1.0f };
+            var priority = 1.0f;
             var queueInfo = new DeviceQueueCreateInfo
             {
                 SType = StructureType.DeviceQueueCreateInfo,
                 QueueFamilyIndex = _queueFamilyIndex,
-                QueueCount = _useDedicatedComputeQueue ? 2u : 1u,
-                PQueuePriorities = priorities,
+                QueueCount = 1,
+                PQueuePriorities = &priority,
             };
             _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
@@ -764,20 +757,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 robustness2Features.RobustImageAccess2 = supportsRobustImageAccess2;
                 robustness2Features.NullDescriptor = supportsNullDescriptor;
                 robustness2Features.PNext = supportsMaintenance8 ? &maintenance8Features : null;
-                _gpuLabelTimelineEnabled =
-                    _gpuLabelTimelineRequested && supportsTimelineSemaphore;
-                timelineSemaphoreFeatures.TimelineSemaphore = _gpuLabelTimelineEnabled;
+                if (!supportsTimelineSemaphore)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        "the submission scheduler needs timeline semaphores, which this device lacks");
+                }
+
+                _gpuLabelTimelineEnabled = _gpuLabelTimelineRequested;
+                timelineSemaphoreFeatures.TimelineSemaphore = true;
                 timelineSemaphoreFeatures.PNext = supportsRobustness2
                     ? &robustness2Features
                     : (supportsMaintenance8 ? &maintenance8Features : null);
                 var features2 = new PhysicalDeviceFeatures2
                 {
                     SType = StructureType.PhysicalDeviceFeatures2,
-                    PNext = _gpuLabelTimelineEnabled
-                        ? &timelineSemaphoreFeatures
-                        : supportsRobustness2
-                            ? &robustness2Features
-                            : (supportsMaintenance8 ? &maintenance8Features : null),
+                    PNext = &timelineSemaphoreFeatures,
                     Features = enabledFeatures,
                 };
                 var createInfo = new DeviceCreateInfo
@@ -801,36 +795,15 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            if (_useDedicatedComputeQueue)
-            {
-                _vk.GetDeviceQueue(_device, _queueFamilyIndex, 1, out _computeQueue);
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] Vulkan dedicated compute queue enabled " +
-                    $"family={_queueFamilyIndex} queues={_queueFamilyQueueCount}.");
-            }
-            else if (_useDedicatedComputeQueueRequested)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][WARN] Vulkan dedicated compute queue requested but " +
-                    $"unavailable family={_queueFamilyIndex} queues={_queueFamilyQueueCount} " +
-                    $"compute={_queueFamilySupportsCompute}; using graphics queue.");
-            }
+            CreateScheduler();
             if (_gpuLabelTimelineEnabled)
             {
                 CreateGuestTimelineSemaphores();
                 Volatile.Write(ref _gpuLabelTimelineAvailable, true);
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] Vulkan GPU label timelines enabled " +
-                    $"dedicated_compute={_useDedicatedComputeQueue}.");
-            }
-            else if (_gpuLabelTimelineRequested)
-            {
-                Console.Error.WriteLine(
-                    "[LOADER][WARN] Vulkan GPU label timelines requested but " +
-                    "timeline semaphores are unavailable; using CPU-visible labels.");
+                Console.Error.WriteLine("[LOADER][INFO] Vulkan GPU label timelines enabled.");
             }
             LoadDebugUtilsCommands();
-            VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
+            VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex, _queueGate);
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
             {
                 throw new InvalidOperationException("VK_KHR_swapchain is unavailable.");
@@ -1049,27 +1022,18 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.CommandBufferAllocateInfo,
                 CommandPool = _commandPool,
                 Level = CommandBufferLevel.Primary,
-                CommandBufferCount = MaxFramesInFlight,
+                CommandBufferCount = 1,
             };
-            _frameCommandBuffers = new CommandBuffer[MaxFramesInFlight];
-            fixed (CommandBuffer* frameCommandBuffers = _frameCommandBuffers)
-            {
-                Check(
-                    _vk.AllocateCommandBuffers(_device, &allocateInfo, frameCommandBuffers),
-                    "vkAllocateCommandBuffers");
-            }
+            Check(
+                _vk.AllocateCommandBuffers(_device, &allocateInfo, out _syncCommandBuffer),
+                "vkAllocateCommandBuffers(sync)");
 
             var semaphoreInfo = new SemaphoreCreateInfo
             {
                 SType = StructureType.SemaphoreCreateInfo,
             };
-            var fenceInfo = new FenceCreateInfo
-            {
-                SType = StructureType.FenceCreateInfo,
-            };
             _frameImageAvailable = new VkSemaphore[MaxFramesInFlight];
-            _frameFences = new Fence[MaxFramesInFlight];
-            _frameFencePending = new bool[MaxFramesInFlight];
+            _frameInFlight = new bool[MaxFramesInFlight];
             _frameTimelines = new ulong[MaxFramesInFlight];
             _frameTranslatedResources = new TranslatedDrawResources?[MaxFramesInFlight];
             _frameGuestImageVersions = new GuestImageResource?[MaxFramesInFlight];
@@ -1078,9 +1042,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 Check(
                     _vk.CreateSemaphore(_device, &semaphoreInfo, null, out _frameImageAvailable[slot]),
                     "vkCreateSemaphore");
-                Check(
-                    _vk.CreateFence(_device, &fenceInfo, null, out _frameFences[slot]),
-                    "vkCreateFence(frame)");
             }
 
             _renderFinishedPerImage = new VkSemaphore[_swapchainImages.Length];
@@ -1092,8 +1053,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _currentFrameSlot = 0;
-            _commandBuffer = _frameCommandBuffers[0];
-            _presentationCommandBuffer = _commandBuffer;
 
             CreateStagingBuffer((ulong)_extent.Width * _extent.Height * 4);
             CreateFrameUploadBuffers(_stagingSize);

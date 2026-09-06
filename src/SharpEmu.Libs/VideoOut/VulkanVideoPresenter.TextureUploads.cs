@@ -93,7 +93,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private VulkanDetilePass EnsureDetilePass() =>
             _detilePass ??= new VulkanDetilePass(
-                _vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
+                _vk, _device, _queue, _physicalDevice, _queueFamilyIndex, _queueGate);
 
         private TextureResource CreateTextureResource(GuestDrawTexture texture)
         {

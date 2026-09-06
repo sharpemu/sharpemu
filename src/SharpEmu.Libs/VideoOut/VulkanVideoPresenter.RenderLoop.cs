@@ -18,10 +18,11 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Idle);
             var gpuWorkInFlight = _pendingGuestSubmissions.Count > 0 ||
-                Array.Exists(_frameFencePending, static pending => pending);
+                Array.Exists(_frameInFlight, static pending => pending);
             lock (_gate)
             {
                 if (_closed ||
+                    _relay.HasPendingCommands ||
                     _pendingGuestWorkCount > 0 ||
                     (_latestPresentation is { } latest &&
                      latest.Sequence != _presentedSequence &&
@@ -69,6 +70,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            _relay.RunPendingCommands();
             if (_deviceLost)
             {
                 RenderDocCapture.DiscardFrame();
@@ -82,27 +84,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            // Reuse of a frame slot waits only on that slot's fence, keeping
+            // Reuse of a frame slot waits only on that slot's tick, keeping
             // up to MaxFramesInFlight frames pipelined between CPU and GPU.
             var frameSlot = _currentFrameSlot;
-            bool frameSlotReady;
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.FrameSlotWait))
             {
-                frameSlotReady = TryWaitFrameSlot(frameSlot, _frameSlotWaitBudgetNs);
+                WaitFrameSlot(frameSlot);
             }
 
-            if (!frameSlotReady)
-            {
-                // The GPU is still finishing this slot's previous frame (slow
-                // compute backlog). Don't block the macOS main thread — return
-                // to the Cocoa event pump so the window keeps handling input
-                // (F1 overlay, drag, close) and redrawing. The frame is retried
-                // next Render(); the fence signals once the GPU catches up.
-                return;
-            }
-
-            _presentationCommandBuffer = _frameCommandBuffers[frameSlot];
-            _commandBuffer = _presentationCommandBuffer;
             if (!_deviceLost)
             {
                 using var collectScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Collect);
@@ -131,6 +120,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _pendingGuestWorkCount >= (_maxPendingGuestWorkItems / 2);
             while (completedWork < workLimit)
             {
+                _relay.RunPendingCommands();
                 // Never block the macOS main thread waiting for in-flight GPU
                 // work to drain. If submission is at capacity (a slow-compute
                 // backlog), stop processing and let the event pump run; the
@@ -181,6 +171,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 _activeGuestQueue = pendingGuestWork.Queue;
+                BindSubmissionContext(pendingGuestWork.Queue);
                 _activeGuestWorkSequence = pendingGuestWork.Sequence;
                 Volatile.Write(
                     ref _executingGuestWorkSequence,
@@ -629,13 +620,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             using var presentScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Present);
-            Check(_vk.ResetCommandBuffer(_commandBuffer, 0), "vkResetCommandBuffer");
-            var beginInfo = new CommandBufferBeginInfo
-            {
-                SType = StructureType.CommandBufferBeginInfo,
-                Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
-            };
-            Check(_vk.BeginCommandBuffer(_commandBuffer, &beginInfo), "vkBeginCommandBuffer");
+            FlushBatchedGuestCommands();
+            _commandBuffer = CurrentRecordingBuffer();
 
             PipelineStageFlags waitStage;
             if (pixels is not null)
@@ -694,32 +680,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
             }
 
-            Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer");
-
-            var imageAvailable = _frameImageAvailable[frameSlot];
-            var commandBuffer = _commandBuffer;
             var renderFinished = _renderFinishedPerImage[imageIndex];
-            var submitInfo = new SubmitInfo
-            {
-                SType = StructureType.SubmitInfo,
-                WaitSemaphoreCount = 1,
-                PWaitSemaphores = &imageAvailable,
-                PWaitDstStageMask = &waitStage,
-                CommandBufferCount = 1,
-                PCommandBuffers = &commandBuffer,
-                SignalSemaphoreCount = 1,
-                PSignalSemaphores = &renderFinished,
-            };
-            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit))
-            {
-                Check(
-                    _vk.QueueSubmit(_queue, 1, &submitInfo, _frameFences[frameSlot]),
-                    "vkQueueSubmit");
-            }
-
-            _submitTimeline++;
+            _submitTimeline = SubmitPresentation(
+                _frameImageAvailable[frameSlot],
+                waitStage,
+                renderFinished);
+            _commandBuffer = default;
             _frameTimelines[frameSlot] = _submitTimeline;
-            _frameFencePending[frameSlot] = true;
+            _frameInFlight[frameSlot] = true;
             _frameTranslatedResources[frameSlot] = translatedResources;
             if (translatedResources is not null)
             {
@@ -743,7 +711,10 @@ internal static unsafe partial class VulkanVideoPresenter
             Result presentResult;
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueuePresent))
             {
-                presentResult = _swapchainApi.QueuePresent(_queue, &presentInfo);
+                lock (_queueGate)
+                {
+                    presentResult = _swapchainApi.QueuePresent(_queue, &presentInfo);
+                }
             }
 
             if (presentResult == Result.ErrorOutOfDateKhr)

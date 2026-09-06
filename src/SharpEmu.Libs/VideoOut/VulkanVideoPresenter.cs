@@ -354,43 +354,7 @@ internal static unsafe partial class VulkanVideoPresenter
             ? followupBudgetMs
             : 24L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
-    // Max time the main-thread Render() will block waiting for a frame slot's
-    // GPU fence before skipping the frame and returning to the event pump.
-    // Prevents the window freezing behind a slow-compute GPU backlog.
-    // SHARPEMU_FRAME_WAIT_BUDGET_MS overrides; default 8ms on macOS. The
-    // dedicated Windows/Linux render thread may wait for its frame slot so it
-    // does not drop guest-work drain opportunities under normal GPU load.
-    private static readonly ulong _frameSlotWaitBudgetNs =
-        ulong.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_FRAME_WAIT_BUDGET_MS"),
-            out var frameWaitMs) && frameWaitMs > 0
-            ? frameWaitMs * 1_000_000UL
-            : OperatingSystem.IsMacOS() ? 8_000_000UL : ulong.MaxValue;
-    // Cap the guest-submission fence wait so a GPU submission whose fence never
-    // signals (a mistranslated compute shader that hangs the Metal queue) cannot
-    // freeze the render thread forever and starve the swapchain present.
-    // SHARPEMU_FENCE_WAIT_TIMEOUT_MS overrides; default 3s.
-    private static readonly ulong _guestFenceWaitTimeoutNs =
-        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FENCE_WAIT_TIMEOUT_MS"), out var fenceMs) && fenceMs > 0
-            ? fenceMs * 1_000_000UL
-            : 3_000_000_000UL;
-    // When making room in the in-flight submission queue from the macOS MAIN
-    // thread (Render() -> guest-work drain), block only this long per attempt
-    // instead of the full fence timeout. If a slow/capped compute submission
-    // isn't done yet, proceed anyway: the in-flight cap is soft, the fence and
-    // command-buffer pools are dynamic so a brief overshoot is safe, and the
-    // queue drains as GPU completions land on later frames. This keeps the
-    // window responsive (event pump runs) under a heavy compute backlog instead
-    // of the main thread sitting in vkWaitForFences for up to 3s per chunk.
-    // SHARPEMU_SUBMISSION_CAPACITY_WAIT_MS overrides; default 100ms; 0 restores
-    // the full blocking wait.
-    private static readonly ulong _submissionCapacityWaitNs =
-        ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SUBMISSION_CAPACITY_WAIT_MS"), out var capMs)
-            ? capMs * 1_000_000UL
-            : 100_000_000UL;
-    private static readonly HashSet<string> _tracedFenceTimeouts = new();
     private static long _guestQueueBackpressureTraceCount;
-    private static long _orderedActionFenceWaitTraceCount;
     private static long _guestQueueStarvationTraceCount;
     private static long _guestQueueStarvationLastQueued = -1;
     // Zero-payload sync (ordered actions / flip markers) may exceed the
@@ -410,21 +374,6 @@ internal static unsafe partial class VulkanVideoPresenter
     // geometry+composite path renders on its own.
     private static readonly bool _skipAllCompute =
         Environment.GetEnvironmentVariable("SHARPEMU_SKIP_ALL_COMPUTE") == "1";
-    // Use a second queue from the graphics queue family. Use one queue with
-    // RenderDoc because a capture changes the timing of cross-queue work.
-    // Set SHARPEMU_RENDERDOC_SINGLE_QUEUE=0 to test a multi-queue capture.
-    private static readonly bool _renderDocSingleQueue =
-        RenderDocCapture.IsAvailable &&
-        !string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_RENDERDOC_SINGLE_QUEUE"),
-            "0",
-            StringComparison.Ordinal);
-    private static readonly bool _useDedicatedComputeQueueRequested =
-        !_renderDocSingleQueue &&
-        !string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_DEDICATED_COMPUTE_QUEUE"),
-            "0",
-            StringComparison.Ordinal);
     private static readonly bool _gpuLabelTimelineRequested =
         IsGpuLabelTimelineRequested(
             Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_TIMELINE"));
@@ -439,10 +388,6 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static bool IsGpuLabelTimelineRequested(string? setting) =>
         !string.Equals(setting, "0", StringComparison.Ordinal);
 
-    internal static GuestGpuLabelDependency ResolveGpuLabelSubmissionDependency(
-        GuestGpuLabelDependency requiredDependency,
-        GuestGpuLabelDependency priorQueueDependency) =>
-        requiredDependency.Merge(priorQueueDependency);
     // Diagnostic: skip compute dispatches whose GroupCountZ is at least this,
     // to isolate a specific tall dispatch (e.g. Demon's Souls' 27x15x72 froxel
     // shader that hangs the Metal queue) without needing its ASLR-varying

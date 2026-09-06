@@ -1,7 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
 
@@ -23,36 +23,29 @@ public sealed class VulkanGpuLabelConfigurationTests
             VulkanVideoPresenter.IsGpuLabelTimelineRequested(setting));
     }
 
-    [Fact]
-    public void SubmissionDependencyIncludesPriorLogicalQueueWork()
+    [Theory]
+    [InlineData(3ul, 3ul)]
+    [InlineData(1ul, 7ul)]
+    public void LabelWaitsOnOrBeforeTheLastSignalAreAccepted(ulong wait, ulong lastSignal)
     {
-        var required = new GuestGpuLabelDependency(0, 11);
-        var prior = new GuestGpuLabelDependency(7, 0);
-
-        var dependency =
-            VulkanVideoPresenter.ResolveGpuLabelSubmissionDependency(
-                required,
-                prior);
-
-        Assert.Equal(new GuestGpuLabelDependency(7, 11), dependency);
+        VulkanVideoPresenter.CheckLabelWaitOrder(wait, lastSignal);
     }
 
-    [Theory]
-    [InlineData(7ul, 0ul)]
-    [InlineData(0ul, 11ul)]
-    public void SubmissionDependencyRetainsThePriorPhysicalQueueToken(
-        ulong graphicsTimeline,
-        ulong computeTimeline)
+    [Fact]
+    public void LabelWaitAheadOfItsSignalIsFatal()
     {
-        var prior = new GuestGpuLabelDependency(
-            graphicsTimeline,
-            computeTimeline);
+        var previous = SubmissionScheduler.OnFatal;
+        var fatals = new List<string>();
+        SubmissionScheduler.OnFatal = fatals.Add;
+        try
+        {
+            Assert.Throws<InvalidOperationException>(() => VulkanVideoPresenter.CheckLabelWaitOrder(8, 7));
+        }
+        finally
+        {
+            SubmissionScheduler.OnFatal = previous;
+        }
 
-        var dependency =
-            VulkanVideoPresenter.ResolveGpuLabelSubmissionDependency(
-                default,
-                prior);
-
-        Assert.Equal(prior, dependency);
+        Assert.Equal("label wait 8 precedes its signal (last signalled 7)", fatals.Single());
     }
 }

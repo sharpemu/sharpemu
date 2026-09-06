@@ -873,11 +873,14 @@ internal static unsafe partial class VulkanVideoPresenter
 
                         if (shouldTraceWrite)
                         {
-                            _commandBuffer = _presentationCommandBuffer;
+                            _commandBuffer = default;
                             FlushBatchedGuestCommands();
-                            Check(
-                                _vk.QueueWaitIdle(_queue),
-                                "vkQueueWaitIdle(guest write trace)");
+                            lock (_queueGate)
+                            {
+                                Check(
+                                    _vk.QueueWaitIdle(_queue),
+                                    "vkQueueWaitIdle(guest write trace)");
+                            }
                             TraceGuestImageContents(target);
                         }
                     }
@@ -928,7 +931,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
-                _commandBuffer = _presentationCommandBuffer;
+                _commandBuffer = default;
                 // The command buffer is the shared batch; it is submitted and
                 // freed by FlushBatchedGuestCommands. Resources joined the
                 // batch list before recording, so only pre-recording failures
