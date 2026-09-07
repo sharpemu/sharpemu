@@ -2800,6 +2800,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			0xE06D7363u, // MSVC C++ exception
 			0xC0000409u, // STATUS_STACK_BUFFER_OVERRUN / FailFast
 			0xC00000FDu, // STATUS_STACK_OVERFLOW
+			0x40010006u, // ANSI debug output
+			0x4001000Au, // Unicode debug output
 		];
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx]
 		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00); // mov eax, [rax] ExceptionCode

@@ -47,7 +47,8 @@ internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
         // FastFail (0xC0000409) is logged from this native path only: managed VEH never
         // sees it (tLT18–21 silent exits after TBB AV recovery).
         ReadOnlySpan<uint> nonManagedExceptionCodes =
-            [WindowsFaultCodes.ClrManagedException, 0xE06D7363u, WindowsFaultCodes.FastFail, WindowsFaultCodes.StackOverflow];
+            [WindowsFaultCodes.ClrManagedException, 0xE06D7363u, WindowsFaultCodes.FastFail, WindowsFaultCodes.StackOverflow,
+             WindowsFaultCodes.DebugOutputAnsi, WindowsFaultCodes.DebugOutputUnicode];
         EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [rcx] (ExceptionRecord*)
         EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x00);                                   // mov eax, [rax] (ExceptionCode)
         var passJumpOffsets = stackalloc int[nonManagedExceptionCodes.Length];
