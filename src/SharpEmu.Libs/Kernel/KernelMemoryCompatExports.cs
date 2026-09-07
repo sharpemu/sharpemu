@@ -3041,6 +3041,8 @@ public static partial class KernelMemoryCompatExports
     {
         var start = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
+        if (ShouldTraceDirectMemory())
+            Console.Error.WriteLine($"[LOADER][TRACE] release_direct offset=0x{start:X} size=0x{length:X}");
         if ((long)start < 0 || !IsAligned(start, OrbisPageSize) || !IsAligned(length, OrbisPageSize))
             return MemoryInvalidArgument;
         lock (_memoryGate)
@@ -3060,6 +3062,8 @@ public static partial class KernelMemoryCompatExports
     {
         var start = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
+        if (ShouldTraceDirectMemory())
+            Console.Error.WriteLine($"[LOADER][TRACE] release_direct_checked offset=0x{start:X} size=0x{length:X}");
         if ((long)start < 0 || !IsAligned(start, OrbisPageSize) || !IsAligned(length, OrbisPageSize))
             return MemoryInvalidArgument;
         lock (_memoryGate)
@@ -3135,18 +3139,32 @@ public static partial class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             if (!HasPhysicalSpan(directMemoryStart, length))
+            {
+                if (ShouldTraceDirectMemory())
+                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=physical-span address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X}");
                 return MemoryNoSpace;
+            }
             var space = ResolveBackingSpace(ctx);
             if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
+            {
+                if (ShouldTraceDirectMemory())
+                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=address-selection address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X} backing={space is not null}");
                 return MemoryNoSpace;
-            if (!space.TryMapBacked(address, length, directMemoryStart, mode, out _))
+            }
+            if (!space.TryMapBacked(address, length, directMemoryStart, mode, out var failure))
+            {
+                if (ShouldTraceDirectMemory())
+                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=host-view reason={failure} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} protection=0x{protection:X}");
                 return MemoryNoSpace;
+            }
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, protection,
                 false, true, directMemoryStart, directMemoryStart));
-            GuestGpuMemoryHook.NoteMapped(address, length);
+            GuestGpuMemoryHook.NoteMapped(address, length, mode);
             if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
                 return MemoryFault;
             GuestWriteWatch.OnDirectMapping(address, length, protection);
+            if (ShouldTraceDirectMemory())
+                Console.Error.WriteLine($"[LOADER][TRACE] map_direct applied address=0x{address:X} requested=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X}");
             return 0;
         }
     }
@@ -3195,7 +3213,7 @@ public static partial class KernelMemoryCompatExports
             foreach (var block in blocks)
                 ReplaceMappedRegionRangeLocked(new MappedRegion(block.Address, block.Size, protection,
                     true, false, 0, block.Offset));
-            GuestGpuMemoryHook.NoteMapped(address, length);
+            GuestGpuMemoryHook.NoteMapped(address, length, mode);
             return ctx.TryWriteUInt64(pointer, address) ? 0 : MemoryFault;
         }
     }
@@ -3549,6 +3567,8 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
         }
 
+        if (ShouldTraceDirectMemory())
+            Console.Error.WriteLine($"[LOADER][TRACE] query_direct offset=0x{offset:X} flags=0x{flags:X} start=0x{matchStart:X} end=0x{matchEnd:X}");
         if (!ctx.TryWriteUInt64(infoAddress, matchStart) ||
             !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), matchEnd) ||
             !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), matchMemoryType))

@@ -73,14 +73,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             _samplers.Clear();
             _shaderDigests.Clear();
-            WriteBackAllDirtyGuestBuffers();
-            foreach (var allocation in _guestBufferAllocations)
-            {
-                DestroyGuestBufferAllocation(allocation);
-            }
-            _guestBufferAllocations.Clear();
-            _dirtyGuestBufferIndex.Clear();
-            _dirtyGuestBufferCandidates.Clear();
+            _bufferCache.Dispose();
             PerfOverlay.SetGuestBufferCacheBytes(0);
             _hostBufferPool.Dispose();
             foreach (var guestImage in _guestImages.Values)

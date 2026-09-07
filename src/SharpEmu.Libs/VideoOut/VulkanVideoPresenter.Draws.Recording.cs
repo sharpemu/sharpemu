@@ -981,7 +981,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var globalBuffer in resources.GlobalMemoryBuffers)
             {
-                if (globalBuffer is null || globalBuffer.Allocation is not null)
+                globalBuffer?.StreamRetention?.Dispose();
+                if (globalBuffer is null || !globalBuffer.OwnsBuffer)
                 {
                     continue;
                 }

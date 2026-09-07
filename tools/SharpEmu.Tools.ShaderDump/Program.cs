@@ -303,7 +303,8 @@ foreach (var (name, expectTranslate, words) in testPrograms)
                 storePcs,
                 new byte[64],
                 64,
-                false),
+                false,
+                64),
         }
         : Array.Empty<Gen5GlobalMemoryBinding>();
 
@@ -398,6 +399,12 @@ foreach (var (name, expectTranslate, words) in testPrograms)
         }
     }
 }
+
+// Hand-assembled fixed shaders pass through the same validator gate.
+var faultShader = SpirvFixedShaders.CreateFaultBufferProcess();
+var faultPath = Path.Combine(outputDirectory, "fault-buffer-process-cs.spv");
+File.WriteAllBytes(faultPath, faultShader);
+Console.WriteLine($"[fault-buffer-process] emit: {faultShader.Length} bytes -> {faultPath}");
 
 Console.WriteLine(failures == 0
     ? "RESULT: all programs behaved as expected"

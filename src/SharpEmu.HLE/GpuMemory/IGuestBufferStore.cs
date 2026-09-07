@@ -5,15 +5,11 @@ namespace SharpEmu.HLE.GpuMemory;
 
 public interface IGuestBufferStore
 {
-    // Returns true only when the faulting access can proceed after recovery.
+    // Returns true when recovery completes, even if a later operation adds a new watch.
     bool MarkCpuWrite(ulong address, ulong size);
 
     bool DownloadToCpu(ulong address, ulong size);
-}
 
-public sealed class IdleBufferStore : IGuestBufferStore
-{
-    public bool MarkCpuWrite(ulong address, ulong size) => false;
-
-    public bool DownloadToCpu(ulong address, ulong size) => false;
+    // True for current CPU data or an untracked range; false when required recovery fails.
+    bool TrySynchronizeCpuRead(ulong address, ulong size) => DownloadToCpu(address, size);
 }

@@ -85,10 +85,10 @@ public static partial class KernelMemoryCompatExports
         BackingOffset = region.IsDirect || region.IsFlexible ? region.BackingOffset + start - region.Address : 0,
     };
 
-    private static MappedRegion[] GetMappingSlices(ulong address, ulong size) => _mappedRegions.Values
+    private static MappedRegion[] GetMappingSlices(ulong address, ulong size, bool clip = true) => _mappedRegions.Values
         .Where(region => region.Address < address + size && address < region.Address + region.Length)
-        .Select(region => SliceMapping(region, Math.Max(address, region.Address),
-            Math.Min(address + size, region.Address + region.Length))).ToArray();
+        .Select(region => clip ? SliceMapping(region, Math.Max(address, region.Address),
+            Math.Min(address + size, region.Address + region.Length)) : region).ToArray();
 
     private static bool MappingsCoverRange(MappedRegion[] regions, ulong address, ulong size)
     {
@@ -122,8 +122,8 @@ public static partial class KernelMemoryCompatExports
     private static void RestoreGpuMappings(IEnumerable<MappedRegion> regions)
     {
         foreach (var region in regions)
-            if (!region.IsReserved)
-                GuestGpuMemoryHook.NoteMapped(region.Address, region.Length);
+            if (!region.IsReserved && TryDecodeMappedProtection(region.Protection, out var mode))
+                GuestGpuMemoryHook.NoteMapped(region.Address, region.Length, mode);
     }
 
     private static bool TryUnmapViews(IGuestBackedSpace space, MappedRegion[] regions)
@@ -181,7 +181,7 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static bool TrySelectBackingAddress(IGuestBackedSpace space, ulong requested, ulong length,
-        ulong alignment, ulong flags, out ulong address)
+        ulong alignment, ulong flags, out ulong address, bool reuseReservation = true)
     {
         address = 0;
         if ((flags & OrbisKernelMapFixed) != 0)
@@ -199,10 +199,11 @@ public static partial class KernelMemoryCompatExports
         var desired = requested != 0 ? requested : DefaultMapSearchBase;
         while (space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
         {
-            var overlap = GetMappingSlices(address, length);
-            if (overlap.Length == 0 || (address == requested &&
-                MappingsCoverRange(overlap, address, length) && overlap.All(region => region.IsReserved)))
+            var overlap = GetMappingSlices(address, length, clip: false);
+            if (overlap.Length == 0 || (reuseReservation && address == requested &&
+                MappingsCoverRange(GetMappingSlices(address, length), address, length) && overlap.All(region => region.IsReserved)))
                 break;
+            // Skip the complete reservation, not only the requested slice.
             desired = overlap[^1].Address + overlap[^1].Length;
         }
         if (address == 0)
@@ -224,9 +225,11 @@ public static partial class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             var space = ResolveBackingSpace(ctx);
-            if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
+            if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address, reuseReservation: false))
                 return MemoryNoSpace;
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true));
+            if (ShouldTraceDirectMemory())
+                Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual address=0x{address:X} requested=0x{requested:X} size=0x{length:X} flags=0x{flags:X}");
             return ctx.TryWriteUInt64(pointer, address) ? 0 : MemoryFault;
         }
     }
@@ -286,6 +289,8 @@ public static partial class KernelMemoryCompatExports
 
     private static int ProtectMappedRange(CpuContext ctx, ulong address, ulong length, int protection, int? memoryType = null)
     {
+        if (GuestGpuMemoryHook.Traces(address, length))
+            GuestGpuMemoryHook.Trace(address, length, $"kernel-protect raw=0x{protection:X}");
         if (address == 0 || length == 0 || !TryDecodeMappedProtection(protection, out var mode) ||
             !TryNormalizeProtectRange(address, length, out var start, out var size))
             return MemoryInvalidArgument;
@@ -302,10 +307,10 @@ public static partial class KernelMemoryCompatExports
                 regions = GetMappingSlices(start, size);
                 if (!MappingsCoverRange(regions, start, size) || regions.Any(region => region.IsReserved) ||
                     !KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var space) ||
-                    !space.TryProtect(start, size, mode))
+                    (!GuestGpuMemoryHook.NoteProtected(start, size, mode) && !space.TryProtect(start, size, mode)))
                     return MemoryAccessDenied;
             }
-            else if (!TryProtectHostRange(start, size, protection))
+            else if (!GuestGpuMemoryHook.NoteProtected(start, size, mode) && !TryProtectHostRange(start, size, protection))
                 return unchecked((int)0x80020002);
             _ = TryApplyMappedRegionProtectionLocked(start, size, protection, memoryType);
             return 0;

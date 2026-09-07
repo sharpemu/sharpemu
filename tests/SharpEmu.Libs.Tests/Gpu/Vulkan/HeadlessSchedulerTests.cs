@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -308,8 +309,9 @@ public sealed class HeadlessSchedulerTests : IClassFixture<HeadlessVulkanFixture
         if (_vulkan is null) return;
         using var worker = new GpuWorker(_vulkan);
         var stores = new ObservingStores { Scheduler = worker.Scheduler };
-        using var memory = new GuestGpuMemory(new RecordingAddressSpace(), stores, stores);
-        memory.Register(0x10000, 0x1000);
+        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        memory.AttachStores(stores, stores);
+        memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
         memory.AttachGpuQueue(worker.Relay, worker.Scheduler);
         var order = new List<string>();
         worker.RunOnWorker(() =>
@@ -348,8 +350,9 @@ public sealed class HeadlessSchedulerTests : IClassFixture<HeadlessVulkanFixture
         {
             using var worker = new GpuWorker(_vulkan);
             var stores = new ObservingStores { Scheduler = worker.Scheduler };
-            using var memory = new GuestGpuMemory(new RecordingAddressSpace(), stores, stores);
-            memory.Register(0x10000, 0x1000);
+            using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+            memory.AttachStores(stores, stores);
+            memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
             memory.AttachGpuQueue(worker.Relay, worker.Scheduler);
             worker.RunOnWorker(() =>
             {

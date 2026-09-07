@@ -253,8 +253,13 @@ public sealed unsafe class GuestSpaceOwnerTests
             Assert.False(owner.AllocatePrivate(address, size, HostPageProtection.ReadWrite));
             Assert.False(owner.FreePrivate(address, size));
             Assert.False(owner.ContainsFreeRange(address, size));
-            Assert.False(owner.SetTransientAccess(address, size, HostPageProtection.ReadWrite));
         }
+
+        // Transient access works on host pages; it still rejects misaligned, empty and wrapping ranges.
+        Assert.False(owner.SetTransientAccess(baseAddress + 0x800, 0x1000, HostPageProtection.ReadWrite));
+        Assert.False(owner.SetTransientAccess(baseAddress, 0, HostPageProtection.ReadWrite));
+        Assert.False(owner.SetTransientAccess(ulong.MaxValue - 0x1000 + 1, 0x2000, HostPageProtection.ReadWrite));
+        Assert.True(owner.SetTransientAccess(baseAddress + 0x1000, 0x1000, HostPageProtection.ReadWrite));
 
         Assert.False(owner.TryReserveAddressRange(baseAddress + Page, hole));
         Assert.False(owner.TryReserveAddressRange(baseAddress, hole + Page));

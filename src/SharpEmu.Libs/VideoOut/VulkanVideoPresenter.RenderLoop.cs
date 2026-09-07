@@ -366,6 +366,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 FlushBatchedGuestCommands();
             }
 
+            // Collect unused buffers once per render tick.
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Collect))
+            {
+                _bufferCache.RunGarbageCollector();
+            }
+
+            PerfOverlay.SetGuestBufferCacheBytes(_bufferCache.TotalUsedMemory);
             CollectAbandonedGuestImageVersions();
 
             Presentation presentation;

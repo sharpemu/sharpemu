@@ -30,5 +30,7 @@ internal static class AgcShaderCompilerHooks
             KernelMemoryCompatExports.TryReadShaderGuestMemory;
         Gen5ShaderScalarEvaluator.GlobalMemoryPool =
             GuestDataPool.Shared;
+        Gen5ShaderScalarEvaluator.SnapshotGlobalMemory =
+            GuestGpu.Current.SnapshotsGuestBuffers;
     }
 }

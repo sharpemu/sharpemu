@@ -43,6 +43,9 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         return true;
     }
 
+    public bool CanRead(ulong address, ulong size) =>
+        size != 0 && size <= int.MaxValue && TryResolve(address, (int)size, out _);
+
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)
     {
         address = 0;

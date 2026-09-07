@@ -15,6 +15,65 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelBackedMemoryTests
 {
     [Fact]
+    public void NonFixedReservationHintDoesNotReuseAnExistingReservation()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong size = 0x4000000;
+        var first = test.Reserve(size);
+        Assert.True(test.Context.TryWriteUInt64(test.Output, first));
+        test.Context[CpuRegister.Rdi] = test.Output;
+        test.Context[CpuRegister.Rsi] = 0x10000;
+        test.Context[CpuRegister.Rdx] = 0;
+        test.Context[CpuRegister.Rcx] = 0;
+
+        Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var second));
+        Assert.True(second >= first + size);
+        Assert.Equal((first, first + size), test.Query(first));
+        Assert.Equal((second, second + 0x10000), test.Query(second));
+    }
+
+    [Fact]
+    public void AddressSearchUsesTheFullReservationExtent()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong size = 0x40000000;
+        var start = test.Reserve(size);
+        var query = typeof(KernelMemoryCompatExports).GetMethod("GetMappingSlices",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var regions = (Array)query.Invoke(null, [start + 0x10000, 0x10000UL, false])!;
+        var region = Assert.Single(regions.Cast<object>());
+        Assert.Equal(start, (ulong)region.GetType().GetProperty("Address")!.GetValue(region)!);
+        Assert.Equal(size, (ulong)region.GetType().GetProperty("Length")!.GetValue(region)!);
+        test.Allocate(0, 0x10000);
+        Assert.True(test.Map(0, 0x10000) >= start + size);
+    }
+
+    [Fact]
+    public void TransientProtectionSkipsReservedGapsBetweenViews()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0x8000);
+        var address = test.Reserve(0x10000);
+        test.Map(0, 0x4000, address);
+        test.Map(0x4000, 0x4000, address + 0xC000);
+
+        Assert.True(test.Memory.TryProtect(address, 0x10000, GuestPageProtection.Read));
+        Assert.True(test.Memory.TryProtect(address + 0x4000, 0x8000, GuestPageProtection.Read));
+        Assert.True(test.Memory.TryProtect(address, 0x10000, GuestPageProtection.Read | GuestPageProtection.Write));
+    }
+
+    [Fact]
+    public void TransientProtectionReportsMappedViewFailure()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0x4000);
+        var address = test.Map(0, 0x4000);
+        test.Host.FailNext(FailingHostViews.Op.ChangeAccess);
+        Assert.False(test.Memory.TryProtect(address, 0x4000, GuestPageProtection.Read));
+    }
+
+    [Fact]
     public void DirectAliasesKeepContentsAcrossUnmapAndReleaseTogether()
     {
         using var test = new BackedKernelMemory();
@@ -38,7 +97,7 @@ public sealed class KernelBackedMemoryTests
     public void FailedSecondAliasUnmapRestoresViewsAndGpuRegistration()
     {
         using var test = new BackedKernelMemory();
-        using var gpu = new GuestGpuMemory(test.Memory, new IdleBufferStore(), new IdleImageStore());
+        using var gpu = new GuestGpuMemory(test.Memory);
         GuestGpuMemoryHook.Attach(gpu);
         try
         {

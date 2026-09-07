@@ -84,6 +84,9 @@ public sealed class FlexibleBackingPoolTests
             Calls.Add("unmap");
             return true;
         }
+        public bool IsBackedRange(ulong address, ulong size) => false;
+        public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data) => false;
+        public bool TryReadBacking(ulong address, Span<byte> data) => false;
         public bool TryClearBacking(ulong offset, ulong size)
         {
             Calls.Add("zero");

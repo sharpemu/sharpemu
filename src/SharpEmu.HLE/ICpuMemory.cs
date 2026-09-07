@@ -22,4 +22,7 @@ public interface ICpuMemory
     }
 
     bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) => false;
+
+    // True when the whole range is mapped guest memory; no bytes are copied.
+    bool CanRead(ulong address, ulong size) => false;
 }

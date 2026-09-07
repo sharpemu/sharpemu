@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
@@ -396,8 +397,9 @@ public sealed class SubmissionSchedulerTests
             _device.CompleteOnSubmit = true;
             using var scheduler = NewActiveScheduler(_device, _rendering);
             var stores = new OrderedStores();
-            using var memory = new GuestGpuMemory(new RecordingAddressSpace(), stores, stores);
-            memory.Register(0x10000, 0x1000);
+            using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+            memory.AttachStores(stores, stores);
+            memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
             memory.AttachGpuQueue(new InlineRelay(), scheduler);
             scheduler.QueuePriorityCompletionAction(() =>
             {
@@ -414,7 +416,7 @@ public sealed class SubmissionSchedulerTests
             Assert.False(scheduler.Current.IsInvalid);
             Assert.False(memory.Covers(0x10000, 0x1000));
 
-            memory.Register(0x20000, 0x1000);
+            memory.Register(0x20000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
             scheduler.QueueCompletionAction(() => memory.Unregister(0x20000, 0x1000));
             scheduler.Submit();
             scheduler.RunCompletedOperations();

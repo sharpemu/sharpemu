@@ -741,6 +741,7 @@ public static partial class AgcExports
                 bindings[index].BaseAddress,
                 bindings[index].Data,
                 bindings[index].DataLength,
+                bindings[index].Size,
                 bindings[index].DataPooled,
                 bindings[index].Writable,
                 bindings[index].WriteBackToGuest);

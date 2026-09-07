@@ -91,6 +91,7 @@ public static partial class AgcExports
                 evaluation.InitialScalarRegisters,
                 evaluation.GlobalMemoryBindings),
             GetRuntimeScalarBufferLength(evaluation.GlobalMemoryBindings.Count),
+            (ulong)GetRuntimeScalarBufferLength(evaluation.GlobalMemoryBindings.Count),
             Pooled: true));
         return combined;
     }

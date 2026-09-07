@@ -1044,6 +1044,45 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public bool IsBackedRange(ulong address, ulong size)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            return _backedSpace?.IsBacked(address, size) == true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            return _backedSpace?.TryWriteBacking(address, data) == true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    public bool TryReadBacking(ulong address, Span<byte> data)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            return _backedSpace?.TryReadBacking(address, data) == true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     private bool HasBackingOwner() => !_disposed && _backedSpace != null;
 
     // A span may cross adjacent view records; the owner validates full coverage.
@@ -1294,7 +1333,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
     {
-        if (size == 0)
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"address-space-protect access={protection}");
+        if (size == 0 || size > ulong.MaxValue - address)
         {
             return false;
         }
@@ -1302,12 +1343,51 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            if (_backedSpace?.IsBacked(address, size) == true)
+            var access = ResolveProtection(protection);
+            if (_backedSpace is not null && !_backedSpace.SetTransientAccess(address, size, access))
             {
-                return _backedSpace.SetTransientAccess(address, size, ResolveProtection(protection));
+                return false;
             }
 
-            return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
+            var end = address + size;
+            foreach (var region in _regions)
+            {
+                if (region.VirtualAddress >= end)
+                {
+                    break;
+                }
+
+                if (region.IsBackedView)
+                {
+                    continue;
+                }
+
+                var cursor = Math.Max(address, region.VirtualAddress);
+                var stop = Math.Min(end, region.VirtualAddress + region.Size);
+                while (cursor < stop)
+                {
+                    if (!_hostMemory.Query(cursor, out var info))
+                    {
+                        return false;
+                    }
+
+                    var segmentEnd = Math.Min(stop, info.BaseAddress + info.RegionSize);
+                    if (segmentEnd <= cursor)
+                    {
+                        return false;
+                    }
+
+                    if (info.State == HostRegionState.Committed &&
+                        !_hostMemory.Protect(cursor, segmentEnd - cursor, access, out _))
+                    {
+                        return false;
+                    }
+
+                    cursor = segmentEnd;
+                }
+            }
+
+            return true;
         }
         finally
         {
@@ -1430,6 +1510,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var segmentEnd = checked(virtualAddress + memorySize);
         var mapEnd = AlignUp(segmentEnd, PageSize);
         var mapSize = checked(mapEnd - mapStart);
+        var runs = new List<(ulong Start, ulong Size, ProgramHeaderFlags Flags)>();
 
         _gate.EnterWriteLock();
         try
@@ -1461,7 +1542,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 NativeMemory.Clear((void*)(virtualAddress + (ulong)fileData.Length), (nuint)zeroFillSize);
             }
 
-            ApplySegmentProtection(mapStart, mapEnd, protection);
+            ApplySegmentProtection(mapStart, mapEnd, protection, runs);
 
             TraceVmem($"Mapped segment: 0x{virtualAddress:X16} - 0x{virtualAddress + memorySize:X16} (file: {fileData.Length} bytes, prot: {protection})");
         }
@@ -1471,10 +1552,19 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         GuestGpuMemoryHook.NoteUnmapped(mapStart, mapSize);
-        GuestGpuMemoryHook.NoteMapped(mapStart, mapSize);
+        foreach (var (start, size, flags) in runs)
+        {
+            GuestGpuMemoryHook.NoteMapped(start, size, GuestProtection(flags));
+        }
     }
 
-    private void ApplySegmentProtection(ulong mapStart, ulong mapEnd, ProgramHeaderFlags flags)
+    private static GuestPageProtection GuestProtection(ProgramHeaderFlags flags) =>
+        ((flags & ProgramHeaderFlags.Read) != 0 ? GuestPageProtection.Read : 0) |
+        ((flags & ProgramHeaderFlags.Write) != 0 ? GuestPageProtection.Write : 0) |
+        ((flags & ProgramHeaderFlags.Execute) != 0 ? GuestPageProtection.Execute : 0);
+
+    // Pages keep the union of every segment mapped over them; runs report that merged protection.
+    private void ApplySegmentProtection(ulong mapStart, ulong mapEnd, ProgramHeaderFlags flags, List<(ulong Start, ulong Size, ProgramHeaderFlags Flags)> runs)
     {
         var runStart = mapStart;
         var runFlags = ProgramHeaderFlags.None;
@@ -1495,6 +1585,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             else if (mergedFlags != runFlags)
             {
                 SetProtection(runStart, pageAddress - runStart, runFlags);
+                runs.Add((runStart, pageAddress - runStart, runFlags));
                 runStart = pageAddress;
                 runFlags = mergedFlags;
             }
@@ -1503,6 +1594,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         if (hasRun)
         {
             SetProtection(runStart, mapEnd - runStart, runFlags);
+            runs.Add((runStart, mapEnd - runStart, runFlags));
         }
     }
 
@@ -1716,6 +1808,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // their owners dirtied before the copy; guest addresses are
         // host-identical, matching the tracker's fault addresses.
         GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
+        GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
 
         var requiresExclusiveAccess = false;
         _gate.EnterReadLock();
@@ -1813,6 +1906,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // Match TryWrite's managed-write notification before touching an
         // identity-mapped guest page protected by the image tracker.
         GuestImageWriteTracker.NotifyManagedWrite(destinationAddress, length);
+        GuestGpuMemoryHook.MarkCpuWrite(destinationAddress, length);
 
         _gate.EnterReadLock();
         try
@@ -2019,6 +2113,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitReadLock();
         }
     }
+
+    public bool CanRead(ulong address, ulong size) => size != 0 && (IsBackedRange(address, size) || IsAccessible(address, size));
 
     public bool IsAccessible(ulong virtualAddress, ulong size)
     {

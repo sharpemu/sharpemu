@@ -2301,7 +2301,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe nint CreateImportHandlerTrampoline(int importIndex)
 	{
-		void* ptr = VirtualAlloc(null, 512u, 12288u, 64u);
+		const uint stubSize = 1024u;
+		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
 		if (ptr == null)
 		{
 			return 0;
@@ -2393,11 +2394,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 73;
 			ptr2[num++] = 139;
 			ptr2[num++] = 35;
+			EmitSavedStackBounds(ptr2, ref num, restore: false);
+			ptr2[num++] = 0x4D; ptr2[num++] = 0x89; ptr2[num++] = 0xDA; // mov r10,r11
+			EmitHostStackBounds(ptr2, ref num, save: false);
 			ptr2[num++] = 72;
 			ptr2[num++] = 131;
 			ptr2[num++] = 236;
 			ptr2[num++] = 56;
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x89; ptr2[num++] = 0x64; ptr2[num++] = 0x24; ptr2[num++] = 0x28; // mov [rsp+0x28],r12
+			ptr2[num++] = 0x4C; ptr2[num++] = 0x89; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x30; // mov [rsp+0x30],r10
 			ptr2[num++] = 72;
 			ptr2[num++] = 185;
 			*(long*)(ptr2 + num) = _selfHandlePtr;
@@ -2415,6 +2420,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = byte.MaxValue;
 			ptr2[num++] = 208;
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x64; ptr2[num++] = 0x24; ptr2[num++] = 0x28; // mov r12,[rsp+0x28]
+			// Host calls can grow the stack. Keep the new limit before switching back.
+			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x30; // mov r10,[rsp+0x30]
+			EmitHostStackBounds(ptr2, ref num, save: true);
 			ptr2[num++] = 72;
 			ptr2[num++] = 131;
 			ptr2[num++] = 196;
@@ -2432,6 +2440,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				*(int*)(ptr2 + num) = -0x80 + (xmm * 0x10);
 				num += 4;
 			}
+			EmitSavedStackBounds(ptr2, ref num, restore: true);
 			ptr2[num++] = 76;
 			ptr2[num++] = 137;
 			ptr2[num++] = 228;
@@ -2454,10 +2463,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 65;
 			ptr2[num++] = 95;
 			ptr2[num++] = 195;
-			Debug.Assert(num <= 512, "Import handler trampoline exceeded its allocation.");
+			Debug.Assert(num <= stubSize, "Import handler trampoline exceeded its allocation.");
 			uint num2 = default(uint);
-			VirtualProtect(ptr, 512u, 32u, &num2);
-			FlushInstructionCache(GetCurrentProcess(), ptr, 512u);
+			VirtualProtect(ptr, stubSize, 32u, &num2);
+			FlushInstructionCache(GetCurrentProcess(), ptr, stubSize);
 			return (nint)ptr;
 		}
 		catch
@@ -2623,6 +2632,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x48); // mov rsp, [rax]
 		EmitByte(code, ref offset, 0x8B);
 		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC2); // mov r10,rax
+		EmitHostStackBounds(code, ref offset, save: false);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
@@ -2990,8 +3001,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x54); // push r12
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x55); // push r13
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x56); // push r14
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x57); // push r15
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov r12, rsp
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xCD); // mov r13, rcx
+		EmitExceptionHostStackBounds(code, ref offset);
 
 		// Native worker EXECUTE-AV abort without managed VEH.
 		// Do NOT catch read/write AVs — workers need managed lazy-commit (tLTJ
@@ -3079,9 +3093,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			EmitByte(code, ref offset, 0xB8); EmitUInt32(code, ref offset, unchecked((uint)-1));
 			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
 			EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D); // pop r13
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C); // pop r12
-			EmitByte(code, ref offset, 0xC3);    // ret
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
+			EmitByte(code, ref offset, 0xC3);
 
 			int tbbFallthroughOffset = offset;
 			*(int*)(code + tbbFallthroughJump) = tbbFallthroughOffset - (tbbFallthroughJump + sizeof(int));
@@ -3120,8 +3136,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int hostNotAccessViolationJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0);
+		EmitSavedStackBounds(code, ref offset, restore: true);
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
 		EmitByte(code, ref offset, 0xE4); // mov rsp, r12
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
 		EmitByte(code, ref offset, 0xC3);
@@ -3162,13 +3181,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int missingHostStackJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xDC); // mov rsp, r11
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x48);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x38); // mov [rsp+0x38],rax
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = managedHandler;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
+		EmitExceptionStackSelection(code, ref offset);
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24); EmitByte(code, ref offset, 0x38); // mov r10,[rsp+0x38]
+		EmitHostStackBounds(code, ref offset, save: true);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x48);
 		EmitByte(code, ref offset, 0xE9);
 		int guestRestoreJump = offset;
 		EmitUInt32(code, ref offset, 0u);
@@ -3176,10 +3199,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int passThroughOffset = offset;
 		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
 		int restoreOffset = offset;
+		EmitSavedStackBounds(code, ref offset, restore: true);
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D); // pop r13
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C); // pop r12
-		EmitByte(code, ref offset, 0xC3);    // ret
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
+		EmitByte(code, ref offset, 0xC3);
 
 		*(int*)(code + aboveStackJump) = guestStackOffset - (aboveStackJump + sizeof(int));
 		*(int*)(code + belowStackJump) = guestStackOffset - (belowStackJump + sizeof(int));
@@ -6059,7 +6085,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			reason = "failed to allocate executable memory for guest thread stub";
 			return GuestNativeCallExitReason.Exception;
 		}
-		void* hostRspStorage = NativeMemory.Alloc((nuint)sizeof(ulong));
+		void* hostRspStorage = NativeMemory.AllocZeroed((nuint)HostStackStateBytes);
 		if (hostRspStorage == null)
 		{
 			VirtualFree(ptr, 0u, 32768u);
@@ -6111,6 +6137,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 73;
 			ptr2[offset++] = 137;
 			ptr2[offset++] = 34;
+			EmitGuestStackBounds(ptr2, ref offset, context[CpuRegister.Rsp]);
 			ptr2[offset++] = 72;
 			ptr2[offset++] = 184;
 			*(ulong*)(ptr2 + offset) = context[CpuRegister.Rsp];
@@ -6172,6 +6199,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 73;
 			ptr2[offset++] = 139;
 			ptr2[offset++] = 34;
+			EmitHostStackBounds(ptr2, ref offset, save: false);
 			EmitHostNonvolatileXmmRestore(ptr2, ref offset);
 			ptr2[offset++] = 65;
 			ptr2[offset++] = 95;
@@ -6283,7 +6311,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			reason = "failed to allocate executable memory for guest thread stub";
 			return GuestNativeCallExitReason.Exception;
 		}
-		void* hostRspStorage = NativeMemory.Alloc((nuint)sizeof(ulong));
+		void* hostRspStorage = NativeMemory.AllocZeroed((nuint)HostStackStateBytes);
 		if (hostRspStorage == null)
 		{
 			VirtualFree(ptr, 0u, 32768u);
@@ -6334,6 +6362,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xC4); emitter.Emit(0x08); // add rsp,8
 			emitter.EmitMovR64Immediate(0x49, 0xBA, hostRspSlot); // mov r10, hostRspSlot
 			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
+			EmitGuestStackBounds(ptr2, ref emitter.Offset, context[CpuRegister.Rsp]);
 			emitter.EmitMovR64Immediate(0x48, 0xB8, context[CpuRegister.Rsp]); // mov rax, guest rsp
 			emitter.Emit(0x48); emitter.Emit(0x89); emitter.Emit(0xC4); // mov rsp, rax
 			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xEC); emitter.Emit(0x08); // reserve transfer slot
@@ -6553,7 +6582,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			result = OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
 			return false;
 		}
-		void* hostRspStorage = NativeMemory.Alloc((nuint)sizeof(ulong));
+		void* hostRspStorage = NativeMemory.AllocZeroed((nuint)HostStackStateBytes);
 		if (hostRspStorage == null)
 		{
 			VirtualFree(ptr, 0u, 32768u);
@@ -6603,6 +6632,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 73;
 			ptr2[num3++] = 137;
 			ptr2[num3++] = 34;
+			EmitGuestStackBounds(ptr2, ref num3, context[CpuRegister.Rsp]);
 			ptr2[num3++] = 72;
 			ptr2[num3++] = 184;
 			*(ulong*)(ptr2 + num3) = context[CpuRegister.Rsp];
@@ -6664,6 +6694,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 73;
 			ptr2[num3++] = 139;
 			ptr2[num3++] = 34;
+			EmitHostStackBounds(ptr2, ref num3, save: false);
 			EmitHostNonvolatileXmmRestore(ptr2, ref num3);
 			ptr2[num3++] = 65;
 			ptr2[num3++] = 95;

@@ -2289,6 +2289,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 translatedDraw.PixelInitialScalars,
                 translatedDraw.GlobalMemoryBindings),
             runtimeStateLength,
+            (ulong)runtimeStateLength,
             Pooled: true));
         combined.Add(new GuestMemoryBuffer(
             0,
@@ -2296,6 +2297,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 translatedDraw.VertexInitialScalars,
                 translatedDraw.GlobalMemoryBindings),
             runtimeStateLength,
+            (ulong)runtimeStateLength,
             Pooled: true));
         return combined;
     }
@@ -2332,6 +2334,20 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         var combined = new List<GuestMemoryBuffer>(bindings.Count + 2);
         foreach (var binding in bindings)
         {
+            if (!Gen5ShaderScalarEvaluator.SnapshotGlobalMemory)
+            {
+                var readable = binding.BaseAddress != 0 && ctx.Memory.CanRead(binding.BaseAddress, binding.Size);
+                combined.Add(new GuestMemoryBuffer(
+                    binding.BaseAddress,
+                    [],
+                    0,
+                    binding.Size,
+                    Pooled: false,
+                    Writable: binding.Writable,
+                    WriteBackToGuest: binding.WriteBackToGuest && readable));
+                continue;
+            }
+
             var data = new byte[Math.Max(binding.DataLength, sizeof(uint))];
             var guestMemoryBacked = binding.BaseAddress != 0 &&
                 (ctx.Memory.TryRead(binding.BaseAddress, data) ||
@@ -2345,6 +2361,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 binding.BaseAddress,
                 data,
                 data.Length,
+                (ulong)data.Length,
                 Pooled: false,
                 Writable: binding.Writable,
                 WriteBackToGuest: binding.WriteBackToGuest && guestMemoryBacked));
@@ -2359,6 +2376,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     translatedDraw.PixelInitialScalars,
                     bindings),
                 runtimeStateLength,
+                (ulong)runtimeStateLength,
                 Pooled: false));
             combined.Add(new GuestMemoryBuffer(
                 0,
@@ -2366,6 +2384,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     translatedDraw.VertexInitialScalars,
                     bindings),
                 runtimeStateLength,
+                (ulong)runtimeStateLength,
                 Pooled: false));
         }
 

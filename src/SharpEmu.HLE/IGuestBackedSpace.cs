@@ -13,4 +13,9 @@ public interface IGuestBackedSpace
     bool TryUnmapBacked(ulong address, ulong size);
     bool TryClearBacking(ulong offset, ulong size);
     bool IsBackedView(ulong address);
+    bool IsBackedRange(ulong address, ulong size);
+
+    // Copies through the backing alias only: no protection change, no store notification.
+    bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data);
+    bool TryReadBacking(ulong address, Span<byte> data);
 }

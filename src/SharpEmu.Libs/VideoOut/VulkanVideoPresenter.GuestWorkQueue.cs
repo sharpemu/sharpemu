@@ -137,21 +137,6 @@ internal static unsafe partial class VulkanVideoPresenter
             StringComparison.Ordinal);
     }
 
-    internal static bool ShouldRefreshGuestGlobalBuffer(
-        bool writable,
-        bool capturedMatchesShadow,
-        bool liveMatchesShadow) =>
-        writable ? !liveMatchesShadow : !capturedMatchesShadow;
-
-    internal static bool ShouldVersionReadOnlyGuestGlobalBuffer(
-        bool writable,
-        bool needsRefresh,
-        bool allocationInFlight,
-        bool allocationInOpenBatch) =>
-        !writable &&
-        needsRefresh &&
-        (allocationInFlight || allocationInOpenBatch);
-
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -884,6 +869,21 @@ internal static unsafe partial class VulkanVideoPresenter
         sequence <= 0 ||
         sequence <= _completedGuestWorkSequence ||
         _completedGuestWorkOutOfOrder.Contains(sequence);
+
+    private static bool WaitForAcceptedGuestWork()
+    {
+        lock (_gate)
+        {
+            var boundary = _enqueuedGuestWorkSequence;
+            // All earlier queues must complete, not only the last sequence taken.
+            while (!_closed && _completedGuestWorkSequence < boundary)
+            {
+                System.Threading.Monitor.Wait(_gate);
+            }
+
+            return _completedGuestWorkSequence >= boundary;
+        }
+    }
 
     public static bool WaitForGuestWork(
         long workSequence,

@@ -129,6 +129,8 @@ public sealed class PageGuard : IDisposable
         _addressSpace = addressSpace;
     }
 
+    public GuestPermissionLedger Permissions { get; } = new();
+
     public void Dispose()
     {
         foreach (var block in _blocks)
@@ -158,6 +160,7 @@ public sealed class PageGuard : IDisposable
 
     public void RemoveWatchMask(ulong blockBase, in PageMask pages, bool blockReads) => UpdateMask(blockBase, pages, false, blockReads);
 
+    // Watcher state only; the guest's own permissions are the ledger's.
     public bool Allows(ulong address, FaultKind kind)
     {
         var block = FindBlock(address);
@@ -173,12 +176,31 @@ public sealed class PageGuard : IDisposable
             : allowedAccess != GuestPageProtection.None;
     }
 
-    public void NoteMapped(ulong address, ulong size)
+    internal string DescribeWatchers(ulong address)
     {
+        var block = FindBlock(address);
+        if (block == null)
+            return "read_watch=0 write_watch=0";
+        using var held = new BlockLock(block);
+        var counts = block.Pages[(int)(address % BlockBytes / PageBytes)];
+        return $"read_watch={counts.ReadWatchCount} write_watch={counts.WriteWatchCount}";
     }
 
-    public void NoteUnmapped(ulong address, ulong size)
+    // Applies the derived protection again after the ledger changed; the block lock keeps watcher updates out.
+    public void Reapply(ulong address, ulong size)
     {
+        var end = GetPageRangeEnd(address, size);
+        for (var chunkBegin = GetPageStart(address); chunkBegin < end;)
+        {
+            var chunkEnd = Math.Min(end, (chunkBegin / BlockBytes + 1) * BlockBytes);
+            var block = GetOrCreateBlock(chunkBegin);
+            using (new BlockLock(block))
+            {
+                ApplyDerived(chunkBegin, chunkEnd, block);
+            }
+
+            chunkBegin = chunkEnd;
+        }
     }
 
     private PageBlock? FindBlock(ulong address) =>
@@ -205,19 +227,59 @@ public sealed class PageGuard : IDisposable
         }
     }
 
+    // Host protection is ledger ∩ watchers; execute needs a readable page on x86.
+    private static GuestPageProtection Derive(GuestPageProtection guest, GuestPageProtection watchers)
+    {
+        if (watchers == GuestPageProtection.None)
+        {
+            return GuestPageProtection.None;
+        }
+
+        var derived = guest & (GuestPageProtection.Read | GuestPageProtection.Execute);
+        if ((watchers & GuestPageProtection.Write) != 0)
+        {
+            derived |= guest & GuestPageProtection.Write;
+        }
+
+        return derived;
+    }
+
+    private GuestPageProtection Derive(ulong address, in PageCounts counts) => Derive(Permissions.Lookup(address), counts.GetAllowedAccess());
+
     private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess)
     {
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"host-protect derived={allowedAccess}");
         if (!_addressSpace.TryProtect(address, size, allowedAccess))
         {
             OnFatal($"Could not change page access at 0x{address:X16}, new=0x{(uint)allowedAccess:X8}.");
         }
     }
 
+    private void ApplyDerived(ulong begin, ulong end, PageBlock block)
+    {
+        var runStart = begin;
+        var runAllowedAccess = GuestPageProtection.None;
+        for (var address = begin; address < end; address += PageBytes)
+        {
+            var allowedAccess = Derive(address, block.Pages[(int)(address % BlockBytes / PageBytes)]);
+            if (address != begin && allowedAccess != runAllowedAccess)
+            {
+                ApplyAccess(runStart, address - runStart, runAllowedAccess);
+                runStart = address;
+            }
+
+            runAllowedAccess = allowedAccess;
+        }
+
+        ApplyAccess(runStart, end - runStart, runAllowedAccess);
+    }
+
     private void UpdateBlock(PageBlock block, ulong blockBase, int first, int last, bool track, bool isRead, bool masked, in PageMask mask)
     {
         using var _ = new BlockLock(block);
         var pages = block.Pages;
-        var allowedAccess = pages[first].GetAllowedAccess();
+        var allowedAccess = Derive(blockBase + (ulong)first * PageBytes, pages[first]);
         var rangeBegin = 0;
         var rangeBytes = 0UL;
         var potentialRangeBytes = 0UL;
@@ -237,9 +299,13 @@ public sealed class PageGuard : IDisposable
             var address = blockBase + (ulong)pageIndex * PageBytes;
             var update = !masked || mask.Get(pageIndex);
 
-            var oldAllowedAccess = pages[pageIndex].GetAllowedAccess();
+            var guest = Permissions.Lookup(address);
+            var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address);
-            var newAllowedAccess = pages[pageIndex].GetAllowedAccess();
+            var newAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
+            if (update && GuestGpuMemoryHook.Traces(address, PageBytes))
+                GuestGpuMemoryHook.Trace(address, PageBytes,
+                    $"watch track={track} block_reads={isRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");
 
             if (newAllowedAccess != allowedAccess)
             {

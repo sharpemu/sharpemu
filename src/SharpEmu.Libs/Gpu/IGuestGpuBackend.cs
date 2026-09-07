@@ -33,6 +33,9 @@ internal interface IGuestGpuBackend
     /// the window title on macOS where either backend can run.</summary>
     string BackendName { get; }
 
+    /// <summary>True when draw records must carry a copy of each global buffer's bytes.</summary>
+    bool SnapshotsGuestBuffers { get; }
+
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 

@@ -130,9 +130,10 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
+    // Page watchers protect host pages, which are smaller than the guest page.
     public bool SetTransientAccess(ulong address, ulong size, HostPageProtection protection)
     {
-        if (!IsValidAlignedRange(address, size))
+        if (!IsValidRange(address, size) || address % _host.PageSize != 0 || size % _host.PageSize != 0)
         {
             return false;
         }

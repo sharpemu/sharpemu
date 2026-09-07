@@ -60,6 +60,25 @@ public sealed class ImportTrampolineAbiTests
         }
     }
 
+    [Fact]
+    public void GeneratedTrampoline_SavesGrownHostBoundsBeforeGuestReturn()
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+
+        var code = CreateTrampolineBytes();
+        var stateSave = code.AsSpan().IndexOf(new byte[] { 0x4C, 0x89, 0x54, 0x24, 0x30 });
+        var stateRestore = code.AsSpan().IndexOf(new byte[] { 0x4C, 0x8B, 0x54, 0x24, 0x30 });
+        Assert.True(stateSave >= 0 && stateRestore > stateSave);
+
+        ReadOnlySpan<byte> saveBounds = [
+            0x65, 0x4C, 0x8B, 0x1C, 0x25, 0x08, 0, 0, 0, 0x4D, 0x89, 0x5A, 0x08,
+            0x65, 0x4C, 0x8B, 0x1C, 0x25, 0x10, 0, 0, 0, 0x4D, 0x89, 0x5A, 0x10];
+        Assert.True(code.AsSpan(stateRestore + 5).StartsWith(saveBounds));
+        var guestRestore = code.AsSpan(stateRestore).IndexOf(
+            new byte[] { 0x65, 0x4C, 0x89, 0x34, 0x25, 0x08, 0, 0, 0 });
+        Assert.True(guestRestore > saveBounds.Length);
+    }
+
     private static unsafe byte[] CreateTrampolineBytes()
     {
         var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
@@ -79,7 +98,7 @@ public sealed class ImportTrampolineAbiTests
 
         try
         {
-            return new ReadOnlySpan<byte>((void*)trampoline, 512).ToArray();
+            return new ReadOnlySpan<byte>((void*)trampoline, 1024).ToArray();
         }
         finally
         {

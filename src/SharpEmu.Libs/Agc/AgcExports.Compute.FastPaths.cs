@@ -311,7 +311,7 @@ public static partial class AgcExports
         var scalars = evaluation.InitialScalarRegisters;
         if (destination is null ||
             destination.BaseAddress == 0 ||
-            destination.DataLength < FillRecordBytes ||
+            destination.Size < FillRecordBytes ||
             scalars.Count < 8 ||
             !IsExactConstantFillDescriptor(scalars, destination.BaseAddress))
         {
@@ -324,7 +324,7 @@ public static partial class AgcExports
             : Math.Min(
                 (ulong)uint.MaxValue,
                 (ulong)dispatch.GroupCountX * localSizeX);
-        var writableRecords = (uint)(destination.DataLength / FillRecordBytes);
+        var writableRecords = destination.Size / FillRecordBytes;
         var outputRecords = (uint)Math.Min(
             Math.Min((ulong)numRecords, dispatchedThreads),
             writableRecords);
@@ -495,9 +495,9 @@ public static partial class AgcExports
             return "destination-base-zero";
         }
 
-        if (destination.DataLength < FillRecordBytes)
+        if (destination.Size < FillRecordBytes)
         {
-            return $"destination-data-short:{destination.DataLength}";
+            return $"destination-size-short:{destination.Size}";
         }
 
         var scalars = evaluation.InitialScalarRegisters;
@@ -517,7 +517,7 @@ public static partial class AgcExports
             : Math.Min(
                 (ulong)uint.MaxValue,
                 (ulong)dispatch.GroupCountX * localSizeX);
-        var writableRecords = (uint)(destination.DataLength / FillRecordBytes);
+        var writableRecords = destination.Size / FillRecordBytes;
         var outputRecords = (uint)Math.Min(
             Math.Min((ulong)numRecords, dispatchedThreads),
             writableRecords);

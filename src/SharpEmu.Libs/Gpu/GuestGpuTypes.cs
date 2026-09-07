@@ -92,10 +92,12 @@ internal readonly record struct TextureCacheLookupIdentity(
     TextureContentIdentity Content,
     GuestSampler Sampler);
 
+// Size is the guest extent; Data carries bytes only for host-owned buffers and snapshot backends.
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,
     byte[] Data,
     int Length,
+    ulong Size,
     bool Pooled,
     bool Writable = false,
     bool WriteBackToGuest = true);

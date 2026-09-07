@@ -698,13 +698,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
                 PNext = &robustness2Features,
             };
+            var addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+            {
+                SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+                PNext = &timelineSemaphoreFeatures,
+            };
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &timelineSemaphoreFeatures,
+                PNext = &addressFeatures,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
             var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
+            var supportsBufferDeviceAddress = addressFeatures.BufferDeviceAddress;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -763,15 +769,27 @@ internal static unsafe partial class VulkanVideoPresenter
                         "the submission scheduler needs timeline semaphores, which this device lacks");
                 }
 
+                if (!supportsBufferDeviceAddress)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        "the buffer store needs bufferDeviceAddress, which this device lacks");
+                }
+
                 _gpuLabelTimelineEnabled = _gpuLabelTimelineRequested;
                 timelineSemaphoreFeatures.TimelineSemaphore = true;
                 timelineSemaphoreFeatures.PNext = supportsRobustness2
                     ? &robustness2Features
                     : (supportsMaintenance8 ? &maintenance8Features : null);
+                addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+                {
+                    SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+                    BufferDeviceAddress = true,
+                    PNext = &timelineSemaphoreFeatures,
+                };
                 var features2 = new PhysicalDeviceFeatures2
                 {
                     SType = StructureType.PhysicalDeviceFeatures2,
-                    PNext = &timelineSemaphoreFeatures,
+                    PNext = &addressFeatures,
                     Features = enabledFeatures,
                 };
                 var createInfo = new DeviceCreateInfo
@@ -796,6 +814,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
             CreateScheduler();
+            CreateBufferCache();
             if (_gpuLabelTimelineEnabled)
             {
                 CreateGuestTimelineSemaphores();

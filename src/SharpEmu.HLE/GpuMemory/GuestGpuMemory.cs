@@ -14,55 +14,80 @@ public interface IGpuQueueRelay
 
     // Return false if the relay rejects the work. Rejected work does not run.
     bool TryRunOnGpuQueue(Action work);
+
+    bool TryRunAfterPendingWork(Action work) => TryRunOnGpuQueue(work);
 }
 
 public sealed class GuestGpuMemory : IDisposable
 {
     private readonly PageGuard _pages;
-    private readonly IGuestBufferStore _buffers;
-    private readonly IGuestImageStore _images;
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
     private sealed record GpuAttachment(IGpuQueueRelay? Gpu, IGpuTickScheduler? Scheduler);
 
     private readonly object _attachGate = new();
     private GpuAttachment? _attachment;
+    private IGuestBufferStore? _buffers;
+    private IGuestImageStore? _images;
 
-    public GuestGpuMemory(IGuestAddressSpace addressSpace, IGuestBufferStore buffers, IGuestImageStore images)
+    public GuestGpuMemory(IGuestAddressSpace addressSpace)
     {
+        AddressSpace = addressSpace;
         _pages = new PageGuard(addressSpace);
-        _buffers = buffers;
-        _images = images;
     }
 
-    public IGuestBufferStore Buffers => _buffers;
+    public IGuestAddressSpace AddressSpace { get; }
 
-    public IGuestImageStore Images => _images;
+    public IGuestBufferStore? Buffers => Volatile.Read(ref _buffers);
 
-    internal PageGuard Pages => _pages;
+    public IGuestImageStore? Images => Volatile.Read(ref _images);
 
-    // Claims a fault only when a store recovered it and the page now permits the access.
+    public PageGuard Pages => _pages;
+
+    // Stores arrive once the host GPU is ready; null stores decline every fault.
+    public void AttachStores(IGuestBufferStore? buffers, IGuestImageStore? images)
+    {
+        Volatile.Write(ref _buffers, buffers);
+        Volatile.Write(ref _images, images);
+    }
+
+    // Claims a fault only when the guest permits it and a store completed recovery.
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         const ulong faultSize = 8;
         if (!Covers(address, faultSize))
         {
+            TraceFault("unregistered");
+            return false;
+        }
+        if (!GuestPermits(kind, address))
+        {
+            TraceFault("guest-denied");
             return false;
         }
 
+        var buffers = Buffers;
+        var images = Images;
         bool handled;
         if (kind == FaultKind.Write)
         {
-            var buffers = _buffers.MarkCpuWrite(address, faultSize);
-            var images = _images.MarkCpuWrite(address, faultSize);
-            handled = buffers | images;
+            handled = (buffers?.MarkCpuWrite(address, faultSize) ?? false) | (images?.MarkCpuWrite(address, faultSize) ?? false);
         }
         else
         {
-            handled = _buffers.DownloadToCpu(address, faultSize);
+            handled = buffers?.DownloadToCpu(address, faultSize) ?? false;
         }
 
-        return handled && _pages.Allows(address, kind);
+        // A new watch can follow recovery. Let the retried access fault again if necessary.
+        TraceFault(handled ? "resolved" : "store-declined");
+        return handled;
+
+        void TraceFault(string result)
+        {
+            if (GuestGpuMemoryHook.Traces(address, faultSize))
+                GuestGpuMemoryHook.Trace(address, faultSize,
+                    $"fault={kind} result={result} guest={_pages.Permissions.Lookup(address)} buffers={Buffers != null} images={Images != null} {_pages.DescribeWatchers(address)}");
+        }
     }
 
     public bool MarkCpuWrite(ulong address, ulong size)
@@ -72,8 +97,8 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
-        _ = _buffers.MarkCpuWrite(address, size);
-        _ = _images.MarkCpuWrite(address, size);
+        _ = Buffers?.MarkCpuWrite(address, size);
+        _ = Images?.MarkCpuWrite(address, size);
         return true;
     }
 
@@ -95,8 +120,24 @@ public sealed class GuestGpuMemory : IDisposable
         }
     }
 
-    public void Register(ulong address, ulong size)
+    public void ForEachSpan(Action<ulong, ulong> visit)
     {
+        _spansLock.EnterReadLock();
+        try
+        {
+            _spans.ForEach(visit);
+        }
+        finally
+        {
+            _spansLock.ExitReadLock();
+        }
+    }
+
+    // The host mapping takes the guest protection here; the views themselves are mapped read-write.
+    public void Register(ulong address, ulong size, GuestPageProtection protection)
+    {
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"map guest={protection}");
         _spansLock.EnterWriteLock();
         try
         {
@@ -107,11 +148,28 @@ public sealed class GuestGpuMemory : IDisposable
             _spansLock.ExitWriteLock();
         }
 
-        _pages.NoteMapped(address, size);
+        _pages.Permissions.Set(address, size, protection);
+        _pages.Reapply(address, size);
+    }
+
+    // A guest mprotect on a covered range: the ledger changes, then every page gets its derived protection.
+    public bool NoteProtected(ulong address, ulong size, GuestPageProtection protection)
+    {
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"protect-request guest={protection}");
+        if (!Covers(address, size))
+        {
+            return false;
+        }
+
+        _pages.Permissions.Set(address, size, protection);
+        _pages.Reapply(address, size);
+        return true;
     }
 
     public void Unregister(ulong address, ulong size)
     {
+        GuestGpuMemoryHook.Trace(address, size, "unmap-request");
         for (;;)
         {
             var attachment = Volatile.Read(ref _attachment);
@@ -123,7 +181,7 @@ public sealed class GuestGpuMemory : IDisposable
 
             if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
             {
-                if (gpu.TryRunOnGpuQueue(() => Unmap(attachment.Scheduler)))
+                if (gpu.TryRunAfterPendingWork(() => Unmap(attachment.Scheduler)))
                 {
                     return;
                 }
@@ -146,9 +204,8 @@ public sealed class GuestGpuMemory : IDisposable
                 scheduler.WaitForPriorityOperations(tick);
             }
 
-            _ = _buffers.MarkCpuWrite(address, size);
-            _images.Unregister(address, size);
-            _pages.NoteUnmapped(address, size);
+            _ = Buffers?.MarkCpuWrite(address, size);
+            Images?.Unregister(address, size);
             _spansLock.EnterWriteLock();
             try
             {
@@ -158,6 +215,9 @@ public sealed class GuestGpuMemory : IDisposable
             {
                 _spansLock.ExitWriteLock();
             }
+
+            _pages.Permissions.Clear(address, size);
+            GuestGpuMemoryHook.Trace(address, size, "unmap-complete");
         }
     }
 
@@ -169,6 +229,17 @@ public sealed class GuestGpuMemory : IDisposable
             Volatile.Write(ref _attachment, gpu == null && scheduler == null ? null : new GpuAttachment(gpu, scheduler));
             Monitor.PulseAll(_attachGate);
         }
+    }
+
+    private bool GuestPermits(FaultKind kind, ulong address)
+    {
+        var needed = kind switch
+        {
+            FaultKind.Write => GuestPageProtection.Write,
+            FaultKind.Execute => GuestPageProtection.Execute,
+            _ => GuestPageProtection.Read,
+        };
+        return (_pages.Permissions.Lookup(address) & needed) != 0;
     }
 
     private void WaitForDetach(GpuAttachment attachment)

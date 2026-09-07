@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -8,7 +9,7 @@ using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
-// A window-less Vulkan 1.2 device with timeline semaphores; null when the host has none.
+// A window-less Vulkan 1.2 device with timeline semaphores and buffer device addresses; null when the host has none.
 internal sealed unsafe class HeadlessVulkan : IDisposable
 {
     private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily)
@@ -34,6 +35,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public uint QueueFamily { get; }
 
     public object QueueGate { get; } = new();
+
+    public GpuDeviceInfo DeviceInfo => new(Vk, Physical, Device);
 
     public string DeviceName
     {
@@ -141,13 +144,18 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             }
         }
 
+        var addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+        {
+            SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+        };
         var timelineFeatures = new PhysicalDeviceTimelineSemaphoreFeatures
         {
             SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
+            PNext = &addressFeatures,
         };
         var features = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &timelineFeatures };
         vk.GetPhysicalDeviceFeatures2(physical, &features);
-        if (family == uint.MaxValue || !timelineFeatures.TimelineSemaphore)
+        if (family == uint.MaxValue || !timelineFeatures.TimelineSemaphore || !addressFeatures.BufferDeviceAddress)
         {
             vk.DestroyInstance(instance, null);
             return null;
@@ -162,6 +170,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             PQueuePriorities = &priority,
         };
         timelineFeatures.TimelineSemaphore = true;
+        addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+        {
+            SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+            BufferDeviceAddress = true,
+        };
+        timelineFeatures.PNext = &addressFeatures;
         var deviceInfo = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,

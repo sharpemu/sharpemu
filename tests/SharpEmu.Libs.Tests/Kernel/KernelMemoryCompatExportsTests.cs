@@ -439,7 +439,7 @@ public sealed class KernelMemoryCompatExportsTests
         using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
         Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
         var context = new CpuContext(memory, Generation.Gen5);
-        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
+        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace());
         GuestGpuMemoryHook.Attach(gpuMemory);
         var mappedAddress = 0UL;
 
@@ -490,7 +490,7 @@ public sealed class KernelMemoryCompatExportsTests
         using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
         Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
         var context = new CpuContext(memory, Generation.Gen5);
-        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore());
+        var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace());
         GuestGpuMemoryHook.Attach(gpuMemory);
         var mappedAddress = 0UL;
 

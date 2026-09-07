@@ -97,7 +97,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         moduleManager.Freeze();
 
         var virtualMemory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create());
-        var gpuMemory = new GuestGpuMemory(virtualMemory, new IdleBufferStore(), new IdleImageStore());
+        var gpuMemory = new GuestGpuMemory(virtualMemory);
         GuestGpuMemoryHook.Attach(gpuMemory);
 
         var fileSystem = new PhysicalFileSystem();

@@ -378,13 +378,15 @@ public sealed record Gen5ImageBinding(
 // Data arrays may be rented from ArrayPool (oversized): always slice with
 // DataLength, never Data.Length. Ownership transfers to the presenter, which
 // returns pooled arrays after uploading them into host-visible buffers.
+// Size is the guest extent the shader may touch; Data holds a copy only when the backend snapshots.
 public sealed record Gen5GlobalMemoryBinding(
     uint ScalarAddress,
     ulong BaseAddress,
     IReadOnlyList<uint> InstructionPcs,
     byte[] Data,
     int DataLength,
-    bool DataPooled)
+    bool DataPooled,
+    ulong Size)
 {
     public bool Writable { get; set; }
 

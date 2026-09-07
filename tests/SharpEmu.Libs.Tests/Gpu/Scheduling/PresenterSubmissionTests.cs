@@ -4,6 +4,7 @@
 using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
@@ -33,7 +34,7 @@ public sealed class PresenterSubmissionTests
             "_batchResources", "_batchTraceImages", "_batchRetireBuffers", "_batchRetireDetile",
             "_pendingGuestSubmissions", "_lastSubmittedTimelineByGuestQueue",
             "_lastSubmittedGpuLabelDependencyByGuestQueue", "_gpuLabelHostPublications",
-            "_dirtyGuestBufferIndex", "_recycledDescriptorPools", "_deferredTextureDestroys",
+            "_recycledDescriptorPools", "_deferredTextureDestroys",
             "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys", "_deferredGuestImageVariantDestroys",
         })
         {
@@ -46,13 +47,8 @@ public sealed class PresenterSubmissionTests
         Set(presenter, "_gpuLabelTimelineEnabled", true);
         Set(presenter, "_graphicsGuestTimelineSemaphore", new Silk.NET.Vulkan.Semaphore(100));
 
-        var allocation = NewNested("GuestBufferAllocation");
         var binding = NewNested("GlobalBufferResource");
-        Set(binding, "Allocation", allocation);
         Set(binding, "Writable", true);
-        Set(binding, "WriteBackToGuest", true);
-        Set(binding, "GuestOffset", 16UL);
-        Set(binding, "GuestSize", 32UL);
         var resources = NewNested("TranslatedDrawResources");
         var bindings = Array.CreateInstance(binding.GetType(), 1);
         bindings.SetValue(binding, 0);
@@ -72,9 +68,9 @@ public sealed class PresenterSubmissionTests
         switch (route)
         {
             case "unmap":
-                using (var memory = new GuestGpuMemory(new RecordingAddressSpace(), new IdleBufferStore(), new IdleImageStore()))
+                using (var memory = new GuestGpuMemory(new RecordingAddressSpace()))
                 {
-                    memory.Register(0x10000, 0x1000);
+                    memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
                     memory.AttachGpuQueue(null, scheduler);
                     memory.Unregister(0x10000, 0x1000);
                     Assert.False(memory.Covers(0x10000, 0x1000));
@@ -90,10 +86,6 @@ public sealed class PresenterSubmissionTests
         Assert.False((bool)Get(presenter, "_batchOpen"));
         Assert.Empty((IEnumerable)Get(presenter, "_batchResources"));
         Assert.Equal(1UL, Get(presenter, "_submitTimeline"));
-        Assert.Equal(1UL, Get(allocation, "LastUseTimeline"));
-        var dirty = Assert.Single(((IEnumerable)allocation.GetType().GetProperty("DirtyRanges")!.GetValue(allocation)!).Cast<object>());
-        Assert.Equal(1UL, dirty.GetType().GetProperty("Timeline")!.GetValue(dirty));
-        Assert.Equal("test.queue", dirty.GetType().GetProperty("QueueName")!.GetValue(dirty));
         var pending = Assert.Single(((IEnumerable)Get(presenter, "_pendingGuestSubmissions")).Cast<object>());
         Assert.Equal(1UL, pending.GetType().GetProperty("Tick")!.GetValue(pending));
         Assert.Same(resources, Assert.Single(((IEnumerable)pending.GetType().GetProperty("Resources")!.GetValue(pending)!).Cast<object>()));
@@ -117,7 +109,6 @@ public sealed class PresenterSubmissionTests
             scheduler.Finish();
             Assert.Equal(2UL, Get(presenter, "_submitTimeline"));
             Assert.Equal(1, device.Submits[1].Signals);
-            Assert.Equal(1UL, Get(allocation, "LastUseTimeline"));
             Assert.Empty((IEnumerable)Get(presenter, "_pendingGuestSubmissions"));
             Invoke(presenter, "CollectCompletedGuestSubmissions", false);
             Assert.Equal(2UL, Get(presenter, "_completedTimeline"));

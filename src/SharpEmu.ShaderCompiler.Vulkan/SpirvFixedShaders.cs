@@ -648,4 +648,112 @@ public static class SpirvFixedShaders
             [gidVar, tiledVar, xTermVar, yTermVar, outVar, pushVar]);
         return module.Build();
     }
+
+    // Read and clear binding 0. Write the count and 64-bit page addresses to binding 1.
+    // Use 64 threads per group, with one thread per 32-page word.
+    public static byte[] CreateFaultBufferProcess()
+    {
+        const uint cachingPageBits = 14;
+        const uint maxPageFaults = 1024;
+
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+        var glsl = module.ImportExtInst("GLSL.std.450");
+
+        var voidType = module.TypeVoid();
+        var boolType = module.TypeBool();
+        var uintType = module.TypeInt(32, signed: false);
+        var uvec3Type = module.TypeVector(uintType, 3);
+        var runtimeArray = module.TypeRuntimeArray(uintType);
+        module.AddDecoration(runtimeArray, SpirvDecoration.ArrayStride, 4);
+        var bufferStruct = module.TypeStruct(runtimeArray);
+        module.AddDecoration(bufferStruct, SpirvDecoration.Block);
+        module.AddMemberDecoration(bufferStruct, 0, SpirvDecoration.Offset, 0);
+        var bufferPtrType = module.TypePointer(SpirvStorageClass.StorageBuffer, bufferStruct);
+        var uintStoragePtr = module.TypePointer(SpirvStorageClass.StorageBuffer, uintType);
+
+        uint MakeBuffer(uint binding, string name)
+        {
+            var variable = module.AddGlobalVariable(bufferPtrType, SpirvStorageClass.StorageBuffer);
+            module.AddName(variable, name);
+            module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            module.AddDecoration(variable, SpirvDecoration.Binding, binding);
+            return variable;
+        }
+
+        var faultVar = MakeBuffer(0, "fault_buffer");
+        var downloadVar = MakeBuffer(1, "download_buffer");
+        var inputUvec3Ptr = module.TypePointer(SpirvStorageClass.Input, uvec3Type);
+        var gidVar = module.AddGlobalVariable(inputUvec3Ptr, SpirvStorageClass.Input);
+        module.AddName(gidVar, "gid");
+        module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
+
+        uint UInt(uint value) => module.Constant(uintType, value);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        var entry = module.AddLabel();
+        var gid = module.AddInstruction(SpirvOp.Load, uvec3Type, gidVar);
+        var id = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
+        var wordPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, faultVar, UInt(0), id);
+        var firstWord = module.AddInstruction(SpirvOp.Load, uintType, wordPtr);
+        module.AddStatement(SpirvOp.Store, wordPtr, UInt(0));
+        var baseBit = module.AddInstruction(SpirvOp.IMul, uintType, id, UInt(32));
+
+        var header = module.AllocateId();
+        var body = module.AllocateId();
+        var store = module.AllocateId();
+        var exit = module.AllocateId();
+        var afterStore = module.AllocateId();
+        var continueLabel = module.AllocateId();
+        var merge = module.AllocateId();
+        var nextWord = module.AllocateId();
+        module.AddStatement(SpirvOp.Branch, header);
+
+        module.AddLabel(header);
+        var word = module.AddInstruction(SpirvOp.Phi, uintType, firstWord, entry, nextWord, continueLabel);
+        var hasBits = module.AddInstruction(SpirvOp.INotEqual, boolType, word, UInt(0));
+        module.AddStatement(SpirvOp.LoopMerge, merge, continueLabel, 0);
+        module.AddStatement(SpirvOp.BranchConditional, hasBits, body, merge);
+
+        module.AddLabel(body);
+        var countPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), UInt(0));
+        var previous = module.AddInstruction(SpirvOp.AtomicIAdd, uintType, countPtr, UInt(1), UInt(0), UInt(1));
+        var storeIndex = module.AddInstruction(SpirvOp.IAdd, uintType, previous, UInt(1));
+        var fits = module.AddInstruction(SpirvOp.ULessThan, boolType, storeIndex, UInt(maxPageFaults));
+        module.AddStatement(SpirvOp.SelectionMerge, afterStore, 0);
+        module.AddStatement(SpirvOp.BranchConditional, fits, store, exit);
+
+        module.AddLabel(exit);
+        module.AddStatement(SpirvOp.Return);
+
+        module.AddLabel(store);
+        var bit = module.AddInstruction(SpirvOp.ExtInst, uintType, glsl, 73, word);
+        var wordMinusOne = module.AddInstruction(SpirvOp.ISub, uintType, word, UInt(1));
+        // The phi in the loop header names this result before it is emitted.
+        module.AddStatement(SpirvOp.BitwiseAnd, uintType, nextWord, word, wordMinusOne);
+        var page = module.AddInstruction(SpirvOp.IAdd, uintType, baseBit, bit);
+        var low = module.AddInstruction(SpirvOp.ShiftLeftLogical, uintType, page, UInt(cachingPageBits));
+        var high = module.AddInstruction(SpirvOp.ShiftRightLogical, uintType, page, UInt(32 - cachingPageBits));
+        var lowIndex = module.AddInstruction(SpirvOp.IMul, uintType, storeIndex, UInt(2));
+        var highIndex = module.AddInstruction(SpirvOp.IAdd, uintType, lowIndex, UInt(1));
+        var lowPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), lowIndex);
+        module.AddStatement(SpirvOp.Store, lowPtr, low);
+        var highPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), highIndex);
+        module.AddStatement(SpirvOp.Store, highPtr, high);
+        module.AddStatement(SpirvOp.Branch, afterStore);
+
+        module.AddLabel(afterStore);
+        module.AddStatement(SpirvOp.Branch, continueLabel);
+        module.AddLabel(continueLabel);
+        module.AddStatement(SpirvOp.Branch, header);
+        module.AddLabel(merge);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 64, 1, 1);
+        module.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [gidVar, faultVar, downloadVar]);
+        return module.Build();
+    }
 }

@@ -172,6 +172,9 @@ public static partial class Gen5ShaderScalarEvaluator
     /// </summary>
     public static Gen5FallbackMemoryReader? FallbackMemoryReader { get; set; }
 
+    // False when the backend uploads from live guest memory; readability is then probed, not copied.
+    public static bool SnapshotGlobalMemory { get; set; } = true;
+
     public delegate bool Gen5FallbackMemoryReader(ulong baseAddress, Span<byte> destination);
 
     /// <summary>
@@ -667,7 +670,7 @@ public static partial class Gen5ShaderScalarEvaluator
                 }
                 else
                 {
-                    if (!TryReadGlobalMemory(ctx, baseAddress, out var data, out var dataLength))
+                    if (!TryReadGlobalMemory(ctx, baseAddress, out var data, out var dataLength, out var size))
                     {
                         error =
                             $"global-memory-read-failed pc=0x{instruction.Pc:X} " +
@@ -681,7 +684,8 @@ public static partial class Gen5ShaderScalarEvaluator
                         new List<uint> { instruction.Pc },
                         data,
                         dataLength,
-                        DataPooled: true);
+                        DataPooled: dataLength != 0,
+                        size);
                     binding.Writable = writable;
                     globalMemoryByAddress.Add(key, binding);
                     globalMemoryBindings.Add(binding);
@@ -745,7 +749,8 @@ public static partial class Gen5ShaderScalarEvaluator
                             new List<uint> { instruction.Pc },
                             new byte[sizeof(uint)],
                             sizeof(uint),
-                            DataPooled: false)
+                            DataPooled: false,
+                            sizeof(uint))
                         {
                             Writable = writable,
                         };
@@ -874,7 +879,8 @@ public static partial class Gen5ShaderScalarEvaluator
                             bufferDescriptor.BaseAddress,
                             bufferDescriptor.SizeBytes,
                             out var data,
-                            out var dataLength))
+                            out var dataLength,
+                            out var size))
                     {
                         var descriptorWords = string.Join(
                             ':',
@@ -896,6 +902,7 @@ public static partial class Gen5ShaderScalarEvaluator
                             (ulong)MaxGlobalMemoryBindingBytes));
                         data = new byte[Math.Max(dataLength, sizeof(uint))];
                         dataLength = data.Length;
+                        size = (ulong)dataLength;
                         dataPooled = false;
                         Console.Error.WriteLine(
                             $"[LOADER][WARN] AGC buffer read unavailable; using zero buffer " +
@@ -910,7 +917,8 @@ public static partial class Gen5ShaderScalarEvaluator
                         new List<uint> { instruction.Pc },
                         data,
                         dataLength,
-                        DataPooled: dataPooled)
+                        DataPooled: dataPooled && dataLength != 0,
+                        size)
                     {
                         Writable = writable,
                         WriteBackToGuest = dataPooled,
@@ -1175,8 +1183,9 @@ public static partial class Gen5ShaderScalarEvaluator
             var byteCount = end > start
                 ? Math.Min(end - start, (ulong)MaxGlobalMemoryBindingBytes)
                 : 0;
+            // Vertex streams are always copied; the buffer store takes only global memory.
             if (byteCount == 0 ||
-                !TryReadGlobalMemory(ctx, start, byteCount, out var data, out var dataLength))
+                !TryReadSizedGlobalMemoryCore(ctx, start, byteCount, true, out var data, out var dataLength, out _, out _))
             {
                 foreach (var binding in captured)
                 {
@@ -1423,7 +1432,8 @@ public static partial class Gen5ShaderScalarEvaluator
         CpuContext ctx,
         ulong baseAddress,
         out byte[] data,
-        out int dataLength)
+        out int dataLength,
+        out ulong size)
     {
         if (!Gen5ShaderEvaluationProfile.Enabled)
         {
@@ -1431,7 +1441,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 ctx,
                 baseAddress,
                 out data,
-                out dataLength);
+                out dataLength,
+                out size);
         }
 
         var started = Stopwatch.GetTimestamp();
@@ -1439,7 +1450,8 @@ public static partial class Gen5ShaderScalarEvaluator
             ctx,
             baseAddress,
             out data,
-            out dataLength);
+            out dataLength,
+            out size);
         Gen5ShaderEvaluationProfile.RecordMemoryRead(
             Gen5GlobalMemoryReadKind.UnknownSize,
             succeeded
@@ -1455,25 +1467,42 @@ public static partial class Gen5ShaderScalarEvaluator
         CpuContext ctx,
         ulong baseAddress,
         out byte[] data,
-        out int dataLength)
+        out int dataLength,
+        out ulong size)
     {
-        var rented = GlobalMemoryPool.Rent(MaxGlobalMemoryBindingBytes);
-        for (var size = MaxGlobalMemoryBindingBytes; size >= 4096; size >>= 1)
+        data = [];
+        dataLength = 0;
+        if (!SnapshotGlobalMemory)
         {
-            if (ctx.Memory.TryRead(baseAddress, rented.AsSpan(0, size)))
+            for (size = MaxGlobalMemoryBindingBytes; size >= 4096; size >>= 1)
+            {
+                if (ctx.Memory.CanRead(baseAddress, size))
+                {
+                    Interlocked.Increment(ref GlobalMemoryReadCount);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        var rented = GlobalMemoryPool.Rent(MaxGlobalMemoryBindingBytes);
+        for (var candidate = MaxGlobalMemoryBindingBytes; candidate >= 4096; candidate >>= 1)
+        {
+            if (ctx.Memory.TryRead(baseAddress, rented.AsSpan(0, candidate)))
             {
                 Interlocked.Increment(ref GlobalMemoryReadCount);
-                Interlocked.Add(ref GlobalMemoryReadBytes, size);
-                Interlocked.Add(ref GlobalMemoryReadPvmBytes, size);
+                Interlocked.Add(ref GlobalMemoryReadBytes, candidate);
+                Interlocked.Add(ref GlobalMemoryReadPvmBytes, candidate);
                 data = rented;
-                dataLength = size;
+                dataLength = candidate;
+                size = (ulong)candidate;
                 return true;
             }
         }
 
         GlobalMemoryPool.Return(rented);
-        data = [];
-        dataLength = 0;
+        size = 0;
         return false;
     }
 
@@ -1482,7 +1511,8 @@ public static partial class Gen5ShaderScalarEvaluator
         ulong baseAddress,
         ulong sizeBytes,
         out byte[] data,
-        out int dataLength)
+        out int dataLength,
+        out ulong size)
     {
         if (!Gen5ShaderEvaluationProfile.Enabled)
         {
@@ -1490,8 +1520,10 @@ public static partial class Gen5ShaderScalarEvaluator
                 ctx,
                 baseAddress,
                 sizeBytes,
+                SnapshotGlobalMemory,
                 out data,
                 out dataLength,
+                out size,
                 out _);
         }
 
@@ -1500,8 +1532,10 @@ public static partial class Gen5ShaderScalarEvaluator
             ctx,
             baseAddress,
             sizeBytes,
+            SnapshotGlobalMemory,
             out data,
             out dataLength,
+            out size,
             out var source);
         Gen5ShaderEvaluationProfile.RecordMemoryRead(
             Gen5GlobalMemoryReadKind.DescriptorSized,
@@ -1516,12 +1550,15 @@ public static partial class Gen5ShaderScalarEvaluator
         CpuContext ctx,
         ulong baseAddress,
         ulong sizeBytes,
+        bool snapshot,
         out byte[] data,
         out int dataLength,
+        out ulong size,
         out Gen5GlobalMemoryReadSource source)
     {
         data = [];
         dataLength = 0;
+        size = 0;
         source = Gen5GlobalMemoryReadSource.None;
         if (sizeBytes == 0)
         {
@@ -1532,6 +1569,27 @@ public static partial class Gen5ShaderScalarEvaluator
         if (cappedSize > int.MaxValue)
         {
             return false;
+        }
+
+        // Without snapshots a readable guest range needs no copy; the fallback reader below
+        // still copies memory the guest map cannot see.
+        if (!snapshot)
+        {
+            for (var candidate = cappedSize; ; candidate = Math.Max(candidate / 2, sizeof(uint)))
+            {
+                if (ctx.Memory.CanRead(baseAddress, candidate))
+                {
+                    Interlocked.Increment(ref GlobalMemoryReadCount);
+                    size = candidate;
+                    source = Gen5GlobalMemoryReadSource.PhysicalMemory;
+                    return true;
+                }
+
+                if (candidate == sizeof(uint))
+                {
+                    break;
+                }
+            }
         }
 
         var rented = GlobalMemoryPool.Rent(
@@ -1557,6 +1615,7 @@ public static partial class Gen5ShaderScalarEvaluator
                 }
                 data = rented;
                 dataLength = sizeof(uint);
+                size = sizeof(uint);
                 return true;
             }
 
@@ -1585,6 +1644,7 @@ public static partial class Gen5ShaderScalarEvaluator
                 }
                 data = rented;
                 dataLength = candidateSize;
+                size = (ulong)candidateSize;
                 return true;
             }
 
@@ -2670,14 +2730,16 @@ public static partial class Gen5ShaderScalarEvaluator
                     bufferDescriptor.BaseAddress,
                     bufferDescriptor.SizeBytes,
                     out var data,
-                    out var dataLength);
+                    out var dataLength,
+                    out var size);
                 var binding = new Gen5GlobalMemoryBinding(
                     scalarBase.Value,
                     bufferDescriptor.BaseAddress,
                     new List<uint> { instruction.Pc },
                     data,
                     dataLength,
-                    DataPooled: pooled)
+                    DataPooled: pooled && dataLength != 0,
+                    size)
                 {
                     WriteBackToGuest = pooled,
                 };
@@ -2712,14 +2774,16 @@ public static partial class Gen5ShaderScalarEvaluator
                     baseAddress,
                     requiredBytes,
                     out var data,
-                    out var dataLength);
+                    out var dataLength,
+                    out var size);
                 var binding = new Gen5GlobalMemoryBinding(
                     scalarBase.Value,
                     baseAddress,
                     new List<uint> { instruction.Pc },
                     data,
                     dataLength,
-                    DataPooled: pooled)
+                    DataPooled: pooled && dataLength != 0,
+                    size)
                 {
                     WriteBackToGuest = pooled,
                 };
@@ -3107,6 +3171,15 @@ public static partial class Gen5ShaderScalarEvaluator
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
+        // Backing-view reads bypass page faults. Resolve GPU writes before reading descriptors.
+        var memory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current;
+        if (memory?.Covers(address, sizeof(uint)) == true && memory.Buffers is { } buffers &&
+            !buffers.TrySynchronizeCpuRead(address, sizeof(uint)))
+        {
+            value = 0;
+            return false;
+        }
+
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, bytes) &&
             FallbackMemoryReader?.Invoke(address, bytes) != true)

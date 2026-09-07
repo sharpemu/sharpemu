@@ -428,7 +428,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             : resolved;
                 }
 
-                PrepareGuestBufferAllocations(draw.GlobalMemoryBuffers);
+                PrepareGlobalBufferAllocations(_bufferCache, draw.GlobalMemoryBuffers);
                 for (var index = 0; index < draw.GlobalMemoryBuffers.Count; index++)
                 {
                     resources.GlobalMemoryBuffers[index] =
@@ -568,7 +568,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     TraceVulkanShader("vk.compute_resources resolve ready");
                 }
 
-                PrepareGuestBufferAllocations(dispatch.GlobalMemoryBuffers);
+                PrepareGlobalBufferAllocations(_bufferCache, dispatch.GlobalMemoryBuffers);
                 for (var index = 0; index < dispatch.GlobalMemoryBuffers.Count; index++)
                 {
                     resources.GlobalMemoryBuffers[index] =

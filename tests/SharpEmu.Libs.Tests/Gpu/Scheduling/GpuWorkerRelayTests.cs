@@ -18,9 +18,9 @@ public sealed class GpuWorkerRelayTests : IDisposable
         private readonly Thread _thread;
         private bool _stop;
 
-        public TestWorker()
+        public TestWorker(Func<bool>? waitForAcceptedWork = null)
         {
-            Relay = new GpuWorkerRelay(Wake);
+            Relay = new GpuWorkerRelay(Wake, waitForAcceptedWork);
             _thread = new Thread(Run) { IsBackground = true };
         }
 
@@ -90,6 +90,46 @@ public sealed class GpuWorkerRelayTests : IDisposable
     }
 
     private readonly TestWorker _worker = new();
+
+    [Fact]
+    public async Task UnmapWaitLeavesPriorityRecoveryAvailable()
+    {
+        using var waiting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var worker = new TestWorker(() =>
+        {
+            waiting.Set();
+            return release.Wait(TimeSpan.FromSeconds(5));
+        });
+        worker.Start();
+        var applied = false;
+        var unmap = Task.Run(() => worker.Relay.TryRunAfterPendingWork(() => applied = true));
+        try
+        {
+            Assert.True(waiting.Wait(TimeSpan.FromSeconds(5)));
+            var recovered = false;
+            worker.Relay.RunOnGpuQueue(() => recovered = true);
+            Assert.True(recovered);
+            Assert.False(applied);
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        Assert.True(await unmap.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(applied);
+    }
+
+    [Fact]
+    public void FailedWorkDrainDoesNotRunUnmap()
+    {
+        using var worker = new TestWorker(() => false);
+        worker.Start();
+        Assert.False(worker.Relay.TryRunAfterPendingWork(() => throw new InvalidOperationException()));
+        worker.Relay.RunOnGpuQueue(() =>
+            Assert.True(worker.Relay.TryRunAfterPendingWork(() => { })));
+    }
     private readonly List<string> _order = new();
 
     public void Dispose() => _worker.Dispose();

@@ -79,17 +79,14 @@ internal static unsafe partial class VulkanVideoPresenter
         private List<VulkanGuestCacheResourceRange> CollectGuestCacheResourceRanges()
         {
             var resources = new List<VulkanGuestCacheResourceRange>(
-                _guestBufferAllocations.Count +
+                _bufferCache.BufferCount +
                 _guestDepthImages.Count +
                 _guestImages.Count +
                 _textureCache.Count);
-            foreach (var allocation in _guestBufferAllocations)
-            {
-                resources.Add(new VulkanGuestCacheResourceRange(
-                    allocation.BaseAddress,
-                    allocation.Size,
-                    VulkanGuestCacheResourceKind.Buffer));
-            }
+            _bufferCache.ForEachBuffer(buffer => resources.Add(new VulkanGuestCacheResourceRange(
+                buffer.CpuAddress,
+                buffer.Size,
+                VulkanGuestCacheResourceKind.Buffer)));
 
             foreach (var depth in _guestDepthImages.Values)
             {
@@ -187,24 +184,24 @@ internal static unsafe partial class VulkanVideoPresenter
             var operationEnd = VulkanGuestCacheBarrierPlanner.SaturatingEnd(
                 operation.BaseAddress,
                 operation.SizeBytes);
-            foreach (var allocation in _guestBufferAllocations)
+            _bufferCache.ForEachBuffer(buffer =>
             {
                 if (!VulkanGuestCacheBarrierPlanner.RangesOverlap(
                         operation.BaseAddress,
                         operation.SizeBytes,
-                        allocation.BaseAddress,
-                        allocation.Size))
+                        buffer.CpuAddress,
+                        buffer.Size))
                 {
-                    continue;
+                    return;
                 }
 
-                var allocationEnd = VulkanGuestCacheBarrierPlanner.SaturatingEnd(
-                    allocation.BaseAddress,
-                    allocation.Size);
+                var bufferEnd = VulkanGuestCacheBarrierPlanner.SaturatingEnd(
+                    buffer.CpuAddress,
+                    buffer.Size);
                 var overlapStart = Math.Max(
                     operation.BaseAddress,
-                    allocation.BaseAddress);
-                var overlapEnd = Math.Min(operationEnd, allocationEnd);
+                    buffer.CpuAddress);
+                var overlapEnd = Math.Min(operationEnd, bufferEnd);
                 barriers.Add(new BufferMemoryBarrier
                 {
                     SType = StructureType.BufferMemoryBarrier,
@@ -212,11 +209,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     DstAccessMask = plan.DestinationAccess,
                     SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                     DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                    Buffer = allocation.Buffer,
-                    Offset = overlapStart - allocation.BaseAddress,
+                    Buffer = buffer.Handle,
+                    Offset = overlapStart - buffer.CpuAddress,
                     Size = overlapEnd - overlapStart,
                 });
-            }
+            });
 
             return barriers.ToArray();
         }

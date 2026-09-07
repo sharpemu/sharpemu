@@ -1381,7 +1381,8 @@ public sealed partial class DirectExecutionBackend
 			return TryReadHostBytes(address, buffer);
 		}
 
-		if (!IsReadableHostRange(address, buffer.Length))
+		// Faulting x64 code can have execute-only protection. Data probes still require read access.
+		if (!IsReadableHostRange(address, buffer.Length, allowExecuteOnly: true))
 		{
 			return false;
 		}
@@ -1400,7 +1401,7 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
-	private unsafe static bool IsReadableHostRange(ulong address, int byteCount)
+	private unsafe static bool IsReadableHostRange(ulong address, int byteCount, bool allowExecuteOnly = false)
 	{
 		if (byteCount < 0 || !IsCanonicalUserAddress(address))
 		{
@@ -1422,7 +1423,8 @@ public sealed partial class DirectExecutionBackend
 					out var mbi,
 					(nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
 				mbi.State != MEM_COMMIT ||
-				!IsReadableProtection(mbi.Protect))
+				(!IsReadableProtection(mbi.Protect) &&
+				 !(allowExecuteOnly && mbi.Protect == 0x10)))
 			{
 				return false;
 			}

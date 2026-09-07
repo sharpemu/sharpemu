@@ -244,7 +244,8 @@ internal static class Gen5ComputeFixtures
                     accessPcs,
                     new byte[Math.Max(fixture.StoreBackingBytes, 4)],
                     Math.Max(fixture.StoreBackingBytes, 4),
-                    DataPooled: false)
+                    DataPooled: false,
+                    (ulong)Math.Max(fixture.StoreBackingBytes, 4))
                 {
                     Writable = true,
                 },

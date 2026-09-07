@@ -49,6 +49,8 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     public bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) =>
         _inner.TryCopy(destinationAddress, sourceAddress, length);
 
+    public bool CanRead(ulong address, ulong size) => _inner.CanRead(address, size);
+
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)
     {
         if (_inner is IGuestMemoryAllocator allocator)

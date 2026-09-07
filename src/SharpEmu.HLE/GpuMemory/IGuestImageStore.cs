@@ -5,17 +5,8 @@ namespace SharpEmu.HLE.GpuMemory;
 
 public interface IGuestImageStore
 {
-    // Returns true only when the faulting access can proceed after recovery.
+    // Returns true when recovery completes, even if a later operation adds a new watch.
     bool MarkCpuWrite(ulong address, ulong size);
 
     void Unregister(ulong address, ulong size);
-}
-
-public sealed class IdleImageStore : IGuestImageStore
-{
-    public bool MarkCpuWrite(ulong address, ulong size) => false;
-
-    public void Unregister(ulong address, ulong size)
-    {
-    }
 }

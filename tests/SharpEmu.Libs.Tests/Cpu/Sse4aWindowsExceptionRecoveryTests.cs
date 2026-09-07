@@ -114,6 +114,39 @@ public sealed unsafe class Sse4aWindowsExceptionRecoveryTests
 
     private static int XmmOffset(int register) => Win64ContextXmm0Offset + register * 16;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ImmediateInsertRecoversAliasedRegisters(bool executeOnly)
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+        byte[] instruction = [0xF2, 0x0F, 0x78, 0xC0, 0x08, 0x08];
+        var code = AllocateProbeVisibleCode(instruction);
+        try
+        {
+            if (executeOnly)
+            {
+                Assert.True(HostMemory.Protect((void*)code, (nuint)Environment.SystemPageSize,
+                    HostMemory.PAGE_EXECUTE, out _));
+            }
+            const ulong value = 0x123456789ABCDEF0;
+            var context = stackalloc byte[0x4D0];
+            new Span<byte>(context, 0x4D0).Clear();
+            *(ulong*)(context + Win64ContextRipOffset) = (ulong)code;
+            *(ulong*)(context + Win64ContextXmm0Offset) = value;
+            var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
+            Assert.True((bool)TryRecoverAmdCompat.Invoke(backend,
+                [Pointer.Box(context, typeof(void*)), (ulong)code])!);
+            Assert.Equal(Sse4aBitFieldEmulator.InsertBitField(value, value, 8, 8),
+                *(ulong*)(context + Win64ContextXmm0Offset));
+            Assert.Equal((ulong)code + 6, *(ulong*)(context + Win64ContextRipOffset));
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free((void*)code, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
     private static nint AllocateProbeVisibleCode(ReadOnlySpan<byte> instructions)
     {
         var size = checked((nuint)Environment.SystemPageSize);

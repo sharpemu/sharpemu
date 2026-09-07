@@ -63,7 +63,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
             work.Action();
             RenderPhaseProfile.RecordOrderedAction(work.DebugName, completed: true);
             if (_traceVulkanShaderEnabled)
@@ -407,28 +406,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _lastSubmittedGpuLabelDependencyByGuestQueue[queueName] = _batchLabelDependency;
             }
 
-            foreach (var referenced in _batchReferencedResources ?? resources)
-            {
-                foreach (var globalBuffer in referenced.GlobalMemoryBuffers)
-                {
-                    if (globalBuffer.Allocation is not { } allocation)
-                    {
-                        continue;
-                    }
-
-                    allocation.LastUseTimeline = Math.Max(allocation.LastUseTimeline, tick);
-                    if (globalBuffer.Writable && globalBuffer.WriteBackToGuest)
-                    {
-                        MarkGuestBufferDirty(
-                            allocation,
-                            globalBuffer.GuestOffset,
-                            globalBuffer.GuestSize,
-                            queueName,
-                            tick);
-                    }
-                }
-            }
-
             _pendingGuestSubmissions.Enqueue(
                 new PendingGuestSubmission(
                     tick,
@@ -513,6 +490,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _completedTimeline = Math.Max(_completedTimeline, _scheduler.Timeline.CompletedTick);
+            // Deferred tick work (buffer erases, one-shot uploads, fault parses) runs here.
+            if (_scheduler.Active)
+            {
+                _scheduler.RunCompletedOperations();
+            }
+
             ProcessDeferredTextureDestroys();
         }
 
@@ -582,24 +565,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return true;
-        }
-
-        private void WaitForGuestBufferAllocationForCpuVisibility(
-            GuestBufferAllocation allocation)
-        {
-            if (IsGuestBufferAllocationReferencedByOpenBatch(allocation))
-            {
-                FlushBatchedGuestCommands();
-            }
-
-            var targetTimeline = allocation.LastUseTimeline;
-            if (targetTimeline <= _completedTimeline)
-            {
-                return;
-            }
-
-            _scheduler.Wait(targetTimeline);
-            CollectCompletedGuestSubmissions(waitForOldest: false);
         }
     }
 }
