@@ -66,6 +66,9 @@ public interface IGuestThreadScheduler
     /// </summary>
     bool HasPendingGuestExceptionForCurrentThread();
 
+    // Host waits must allow exception delivery before the import call returns.
+    void DeliverPendingGuestExceptionIfReady(CpuContext context) { }
+
     /// <summary>
     /// Applies a new guest scheduling priority to a live thread, mapping it
     /// onto the host thread if one is running. Returns false when the thread

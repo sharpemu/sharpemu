@@ -5229,6 +5229,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return 0;
 	}
 
+	public void DeliverPendingGuestExceptionIfReady(CpuContext context)
+	{
+		if (HasPendingGuestExceptionForCurrentThread() &&
+			GuestThreadExecution.TryGetCurrentImportCallFrame(out var frame) &&
+			frame.ResumeRsp >= 104 && frame.ReturnRip >= 65536)
+		{
+			DeliverPendingGuestExceptionAtSafePoint(
+				context,
+				CaptureImportBoundaryContinuation(context, (nint)(frame.ResumeRsp - 104), frame.ReturnRip));
+		}
+	}
+
 	private void DeliverPendingGuestExceptionAtSafePoint(
 		CpuContext currentContext,
 		GuestCpuContinuation interruptedContinuation)

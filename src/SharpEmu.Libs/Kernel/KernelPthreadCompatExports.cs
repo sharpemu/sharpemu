@@ -1037,7 +1037,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var hostResult = WaitForHostMutexLock(state, waiter!);
+        var hostResult = WaitForHostMutexLock(ctx, state, waiter!);
         TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, hostResult);
         return hostResult;
     }
@@ -2000,7 +2000,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        _ = WaitForHostMutexLock(mutexState, waiter.MutexWaiter);
+        _ = WaitForHostMutexLock(ctx, mutexState, waiter.MutexWaiter);
         var waitResult = waiter.CompletionState == 2
             ? CondTimedOutResult(waiter)
             : (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -2185,7 +2185,7 @@ public static class KernelPthreadCompatExports
         }
     }
 
-    private static int WaitForHostMutexLock(PthreadMutexState state, PthreadMutexWaiter waiter)
+    private static int WaitForHostMutexLock(CpuContext ctx, PthreadMutexState state, PthreadMutexWaiter waiter)
     {
         ManualResetEventSlim? hostSignal = null;
         try
@@ -2209,7 +2209,11 @@ public static class KernelPthreadCompatExports
                     hostSignal.Reset();
                 }
 
-                hostSignal.Wait();
+                if (!hostSignal.Wait(10))
+                {
+                    // Deliver the exception outside the mutex lock, then resume the wait.
+                    GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
+                }
             }
         }
         finally

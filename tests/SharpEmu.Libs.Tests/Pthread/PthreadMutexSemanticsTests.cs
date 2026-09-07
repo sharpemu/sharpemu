@@ -1,11 +1,99 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pthread;
+
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class PthreadExceptionStateCollection
+{
+    public const string Name = "PthreadExceptionState";
+}
+
+[Collection(PthreadExceptionStateCollection.Name)]
+public sealed class PthreadMutexExceptionTests
+{
+    [Fact]
+    public void HostMutexWaitDeliversExceptionWithoutGrantingOwnership()
+    {
+        const ulong mutexAddress = 0x6_0000_0100;
+        var memory = new PthreadMutexSemanticsTests.AllocatingCpuMemory(0x6_0000_0000, 0x4000);
+        var ownerContext = new CpuContext(memory, Generation.Gen5);
+        ownerContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.True(ownerContext.TryWriteUInt64(mutexAddress, 1));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(ownerContext));
+        using var exceptionDelivered = new ManualResetEventSlim();
+        using var acquired = new ManualResetEventSlim();
+        var scheduler = DispatchProxy.Create<IGuestThreadScheduler, ExceptionWaitScheduler>();
+        var proxy = (ExceptionWaitScheduler)(object)scheduler;
+        var waiterThreadId = 0;
+        var deliveryThreadId = 0;
+        proxy.DeliverException = context =>
+        {
+            deliveryThreadId = Environment.CurrentManagedThreadId;
+            Assert.Equal(mutexAddress, context[CpuRegister.Rdi]);
+            exceptionDelivered.Set();
+        };
+        var previousScheduler = GuestThreadExecution.Scheduler;
+        var lockResult = -1;
+        var unlockResult = -1;
+        Exception? failure = null;
+        var waiter = new Thread(() =>
+        {
+            try
+            {
+                waiterThreadId = Environment.CurrentManagedThreadId;
+                var context = new CpuContext(memory, Generation.Gen5);
+                context[CpuRegister.Rdi] = mutexAddress;
+                lockResult = KernelPthreadCompatExports.PthreadMutexLock(context);
+                acquired.Set();
+                unlockResult = KernelPthreadCompatExports.PthreadMutexUnlock(context);
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+        }) { IsBackground = true };
+        try
+        {
+            GuestThreadExecution.Scheduler = scheduler;
+            waiter.Start();
+            Assert.True(exceptionDelivered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(acquired.IsSet);
+            Assert.Equal(waiterThreadId, deliveryThreadId);
+        }
+        finally
+        {
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+            var joined = waiter.Join(TimeSpan.FromSeconds(5));
+            GuestThreadExecution.Scheduler = previousScheduler;
+            Assert.True(joined);
+        }
+        Assert.Null(failure);
+        Assert.Equal(0, lockResult);
+        Assert.Equal(0, unlockResult);
+    }
+
+    public class ExceptionWaitScheduler : DispatchProxy
+    {
+        public Action<CpuContext>? DeliverException { get; set; }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IGuestThreadScheduler.DeliverPendingGuestExceptionIfReady))
+            {
+                DeliverException!((CpuContext)args![0]!);
+                return null;
+            }
+            throw new NotSupportedException(targetMethod?.Name);
+        }
+    }
+
+}
 
 public sealed class PthreadMutexSemanticsTests
 {
@@ -336,7 +424,7 @@ public sealed class PthreadMutexSemanticsTests
         }
     }
 
-    private sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
+    internal sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
     {
         private readonly ulong _baseAddress;
         private readonly byte[] _storage;
