@@ -11,8 +11,9 @@ namespace SharpEmu.Libs.VideoOut;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
-    internal static void PrepareGlobalBufferAllocations(
-        GuestBufferCache cache, IReadOnlyList<GuestMemoryBuffer> buffers)
+    internal static void PrepareCachedBufferAllocations(
+        GuestBufferCache cache, IReadOnlyList<GuestMemoryBuffer> buffers,
+        IReadOnlyList<GuestVertexBuffer>? vertices = null, GuestIndexBuffer? indices = null)
     {
         // Complete overlapping allocation merges before any descriptor takes a handle.
         foreach (var buffer in buffers)
@@ -23,6 +24,30 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ = cache.FindBuffer(address, size);
             }
         }
+
+        if (vertices is not null)
+        {
+            foreach (var vertex in vertices)
+            {
+                if (vertex.BaseAddress == 0 || vertex.Length <= 0) continue;
+                var size = (ulong)vertex.Length;
+                var needsCache = cache.HasGpuDirtyPages(vertex.BaseAddress, size);
+                foreach (var global in buffers)
+                {
+                    if (!global.Writable || !global.WriteBackToGuest || global.Length != 0 || global.BaseAddress == 0)
+                        continue;
+                    var (address, bytes) = GlobalBufferRange(global);
+                    var pageMask = GuestBufferCache.CachingPageSize - 1;
+                    var begin = address & ~pageMask;
+                    var end = (address + bytes + pageMask) & ~pageMask;
+                    needsCache |= vertex.BaseAddress < end && begin < vertex.BaseAddress + size;
+                }
+                if (needsCache) _ = cache.FindBuffer(vertex.BaseAddress, size);
+            }
+        }
+
+        if (indices is { GuestAddress: not 0, Length: > 0 })
+            _ = cache.FindBuffer(indices.GuestAddress, (ulong)indices.Length);
     }
 
     private static (ulong Address, ulong Size) GlobalBufferRange(GuestMemoryBuffer buffer)

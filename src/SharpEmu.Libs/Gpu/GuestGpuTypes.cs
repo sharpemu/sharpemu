@@ -127,6 +127,8 @@ internal sealed record GuestIndexBuffer(
     bool Pooled,
     GuestIndexBufferLease? Lease = null)
 {
+    public ulong GuestAddress { get; init; }
+
     public bool LeaseReturned => Lease?.Returned ?? false;
 
     public bool TryReturnPooledData()

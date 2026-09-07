@@ -428,7 +428,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             : resolved;
                 }
 
-                PrepareGlobalBufferAllocations(_bufferCache, draw.GlobalMemoryBuffers);
+                PrepareCachedBufferAllocations(_bufferCache, draw.GlobalMemoryBuffers, draw.VertexBuffers, draw.IndexBuffer);
                 for (var index = 0; index < draw.GlobalMemoryBuffers.Count; index++)
                 {
                     resources.GlobalMemoryBuffers[index] =
@@ -459,11 +459,32 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (draw.IndexBuffer is { Length: > 0 } indexBuffer)
                 {
-                    resources.IndexBuffer = CreateHostBuffer(
-                        indexBuffer.Data.AsSpan(0, indexBuffer.Length),
-                        BufferUsageFlags.IndexBufferBit,
-                        out resources.IndexMemory,
-                        out _);
+                    if (indexBuffer.GuestAddress != 0)
+                    {
+                        CloseOpenTranslatedRenderPass();
+                        var (buffer, offset) = _bufferCache.ObtainBuffer(
+                            indexBuffer.GuestAddress, (ulong)indexBuffer.Length, isWritten: false);
+                        resources.IndexBuffer = buffer.Handle;
+                        resources.IndexBufferOffset = offset;
+                        var barrier = new MemoryBarrier
+                        {
+                            SType = StructureType.MemoryBarrier,
+                            SrcAccessMask = AccessFlags.MemoryWriteBit,
+                            DstAccessMask = AccessFlags.IndexReadBit,
+                        };
+                        _vk.CmdPipelineBarrier(new CommandBuffer(_scheduler.Current.Handle),
+                            PipelineStageFlags.AllCommandsBit, PipelineStageFlags.VertexInputBit,
+                            0, 1, &barrier, 0, null, 0, null);
+                    }
+                    else
+                    {
+                        resources.IndexBuffer = CreateHostBuffer(
+                            indexBuffer.Data.AsSpan(0, indexBuffer.Length),
+                            BufferUsageFlags.IndexBufferBit,
+                            out resources.IndexMemory,
+                            out _);
+                        resources.OwnsIndexBuffer = true;
+                    }
                     resources.Index32Bit = indexBuffer.Is32Bit;
                     if (indexBuffer.Pooled)
                     {
@@ -568,7 +589,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     TraceVulkanShader("vk.compute_resources resolve ready");
                 }
 
-                PrepareGlobalBufferAllocations(_bufferCache, dispatch.GlobalMemoryBuffers);
+                PrepareCachedBufferAllocations(_bufferCache, dispatch.GlobalMemoryBuffers);
                 for (var index = 0; index < dispatch.GlobalMemoryBuffers.Count; index++)
                 {
                     resources.GlobalMemoryBuffers[index] =
@@ -877,14 +898,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 // One Vulkan binding per unique host buffer and input rate
                 // (fetch_index). Attributes share that binding with
                 // Offset = OffsetBytes.
-                var bindingByBuffer = new Dictionary<(ulong Handle, bool PerInstance), uint>();
+                var bindingByBuffer = new Dictionary<(ulong Handle, ulong Offset, uint Stride, bool PerInstance), uint>();
                 var vertexBindingList = new List<VertexInputBindingDescription>();
                 var vertexAttributeDescriptions =
                     new VertexInputAttributeDescription[resources.VertexBuffers.Length];
                 for (var index = 0; index < resources.VertexBuffers.Length; index++)
                 {
                     var vertexBuffer = resources.VertexBuffers[index];
-                    var bufferKey = (vertexBuffer.Buffer.Handle, vertexBuffer.PerInstance);
+                    var bufferKey = (vertexBuffer.Buffer.Handle, vertexBuffer.BufferOffset,
+                        vertexBuffer.Stride, vertexBuffer.PerInstance);
                     if (!bindingByBuffer.TryGetValue(bufferKey, out var bindingIndex))
                     {
                         bindingIndex = (uint)vertexBindingList.Count;

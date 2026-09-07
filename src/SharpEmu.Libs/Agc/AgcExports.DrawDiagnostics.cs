@@ -263,7 +263,9 @@ public static partial class AgcExports
                 $"{index}:0x{binding.BaseAddress:X16}:{binding.DataLength}:" +
                 Convert.ToHexString(binding.Data.AsSpan(0, Math.Min(binding.DataLength, 256)))));
         var indices = draw.IndexBuffer is { } indexBuffer
-            ? $"{(indexBuffer.Is32Bit ? 32 : 16)}:" +
+            ? indexBuffer.GuestAddress != 0
+                ? $"gpu:0x{indexBuffer.GuestAddress:X16}:{indexBuffer.Length}"
+                : $"{(indexBuffer.Is32Bit ? 32 : 16)}:" +
               Convert.ToHexString(indexBuffer.Data.AsSpan(0, Math.Min(indexBuffer.Length, 32)))
             : "none";
         var vertexInputs = draw.VertexInputs.Count == 0

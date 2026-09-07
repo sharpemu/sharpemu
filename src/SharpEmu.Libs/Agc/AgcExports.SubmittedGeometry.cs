@@ -3,7 +3,9 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -73,6 +75,15 @@ public static partial class AgcExports
         var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)guestBytesPerIndex);
         var guestByteCount = checked((int)(indexCount * (uint)guestBytesPerIndex));
         var address = state.IndexBufferAddress + byteOffset;
+        if (UsesCachedGpuIndices(state, indexCount))
+        {
+            return new GuestIndexBuffer([], guestByteCount,
+                indexType == AgcIndexHelpers.ProsperoIndexType.Index32, Pooled: false)
+            {
+                GuestAddress = address,
+            };
+        }
+
         var retained = state.CurrentIndexSnapshot;
         if (retained is not null &&
             retained.SourceAddress == address &&
@@ -137,6 +148,20 @@ public static partial class AgcExports
         return null;
     }
 
+    private static bool UsesCachedGpuIndices(SubmittedDcbState state, uint count)
+    {
+        var type = GetProsperoIndexType(state);
+        if (type == AgcIndexHelpers.ProsperoIndexType.Index8 || state.IndexBufferAddress == 0 || count == 0)
+        {
+            return false;
+        }
+
+        var stride = (uint)AgcIndexHelpers.GetGuestStrideBytes(type);
+        var address = checked(state.IndexBufferAddress + (ulong)state.DrawIndexOffset * stride);
+        return GuestGpuMemoryHook.Current?.Buffers is GuestBufferCache cache &&
+            cache.HasGpuDirtyPages(address, (ulong)count * stride);
+    }
+
     private static GuestIndexBuffer CreatePooledGuestIndexBuffer(
         byte[] data,
         int length,
@@ -165,6 +190,12 @@ public static partial class AgcExports
         }
 
         if (state.IndexBufferAddress == 0 || drawCount == 0)
+        {
+            return false;
+        }
+
+        // Do not use stale CPU indices to calculate the required vertex range.
+        if (UsesCachedGpuIndices(state, drawCount))
         {
             return false;
         }

@@ -211,9 +211,13 @@ internal static class VulkanVertexBindingPlanner
     public static int BuildUniqueSourceIndices(
         ReadOnlySpan<ulong> handles,
         ReadOnlySpan<bool> perInstance,
-        Span<int> sourceIndices)
+        Span<int> sourceIndices,
+        ReadOnlySpan<ulong> offsets = default,
+        ReadOnlySpan<uint> strides = default)
     {
-        if (handles.Length != perInstance.Length || sourceIndices.Length < handles.Length)
+        if (handles.Length != perInstance.Length || sourceIndices.Length < handles.Length ||
+            (!offsets.IsEmpty && offsets.Length != handles.Length) ||
+            (!strides.IsEmpty && strides.Length != handles.Length))
         {
             throw new ArgumentException("Vertex binding spans must have compatible lengths.");
         }
@@ -226,6 +230,8 @@ internal static class VulkanVertexBindingPlanner
             {
                 var previousSourceIndex = sourceIndices[bindingIndex];
                 if (handles[previousSourceIndex] == handles[sourceIndex] &&
+                    (offsets.IsEmpty || offsets[previousSourceIndex] == offsets[sourceIndex]) &&
+                    (strides.IsEmpty || strides[previousSourceIndex] == strides[sourceIndex]) &&
                     perInstance[previousSourceIndex] == perInstance[sourceIndex])
                 {
                     found = true;
@@ -493,6 +499,8 @@ internal static unsafe partial class VulkanVideoPresenter
             public VertexBufferResource[] VertexBuffers = [];
             public VkBuffer IndexBuffer;
             public DeviceMemory IndexMemory;
+            public ulong IndexBufferOffset;
+            public bool OwnsIndexBuffer;
             public bool Index32Bit;
             public uint VertexCount = 3;
             public uint InstanceCount = 1;

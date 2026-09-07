@@ -9,6 +9,19 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanVertexBindingTests
 {
     [Fact]
+    public void SharedAllocationKeepsDistinctOffsetsAndStrides()
+    {
+        ulong[] handles = [10, 10, 10, 10];
+        bool[] rates = [false, false, false, false];
+        ulong[] offsets = [64, 64, 128, 64];
+        uint[] strides = [16, 16, 16, 32];
+        Span<int> sources = stackalloc int[4];
+        var count = VulkanVertexBindingPlanner.BuildUniqueSourceIndices(
+            handles, rates, sources, offsets, strides);
+        Assert.Equal([0, 2, 3], sources[..count].ToArray());
+    }
+
+    [Fact]
     public void SharedBufferUsesOneBinding()
     {
         ulong[] handles = [10, 10];

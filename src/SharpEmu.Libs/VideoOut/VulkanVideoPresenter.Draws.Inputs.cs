@@ -22,6 +22,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public DeviceMemory Memory;
             public bool OwnsBuffer;
             public ulong Size;
+            public ulong BufferOffset;
             public uint Location;
             public uint ComponentCount;
             public uint DataFormat;
@@ -53,6 +54,27 @@ internal static unsafe partial class VulkanVideoPresenter
         private VertexBufferResource CreateVertexBufferResource(
             GuestVertexBuffer guestBuffer)
         {
+            if (guestBuffer.BaseAddress != 0 && guestBuffer.Length > 0 &&
+                _bufferCache.HasGpuDirtyPages(guestBuffer.BaseAddress, (ulong)guestBuffer.Length))
+            {
+                CloseOpenTranslatedRenderPass();
+                var (resident, offset) = _bufferCache.ObtainBuffer(
+                    guestBuffer.BaseAddress, (ulong)guestBuffer.Length, isWritten: false);
+                var resource = CreateVertexBufferResource(resident.Handle, default,
+                    (ulong)guestBuffer.Length, guestBuffer, ownsBuffer: false);
+                resource.BufferOffset = offset;
+                var barrier = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier,
+                    SrcAccessMask = AccessFlags.MemoryWriteBit,
+                    DstAccessMask = AccessFlags.VertexAttributeReadBit,
+                };
+                _vk.CmdPipelineBarrier(new CommandBuffer(_scheduler.Current.Handle),
+                    PipelineStageFlags.AllCommandsBit, PipelineStageFlags.VertexInputBit,
+                    0, 1, &barrier, 0, null, 0, null);
+                return resource;
+            }
+
             ReadOnlySpan<byte> source = guestBuffer.Data.AsSpan(0, guestBuffer.Length);
             byte[]? forcedVertexColors = null;
             if (_forceTitleVertexColorWhite &&
@@ -140,6 +162,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Memory = shared.Memory,
             OwnsBuffer = false,
             Size = shared.Size,
+            BufferOffset = shared.BufferOffset,
             Location = guestBuffer.Location,
             ComponentCount = guestBuffer.ComponentCount,
             DataFormat = guestBuffer.DataFormat,

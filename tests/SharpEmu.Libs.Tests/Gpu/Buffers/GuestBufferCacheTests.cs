@@ -26,6 +26,30 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void GeometryPreparationKeepsWritableGlobalBufferInTheFinalAllocation(bool indexed)
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var globals = new[] { new GuestMemoryBuffer(address, [], 0, 0x8000, false, Writable: true) };
+            var vertex = new GuestVertexBuffer(0, 4, 0, 0, address + 0x4000, 16, 0, [], 0x10000, false);
+            var indices = new GuestIndexBuffer([], 0x10000, false, false) { GuestAddress = address + 0x4000 };
+            VulkanVideoPresenter.PrepareCachedBufferAllocations(harness.Cache, globals,
+                indexed ? [] : [vertex], indexed ? indices : null);
+            var (global, offset) = harness.Cache.ObtainBuffer(address, 0x8000, true);
+            var (geometry, _) = harness.Cache.ObtainBuffer(address + 0x4000, 0x10000, false);
+            Assert.Same(global, geometry);
+            global.Fill(offset, 4, 0x12345678);
+        });
+        Assert.True(harness.Cache.TrySynchronizeCpuRead(address, 4));
+        Assert.Equal(new byte[] { 0x78, 0x56, 0x34, 0x12 }, harness.Read(address, 4));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void CpuReadAcrossTrackingBoundaryDownloadsTheDirtyPart(bool dirtyBeforeBoundary)
     {
         if (_vulkan is null) return;
@@ -56,7 +80,7 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Worker.Run(() =>
         {
             harness.Scheduler.Begin(new SubmissionContext());
-            VulkanVideoPresenter.PrepareGlobalBufferAllocations(harness.Cache,
+            VulkanVideoPresenter.PrepareCachedBufferAllocations(harness.Cache,
             [
                 new GuestMemoryBuffer(address, [], 0, 0x8000, false),
                 new GuestMemoryBuffer(address + 0x4000, [], 0, 0x10000, false),
@@ -110,6 +134,57 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         }
 
         return bytes;
+    }
+
+    [Theory]
+    [InlineData(0u, 2)]
+    [InlineData(1u, 4)]
+    public void GpuOwnedIndices_KeepGuestOffsetAndDoNotUseStaleVertexBounds(uint indexType, int stride)
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);
+            buffer.Fill(offset, 0x100, 0x00020001);
+        });
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            var stateType = typeof(AgcExports).GetNestedType("SubmittedDcbState", BindingFlags.NonPublic)!;
+            var state = Activator.CreateInstance(stateType, nonPublic: true)!;
+            stateType.GetProperty("IndexBufferAddress")!.SetValue(state, address);
+            stateType.GetProperty("DrawIndexOffset")!.SetValue(state, 7u);
+            stateType.GetProperty("IndexSize")!.SetValue(state, indexType);
+            var context = new CpuContext(harness.Memory, Generation.Gen5);
+            var create = typeof(AgcExports).GetMethod("CreateGuestIndexBuffer", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var indices = Assert.IsType<GuestIndexBuffer>(create.Invoke(null, [context, state, 6u]));
+            Assert.Equal(address + 7UL * (ulong)stride, indices.GuestAddress);
+            Assert.Equal(6 * stride, indices.Length);
+            Assert.Equal(stride == 4, indices.Is32Bit);
+            Assert.Empty(indices.Data);
+            Assert.False(indices.Pooled);
+
+            var bound = typeof(AgcExports).GetMethod("TryGetRequiredVertexRecordCount", BindingFlags.NonPublic | BindingFlags.Static)!;
+            object?[] arguments = [context, state, 6u, true, 0u];
+            Assert.False((bool)bound.Invoke(null, arguments)!);
+            Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x100));
+
+            var (resident, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(indices.GuestAddress, (ulong)indices.Length, false));
+            Assert.Equal(7UL * (ulong)stride, offset);
+            Assert.Contains(harness.ReadBack(resident, offset, (ulong)indices.Length), value => value != 0);
+
+            Assert.True(harness.Store.DownloadToCpu(address, 0x100));
+            var snapshot = Assert.IsType<GuestIndexBuffer>(create.Invoke(null, [context, state, 6u]));
+            Assert.Equal(0UL, snapshot.GuestAddress);
+            Assert.Contains(snapshot.Data.AsSpan(0, snapshot.Length).ToArray(), value => value != 0);
+            Assert.True(snapshot.TryReturnPooledData());
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
     }
 
     [Fact]

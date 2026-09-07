@@ -825,24 +825,30 @@ internal static unsafe partial class VulkanVideoPresenter
                 var buffers = stackalloc VkBuffer[resources.VertexBuffers.Length];
                 var offsets = stackalloc ulong[resources.VertexBuffers.Length];
                 var handles = stackalloc ulong[resources.VertexBuffers.Length];
+                var sourceOffsets = stackalloc ulong[resources.VertexBuffers.Length];
+                var strides = stackalloc uint[resources.VertexBuffers.Length];
                 var perInstance = stackalloc bool[resources.VertexBuffers.Length];
                 var sourceIndices = stackalloc int[resources.VertexBuffers.Length];
                 for (var index = 0; index < resources.VertexBuffers.Length; index++)
                 {
                     handles[index] = resources.VertexBuffers[index].Buffer.Handle;
+                    sourceOffsets[index] = resources.VertexBuffers[index].BufferOffset;
+                    strides[index] = resources.VertexBuffers[index].Stride;
                     perInstance[index] = resources.VertexBuffers[index].PerInstance;
                 }
 
                 var bindingCount = VulkanVertexBindingPlanner.BuildUniqueSourceIndices(
                     new ReadOnlySpan<ulong>(handles, resources.VertexBuffers.Length),
                     new ReadOnlySpan<bool>(perInstance, resources.VertexBuffers.Length),
-                    new Span<int>(sourceIndices, resources.VertexBuffers.Length));
+                    new Span<int>(sourceIndices, resources.VertexBuffers.Length),
+                    new ReadOnlySpan<ulong>(sourceOffsets, resources.VertexBuffers.Length),
+                    new ReadOnlySpan<uint>(strides, resources.VertexBuffers.Length));
                 for (var bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
                 {
                     var sourceIndex = sourceIndices[bindingIndex];
                     buffers[bindingIndex] = resources.VertexBuffers[sourceIndex].Buffer;
                     // The pipeline attribute already contains OffsetBytes.
-                    offsets[bindingIndex] = 0;
+                    offsets[bindingIndex] = resources.VertexBuffers[sourceIndex].BufferOffset;
                 }
 
                 _vk.CmdBindVertexBuffers(
@@ -881,7 +887,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _vk.CmdBindIndexBuffer(
                         _commandBuffer,
                         resources.IndexBuffer,
-                        0,
+                        resources.IndexBufferOffset,
                         resources.Index32Bit ? IndexType.Uint32 : IndexType.Uint16);
                     // vertexOffset = ResolveVertexOffset(GE_INDX_OFFSET).
                     // GTA UI glyphs use relative indices + a nonzero base vertex.
@@ -1000,7 +1006,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 RecycleHostBuffer(vertexBuffer.Buffer, vertexBuffer.Memory);
             }
 
-            RecycleHostBuffer(resources.IndexBuffer, resources.IndexMemory);
+            if (resources.OwnsIndexBuffer)
+            {
+                RecycleHostBuffer(resources.IndexBuffer, resources.IndexMemory);
+            }
 
             if (!resources.PipelineCached && resources.Pipeline.Handle != 0)
             {

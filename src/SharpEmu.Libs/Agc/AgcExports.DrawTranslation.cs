@@ -1102,10 +1102,13 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
-        ApplySubmittedVertexSnapshot(
-            state,
-            exportShaderAddress,
-            ref exportEvaluation);
+        if (!indexed || !UsesCachedGpuIndices(state, vertexCount))
+        {
+            ApplySubmittedVertexSnapshot(
+                state,
+                exportShaderAddress,
+                ref exportEvaluation);
+        }
 
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
