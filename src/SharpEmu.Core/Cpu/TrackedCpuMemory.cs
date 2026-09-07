@@ -18,6 +18,8 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
 
     public ICpuMemory Inner => _inner;
 
+    public string DescribeReadRange(ulong address, ulong size) => _inner.DescribeReadRange(address, size);
+
     public bool TryRead(ulong virtualAddress, Span<byte> destination)
     {
         var result = _inner.TryRead(virtualAddress, destination);

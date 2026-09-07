@@ -1132,6 +1132,16 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     {
         if (!_guest.TryRead(address, destination))
         {
+            Console.Error.WriteLine($"[GPU][READ_FAILURE] addr=0x{address:X16} size=0x{destination.Length:X}");
+            Console.Error.WriteLine($"[GPU][READ_FAILURE] binding=0x{requestedAddress:X16} size=0x{requestedSize:X}");
+            try
+            {
+                Console.Error.WriteLine(_guest.DescribeReadRange(address, (ulong)destination.Length));
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine($"[GPU][READ_FAILURE] mapping query failed: {error.GetType().Name}");
+            }
             throw SubmissionScheduler.Fatal($"Could not read guest memory: addr=0x{address:X16} size=0x{destination.Length:X}");
         }
     }

@@ -38,6 +38,17 @@ public static partial class Gen5ShaderScalarEvaluator
     private static readonly object _scalarFallbackTraceGate = new();
     private static readonly HashSet<(ulong Shader, uint Pc)> _tracedScalarFallbacks = [];
     private static readonly HashSet<(ulong Shader, uint Pc)> _tracedDivergentDescriptors = [];
+    private static readonly ulong _scalarTraceShaderAddress = ReadScalarTraceShaderAddress();
+    private static int _scalarLoadTraceCount;
+
+    private static ulong ReadScalarTraceShaderAddress()
+    {
+        var text = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS");
+        if (text?.StartsWith("0x", StringComparison.OrdinalIgnoreCase) == true)
+            text = text[2..];
+        return ulong.TryParse(text, System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture, out var address) ? address : 0;
+    }
 
     private static readonly ConditionalWeakTable<Gen5ShaderProgram, Ir.Gen5ScalarSsa> _scalarSsaCache = [];
 
@@ -2806,6 +2817,8 @@ public static partial class Gen5ShaderScalarEvaluator
             return false;
         }
 
+        var failedReads = 0;
+        var suppressedReads = 0;
         for (var index = 0; index < instruction.Destinations.Count; index++)
         {
             var destination = instruction.Destinations[index];
@@ -2831,6 +2844,7 @@ public static partial class Gen5ShaderScalarEvaluator
                 (componentOffset >= bufferSize ||
                  bufferSize - componentOffset < sizeof(uint)))
             {
+                suppressedReads++;
                 scalarRegisters[destination.Value] = 0;
                 continue;
             }
@@ -2840,6 +2854,7 @@ public static partial class Gen5ShaderScalarEvaluator
                     address + (ulong)(index * sizeof(uint)),
                     out var value))
             {
+                failedReads++;
                 if (isBufferLoad || !_strictScalarLoad)
                 {
                     scalarRegisters[destination.Value] = 0;
@@ -2859,6 +2874,19 @@ public static partial class Gen5ShaderScalarEvaluator
             }
 
             scalarRegisters[destination.Value] = value;
+        }
+
+        if (_scalarTraceShaderAddress != 0 && state.Program.Address == _scalarTraceShaderAddress &&
+            Interlocked.Increment(ref _scalarLoadTraceCount) <= 128)
+        {
+            var values = string.Join(',', instruction.Destinations.Select(destination =>
+                $"s{destination.Value}={scalarRegisters[destination.Value]:X8}"));
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.scalar_load shader=0x{state.Program.Address:X16} " +
+                $"pc=0x{instruction.Pc:X} op={instruction.Opcode} base=0x{baseAddress:X16} " +
+                $"address=0x{address:X16} buffer_size=0x{bufferSize:X} " +
+                $"unbound={bufferUnbound || scalarPointerUnbound} failed={failedReads} " +
+                $"suppressed={suppressedReads} values=[{values}]");
         }
 
         return true;

@@ -308,6 +308,28 @@ public sealed class SubmissionSchedulerTests
     }
 
     [Fact]
+    public void SubmissionHistoryIsBoundedOrderedAndResetsRecordingFields()
+    {
+        using var scheduler = NewActiveScheduler(_device, _rendering);
+        _device.CompleteOnSubmit = true;
+        for (uint index = 1; index <= 40; index++)
+        {
+            Assert.Equal((uint)RecordedOperation.Unknown, scheduler.Current.DebugOp);
+            Assert.Equal(0UL, scheduler.Current.DebugArg4);
+            scheduler.Current.SetDebugInfo((uint)RecordedOperation.DispatchDirect, index,
+                index, 2, 3, 0, 0xABCD);
+            scheduler.Submit();
+            scheduler.BeginCommand();
+        }
+
+        var history = scheduler.FormatRecentSubmissions().ToArray();
+        Assert.Equal(32, history.Length);
+        Assert.StartsWith("tick=9 op=DispatchDirect submit=9 ", history[0]);
+        Assert.StartsWith("tick=40 op=DispatchDirect submit=40 ", history[^1]);
+        Assert.EndsWith("args=40,2,3,0,0x000000000000ABCD", history[^1]);
+    }
+
+    [Fact]
     public void TwoSchedulersKeepIndependentTicksAndOneMayRunWithoutActivation()
     {
         var otherDevice = new FakeTickDevice();

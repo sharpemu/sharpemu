@@ -1632,6 +1632,64 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    public string DescribeReadRange(ulong address, ulong size)
+    {
+        if (size == 0 || size > ulong.MaxValue - address)
+        {
+            return "The diagnostic memory range is invalid.";
+        }
+
+        _gate.EnterReadLock();
+        try
+        {
+            var lines = new List<string>();
+            var end = address + size;
+            var cursor = address;
+            while (cursor < end && lines.Count < 32)
+            {
+                var region = FindRegion(cursor, 1);
+                var stop = end;
+                if (region is not null)
+                {
+                    stop = Math.Min(stop, region.VirtualAddress + region.Size);
+                }
+                else
+                {
+                    foreach (var next in _regions)
+                    {
+                        if (next.VirtualAddress > cursor)
+                        {
+                            stop = Math.Min(stop, next.VirtualAddress);
+                            break;
+                        }
+                    }
+                }
+
+                var host = "unknown";
+                if (_hostMemory.Query(cursor, out var info))
+                {
+                    var hostEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
+                        ? ulong.MaxValue : info.BaseAddress + info.RegionSize;
+                    stop = Math.Min(stop, hostEnd);
+                    host = $"{info.State}/0x{info.RawProtection:X}";
+                }
+
+                if (stop <= cursor) break;
+                var kind = region is null ? "unmapped" : region.IsBackedView ? "backed" : "private";
+                var backing = _backedSpace?.IsBacked(cursor, stop - cursor) == true;
+                lines.Add($"range=0x{cursor:X16}..0x{stop:X16} guest={kind} backing={backing} host={host}");
+                cursor = stop;
+            }
+
+            if (cursor < end) lines.Add($"remaining=0x{cursor:X16}..0x{end:X16}");
+            return string.Join(Environment.NewLine, lines);
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     public IReadOnlyList<VirtualMemoryRegion> SnapshotRegions()
     {
         _gate.EnterReadLock();

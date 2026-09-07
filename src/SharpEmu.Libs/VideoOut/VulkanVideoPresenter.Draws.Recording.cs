@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
@@ -871,6 +872,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 1u,
                 Math.Min(drawScissor.Height, maxPixelsPerDraw / Math.Max(drawScissor.Width, 1u)));
             var drawCount = 0u;
+            _scheduler.Current.SetDebugInfo((uint)(resources.IndexBuffer.Handle != 0
+                    ? RecordedOperation.DrawIndex : RecordedOperation.DrawIndexAuto), 0,
+                resources.VertexCount, resources.InstanceCount, unchecked((uint)resources.BaseVertex));
             for (var y = 0u; y < drawScissor.Height; y += rowsPerDraw)
             {
                 var scissor = new Rect2D(

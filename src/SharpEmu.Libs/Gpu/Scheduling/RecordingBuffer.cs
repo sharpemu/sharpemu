@@ -83,6 +83,7 @@ public sealed class RecordingBuffer
         }
 
         _device.BeginBuffer(Buffer);
+        SetDebugInfo((uint)RecordedOperation.Unknown, 0);
     }
 
     internal void End()

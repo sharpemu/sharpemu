@@ -50,6 +50,26 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
+    public void ReadRangeDiagnosticsReportViewsAndReservedGaps()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0x8000);
+        var address = test.Reserve(0x10000);
+        test.Map(0, 0x4000, address);
+        test.Map(0x4000, 0x4000, address + 0xC000);
+
+        var result = test.Memory.DescribeReadRange(address, 0x10000);
+        Assert.Contains("guest=backed backing=True host=Committed", result);
+        Assert.Contains("guest=unmapped backing=False host=Reserved", result);
+        Assert.Contains($"0x{address + 0x4000:X16}..0x{address + 0xC000:X16}", result);
+        Assert.False(test.Memory.CanRead(address, 0x10000));
+        Assert.True(test.Memory.IsBackedRange(address, 0x4000));
+        Assert.True(test.Memory.IsBackedRange(address + 0xC000, 0x4000));
+        Assert.Contains("guest=private", test.Memory.DescribeReadRange(test.Output, 16));
+        Assert.Equal("The diagnostic memory range is invalid.", test.Memory.DescribeReadRange(ulong.MaxValue, 2));
+    }
+
+    [Fact]
     public void TransientProtectionSkipsReservedGapsBetweenViews()
     {
         using var test = new BackedKernelMemory();

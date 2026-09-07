@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Diagnostics;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 
 // This partial executes translated Vulkan compute dispatches.
@@ -517,6 +518,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     for (var z = 0u; z < zCount;)
                     {
                         var countZ = Math.Min(maxZChunk, zCount - z);
+                        _scheduler.Current.SetDebugInfo((uint)RecordedOperation.DispatchDirect, 0,
+                            countX, countY, countZ, work.IsIndirect ? 1u : 0u, work.ShaderAddress);
                         _vk.CmdDispatchBase(
                             commandBuffer,
                             checked(work.BaseGroupX + x),

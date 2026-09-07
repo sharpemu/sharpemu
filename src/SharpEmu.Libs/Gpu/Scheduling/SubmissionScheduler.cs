@@ -20,6 +20,11 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     }
 
     private readonly record struct TickWork(Action Callback, ulong Tick);
+    private readonly record struct SubmissionTraceEntry(ulong Tick, uint Op, ulong SubmitId,
+        uint Arg0, uint Arg1, uint Arg2, uint Arg3, ulong Arg4);
+    private readonly SubmissionTraceEntry[] _submissionHistory = new SubmissionTraceEntry[32];
+    private int _nextSubmissionHistoryIndex;
+    private int _submissionHistoryCount;
 
     private readonly IGpuTickDevice _device;
     private readonly TickTimeline _timeline;
@@ -79,6 +84,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     // Report the fatal error, then return an exception to stop the caller.
     internal static Exception Fatal(string message)
     {
+        Console.Error.WriteLine($"[GPU][FATAL] {message}");
         OnFatal(message);
         return new InvalidOperationException(message);
     }
@@ -415,14 +421,33 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
         if (!submitted)
         {
+            Console.Error.WriteLine($"[GPU][ERROR] submission history known_completed_tick={_timeline.CompletedTick}");
+            foreach (var entry in FormatRecentSubmissions())
+                Console.Error.WriteLine($"[GPU][ERROR] {entry}");
             throw Fatal(
                 $"vkQueueSubmit failed: {failure}, tick={tick} debug_op={_command.DebugOp} debug_submit={_command.DebugSubmitId} " +
                 $"args={_command.DebugArg0},{_command.DebugArg1},{_command.DebugArg2},{_command.DebugArg3},0x{_command.DebugArg4:X16}");
         }
 
+        _submissionHistory[_nextSubmissionHistoryIndex] = new SubmissionTraceEntry(tick, _command.DebugOp, _command.DebugSubmitId,
+            _command.DebugArg0, _command.DebugArg1, _command.DebugArg2, _command.DebugArg3, _command.DebugArg4);
+        _nextSubmissionHistoryIndex = (_nextSubmissionHistoryIndex + 1) % _submissionHistory.Length;
+        _submissionHistoryCount = Math.Min(_submissionHistoryCount + 1, _submissionHistory.Length);
         _command.Buffer = 0;
         _submitted?.Invoke(tick);
         return tick;
+    }
+
+    // Report the last operation in each saved submission. Earlier GPU work can cause device loss.
+    internal IEnumerable<string> FormatRecentSubmissions()
+    {
+        for (var index = 0; index < _submissionHistoryCount; index++)
+        {
+            var slot = (_nextSubmissionHistoryIndex - _submissionHistoryCount + index + _submissionHistory.Length) % _submissionHistory.Length;
+            var entry = _submissionHistory[slot];
+            yield return $"tick={entry.Tick} op={(RecordedOperation)entry.Op} submit={entry.SubmitId} " +
+                $"args={entry.Arg0},{entry.Arg1},{entry.Arg2},{entry.Arg3},0x{entry.Arg4:X16}";
+        }
     }
 
     private void RunPriorityWorker()
