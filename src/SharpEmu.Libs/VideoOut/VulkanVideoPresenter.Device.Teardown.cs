@@ -29,6 +29,15 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
+            foreach (var texture in _textureCache.Values)
+            {
+                DestroyCachedTextureResource(texture);
+            }
+            _textureCache.Clear();
+            while (_deferredTextureDestroys.TryDequeue(out var textureEntry))
+            {
+                DestroyCachedTextureResource(textureEntry.Texture);
+            }
             DestroyFeedbackSnapshotPool();
             ReportFeedbackSnapshotTelemetry(final: true);
             ClearCachedTextureIdentities();

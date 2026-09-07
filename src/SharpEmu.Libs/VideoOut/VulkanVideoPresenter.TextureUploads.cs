@@ -443,6 +443,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     CpuContentFingerprint = contentFingerprint,
                     SupportsStorageUsage = supportsStorageUsage,
                 };
+                if (view.Handle != canonicalView.Handle)
+                {
+                    // Keep the sampled view with the image that now owns its storage.
+                    guestImage.FormatViews.Add((vkFormat, 0u, 1u, texture.DstSelect), view);
+                }
                 _guestImages.Add(texture.Address, guestImage);
                 resource.OwnsStorage = false;
                 resource.GuestImage = guestImage;

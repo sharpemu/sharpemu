@@ -577,7 +577,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         {
                             SType = StructureType.ImageMemoryBarrier,
                             SrcAccessMask = hasPriorContents ? AccessFlags.ShaderReadBit : 0,
-                            DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
+                            DstAccessMask = AccessFlags.ColorAttachmentReadBit |
+                                            AccessFlags.ColorAttachmentWriteBit,
                             OldLayout = hasPriorContents
                                 ? ImageLayout.ShaderReadOnlyOptimal
                                 : ImageLayout.Undefined,

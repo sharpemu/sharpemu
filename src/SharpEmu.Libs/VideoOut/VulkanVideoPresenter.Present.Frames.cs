@@ -10,6 +10,10 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
+    internal static PipelineStageFlags GetPresentationUploadSourceStage(bool isHdrOutput, bool isImageInitialized) =>
+        !isHdrOutput ? PipelineStageFlags.TransferBit : isImageInitialized
+            ? PipelineStageFlags.FragmentShaderBit : PipelineStageFlags.TopOfPipeBit;
+
     private sealed partial class Presenter
     {
         // This partial records presentation frame transfers.
@@ -64,11 +68,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var toTransfer = new ImageMemoryBarrier
             {
                 SType = StructureType.ImageMemoryBarrier,
-                SrcAccessMask = _imageInitialized[imageIndex]
-                    ? _hdrOutputActive
-                        ? AccessFlags.ShaderReadBit
-                        : AccessFlags.MemoryReadBit
-                    : 0,
+                SrcAccessMask = _hdrOutputActive && _imageInitialized[imageIndex]
+                    ? AccessFlags.ShaderReadBit : 0,
                 DstAccessMask = AccessFlags.TransferWriteBit,
                 OldLayout = oldLayout,
                 NewLayout = ImageLayout.TransferDstOptimal,
@@ -79,11 +80,7 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             _vk.CmdPipelineBarrier(
                 _commandBuffer,
-                _imageInitialized[imageIndex]
-                    ? _hdrOutputActive
-                        ? PipelineStageFlags.FragmentShaderBit
-                        : PipelineStageFlags.BottomOfPipeBit
-                    : PipelineStageFlags.TopOfPipeBit,
+                GetPresentationUploadSourceStage(_hdrOutputActive, _imageInitialized[imageIndex]),
                 PipelineStageFlags.TransferBit,
                 0,
                 0,

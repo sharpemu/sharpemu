@@ -10,6 +10,17 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanPresentEncodeFormatTests
 {
     [Theory]
+    [InlineData(false, false, PipelineStageFlags.TransferBit)]
+    [InlineData(false, true, PipelineStageFlags.TransferBit)]
+    [InlineData(true, false, PipelineStageFlags.TopOfPipeBit)]
+    [InlineData(true, true, PipelineStageFlags.FragmentShaderBit)]
+    public void UploadSourceStageMatchesOutputModeAndImageState(
+        bool isHdrOutput, bool isImageInitialized, PipelineStageFlags expected)
+    {
+        Assert.Equal(expected, VulkanVideoPresenter.GetPresentationUploadSourceStage(isHdrOutput, isImageInitialized));
+    }
+
+    [Theory]
     [InlineData(Format.B8G8R8A8Unorm, Format.B8G8R8A8Srgb)]
     [InlineData(Format.R8G8B8A8Unorm, Format.R8G8B8A8Srgb)]
     public void UnormSwapchainFormatsHaveSrgbCounterparts(
