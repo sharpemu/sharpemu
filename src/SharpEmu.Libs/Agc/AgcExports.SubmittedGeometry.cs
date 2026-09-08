@@ -479,13 +479,16 @@ public static partial class AgcExports
                 captureState.IndexSize = packetIndexSize & 0x3u;
             }
 
-            ApplySubmittedRegisters(
-                ctx,
-                captureState,
-                packetAddress,
-                length,
-                opcode,
-                register);
+            if (NeedsGeometryRegisterUpdate(opcode, register))
+            {
+                ApplySubmittedRegisters(
+                    ctx,
+                    captureState,
+                    packetAddress,
+                    length,
+                    opcode,
+                    register);
+            }
 
             if (opcode == ItDrawIndex2 && length >= 6 &&
                 TryReadUInt32(ctx, packetAddress + 4, out var maximumIndexCount) &&
@@ -568,6 +571,11 @@ public static partial class AgcExports
             offset += length;
         }
     }
+
+    // Geometry capture does not consume context state. The main parser still applies it.
+    internal static bool NeedsGeometryRegisterUpdate(uint opcode, uint register) =>
+        opcode is not (ItSetContextReg or ItSetContextRegIndirect) &&
+        !(opcode == ItNop && register == RCxRegsIndirect);
 
     private static void TryCaptureSubmittedVertexSnapshot(
         CpuContext ctx,
