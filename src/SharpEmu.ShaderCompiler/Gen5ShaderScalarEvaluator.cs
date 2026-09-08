@@ -164,12 +164,7 @@ public static partial class Gen5ShaderScalarEvaluator
     public static bool WasEmptySrtScalarPointerFallback(ulong shaderAddress) =>
         _emptySrtScalarPointerFallbacks.ContainsKey(shaderAddress);
 
-    // Uniform forward branches select material/resource bodies that remain
-    // statically present in the translated shader. Discover the skipped body's
-    // descriptors by default; SHARPEMU_CFG_RESOURCE_DISCOVERY=0 is a diagnostic
-    // opt-out. Conditional branches are deliberately not forked because their
-    // fall-through is already scanned and forking vector-mask conditions grows
-    // exponentially without adding descriptor coverage.
+    // Discover image bindings in skipped blocks. Keep the registers from their branch entries.
     private static readonly bool _cfgResourceDiscovery =
         !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_CFG_RESOURCE_DISCOVERY"),
@@ -404,6 +399,7 @@ public static partial class Gen5ShaderScalarEvaluator
         var resolvedImageByPc = new Dictionary<uint, int>();
         var finalScalarRegisters = (uint[])scalarRegisters.Clone();
         var pendingPaths = new Stack<ScalarPathState>();
+        Queue<ScalarPathState>? pendingImageEntries = null;
         var visitedPaths = new HashSet<ScalarPathKey>();
         using var pooledData = new PooledEvaluationDataScope(
             globalMemoryBindings,
@@ -416,7 +412,8 @@ public static partial class Gen5ShaderScalarEvaluator
             HashSet<uint> laneRestoredScalarRegisters,
             ulong pathExecMask,
             bool pathScc,
-            bool supplemental)
+            bool supplemental,
+            bool imageEntry = false)
         {
             var key = new ScalarPathKey(
                 pc,
@@ -428,14 +425,16 @@ public static partial class Gen5ShaderScalarEvaluator
                     pathScc));
             if (visitedPaths.Add(key))
             {
-                pendingPaths.Push(new ScalarPathState(
+                var queuedPath = new ScalarPathState(
                     pc,
                     registers,
                     vectorLaneValues,
                     laneRestoredScalarRegisters,
                     pathExecMask,
                     pathScc,
-                    supplemental));
+                    supplemental);
+                if (imageEntry) (pendingImageEntries ??= new()).Enqueue(queuedPath);
+                else pendingPaths.Push(queuedPath);
             }
         }
 
@@ -451,9 +450,9 @@ public static partial class Gen5ShaderScalarEvaluator
                 supplemental: false);
         }
 
-        while (pendingPaths.Count != 0)
+        while (pendingPaths.Count != 0 || pendingImageEntries is { Count: > 0 })
         {
-            var path = pendingPaths.Pop();
+            var path = pendingImageEntries is { Count: > 0 } ? pendingImageEntries.Dequeue() : pendingPaths.Pop();
             scalarRegisters = path.ScalarRegisters;
             var vectorLaneValues = path.VectorLaneValues;
             var laneRestoredScalarRegisters = path.LaneRestoredScalarRegisters;
@@ -478,20 +477,23 @@ public static partial class Gen5ShaderScalarEvaluator
                     break;
                 }
 
+                // Use the incoming registers before the other branch can replace a descriptor.
+                if (_cfgResourceDiscovery && !path.Supplemental && instruction.Encoding == Gen5ShaderEncoding.Sopp &&
+                    instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) &&
+                    state.Program.AlternateImageEntries.TryGetValue(instruction.Pc, out var imageEntryPc))
+                {
+                    QueuePath(imageEntryPc, (uint[])scalarRegisters.Clone(),
+                        CloneVectorLaneValues(vectorLaneValues), new HashSet<uint>(laneRestoredScalarRegisters),
+                        execMask, scalarConditionCode, supplemental: true, imageEntry: true);
+                }
+
                 if (instruction.Opcode == "SBranch" &&
                     TryGetSoppBranchTargetPc(instruction, out var targetPc))
                 {
                     if (targetPc > instruction.Pc)
                     {
-                        // The regular scalar evaluation follows the uniform
-                        // branch. Evaluate its skipped fall-through region once
-                        // as supplemental resource discovery: large shaders use
-                        // forward S_BRANCH to select one material/resource body,
-                        // and SPIR-V still needs descriptors for every body that
-                        // remains in the statically translated CFG. Do not fork
-                        // SC_BRANCH targets here; their fall-through regions are
-                        // already visited linearly and forking every vector-mask
-                        // condition causes exponential state growth.
+                        // Scan skipped blocks after their saved conditional entries.
+                        // Resolved image bindings take priority over this fall-through state.
                         if (_cfgResourceDiscovery)
                         {
                             var fallthroughPc = instruction.Pc +

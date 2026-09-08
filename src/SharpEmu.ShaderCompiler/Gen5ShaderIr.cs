@@ -451,6 +451,45 @@ public sealed record Gen5ShaderProgram(
     private readonly uint _parameterExportMask = ComputeParameterExportMask(Instructions);
     private const int ScalarRegisterCount = 256;
     private IReadOnlySet<uint>? _runtimeScalarRegisters;
+    private IReadOnlyDictionary<uint, uint>? _alternateImageEntries;
+
+    // Cache branch entries whose image instructions are skipped by a forward jump.
+    internal IReadOnlyDictionary<uint, uint> AlternateImageEntries =>
+        _alternateImageEntries ??= FindAlternateImageEntries();
+
+    private IReadOnlyDictionary<uint, uint> FindAlternateImageEntries()
+    {
+        var entries = new Dictionary<uint, uint>();
+        var skippedRanges = new List<(uint Start, long End)>();
+        foreach (var instruction in Instructions)
+        {
+            if (instruction.Opcode == "SBranch" && instruction.Words.Count != 0)
+            {
+                var end = (long)instruction.Pc + instruction.Words.Count * 4 +
+                    unchecked((short)instruction.Words[0]) * 4;
+                if (end > instruction.Pc) skippedRanges.Add((instruction.Pc, end));
+            }
+        }
+
+        foreach (var instruction in Instructions)
+        {
+            if (!instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) ||
+                instruction.Words.Count == 0) continue;
+            var target = (long)instruction.Pc + instruction.Words.Count * 4 +
+                unchecked((short)instruction.Words[0]) * 4;
+            if (target <= instruction.Pc || target > uint.MaxValue) continue;
+            if (skippedRanges.Any(range => instruction.Pc < range.Start &&
+                target > range.Start && target < range.End &&
+                Instructions.Any(candidate => candidate.Pc >= target && candidate.Pc < range.End &&
+                    candidate.Control is Gen5ImageControl)))
+            {
+                entries.Add(instruction.Pc, (uint)target);
+            }
+        }
+
+        return entries;
+    }
+
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
     public uint ParameterExportMask => _parameterExportMask;
