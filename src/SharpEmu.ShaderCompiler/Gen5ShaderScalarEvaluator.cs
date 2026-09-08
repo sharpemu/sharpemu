@@ -286,7 +286,8 @@ public static partial class Gen5ShaderScalarEvaluator
         bool resolveVertexInputs = false,
         uint? requiredVertexRecordCount = null,
         bool captureVertexInputsOnly = false,
-        Gen5ShaderEvaluationStage profileStage = Gen5ShaderEvaluationStage.Unknown)
+        Gen5ShaderEvaluationStage profileStage = Gen5ShaderEvaluationStage.Unknown,
+        IReadOnlyList<Gen5VertexInputBinding>? retainedVertexInputs = null)
     {
         var profileEnabled = Gen5ShaderEvaluationProfile.Enabled;
         var detailedProfileEnabled = Gen5ShaderEvaluationProfile.DetailedEnabled;
@@ -299,7 +300,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 out error,
                 resolveVertexInputs,
                 requiredVertexRecordCount,
-                captureVertexInputsOnly);
+                captureVertexInputsOnly,
+                retainedVertexInputs);
         }
 
         var inputSignature = default(Gen5EvaluationInputSignature);
@@ -325,7 +327,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 out error,
                 resolveVertexInputs,
                 requiredVertexRecordCount,
-                captureVertexInputsOnly);
+                captureVertexInputsOnly,
+                retainedVertexInputs);
             if (succeeded)
             {
                 evaluationForProfile = evaluation;
@@ -357,7 +360,8 @@ public static partial class Gen5ShaderScalarEvaluator
         out string error,
         bool resolveVertexInputs,
         uint? requiredVertexRecordCount,
-        bool captureVertexInputsOnly)
+        bool captureVertexInputsOnly,
+        IReadOnlyList<Gen5VertexInputBinding>? retainedVertexInputs)
     {
         evaluation = default!;
         error = string.Empty;
@@ -1026,6 +1030,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
         }
 
+        var reusedVertexInputs = false;
         if (vertexInputBindings.Count != 0)
         {
             for (var index = 0; index < vertexInputBindings.Count; index++)
@@ -1044,7 +1049,9 @@ public static partial class Gen5ShaderScalarEvaluator
                     ctx,
                     vertexInputBindings,
                     out var capturedVertexInputs,
-                    out error))
+                    out error,
+                    retainedVertexInputs,
+                    out reusedVertexInputs))
             {
                 return false;
             }
@@ -1059,7 +1066,10 @@ public static partial class Gen5ShaderScalarEvaluator
             globalMemoryBindings,
             state.ComputeSystemRegisters,
             runtimeScalarRegisters,
-            vertexInputBindings);
+            vertexInputBindings)
+        {
+            ReusedVertexInputs = reusedVertexInputs,
+        };
         pooledData.TransferOwnership();
         return true;
     }
@@ -1156,12 +1166,15 @@ public static partial class Gen5ShaderScalarEvaluator
         return true;
     }
 
-    private static bool TryCaptureVertexInputData(
+    internal static bool TryCaptureVertexInputData(
         CpuContext ctx,
         IReadOnlyList<Gen5VertexInputBinding> pending,
         out List<Gen5VertexInputBinding> captured,
-        out string error)
+        out string error,
+        IReadOnlyList<Gen5VertexInputBinding>? retained,
+        out bool reused)
     {
+        reused = false;
         captured = new List<Gen5VertexInputBinding>(pending.Count);
         error = string.Empty;
         var ordered = pending
@@ -1196,9 +1209,11 @@ public static partial class Gen5ShaderScalarEvaluator
             var byteCount = end > start
                 ? Math.Min(end - start, (ulong)MaxGlobalMemoryBindingBytes)
                 : 0;
-            // Vertex streams are always copied; the buffer store takes only global memory.
+            byte[] data = [];
+            var dataLength = checked((int)byteCount);
+            // With retained inputs, first resolve the same merged ranges without reading them.
             if (byteCount == 0 ||
-                !TryReadSizedGlobalMemoryCore(ctx, start, byteCount, true, out var data, out var dataLength, out _, out _))
+                (retained is null && !TryReadSizedGlobalMemoryCore(ctx, start, byteCount, true, out data, out dataLength, out _, out _)))
             {
                 foreach (var binding in captured)
                 {
@@ -1225,7 +1240,7 @@ public static partial class Gen5ShaderScalarEvaluator
                     OffsetBytes = checked((uint)(delta + binding.OffsetBytes)),
                     Data = data,
                     DataLength = dataLength,
-                    DataPooled = index == first,
+                    DataPooled = retained is null && index == first,
                 });
             }
 
@@ -1233,6 +1248,26 @@ public static partial class Gen5ShaderScalarEvaluator
         }
 
         captured.Sort(static (left, right) => left.Location.CompareTo(right.Location));
+        if (retained is not null)
+        {
+            var matches = captured.Count == retained.Count;
+            for (var index = 0; matches && index < captured.Count; index++)
+            {
+                var current = captured[index];
+                var saved = retained[index];
+                matches = current.Pc == saved.Pc && current.Location == saved.Location &&
+                    current.BaseAddress == saved.BaseAddress && current.Stride == saved.Stride &&
+                    current.OffsetBytes == saved.OffsetBytes && current.DataFormat == saved.DataFormat &&
+                    current.NumberFormat == saved.NumberFormat && current.ComponentCount == saved.ComponentCount &&
+                    !saved.DataPooled && saved.DataLength >= current.DataLength && saved.DataLength <= saved.Data.Length;
+            }
+            if (!matches)
+            {
+                return TryCaptureVertexInputData(ctx, pending, out captured, out error, null, out reused);
+            }
+            captured = retained.ToList();
+            reused = true;
+        }
         TraceTitleVertexInputs(captured);
         return true;
     }

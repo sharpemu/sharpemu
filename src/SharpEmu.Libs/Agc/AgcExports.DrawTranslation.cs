@@ -1077,6 +1077,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        var retainedVertexInputs = (!indexed || !UsesCachedGpuIndices(state, vertexCount)) &&
+            state.CurrentVertexSnapshot is { } retainedSnapshot &&
+            retainedSnapshot.ExportShaderAddress == exportShaderAddress
+                ? retainedSnapshot.Bindings
+                : null;
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -1091,7 +1096,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     out var vertexRecords)
                         ? vertexRecords
                         : null,
-                profileStage: Gen5ShaderEvaluationStage.Vertex))
+                profileStage: Gen5ShaderEvaluationStage.Vertex,
+                retainedVertexInputs: retainedVertexInputs))
         {
             return false;
         }

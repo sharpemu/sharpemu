@@ -746,6 +746,10 @@ public static partial class AgcExports
             }
         }
 
+        if (evaluation.ReusedVertexInputs)
+        {
+            return;
+        }
         var returned = new HashSet<byte[]>(
             System.Collections.Generic.ReferenceEqualityComparer.Instance);
         foreach (var binding in current)

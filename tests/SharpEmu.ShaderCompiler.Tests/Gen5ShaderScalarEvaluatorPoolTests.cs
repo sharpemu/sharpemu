@@ -20,6 +20,78 @@ public sealed class Gen5ShaderScalarEvaluatorPoolTests
     private const ulong GuestAddress = 0x1_0000_0000;
 
     [Fact]
+    public void RetainedInterleavedInputsSkipGuestReadsAndPoolRentals()
+    {
+        var memory = new ReadableCpuMemory();
+        var pending = CreatePendingVertexInputs();
+        var bytes = Enumerable.Repeat((byte)0x7b, 44).ToArray();
+        var retained = new[]
+        {
+            pending[0] with { Data = bytes, DataLength = 44 },
+            pending[1] with { BaseAddress = GuestAddress, OffsetBytes = 12, Data = bytes, DataLength = 44 },
+        };
+        var pool = new TrackingArrayPool();
+        WithPool(pool, () =>
+        {
+            Assert.True(Gen5ShaderScalarEvaluator.TryCaptureVertexInputData(
+                new CpuContext(memory, Generation.Gen5), pending, out var captured, out var error, retained, out var reused), error);
+            Assert.True(reused);
+            Assert.Same(retained[0], captured[0]);
+            Assert.Same(retained[1], captured[1]);
+            Assert.Equal(0x7b, captured[0].Data[0]);
+        });
+        Assert.Equal(0, memory.ReadCount);
+        Assert.Equal(0, pool.RentCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void RetainedInputMismatchFallsBackToGuestCapture(int mismatch)
+    {
+        var memory = new ReadableCpuMemory();
+        var pending = CreatePendingVertexInputs();
+        var bytes = new byte[44];
+        var retained = new[]
+        {
+            pending[0] with { Data = bytes, DataLength = 44 },
+            pending[1] with { BaseAddress = GuestAddress, OffsetBytes = 12, Data = bytes, DataLength = 44 },
+        };
+        retained[1] = mismatch switch
+        {
+            0 => retained[1] with { Pc = 99 },
+            1 => retained[1] with { OffsetBytes = 16 },
+            2 => retained[1] with { DataLength = 32 },
+            3 => retained[1] with { DataPooled = true },
+            _ => retained[1] with { DataFormat = 0 },
+        };
+        var pool = new TrackingArrayPool();
+        WithPool(pool, () =>
+        {
+            Assert.True(Gen5ShaderScalarEvaluator.TryCaptureVertexInputData(
+                new CpuContext(memory, Generation.Gen5), pending, out var captured, out var error, retained, out var reused), error);
+            Assert.False(reused);
+            Assert.NotSame(bytes, captured[0].Data);
+            Assert.Equal(0, captured[0].Data[0]);
+            Assert.Same(captured[0].Data, captured[1].Data);
+            foreach (var binding in captured)
+                if (binding.DataPooled) pool.Return(binding.Data);
+        });
+        Assert.Equal(1, memory.ReadCount);
+        Assert.Equal(1, pool.RentCount);
+        Assert.Equal(0, pool.OutstandingCount);
+    }
+
+    private static Gen5VertexInputBinding[] CreatePendingVertexInputs() =>
+    [
+        new(0x40, 0, 2, 11, 7, GuestAddress, 20, 0, [], 32, false),
+        new(0x44, 1, 2, 11, 7, GuestAddress + 12, 20, 0, [], 32, false),
+    ];
+
+    [Fact]
     public void FailedEvaluationReturnsPreviouslyCapturedGlobalMemory()
     {
         var globalLoad = CreateGlobalLoad();
@@ -136,8 +208,10 @@ public sealed class Gen5ShaderScalarEvaluatorPoolTests
 
     private sealed class ReadableCpuMemory : ICpuMemory
     {
+        public int ReadCount { get; private set; }
         public bool TryRead(ulong virtualAddress, Span<byte> destination)
         {
+            ReadCount++;
             if (virtualAddress != GuestAddress)
             {
                 return false;
