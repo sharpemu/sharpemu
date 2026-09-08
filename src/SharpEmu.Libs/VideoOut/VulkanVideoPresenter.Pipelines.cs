@@ -239,6 +239,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SampleCountFlags samples = SampleCountFlags.Count1Bit,
             IReadOnlyList<ulong>? targetAddresses = null)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResources);
             var isTitleDraw = IsTitleDraw(draw.VertexBuffers);
             var forceFullscreenVertex = _forceFullscreenPipeline ||
                 _forceFullscreenVertex ||
@@ -478,6 +479,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private TranslatedDrawResources CreateComputeDispatchResources(
             VulkanComputeGuestDispatch dispatch)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResources);
             var traceResources = dispatch.Textures.Count >= 8;
             if (traceResources)
             {
@@ -567,6 +569,7 @@ internal static unsafe partial class VulkanVideoPresenter
             TranslatedDrawResources resources,
             ShaderStageFlags stageFlags)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorSetup);
             var textureCount = resources.Textures.Length;
             var sampledImageCount = resources.Textures.Count(texture => !texture.IsStorage);
             var storageImageCount = textureCount - sampledImageCount;
@@ -751,6 +754,7 @@ internal static unsafe partial class VulkanVideoPresenter
             IReadOnlyList<Format> renderTargetFormats,
             Extent2D extent)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup);
             var pipelineKey = new GraphicsPipelineKey(
                 GetShaderDigest(vertexSpirv),
                 GetShaderDigest(fragmentSpirv),
@@ -1231,6 +1235,7 @@ internal static unsafe partial class VulkanVideoPresenter
             TranslatedDrawResources resources,
             byte[] computeSpirv)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup);
             var pipelineKey = new ComputePipelineKey(
                 GetShaderDigest(computeSpirv),
                 GetResourceLayoutKey(resources));

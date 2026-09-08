@@ -625,6 +625,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordDrawTextureTransitions(TextureResource[] bindings, DepthAttachment? depth, GuestDepthState depthState)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTransitions);
             if (depth is not null && (depth.ClearDepth || depth.ClearStencil))
             {
                 var attachmentView = depth.Request.View;

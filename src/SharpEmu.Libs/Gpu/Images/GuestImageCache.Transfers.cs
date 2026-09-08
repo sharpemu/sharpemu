@@ -305,6 +305,7 @@ public sealed unsafe partial class GuestImageCache
     // Uploads the guest bytes when the guest or a buffer owns them; watches the image first.
     private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageUpload);
         var image = _slots[imageIdentifier];
         if (ImageDescription.IsEmptyRange(image.Description.Data))
         {
@@ -350,6 +351,7 @@ public sealed unsafe partial class GuestImageCache
     // A maybe-dirty image resolves through its edge hash first; a dirty one is populated again.
     private void RefreshFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageRefresh);
         WatchImage(imageIdentifier);
         var image = _slots[imageIdentifier];
         if (image.IsMaybeCpuDirty)
@@ -507,6 +509,7 @@ public sealed unsafe partial class GuestImageCache
     // Copies image data into the buffer without transferring GPU ownership to the buffer.
     public bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
         using var held = _lock.Hold();
         var matches = new List<ResourceSlotIdentifier>();
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
@@ -631,6 +634,7 @@ public sealed unsafe partial class GuestImageCache
     // Publishes a GPU-owned image to guest memory after its tick completes; false when it cannot.
     private bool TryDownloadToGuest(ResourceSlotIdentifier imageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
         var image = _slots[imageIdentifier];
         if (image.DepthOwner.IsValid)
         {

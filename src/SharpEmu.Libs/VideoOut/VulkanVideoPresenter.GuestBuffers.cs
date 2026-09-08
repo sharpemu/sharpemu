@@ -79,6 +79,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // A buffer that arrives with bytes is host-owned; guest memory is obtained from the store.
         private GlobalBufferResource CreateGlobalBufferResource(GuestMemoryBuffer guestBuffer)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferResources);
             if (guestBuffer.BaseAddress == 0 || !guestBuffer.WriteBackToGuest || guestBuffer.Length != 0)
             {
                 return CreateTransientGlobalBufferResource(guestBuffer);

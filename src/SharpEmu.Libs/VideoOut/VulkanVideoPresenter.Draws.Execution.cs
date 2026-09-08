@@ -398,6 +398,7 @@ internal static unsafe partial class VulkanVideoPresenter
             uint samples,
             uint layers)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.RenderPassSetup);
             var attachmentCount = targets.Count + (depth is null ? 0 : 1);
             var attachments = stackalloc AttachmentDescription[Math.Max(attachmentCount, 1)];
             var colorReferences = stackalloc AttachmentReference[Math.Max(targets.Count, 1)];

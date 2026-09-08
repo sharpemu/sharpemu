@@ -250,6 +250,7 @@ public sealed partial class GuestImageCache
 
     private ResourceSlotIdentifier ResolveDepthOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
         var cached = _slots[cachedImageIdentifier];
         ref var cachedInfo = ref cached.Description;
         if (!cachedInfo.IsDepth && !requested.IsDepth)
@@ -360,6 +361,7 @@ public sealed partial class GuestImageCache
 
     private OverlapResolution ResolveOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier, ResourceSlotIdentifier mergedImageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
         var cached = _slots.TryGet(cachedImageIdentifier);
         if (cached == null)
         {

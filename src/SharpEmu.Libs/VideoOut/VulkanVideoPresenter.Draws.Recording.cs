@@ -383,6 +383,7 @@ internal static unsafe partial class VulkanVideoPresenter
             TranslatedDrawResources resources,
             Extent2D extent)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
             _vk.CmdBindPipeline(
                 _commandBuffer,
                 PipelineBindPoint.Graphics,
@@ -561,6 +562,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DestroyTranslatedDrawResources(TranslatedDrawResources resources)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceDestroy);
             if (resources.TransientFramebuffer.Handle != 0)
             {
                 _vk.DestroyFramebuffer(_device, resources.TransientFramebuffer, null);

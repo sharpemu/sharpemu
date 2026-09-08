@@ -106,6 +106,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     // The image for the request; creates, grows or replaces cached images as the overlap rules decide.
     public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat = false)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageLookup);
         var command = _scheduler.Current;
         if (command.IsInvalid)
         {
@@ -227,6 +228,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     public ImageView AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageAcquire);
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         TouchImage(image);
@@ -272,6 +274,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     public ImageView AcquireColorTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageAcquire);
         if (request.Role != ImageRole.ColorTarget)
         {
             throw SubmissionScheduler.Fatal($"The color-target role is invalid: role={request.Role}.");
@@ -314,6 +317,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     public ImageView AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageAcquire);
         if (request.Role != ImageRole.DepthTarget)
         {
             throw SubmissionScheduler.Fatal($"The depth-target role is invalid: role={request.Role}.");
@@ -445,6 +449,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     private ResourceSlotIdentifier InsertImage(in ImageDescription description)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageCreate);
         var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description));
         if (!ImageDescription.IsEmptyRange(description.Data))
         {

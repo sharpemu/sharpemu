@@ -15,18 +15,30 @@ internal static unsafe partial class VulkanVideoPresenter
         // This partial drives the Vulkan presenter render loop.
         private void ProcessGuestCacheReadbacks()
         {
-            _bufferCache.ProcessPendingFaultBuffer();
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferFaults))
+            {
+                _bufferCache.ProcessPendingFaultBuffer();
+            }
 
-            _imageCache.FlushScheduledReadbacks();
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ImageReadback))
+            {
+                _imageCache.FlushScheduledReadbacks();
+            }
         }
 
         private void RunGuestCacheCollection()
         {
             ProcessGuestCacheReadbacks();
 
-            _imageCache.RunGarbageCollector();
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ImageCollect))
+            {
+                _imageCache.RunGarbageCollector();
+            }
 
-            _bufferCache.RunGarbageCollector();
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferCollect))
+            {
+                _bufferCache.RunGarbageCollector();
+            }
         }
 
         private void WaitForRenderWork()
@@ -70,6 +82,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RenderCore()
         {
+            using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed);
             RenderDocCapture.DiscardTimedOutFrame();
 
             if (Volatile.Read(ref _presenterCloseRequested))
@@ -85,7 +98,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            _relay.RunPendingCommands();
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))
+            {
+                _relay.RunPendingCommands();
+            }
             if (_deviceLost)
             {
                 RenderDocCapture.DiscardFrame();
@@ -130,7 +146,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 _pendingGuestWorkCount >= (_maxPendingGuestWorkItems / 2);
             while (completedWork < workLimit)
             {
-                _relay.RunPendingCommands();
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))
+                {
+                    _relay.RunPendingCommands();
+                }
                 // Never block the macOS main thread waiting for in-flight GPU
                 // work to drain. If submission is at capacity (a slow-compute
                 // backlog), stop processing and let the event pump run; the
@@ -172,20 +191,23 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                if (!string.Equals(
-                        _activeGuestQueue.Name,
-                        pendingGuestWork.Queue.Name,
-                        StringComparison.Ordinal))
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueContext))
                 {
-                    FlushBatchedGuestCommands();
-                }
+                    if (!string.Equals(
+                            _activeGuestQueue.Name,
+                            pendingGuestWork.Queue.Name,
+                            StringComparison.Ordinal))
+                    {
+                        FlushBatchedGuestCommands();
+                    }
 
-                _activeGuestQueue = pendingGuestWork.Queue;
-                BindSubmissionContext(pendingGuestWork.Queue);
-                _activeGuestWorkSequence = pendingGuestWork.Sequence;
-                Volatile.Write(
-                    ref _executingGuestWorkSequence,
-                    pendingGuestWork.Sequence);
+                    _activeGuestQueue = pendingGuestWork.Queue;
+                    BindSubmissionContext(pendingGuestWork.Queue);
+                    _activeGuestWorkSequence = pendingGuestWork.Sequence;
+                    Volatile.Write(
+                        ref _executingGuestWorkSequence,
+                        pendingGuestWork.Sequence);
+                }
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
                     pendingGuestWork.Queue.SubmissionId);
@@ -378,9 +400,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 ProcessGuestCacheReadbacks();
             }
 
-            PerfOverlay.SetGuestBufferCacheBytes(_bufferCache.TotalUsedMemory);
+            PerfOverlay.SetGuestCacheStatistics(
+                _bufferCache.TotalUsedMemory, _imageCache.TotalUsedMemory, _deviceInfo.LiveAllocations, _deviceInfo.PeakAllocations);
             CollectAbandonedGuestImageVersions();
 
+            using var preparationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PresentationPreparation);
             Presentation presentation;
             if (_window.IsMinimized)
             {

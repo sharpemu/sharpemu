@@ -72,6 +72,7 @@ public sealed partial class GuestImageCache
     // Removes the image and its stencil associations; the slot is freed after the current tick.
     private void DeleteImage(ResourceSlotIdentifier imageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDelete);
         var image = _slots.TryGet(imageIdentifier);
         if (image == null || !image.Registered)
         {
@@ -154,6 +155,7 @@ public sealed partial class GuestImageCache
 
     private void WatchImage(ResourceSlotIdentifier imageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTracking);
         var image = _slots[imageIdentifier];
         if (!image.Registered)
         {
@@ -237,6 +239,7 @@ public sealed partial class GuestImageCache
 
     private void UnwatchImage(ResourceSlotIdentifier imageIdentifier)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTracking);
         var image = _slots[imageIdentifier];
         if (!image.IsWatched)
         {

@@ -21,6 +21,98 @@ public sealed class PresenterSubmissionTests
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
 
     [Fact]
+    public void RenderProfile_DetailRequiresAnActiveScopeAndRestoresItsParent()
+    {
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var profile = typeof(RenderPhaseProfile);
+        var entries = (long[])profile.GetField("_entries", staticMembers)!.GetValue(null)!;
+        var depth = profile.GetField("_scopeDepth", staticMembers)!;
+        var current = profile.GetField("_current", staticMembers)!;
+        var initialEntries = entries[(int)RenderPhaseProfile.Phase.ImageLookup];
+        Assert.Equal(0, (int)depth.GetValue(null)!);
+
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageLookup)) { }
+        Assert.Equal(initialEntries, entries[(int)RenderPhaseProfile.Phase.ImageLookup]);
+
+        using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Draw))
+        {
+            try
+            {
+                using var detail = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageLookup);
+                if (RenderPhaseProfile.Enabled)
+                {
+                    Assert.Equal(2, (int)depth.GetValue(null)!);
+                    Assert.Equal(RenderPhaseProfile.Phase.ImageLookup, current.GetValue(null));
+                }
+
+                throw new InvalidOperationException("Test scope cleanup.");
+            }
+            catch (InvalidOperationException)
+            {
+                if (RenderPhaseProfile.Enabled)
+                {
+                    Assert.Equal(1, (int)depth.GetValue(null)!);
+                    Assert.Equal(RenderPhaseProfile.Phase.Draw, current.GetValue(null));
+                }
+            }
+        }
+
+        Assert.Equal(0, (int)depth.GetValue(null)!);
+        Assert.Equal(initialEntries + (RenderPhaseProfile.Enabled ? 1 : 0),
+            entries[(int)RenderPhaseProfile.Phase.ImageLookup]);
+    }
+
+    [Fact]
+    public void RenderProfile_WindowScopesRestoreTheRenderPhase()
+    {
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var profile = typeof(RenderPhaseProfile);
+        var entries = (long[])profile.GetField("_entries", staticMembers)!.GetValue(null)!;
+        var depth = profile.GetField("_scopeDepth", staticMembers)!;
+        var current = profile.GetField("_current", staticMembers)!;
+        var phases = new[]
+        {
+            RenderPhaseProfile.Phase.WindowEvents,
+            RenderPhaseProfile.Phase.CursorUpdate,
+            RenderPhaseProfile.Phase.GamepadPoll,
+            RenderPhaseProfile.Phase.WindowState,
+            RenderPhaseProfile.Phase.WindowDelay,
+            RenderPhaseProfile.Phase.QueueContext,
+            RenderPhaseProfile.Phase.FollowupWait,
+            RenderPhaseProfile.Phase.PresentationPreparation,
+        };
+        var initialEntries = phases.Select(phase => entries[(int)phase]).ToArray();
+        Assert.Equal(0, (int)depth.GetValue(null)!);
+
+        using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WindowLoop))
+        {
+            foreach (var phase in phases)
+            {
+                using (RenderPhaseProfile.MeasureDetail(phase))
+                {
+                    using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed)) { }
+                    if (RenderPhaseProfile.Enabled)
+                    {
+                        Assert.Equal(phase, current.GetValue(null));
+                        Assert.Equal(2, (int)depth.GetValue(null)!);
+                    }
+                }
+                if (RenderPhaseProfile.Enabled)
+                {
+                    Assert.Equal(RenderPhaseProfile.Phase.WindowLoop, current.GetValue(null));
+                }
+            }
+        }
+
+        Assert.Equal(0, (int)depth.GetValue(null)!);
+        for (var index = 0; index < phases.Length; index++)
+        {
+            Assert.Equal(initialEntries[index] + (RenderPhaseProfile.Enabled ? 1 : 0),
+                entries[(int)phases[index]]);
+        }
+    }
+
+    [Fact]
     public void FollowupWork_DoesNotRetryBlockedQueueHeads()
     {
         const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;

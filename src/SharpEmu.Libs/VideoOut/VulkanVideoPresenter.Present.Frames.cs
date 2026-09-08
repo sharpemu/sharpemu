@@ -965,6 +965,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CollectAbandonedGuestImageVersions()
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageVersions);
             if (_guestImageVersions.Count == 0)
             {
                 return;

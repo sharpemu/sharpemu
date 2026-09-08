@@ -347,19 +347,37 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         {
             while (Volatile.Read(ref _closeRequested) == 0)
             {
-                PumpEvents();
+                using var windowScope = _graphicsApi == SdlGraphicsApi.Vulkan
+                    ? RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WindowLoop)
+                    : default;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEvents))
+                {
+                    PumpEvents();
+                }
                 if (Volatile.Read(ref _closeRequested) != 0)
                 {
                     break;
                 }
 
-                UpdateCursorAutoHide();
-                SampleGamepad();
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CursorUpdate))
+                {
+                    UpdateCursorAutoHide();
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GamepadPoll))
+                {
+                    SampleGamepad();
+                }
                 var now = timer.Elapsed.TotalSeconds;
                 render(now - last);
                 last = now;
-                if (IsMinimized)
+                bool minimized;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowState))
                 {
+                    minimized = IsMinimized;
+                }
+                if (minimized)
+                {
+                    using var delayScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowDelay);
                     SDL_Delay(10);
                 }
                 else

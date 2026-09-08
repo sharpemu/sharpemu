@@ -59,7 +59,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.Dispose();
             _samplerStore.Dispose();
             _bufferCache.Dispose();
-            PerfOverlay.SetGuestBufferCacheBytes(0);
+            PerfOverlay.SetGuestCacheStatistics(0, 0, _deviceInfo.LiveAllocations, _deviceInfo.PeakAllocations);
             _hostBufferPool.Dispose();
             foreach (var guestImageVersion in _guestImageVersions.Values)
             {
@@ -75,6 +75,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
+                $"peak_allocations={_deviceInfo.PeakAllocations} limit={_deviceInfo.MaxMemoryAllocationCount}");
             if (_device.Handle != 0)
             {
                 Volatile.Write(ref _gpuLabelTimelineAvailable, false);

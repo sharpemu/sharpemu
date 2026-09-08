@@ -1412,6 +1412,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static bool WaitForFollowupGuestWork(int timeoutMilliseconds, HashSet<string>? excludedQueues)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.FollowupWait);
         lock (_gate)
         {
             if (_pendingGuestWorkCount > 0)

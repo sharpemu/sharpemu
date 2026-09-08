@@ -264,6 +264,7 @@ public sealed unsafe class GpuTiler : IDisposable
     // Checks every transfer and writes its arguments to the stream ring.
     private void Prepare(bool tile, ulong tiledCapacity, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers, ulong sourceBase, ulong targetBase, List<TransferDispatch> dispatches)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTiling);
         if (transfers.IsEmpty || tiledCapacity == 0 || linearCapacity == 0)
         {
             throw SubmissionScheduler.Fatal($"The tile transfer batch is empty or has no capacity: transfers={transfers.Length} tiledCapacity={tiledCapacity} linearCapacity={linearCapacity}.");
@@ -478,6 +479,7 @@ public sealed unsafe class GpuTiler : IDisposable
 
     private void Record(bool tile, VkBuffer source, ulong sourceOffset, ulong sourceCapacity, VkBuffer target, ulong targetOffset, ulong targetCapacity, List<TransferDispatch> dispatches, bool clearTarget)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTiling);
         var vk = _device.Vk;
         var descriptorAlignment = StorageAlignment;
         var sourceDescriptorOffset = sourceOffset & ~(descriptorAlignment - 1);

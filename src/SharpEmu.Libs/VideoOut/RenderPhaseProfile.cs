@@ -54,6 +54,40 @@ internal static class RenderPhaseProfile
         Present,
         /// <summary>vkQueuePresentKHR.</summary>
         QueuePresent,
+        BufferFaults,
+        ImageReadback,
+        ImageCollect,
+        BufferCollect,
+        ImageLookup,
+        ImageAcquire,
+        ImageCreate,
+        ImageDelete,
+        ImageRefresh,
+        ImageUpload,
+        ImageDownload,
+        ImageOverlap,
+        ImageTracking,
+        ImageTiling,
+        ImageTransitions,
+        DrawResources,
+        ComputeResources,
+        BufferResources,
+        DescriptorSetup,
+        PipelineSetup,
+        RenderPassSetup,
+        DrawRecording,
+        ResourceDestroy,
+        ImageVersions,
+        QueueRelay,
+        WindowLoop,
+        WindowEvents,
+        CursorUpdate,
+        GamepadPoll,
+        WindowState,
+        WindowDelay,
+        QueueContext,
+        FollowupWait,
+        PresentationPreparation,
         Count,
     }
 
@@ -101,6 +135,7 @@ internal static class RenderPhaseProfile
     // the per-scope cost to two timestamp reads.
     [ThreadStatic] private static Phase _current;
     [ThreadStatic] private static long _lastTimestamp;
+    [ThreadStatic] private static int _scopeDepth;
 
     internal readonly ref struct Scope
     {
@@ -121,6 +156,7 @@ internal static class RenderPhaseProfile
             }
 
             Charge(_previous);
+            _scopeDepth--;
         }
     }
 
@@ -132,9 +168,14 @@ internal static class RenderPhaseProfile
         }
 
         var previous = Charge(phase);
+        _scopeDepth++;
         _entries[(int)phase]++;
         return new Scope(previous);
     }
+
+    // Cache calls on other threads must not enter the render-thread counters.
+    internal static Scope MeasureDetail(Phase phase) =>
+        _scopeDepth > 0 ? Measure(phase) : default;
 
     public static void RecordOrderedAction(string debugName, bool completed)
     {
@@ -191,7 +232,7 @@ internal static class RenderPhaseProfile
         var frames = _frames;
         _frames = 0;
 
-        var parts = new List<(Phase Phase, double Percent, long Entries)>((int)Phase.Count);
+        var parts = new List<(Phase Phase, double Percent, long Entries, double Milliseconds)>((int)Phase.Count);
         var accounted = 0L;
         for (var index = 0; index < (int)Phase.Count; index++)
         {
@@ -205,7 +246,8 @@ internal static class RenderPhaseProfile
                 continue;
             }
 
-            parts.Add(((Phase)index, phaseTicks * 100.0 / elapsedTicks, entries));
+            parts.Add(((Phase)index, phaseTicks * 100.0 / elapsedTicks, entries,
+                phaseTicks * 1000.0 / Stopwatch.Frequency));
         }
 
         parts.Sort(static (left, right) => right.Percent.CompareTo(left.Percent));
@@ -217,6 +259,10 @@ internal static class RenderPhaseProfile
                 parts.Select(part =>
                     $"{part.Phase}={part.Percent:F1}%" +
                     (part.Entries > 0 ? $"/n{part.Entries}" : string.Empty))));
+
+        Console.Error.WriteLine(
+            $"[PERF][RENDER_MS] window_s={seconds:F1} frames={frames} " +
+            string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
         if (OrderedActionDetailsEnabled && _orderedActions.Count != 0)
         {
