@@ -288,7 +288,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var encodeForPresent = false;
             Image encodeImage = default;
             if (IsLinearFloatPresentSource(source.Format) &&
-                GetSrgbCounterpart(_swapchainFormat) != Format.Undefined)
+                GetSrgbCounterpart(PresentationTargetFormat) != Format.Undefined)
             {
                 encodeForPresent = TryGetPresentEncodeImage(out encodeImage);
             }
@@ -377,11 +377,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 var clearRange = ColorSubresourceRange();
                 _vk.CmdClearColorImage(
                     _commandBuffer,
-                    presentationTarget,
+                    encodeForPresent ? encodeImage : presentationTarget,
                     ImageLayout.TransferDstOptimal,
                     &clearColor,
                     1,
                     &clearRange);
+                var clearComplete = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
+                    0, 1, &clearComplete, 0, null, 0, null);
             }
 
             var sourceOffsets = new ImageBlit.SrcOffsetsBuffer
@@ -425,7 +434,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 destinationWidth % sourceWidth == 0 && destinationHeight % sourceHeight == 0;
             var preserveEncodedSrgb =
                 !encodeForPresent &&
-                CanCopyEncodedSrgbPresentSource(source.Format, _swapchainFormat) &&
+                CanCopyEncodedSrgbPresentSource(source.Format, PresentationTargetFormat) &&
                 sourceWidth == destinationWidth &&
                 sourceHeight == destinationHeight;
             if (preserveEncodedSrgb)
@@ -508,7 +517,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _commandBuffer,
                     encodeImage,
                     ImageLayout.TransferSrcOptimal,
-                    _swapchainImages[imageIndex],
+                    presentationTarget,
                     ImageLayout.TransferDstOptimal,
                     1,
                     &encodedCopy);
