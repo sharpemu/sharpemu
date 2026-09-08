@@ -499,6 +499,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // retries after GPU progress instead of blocking the drain.
             if (!_scheduler.IsTickComplete(targetTimeline))
             {
+                _blockedGuestWorkTicks[_activeGuestWorkSequence] = targetTimeline;
                 return false;
             }
 

@@ -32,6 +32,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     private readonly RecordingBuffer _command;
     private readonly Action<SubmitBundle>? _prepareSubmit;
     private readonly Action<ulong>? _submitted;
+    private readonly Action<ulong>? _completed;
     private readonly Queue<TickWork> _pending = new();
     private readonly Queue<TickWork> _priority = new();
     private readonly object _operationLock = new();
@@ -48,11 +49,13 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         IGpuTickDevice device,
         IRenderingState rendering,
         Action<SubmitBundle>? prepareSubmit = null,
-        Action<ulong>? submitted = null)
+        Action<ulong>? submitted = null,
+        Action<ulong>? completed = null)
     {
         _device = device;
         _prepareSubmit = prepareSubmit;
         _submitted = submitted;
+        _completed = completed;
         _timeline = new TickTimeline(device);
         _ring = new TickedBufferRing(device, _timeline);
         _command = new RecordingBuffer(this, device, rendering);
@@ -412,11 +415,21 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         bool submitted;
         string failure;
         ulong tick;
-        lock (_device.QueueGate)
+        // Keep completion notifications before callbacks for the next recording tick.
+        lock (_operationLock)
         {
-            tick = _timeline.ReserveTick();
-            submit.AddSignal(_timeline.Handle, tick);
-            submitted = _device.TrySubmit(buffer, submit, out failure);
+            lock (_device.QueueGate)
+            {
+                tick = _timeline.ReserveTick();
+                submit.AddSignal(_timeline.Handle, tick);
+                submitted = _device.TrySubmit(buffer, submit, out failure);
+            }
+
+            if (submitted && _completed is { } completed)
+            {
+                _priority.Enqueue(new TickWork(() => completed(tick), tick));
+                Monitor.Pulse(_operationLock);
+            }
         }
 
         if (!submitted)

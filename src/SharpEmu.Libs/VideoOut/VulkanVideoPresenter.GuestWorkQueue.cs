@@ -1395,12 +1395,18 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    private static bool HasReadyGuestWorkLocked(HashSet<string>? excludedQueues)
+    private static bool HasReadyGuestWorkLocked(
+        HashSet<string>? excludedQueues,
+        IReadOnlyDictionary<long, ulong>? blockedTicks = null,
+        ulong completedTick = 0)
     {
         foreach (var (queueName, queue) in _pendingGuestWorkByQueue)
         {
             if (excludedQueues?.Contains(queueName) != true &&
                 queue.First is { } first &&
+                (blockedTicks is null ||
+                 !blockedTicks.TryGetValue(first.Value.Sequence, out var requiredTick) ||
+                 requiredTick <= completedTick) &&
                 IsGuestWorkCompletedLocked(first.Value.RequiredSequence))
             {
                 return true;

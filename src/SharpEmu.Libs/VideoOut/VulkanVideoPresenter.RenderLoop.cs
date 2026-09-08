@@ -13,6 +13,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class Presenter
     {
         // This partial drives the Vulkan presenter render loop.
+        private readonly Dictionary<long, ulong> _blockedGuestWorkTicks = new();
         private void ProcessGuestCacheReadbacks()
         {
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferFaults))
@@ -49,8 +50,9 @@ internal static unsafe partial class VulkanVideoPresenter
             lock (_gate)
             {
                 if (_closed ||
+                    Volatile.Read(ref _presenterCloseRequested) ||
                     _relay.HasPendingCommands ||
-                    _pendingGuestWorkCount > 0 ||
+                    HasReadyGuestWorkLocked(null, _blockedGuestWorkTicks, _scheduler.Timeline.CompletedTick) ||
                     (_latestPresentation is { } latest &&
                      latest.Sequence != _presentedSequence &&
                      latest.RequiredGuestWorkSequence <= _completedGuestWorkSequence))
@@ -82,6 +84,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RenderCore()
         {
+            _blockedGuestWorkTicks.Clear();
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed);
             RenderDocCapture.DiscardTimedOutFrame();
 

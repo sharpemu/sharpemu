@@ -21,6 +21,100 @@ public sealed class PresenterSubmissionTests
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
 
     [Fact]
+    public async Task SubmissionCompletion_WakesForTheSubmittedTickBeforeFutureCallbacks()
+    {
+        var device = new FakeTickDevice();
+        var firstCompletion = new TaskCompletionSource<ulong>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var futureCallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var scheduler = new SubmissionScheduler(device, new RecordingRenderingState(),
+            completed: tick => firstCompletion.TrySetResult(tick));
+        scheduler.Begin(new SubmissionContext { QueueName = "test.queue" });
+        try
+        {
+            Assert.Equal(1UL, scheduler.Flush());
+            scheduler.QueuePriorityCompletionAction(() => futureCallback.TrySetResult());
+            Assert.False(firstCompletion.Task.IsCompleted);
+            device.Complete(1);
+            Assert.Equal(1UL, await firstCompletion.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(futureCallback.Task.IsCompleted);
+            Assert.Equal(2UL, scheduler.CurrentTick);
+            scheduler.Flush();
+            device.Complete(2);
+            await futureCallback.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            device.CompleteOnSubmit = true;
+            device.Complete(ulong.MaxValue);
+        }
+    }
+
+    [Fact]
+    public void SubmissionCompletion_AlreadyFinishedTicksAreNotLost()
+    {
+        var device = new FakeTickDevice { CompleteOnSubmit = true };
+        var completedTicks = new System.Collections.Concurrent.ConcurrentQueue<ulong>();
+        using var scheduler = new SubmissionScheduler(device, new RecordingRenderingState(),
+            completed: completedTicks.Enqueue);
+        scheduler.Begin(new SubmissionContext { QueueName = "test.queue" });
+        scheduler.Flush();
+        scheduler.Flush();
+        scheduler.WaitForAllPriorityOperations();
+        Assert.Equal(new ulong[] { 1, 2 }, completedTicks.ToArray());
+        scheduler.Shutdown();
+        Assert.Equal(new ulong[] { 1, 2, 3 }, completedTicks.ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SubmissionCompletion_WakesThePresenterWithoutLosingEarlyCompletion(bool completeBeforeWait)
+    {
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var gate = typeof(VulkanVideoPresenter).GetField("_gate", staticMembers)!.GetValue(null)!;
+        var wake = PresenterType.GetMethod("WakeRenderThread", staticMembers)!.CreateDelegate<Action>();
+        var device = new FakeTickDevice();
+        using var scheduler = new SubmissionScheduler(device, new RecordingRenderingState(), completed: _ => wake());
+        scheduler.Begin(new SubmissionContext { QueueName = "test.queue" });
+        scheduler.Flush();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? waiter = null;
+        try
+        {
+            if (completeBeforeWait)
+            {
+                device.Complete(1);
+                scheduler.WaitForAllPriorityOperations();
+            }
+
+            waiter = Task.Run(() =>
+            {
+                lock (gate)
+                {
+                    entered.SetResult();
+                    while (scheduler.Timeline.CompletedTick < 1)
+                    {
+                        Assert.True(Monitor.Wait(gate, TimeSpan.FromSeconds(5)), "Completion did not wake the presenter.");
+                    }
+                }
+            });
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            device.Complete(1);
+            await waiter.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            device.CompleteOnSubmit = true;
+            device.Complete(ulong.MaxValue);
+            wake();
+            if (waiter is not null)
+            {
+                await waiter.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+    }
+
+    [Fact]
     public void RenderProfile_DetailRequiresAnActiveScopeAndRestoresItsParent()
     {
         const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
@@ -122,14 +216,15 @@ public sealed class PresenterSubmissionTests
         var count = owner.GetField("_pendingGuestWorkCount", staticMembers)!;
         var completed = owner.GetField("_completedGuestWorkSequence", staticMembers)!;
         var wait = owner.GetMethod("WaitForFollowupGuestWork", staticMembers)!;
+        var ready = owner.GetMethod("HasReadyGuestWorkLocked", staticMembers)!;
         var pendingType = owner.GetNestedType("PendingGuestWork", BindingFlags.NonPublic)!;
         var queueType = typeof(LinkedList<>).MakeGenericType(pendingType);
 
-        object CreateQueue(string name, long dependency)
+        object CreateQueue(string name, long dependency, long sequence = 1)
         {
             var queue = Activator.CreateInstance(queueType)!;
             var work = Activator.CreateInstance(pendingType,
-                [new object(), 0UL, 1L, dependency, 0L, new VulkanGuestQueueIdentity(name, 1)])!;
+                [new object(), 0UL, sequence, dependency, 0L, new VulkanGuestQueueIdentity(name, 1)])!;
             queueType.GetMethod("AddLast", [pendingType])!.Invoke(queue, [work]);
             return queue;
         }
@@ -155,6 +250,13 @@ public sealed class PresenterSubmissionTests
                 queues["sibling"] = CreateQueue("sibling", 0);
                 Assert.True(HasFollowup(new HashSet<string> { "blocked" }));
                 Assert.False(HasFollowup(new HashSet<string> { "blocked", "sibling" }));
+                var blockedTicks = new Dictionary<long, ulong> { [1] = 7 };
+                Assert.False((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
+                Assert.True((bool)ready.Invoke(null, [null, blockedTicks, 7UL])!);
+                queues["sibling"] = CreateQueue("sibling", 0, 2);
+                Assert.True((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
+                queues["sibling"] = CreateQueue("sibling", long.MaxValue, 2);
+                Assert.False((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
                 Assert.Equal(2, queues.Count);
             }
             finally

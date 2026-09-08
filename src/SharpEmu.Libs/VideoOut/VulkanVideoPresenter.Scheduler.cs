@@ -54,7 +54,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 new VulkanTickDevice(_vk, _device, _queue, _queueFamilyIndex, _queueGate),
                 this,
                 PrepareGuestSubmission,
-                CompleteGuestSubmission);
+                CompleteGuestSubmission,
+                _ => WakeRenderThread());
 
         // Both stores share the manager's page guard and read guest memory through its address space.
         private static (GuestGpuMemory Memory, ICpuMemory Guest, IGuestBackedSpace Backing) RequireGuestMemory(string store)
