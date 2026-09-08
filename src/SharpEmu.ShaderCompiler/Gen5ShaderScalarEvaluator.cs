@@ -2771,15 +2771,21 @@ public static partial class Gen5ShaderScalarEvaluator
             }
             else
             {
+                var observedEnd = checked(
+                    byteOffset +
+                    (ulong)Math.Max(instruction.Destinations.Count, 1) * sizeof(uint));
                 var requiredBytes = Math.Max(
                     256UL * 1024UL,
-                    checked(
-                        byteOffset +
-                        (ulong)Math.Max(instruction.Destinations.Count, 1) *
-                        sizeof(uint)));
+                    observedEnd);
                 requiredBytes = Math.Min(
                     (requiredBytes + 4095UL) & ~4095UL,
                     MaxGlobalMemoryBindingBytes);
+                if ((baseAddress & 3UL) == 0 &&
+                    TryGetScalarLoadBindingExtent(state, scalarBase.Value, out var boundedExtent) &&
+                    observedEnd <= boundedExtent)
+                {
+                    requiredBytes = boundedExtent;
+                }
                 var pooled = TryReadGlobalMemory(
                     ctx,
                     baseAddress,
@@ -3066,6 +3072,80 @@ public static partial class Gen5ShaderScalarEvaluator
             $"desc=[{descriptor}] " +
             $"base_addr=0x{baseAddress:X16} imm={control.ImmediateOffsetBytes}" +
             $"{dynamic} address=0x{address:X16}";
+    }
+
+    private static bool TryGetScalarLoadBindingExtent(
+        Gen5ShaderState state,
+        uint scalarBase,
+        out ulong extent)
+    {
+        extent = 0;
+        foreach (var load in state.Program.Instructions)
+        {
+            if (load.Control is Gen5GlobalMemoryControl globalMemory &&
+                (globalMemory.UsesFlatAddress || globalMemory.ScalarAddress == scalarBase) ||
+                load.Control is Gen5BufferMemoryControl bufferMemory &&
+                bufferMemory.ScalarResource == scalarBase)
+            {
+                return false;
+            }
+
+            if (load.Control is not Gen5ScalarMemoryControl memory ||
+                load.Sources.Count == 0 ||
+                load.Sources[0] != Gen5Operand.Scalar(scalarBase))
+            {
+                continue;
+            }
+
+            if (!load.Opcode.StartsWith("SLoadDword", StringComparison.Ordinal) ||
+                memory.ImmediateOffsetBytes < 0)
+            {
+                return false;
+            }
+
+            uint maximumOffset = 0;
+            if (memory.DynamicOffsetRegister is { } offsetRegister)
+            {
+                var definition = GetScalarSsa(state).GetReachingDefinitionAt(load.Pc, offsetRegister);
+                if (definition.State != Ir.IrReachingState.Single)
+                {
+                    return false;
+                }
+
+                var writer = state.Program.Instructions.FirstOrDefault(
+                    candidate => candidate.Pc == definition.DefinitionPc);
+                if (writer is not { Opcode: "SAndB32", Sources.Count: 2, Destinations.Count: 1 } ||
+                    writer.Destinations[0] != Gen5Operand.Scalar(offsetRegister))
+                {
+                    return false;
+                }
+
+                // A constant mask bounds every runtime offset, not only the sampled value.
+                var hasConstantMask = false;
+                maximumOffset = uint.MaxValue;
+                foreach (var source in writer.Sources)
+                {
+                    if (source.Kind is Gen5OperandKind.LiteralConstant or Gen5OperandKind.EncodedConstant &&
+                        TryEvaluateScalarOperand(source, Array.Empty<uint>(), out var mask))
+                    {
+                        maximumOffset &= mask;
+                        hasConstantMask = true;
+                    }
+                }
+
+                if (!hasConstantMask)
+                {
+                    return false;
+                }
+            }
+
+            var destinationCount = Math.Max(memory.DestinationCount, (uint)Math.Max(load.Destinations.Count, 1));
+            var loadEnd = (ulong)maximumOffset + (uint)memory.ImmediateOffsetBytes + (ulong)destinationCount * sizeof(uint);
+            extent = Math.Max(extent, loadEnd);
+        }
+
+        // Keep the conservative path if any use has no proven bound.
+        return extent is > 0 and <= MaxGlobalMemoryBindingBytes;
     }
 
     private static bool TryEvaluateScalarOperand(
