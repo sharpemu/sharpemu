@@ -35,6 +35,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Vulkan" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
+    <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 
   <PropertyGroup>

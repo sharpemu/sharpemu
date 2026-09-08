@@ -69,7 +69,7 @@ public unsafe class GpuBuffer : IDisposable
         foreach (var candidate in RankMemoryTypes(device, requirements.MemoryTypeBits, usage))
         {
             allocateInfo.MemoryTypeIndex = candidate;
-            result = vk.AllocateMemory(device.Device, &allocateInfo, null, out _memory);
+            result = device.AllocateMemory(allocateInfo, out _memory);
             if (result == Result.Success)
             {
                 break;
@@ -118,7 +118,7 @@ public unsafe class GpuBuffer : IDisposable
 
     public bool IsDeleted { get; set; }
 
-    public int LruId { get; set; }
+    public int RecencyEntryIndex { get; set; }
 
     protected GpuDeviceInfo Device => _device;
 
@@ -240,7 +240,7 @@ public unsafe class GpuBuffer : IDisposable
         }
 
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
-        _device.Vk.FreeMemory(_device.Device, _memory, null);
+        _device.FreeMemory(_memory);
         _handle = default;
         _memory = default;
     }

@@ -406,6 +406,32 @@ var faultPath = Path.Combine(outputDirectory, "fault-buffer-process-cs.spv");
 File.WriteAllBytes(faultPath, faultShader);
 Console.WriteLine($"[fault-buffer-process] emit: {faultShader.Length} bytes -> {faultPath}");
 
+// The tiler, depth-conversion, channel-swap and blit modules are assembled per variant.
+var fixedModules = new List<(string Name, byte[] Spirv)>();
+foreach (var shape in Enum.GetValues<TilerBlockShape>())
+{
+    foreach (var bytes in new uint[] { 1, 2, 4, 8, 16 })
+    {
+        fixedModules.Add(($"tiler-{shape.ToString().ToLowerInvariant()}-{bytes}-detile", TilerShaders.CreateBlockCopy(shape, bytes, toTiled: false)));
+        fixedModules.Add(($"tiler-{shape.ToString().ToLowerInvariant()}-{bytes}-tile", TilerShaders.CreateBlockCopy(shape, bytes, toTiled: true)));
+    }
+}
+
+fixedModules.Add(("d16-widen-d24", TilerShaders.CreateDepthWiden(d32: false)));
+fixedModules.Add(("d16-widen-d32", TilerShaders.CreateDepthWiden(d32: true)));
+fixedModules.Add(("d16-narrow-d24", TilerShaders.CreateDepthNarrow(d32: false)));
+fixedModules.Add(("d16-narrow-d32", TilerShaders.CreateDepthNarrow(d32: true)));
+fixedModules.Add(("bgra16-swap", TilerShaders.CreateBgra16Swap()));
+fixedModules.Add(("blit-vert", BlitShaders.CreateFullscreenTriangleVertex()));
+fixedModules.Add(("blit-ms-depth-frag", BlitShaders.CreateColorToMultisampleDepthFragment()));
+fixedModules.Add(("ms-depth-sample-readback-cs", BlitShaders.CreateMultisampleDepthSampleReadback()));
+foreach (var (moduleName, spirv) in fixedModules)
+{
+    var modulePath = Path.Combine(outputDirectory, $"{moduleName}.spv");
+    File.WriteAllBytes(modulePath, spirv);
+    Console.WriteLine($"[{moduleName}] emit: {spirv.Length} bytes -> {modulePath}");
+}
+
 Console.WriteLine(failures == 0
     ? "RESULT: all programs behaved as expected"
     : $"RESULT: {failures} unexpected outcome(s)");

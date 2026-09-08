@@ -39,8 +39,6 @@ internal static unsafe partial class VulkanVideoPresenter
     // to reach the presenter.  Reference counts let failed/completed work
     // retire its reservation without leaving a permanent false cache hit.
     private readonly record struct PendingGuestImageUpload(int Count, long OwnerSequence);
-    private static readonly Dictionary<(ulong Address, uint Format), PendingGuestImageUpload>
-        _pendingGuestImageUploads = new();
     private static readonly bool _traceGuestImageEvents =
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
@@ -302,17 +300,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            foreach (var target in targets)
-            {
-                var guestTextureFormat = GetGuestTextureFormat(
-                    target.Format,
-                    target.NumberType);
-                if (guestTextureFormat != 0)
-                {
-                    _availableGuestImages[target.Address] = guestTextureFormat;
-                }
-            }
-
             var workSequence = EnqueueGuestWorkLocked(
                 new VulkanOffscreenGuestDraw(
                     new VulkanTranslatedGuestDraw(
@@ -397,141 +384,6 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    private sealed record VulkanGuestImageWrite(
-        ulong Address,
-        byte[]? Pixels,
-        uint FillValue,
-        uint RowOffset = 0,
-        ulong ExactByteCount = 0,
-        uint FillValue1 = 0,
-        uint FillValue2 = 0,
-        uint FillValue3 = 0);
-
-    private readonly record struct PendingGuestImageBufferClear(
-        ulong ByteCount,
-        uint PackedValue0,
-        uint PackedValue1,
-        uint PackedValue2,
-        uint PackedValue3);
-
-    private static readonly ConcurrentDictionary<ulong, PendingGuestImageBufferClear>
-        _pendingGuestImageBufferClears = new();
-    private static readonly bool _traceGuestImageBufferClears =
-        _traceGuestImageEvents ||
-        string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_META_SURFACES"),
-            "1",
-            StringComparison.Ordinal);
-    private static readonly ConcurrentDictionary<
-        (ulong Address, ulong RequestedBytes, ulong RegisteredBytes,
-         uint PackedValue, string Result), byte>
-        _tracedGuestImageBufferClearResults = new();
-
-    private static void TraceGuestImageBufferClear(
-        ulong address,
-        ulong requestedBytes,
-        ulong registeredBytes,
-        uint packedValue,
-        string result)
-    {
-        if (!_traceGuestImageBufferClears ||
-            !_tracedGuestImageBufferClearResults.TryAdd(
-                (address, requestedBytes, registeredBytes, packedValue, result),
-                0))
-        {
-            return;
-        }
-
-        Console.Error.WriteLine(
-            $"[LOADER][TRACE] vk.guest_image_buffer_clear " +
-            $"addr=0x{address:X16} requested={requestedBytes} " +
-            $"registered={registeredBytes} packed=0x{packedValue:X8} " +
-            $"result={result}");
-    }
-
-    /// <summary>
-    /// Reports the extent of a live guest image so DMA writes to its backing
-    /// memory can be mirrored into the Vulkan image (PS5 render targets alias
-    /// guest memory, so CP DMA fills/copies are visible to later GPU reads).
-    /// </summary>
-
-    internal static void SubmitGuestImageFill(ulong address, uint fillValue)
-    {
-        lock (_gate)
-        {
-            if (_closed || !_guestImageExtents.ContainsKey(address))
-            {
-                return;
-            }
-
-            _guestImageWorkSequences[address] = EnqueueGuestWorkLocked(
-                new VulkanGuestImageWrite(address, null, fillValue));
-        }
-    }
-
-    private static readonly ConcurrentDictionary<ulong, byte> _pendingGuestColorClears = new();
-
-    /// <summary>
-    /// Clear a guest colour target to zero at its next render pass.
-    ///
-    /// Deliberately not <see cref="SubmitOffscreenColorClear"/>: that enqueues
-    /// a CmdClearColorImage which lands outside the render pass that follows
-    /// it, so a target cleared this way was still observed reading back its
-    /// previous contents. Dropping <c>Initialized</c> makes the render pass
-    /// itself clear via <see cref="AttachmentLoadOp.Clear"/>.
-    /// </summary>
-    internal static void RequestGuestColorClear(ulong address)
-    {
-        if (address != 0)
-        {
-            _pendingGuestColorClears[address] = 0;
-        }
-    }
-
-    internal static long SubmitGuestImageClearFromBuffer(
-        ulong address,
-        ulong byteCount,
-        uint packedValue) =>
-        SubmitGuestImagePatternFromBuffer(
-            address,
-            byteCount,
-            packedValue,
-            packedValue,
-            packedValue,
-            packedValue);
-
-    internal static long SubmitGuestImagePatternFromBuffer(
-        ulong address,
-        ulong byteCount,
-        uint packedValue0,
-        uint packedValue1,
-        uint packedValue2,
-        uint packedValue3)
-    {
-        if (address == 0 || byteCount == 0)
-        {
-            return 0;
-        }
-
-        lock (_gate)
-        {
-            if (_closed)
-            {
-                return 0;
-            }
-
-            return EnqueueGuestWorkLocked(
-                new VulkanGuestImageWrite(
-                    address,
-                    Pixels: null,
-                    FillValue: packedValue0,
-                    ExactByteCount: byteCount,
-                    FillValue1: packedValue1,
-                    FillValue2: packedValue2,
-                    FillValue3: packedValue3));
-        }
-    }
-
     /// <summary>
     /// Apply a solid color clear to offscreen guest render targets without a
     /// graphics pipeline. Used for empty-SRT procedural clear draws that
@@ -567,17 +419,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            foreach (var target in targets)
-            {
-                var guestTextureFormat = GetGuestTextureFormat(
-                    target.Format,
-                    target.NumberType);
-                if (guestTextureFormat != 0)
-                {
-                    _availableGuestImages[target.Address] = guestTextureFormat;
-                }
-            }
-
             var workSequence = EnqueueGuestWorkLocked(
                 new VulkanOffscreenColorClear(
                     targets.ToArray(),
@@ -590,20 +431,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _guestImageWorkSequences[target.Address] = workSequence;
             }
-        }
-    }
-
-    internal static void SubmitGuestImageWrite(ulong address, byte[] pixels, uint rowOffset = 0)
-    {
-        lock (_gate)
-        {
-            if (_closed || !_guestImageExtents.ContainsKey(address))
-            {
-                return;
-            }
-
-            _guestImageWorkSequences[address] = EnqueueGuestWorkLocked(
-                new VulkanGuestImageWrite(address, pixels, 0, rowOffset));
         }
     }
 
@@ -735,14 +562,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     threadCountX,
                     threadCountY,
                     threadCountZ));
-            foreach (var key in GetStorageImageUploadKeys(textures))
-            {
-                _pendingGuestImageUploads[key] =
-                    _pendingGuestImageUploads.TryGetValue(key, out var pendingUpload)
-                        ? pendingUpload with { Count = checked(pendingUpload.Count + 1) }
-                        : new PendingGuestImageUpload(1, workSequence);
-            }
-
             foreach (var texture in textures)
             {
                 if (texture.IsStorage && texture.Address != 0)
@@ -765,14 +584,17 @@ internal static unsafe partial class VulkanVideoPresenter
     /// before it. The render thread flushes its open batch and waits for the
     /// corresponding guest fences before invoking the action.
     /// </summary>
-    public static long SubmitOrderedGuestAction(Action action, string debugName)
+    public static long SubmitOrderedGuestAction(Action action, string debugName, bool completesSubmission = false)
     {
         ArgumentNullException.ThrowIfNull(action);
         lock (_gate)
         {
             return _closed || _thread is null
                 ? 0
-                : EnqueueGuestWorkLocked(new VulkanOrderedGuestAction(action, debugName));
+                : EnqueueGuestWorkLocked(new VulkanOrderedGuestAction(action, debugName)
+                {
+                    CollectionPending = completesSubmission,
+                });
         }
     }
 
@@ -981,72 +803,25 @@ internal static unsafe partial class VulkanVideoPresenter
         uint depth) =>
         checked(GetGuestImageByteCount(format, width, height) * Math.Max(depth, 1u));
 
-    // Guest memory handle for render-thread self-healing: when a draw whose
-    // texel copy was skipped misses the texture cache (eviction, cache
-    // clear, or any other race), the presenter re-reads the texels itself
-    // instead of showing a fallback pattern.
-    private static volatile SharpEmu.HLE.ICpuMemory? _guestMemory;
-
-    internal static void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
-        _guestMemory = memory;
-
-    // Display buffers registered through sceVideoOutRegisterBuffers remain
-    // valid flip targets even before AGC has rendered into them.
-
-    public static bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType)
+    // A hardware color resolve between two color targets runs in queue order through the image store.
+    public static bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination)
     {
-        if (sourceAddress == 0 ||
-            destinationAddress == 0 ||
-            sourceWidth == 0 ||
-            sourceHeight == 0 ||
-            destinationWidth == 0 ||
-            destinationHeight == 0 ||
-            !TryGetCopyFragmentShader(out var fragmentSpirv))
+        if (source.Address == 0 || destination.Address == 0 || source.Registers is null || destination.Registers is null)
         {
             return false;
         }
 
         lock (_gate)
         {
-            if (_closed ||
-                !_availableGuestImages.ContainsKey(sourceAddress) ||
-                GetGuestTextureFormat(destinationFormat, 0) == 0)
+            if (_closed)
             {
                 return false;
             }
+
+            var workSequence = EnqueueGuestWorkLocked(new VulkanGuestImageResolve(source, destination));
+            _guestImageWorkSequences[destination.Address] = workSequence;
         }
 
-        SubmitOffscreenTranslatedDraw(
-            fragmentSpirv,
-            [
-                new GuestDrawTexture(
-                    sourceAddress,
-                    sourceWidth,
-                    sourceHeight,
-                    sourceFormat,
-                    sourceNumberType,
-                    [],
-                    IsFallback: false,
-                    IsStorage: false),
-            ],
-            [],
-            attributeCount: 1,
-            new GuestRenderTarget(
-                destinationAddress,
-                destinationWidth,
-                destinationHeight,
-                destinationFormat,
-                destinationNumberType));
         return true;
     }
 
@@ -1334,7 +1109,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static bool IsPayloadBearingGuestWork(object work) => work is
         VulkanComputeGuestDispatch or
         VulkanOffscreenGuestDraw or
-        VulkanGuestImageWrite or
+        VulkanGuestImageResolve or
+        VulkanGuestImageClearFromBuffer or
         VulkanOffscreenColorClear;
 
     private static bool IsPrioritySyncGuestWork(object work) => work is
@@ -1407,26 +1183,8 @@ internal static unsafe partial class VulkanVideoPresenter
             VulkanComputeGuestDispatch compute => compute.Textures,
             _ => Array.Empty<GuestDrawTexture>(),
         };
-        var required = 0L;
-        foreach (var texture in textures)
-        {
-            if (!texture.IsStorage ||
-                texture.Address == 0 ||
-                texture.RgbaPixels.Length != 0)
-            {
-                continue;
-            }
-
-            var format = GetGuestTextureFormat(texture.Format, texture.NumberType);
-            if (_pendingGuestImageUploads.TryGetValue(
-                    (texture.Address, format),
-                    out var pendingUpload))
-            {
-                required = Math.Max(required, pendingUpload.OwnerSequence);
-            }
-        }
-
-        return required;
+        _ = textures;
+        return 0;
     }
 
     private static void RecordGuestImageWritersLocked(object work, long sequence)
@@ -1447,8 +1205,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     : Enumerable.Empty<ulong>())
                 .Concat(StorageAddresses(draw.Draw.Textures)),
             VulkanComputeGuestDispatch compute => StorageAddresses(compute.Textures),
-            VulkanGuestImageWrite imageWrite when imageWrite.Address != 0 =>
-                new[] { imageWrite.Address },
             _ => Array.Empty<ulong>(),
         };
         foreach (var address in addresses.Distinct())
@@ -1639,13 +1395,29 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    private static bool WaitForFollowupGuestWork(int timeoutMilliseconds)
+    private static bool HasReadyGuestWorkLocked(HashSet<string>? excludedQueues)
+    {
+        foreach (var (queueName, queue) in _pendingGuestWorkByQueue)
+        {
+            if (excludedQueues?.Contains(queueName) != true &&
+                queue.First is { } first &&
+                IsGuestWorkCompletedLocked(first.Value.RequiredSequence))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool WaitForFollowupGuestWork(int timeoutMilliseconds, HashSet<string>? excludedQueues)
     {
         lock (_gate)
         {
             if (_pendingGuestWorkCount > 0)
             {
-                return true;
+                // End the drain when only blocked queue heads remain.
+                return HasReadyGuestWorkLocked(excludedQueues);
             }
 
             if (_closed)
@@ -1654,7 +1426,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             System.Threading.Monitor.Wait(_gate, timeoutMilliseconds);
-            return _pendingGuestWorkCount > 0;
+            return HasReadyGuestWorkLocked(excludedQueues);
         }
     }
 
@@ -1674,7 +1446,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
-            ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
                 _completedGuestWorkSequence = pending.Sequence;
@@ -1713,7 +1484,6 @@ internal static unsafe partial class VulkanVideoPresenter
             GetTexturePayloadBytes(compute.Textures),
             GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
         VulkanOffscreenGuestDraw offscreen => GetDrawPayloadBytes(offscreen.Draw),
-        VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
         _ => 0,
     };
 
@@ -1800,53 +1570,5 @@ internal static unsafe partial class VulkanVideoPresenter
     private static ulong SaturatingAdd(ulong left, ulong right) =>
         ulong.MaxValue - left < right ? ulong.MaxValue : left + right;
 
-    private static void ReleasePendingGuestImageUploadsLocked(object work)
-    {
-        if (work is not VulkanComputeGuestDispatch compute)
-        {
-            return;
-        }
-
-        foreach (var key in GetStorageImageUploadKeys(compute.Textures))
-        {
-            if (!_pendingGuestImageUploads.TryGetValue(key, out var pendingUpload))
-            {
-                continue;
-            }
-
-            if (pendingUpload.Count <= 1)
-            {
-                _pendingGuestImageUploads.Remove(key);
-            }
-            else
-            {
-                _pendingGuestImageUploads[key] = pendingUpload with
-                {
-                    Count = pendingUpload.Count - 1,
-                };
-            }
-        }
-    }
-
-    private static HashSet<(ulong Address, uint Format)> GetStorageImageUploadKeys(
-        IReadOnlyList<GuestDrawTexture> textures)
-    {
-        var keys = new HashSet<(ulong Address, uint Format)>();
-        foreach (var texture in textures)
-        {
-            if (!texture.IsStorage || texture.Address == 0)
-            {
-                continue;
-            }
-
-            var format = GetGuestTextureFormat(texture.Format, texture.NumberType);
-            if (format != 0)
-            {
-                keys.Add((texture.Address, format));
-            }
-        }
-
-        return keys;
-    }
 
 }

@@ -5,6 +5,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
@@ -196,7 +197,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         MemoryPropertyFlags.DeviceLocalBit),
                 };
                 Check(
-                    _vk.AllocateMemory(_device, &allocationInfo, null, out _presentEncodeMemory),
+                    _deviceInfo.AllocateMemory(allocationInfo, out _presentEncodeMemory),
                     "vkAllocateMemory(present encode)");
                 Check(
                     _vk.BindImageMemory(_device, _presentEncodeImage, _presentEncodeMemory, 0),
@@ -222,7 +223,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (_presentEncodeMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _presentEncodeMemory, null);
+                _deviceInfo.FreeMemory(_presentEncodeMemory);
                 _presentEncodeMemory = default;
             }
 
@@ -283,9 +284,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Image = presentationTarget,
                 SubresourceRange = ColorSubresourceRange(),
             };
-            // Linear-float flips need a linear->sRGB encode on the way to a
-            // UNORM swapchain; sRGB (or unknown-counterpart) swapchains keep
-            // the direct blit.
+            // Encode linear floating-point colors before presentation to a UNORM target.
             var encodeForPresent = false;
             Image encodeImage = default;
             if (IsLinearFloatPresentSource(source.Format) &&
@@ -699,45 +698,42 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return destination;
         }
+        // Captures the display surface through the store in queue order; presentation reads the copy.
         private void ExecuteOrderedGuestFlip(VulkanOrderedGuestFlip work)
         {
             FlushBatchedGuestCommands();
-            _guestImages.TryGetValue(work.Address, out var source);
             if (_deviceLost ||
-                source is null ||
-                !source.Initialized)
+                !VideoOutExports.TryGetDisplayBufferInfo(work.VideoOutHandle, work.DisplayBufferIndex, out var displayBuffer) ||
+                displayBuffer.Address != work.Address)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] vk.flip_capture_failed version={work.Version} " +
-                    $"queue={_activeGuestQueue.Name} addr=0x{work.Address:X16} " +
-                    $"found={(source is not null)} initialized={(source?.Initialized ?? false)}");
+                    $"queue={_activeGuestQueue.Name} addr=0x{work.Address:X16} device_lost={_deviceLost}");
                 MarkGuestFlipVersionSafe(work);
                 return;
             }
 
+            RunGuestCacheCollection();
             EnsureGuestSubmissionCapacity();
-            var snapshot = CreateGuestFlipSnapshot(source, work.Version);
-            var commandBuffer = BeginBatchedGuestCommands();
             var submitted = false;
+            GuestImageResource? snapshot = null;
             try
             {
-                var barriers = stackalloc ImageMemoryBarrier[2];
-                barriers[0] = new ImageMemoryBarrier
-                {
-                    SType = StructureType.ImageMemoryBarrier,
-                    SrcAccessMask = AccessFlags.ShaderReadBit |
-                                    AccessFlags.ShaderWriteBit |
-                                    AccessFlags.ColorAttachmentWriteBit |
-                                    AccessFlags.TransferWriteBit,
-                    DstAccessMask = AccessFlags.TransferReadBit,
-                    OldLayout = ImageLayout.ShaderReadOnlyOptimal,
-                    NewLayout = ImageLayout.TransferSrcOptimal,
-                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                    Image = source.Image,
-                    SubresourceRange = ColorSubresourceRange(),
-                };
-                barriers[1] = new ImageMemoryBarrier
+                var surface = new DisplaySurfaceWords(
+                    displayBuffer.Address, 0, displayBuffer.PixelFormat, displayBuffer.Width, displayBuffer.Height, displayBuffer.TilingMode, 0, 0, 0, false);
+                var request = ImageRequestBuilders.DisplaySurface(surface);
+                _ = BeginBatchedGuestCommands();
+                var imageIdentifier = _imageCache.FindImage(ref request);
+                var source = _imageCache.GetImage(imageIdentifier);
+                source.Uses.VideoOut = true;
+                _imageCache.RefreshImage(imageIdentifier);
+                // The refresh can end the tick; the copy records into the buffer that is current now.
+                var commandBuffer = BeginBatchedGuestCommands();
+                var extent = source.Backing.Extent;
+                snapshot = CreateGuestFlipSnapshot(GetPresentationSnapshotFormat(source.Backing.Format),
+                    extent.Width, extent.Height, work.Address, work.Version);
+                source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, commandBuffer);
+                var toTransferDst = new ImageMemoryBarrier
                 {
                     SType = StructureType.ImageMemoryBarrier,
                     SrcAccessMask = 0,
@@ -750,53 +746,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     SubresourceRange = ColorSubresourceRange(),
                 };
                 _vk.CmdPipelineBarrier(
-                    commandBuffer,
-                    PipelineStageFlags.AllCommandsBit,
-                    PipelineStageFlags.TransferBit,
-                    0,
-                    0,
-                    null,
-                    0,
-                    null,
-                    2,
-                    barriers);
-
+                    commandBuffer, PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit, 0, 0, null, 0, null, 1, &toTransferDst);
                 var copy = new ImageCopy
                 {
-                    SrcSubresource = new ImageSubresourceLayers(
-                        ImageAspectFlags.ColorBit, 0, 0, 1),
-                    DstSubresource = new ImageSubresourceLayers(
-                        ImageAspectFlags.ColorBit, 0, 0, 1),
-                    Extent = new Extent3D(source.Width, source.Height, 1),
+                    SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    Extent = new Extent3D(extent.Width, extent.Height, 1),
                 };
                 _vk.CmdCopyImage(
-                    commandBuffer,
-                    source.Image,
-                    ImageLayout.TransferSrcOptimal,
-                    snapshot.Image,
-                    ImageLayout.TransferDstOptimal,
-                    1,
-                    &copy);
-
-                barriers[0] = new ImageMemoryBarrier
-                {
-                    SType = StructureType.ImageMemoryBarrier,
-                    SrcAccessMask = AccessFlags.TransferReadBit,
-                    DstAccessMask = AccessFlags.ShaderReadBit |
-                                    AccessFlags.ShaderWriteBit |
-                                    AccessFlags.ColorAttachmentWriteBit,
-                    OldLayout = ImageLayout.TransferSrcOptimal,
-                    NewLayout = ImageLayout.ShaderReadOnlyOptimal,
-                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                    Image = source.Image,
-                    SubresourceRange = ColorSubresourceRange(),
-                };
-                barriers[1] = new ImageMemoryBarrier
+                    commandBuffer, source.Backing.Handle, ImageLayout.TransferSrcOptimal, snapshot.Image, ImageLayout.TransferDstOptimal, 1, &copy);
+                var toShaderRead = new ImageMemoryBarrier
                 {
                     SType = StructureType.ImageMemoryBarrier,
                     SrcAccessMask = AccessFlags.TransferWriteBit,
-                    DstAccessMask = AccessFlags.ShaderReadBit,
+                    DstAccessMask = AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit,
                     OldLayout = ImageLayout.TransferDstOptimal,
                     NewLayout = ImageLayout.ShaderReadOnlyOptimal,
                     SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
@@ -805,32 +768,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     SubresourceRange = ColorSubresourceRange(),
                 };
                 _vk.CmdPipelineBarrier(
-                    commandBuffer,
-                    PipelineStageFlags.TransferBit,
-                    PipelineStageFlags.AllCommandsBit,
-                    0,
-                    0,
-                    null,
-                    0,
-                    null,
-                    2,
-                    barriers);
+                    commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 0, null, 1, &toShaderRead);
 
                 FlushBatchedGuestCommands();
                 submitted = true;
-                snapshot.Initialized = true;
                 _guestImageVersions.Add(work.Version, snapshot);
                 MarkGuestFlipVersionSafe(work);
 
                 lock (_gate)
                 {
                     var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-                    var isHdr =
-                        VideoOutExports.TryGetDisplayBufferInfo(
-                            work.VideoOutHandle,
-                            work.DisplayBufferIndex,
-                            out var displayBuffer) &&
-                        VideoOutExports.IsHdrPixelFormat(displayBuffer.PixelFormat);
                     var presentation = new Presentation(
                         null,
                         work.Width,
@@ -842,7 +789,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         IsSplash: false,
                         GuestImageAddress: work.Address,
                         GuestImageVersion: work.Version,
-                        IsHdr: isHdr);
+                        IsHdr: VideoOutExports.IsHdrPixelFormat(displayBuffer.PixelFormat));
                     _latestPresentation = presentation;
                     _pendingGuestImagePresentations.Enqueue(presentation);
                     while (_pendingGuestImagePresentations.Count > MaxPendingGuestFlipVersions)
@@ -852,15 +799,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 CollectAbandonedGuestImageVersions();
-
-                var effectivePitch = work.PitchInPixel == 0
-                    ? work.Width
-                    : work.PitchInPixel;
                 TraceVulkanShader(
                     $"vk.flip_capture version={work.Version} " +
                     $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
                     $"work_sequence={_activeGuestWorkSequence} addr=0x{work.Address:X16} " +
-                    $"size={work.Width}x{work.Height} pitch={effectivePitch}");
+                    $"size={extent.Width}x{extent.Height}");
                 RenderDocCapture.OnGuestFlipBoundary(work.Version);
             }
             finally
@@ -868,7 +811,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (!submitted)
                 {
                     MarkGuestFlipVersionSafe(work);
-                    DestroyGuestImage(snapshot);
+                    if (snapshot is not null)
+                    {
+                        DestroyGuestImage(snapshot);
+                    }
                 }
             }
         }
@@ -906,74 +852,51 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool _loggedFlipWaitOrderViolation;
 
-        private GuestImageResource CreateGuestFlipSnapshot(
-            GuestImageResource source,
-            long version)
+        private GuestImageResource CreateGuestFlipSnapshot(Format format, uint width, uint height, ulong address, long version)
         {
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
                 ImageType = ImageType.Type2D,
-                Format = source.Format,
-                Extent = new Extent3D(source.Width, source.Height, 1),
+                Format = format,
+                Extent = new Extent3D(width, height, 1),
                 MipLevels = 1,
                 ArrayLayers = 1,
                 Samples = SampleCountFlags.Count1Bit,
                 Tiling = ImageTiling.Optimal,
-                Usage = ImageUsageFlags.TransferSrcBit |
-                        ImageUsageFlags.TransferDstBit |
-                        ImageUsageFlags.SampledBit,
+                Usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
                 SharingMode = SharingMode.Exclusive,
                 InitialLayout = ImageLayout.Undefined,
             };
-            Check(
-                _vk.CreateImage(_device, &imageInfo, null, out var image),
-                "vkCreateImage(flip snapshot)");
+            Check(_vk.CreateImage(_device, &imageInfo, null, out var image), "vkCreateImage(flip snapshot)");
             _vk.GetImageMemoryRequirements(_device, image, out var requirements);
             var allocationInfo = new MemoryAllocateInfo
             {
                 SType = StructureType.MemoryAllocateInfo,
                 AllocationSize = requirements.Size,
-                MemoryTypeIndex = FindMemoryType(
-                    requirements.MemoryTypeBits,
-                    MemoryPropertyFlags.DeviceLocalBit),
+                MemoryTypeIndex = FindMemoryType(requirements.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
             };
             DeviceMemory memory = default;
             try
             {
-                Check(
-                    _vk.AllocateMemory(_device, &allocationInfo, null, out memory),
-                    "vkAllocateMemory(flip snapshot)");
-                Check(
-                    _vk.BindImageMemory(_device, image, memory, 0),
-                    "vkBindImageMemory(flip snapshot)");
+                Check(_deviceInfo.AllocateMemory(allocationInfo, out memory), "vkAllocateMemory(flip snapshot)");
+                Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(flip snapshot)");
             }
             catch
             {
-                if (memory.Handle != 0)
-                {
-                    _vk.FreeMemory(_device, memory, null);
-                }
+                _deviceInfo.FreeMemory(memory);
                 _vk.DestroyImage(_device, image, null);
                 throw;
             }
 
-            SetDebugName(
-                ObjectType.Image,
-                image.Handle,
-                $"guest flip v{version} source 0x{source.Address:X16}");
+            SetDebugName(ObjectType.Image, image.Handle, $"guest flip v{version} source 0x{address:X16}");
             return new GuestImageResource
             {
-                Address = source.Address,
+                Address = address,
                 FlipVersion = version,
-                Width = source.Width,
-                Height = source.Height,
-                LogicalWidth = source.LogicalWidth,
-                LogicalHeight = source.LogicalHeight,
-                MipLevels = 1,
-                TileMode = source.TileMode,
-                GuestFormat = source.GuestFormat,
-                Format = source.Format,
+                Width = width,
+                Height = height,
+                Format = format,
                 Image = image,
                 Memory = memory,
             };

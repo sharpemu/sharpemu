@@ -41,15 +41,6 @@ public sealed partial class DirectExecutionBackend
 			}
 			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
 			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
-
-			// The raw handler carries the guest-image write-fault bridge, so the
-			// path must be compiled before the first protected-page store can
-			// reach it. Guest code has not started yet, so warming here cannot
-			// race a real fault.
-			SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
-			Console.Error.WriteLine(
-				"[LOADER][INFO] Guest image CPU write tracking: " +
-				$"{(SharpEmu.HLE.GuestImageWriteTracker.Enabled ? "enabled" : "disabled")}");
 		}
 		else
 		{
@@ -65,33 +56,6 @@ public sealed partial class DirectExecutionBackend
 		}
 		_exceptionHandler = (nint)AddVectoredExceptionHandler(1u, _exceptionHandlerStub);
 		Console.Error.WriteLine($"[LOADER][INFO] Exception handler installed: 0x{_exceptionHandler:X16}");
-		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
-
-		if (SharpEmu.HLE.GuestImageWriteTracker.Enabled)
-		{
-			_guestImageWriteFaultHandlerStub = CreateGuestImageWriteFaultHandlerStub();
-			if (_guestImageWriteFaultHandlerStub == 0)
-			{
-				throw new InvalidOperationException(
-					"Failed to create native guest-image write-fault handler");
-			}
-
-			// Install this handler last with first priority. A tracked write fault
-			// must not reach a managed VEH callback while CoreCLR is in a managed
-			// memory-copy or presenter store.
-			_guestImageWriteFaultHandler = (nint)AddVectoredExceptionHandler(
-				1u,
-				_guestImageWriteFaultHandlerStub);
-			if (_guestImageWriteFaultHandler == 0)
-			{
-				throw new InvalidOperationException(
-					"Failed to install native guest-image write-fault handler");
-			}
-
-			Console.Error.WriteLine(
-				"[LOADER][INFO] Native guest-image write-fault handler installed: " +
-				$"0x{_guestImageWriteFaultHandler:X16}");
-		}
 
 		_unhandledFilterDelegate = UnhandledExceptionFilter;
 		_unhandledFilterHandle = GCHandle.Alloc(_unhandledFilterDelegate);

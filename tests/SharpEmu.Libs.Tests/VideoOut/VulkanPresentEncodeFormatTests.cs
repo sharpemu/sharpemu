@@ -10,6 +10,18 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanPresentEncodeFormatTests
 {
     [Theory]
+    [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]
+    [InlineData(Format.B8G8R8A8Unorm, Format.B8G8R8A8Unorm)]
+    [InlineData(Format.R8G8B8A8Unorm, Format.R8G8B8A8Unorm)]
+    [InlineData(Format.R16G16B16A16Sfloat, Format.R16G16B16A16Sfloat)]
+    [InlineData(Format.R32G32B32A32Sfloat, Format.R32G32B32A32Sfloat)]
+    public void PresentationSnapshotPreservesEncodedBytes(Format sourceFormat, Format expected)
+    {
+        Assert.Equal(expected, VulkanVideoPresenter.GetPresentationSnapshotFormat(sourceFormat));
+    }
+
+    [Theory]
     [InlineData(false, false, PipelineStageFlags.TransferBit)]
     [InlineData(false, true, PipelineStageFlags.TransferBit)]
     [InlineData(true, false, PipelineStageFlags.TopOfPipeBit)]

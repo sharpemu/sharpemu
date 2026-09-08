@@ -80,7 +80,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.DestroyBuffer(_device, buffer, null);
             if (memory.Handle != 0)
             {
-                _vk.FreeMemory(_device, memory, null);
+                _deviceInfo.FreeMemory(memory);
             }
         }
 
@@ -88,7 +88,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _vk.UnmapMemory(_device, allocation.Memory);
             _vk.DestroyBuffer(_device, allocation.Buffer, null);
-            _vk.FreeMemory(_device, allocation.Memory, null);
+            _deviceInfo.FreeMemory(allocation.Memory);
         }
 
     }

@@ -1000,14 +1000,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
-                                          Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
-                                          Description="{Binding [Options.Env.GuestImageCpuSync.Desc],
-                                                                Source={x:Static local:Localization.Instance},
-                                                                x:CompileBindings=False}">
-                          <ToggleSwitch x:Name="GameEnvGuestImageCpuSyncToggle"
-                                        Classes="optionToggle" />
-                        </local:SettingRow>
-                        <local:SettingRow Classes="optionRow"
                                           Label="SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"
                                           Description="{Binding [Options.Env.ForceSubmitOrphanPreambles.Desc],
                                                                 Source={x:Static local:Localization.Instance},
@@ -1389,21 +1381,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <StackPanel Spacing="16">
                   <Border Classes="optionsGroup">
                     <StackPanel Spacing="8">
-                      <local:SettingRow x:Name="RenderResolutionRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [Options.RenderResolution.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.RenderResolution.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="RenderResolutionBox"
-                                  Classes="optionValue"
-                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
-                                  HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" />
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
-
-                  <Border Classes="optionsGroup">
-                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="WindowModeRow"
                                         Classes="optionRow"
                         Label="{Binding [Options.WindowMode.Label], Source={x:Static local:Localization.Instance}}"
@@ -1534,11 +1511,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="EnvWritableApp0Row" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
                                         Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
-                      </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvGuestImageCpuSyncRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
-                                        Description="{Binding [Options.Env.GuestImageCpuSync.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvGuestImageCpuSyncToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="EnvForceSubmitOrphanPreamblesRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"

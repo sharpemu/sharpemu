@@ -83,13 +83,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            if (!TryValidateStorageImageBindings(work, out validationError))
-            {
-                LogRejectedComputeDispatch(work, validationError);
-                ReturnPooledGuestData(work);
-                return;
-            }
-
             TranslatedDrawResources? resources = null;
             CommandBuffer commandBuffer = default;
             var submitted = false;
@@ -135,8 +128,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             _commandBuffer,
                             resources,
                             PipelineStageFlags.ComputeShaderBit);
-                        RecordTextureUploads(resources, PipelineStageFlags.ComputeShaderBit);
-                        RecordStorageImagesForWrite(resources, PipelineStageFlags.ComputeShaderBit);
+                        RecordHostMovieUploads(resources.Textures, PipelineStageFlags.ComputeShaderBit);
                     }
                     else
                     {
@@ -193,11 +185,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         resources,
                         work.WritesGlobalMemory);
 
-                    if (isLastBatch)
-                    {
-                        RecordStorageImagesForRead(resources, PipelineStageFlags.ComputeShaderBit);
-                    }
-
                     EndDebugLabel(_commandBuffer);
 
                     TraceVulkanShader(
@@ -206,8 +193,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (isLastBatch)
                     {
                         _batchResources.Add(resources);
-                        _batchTraceImages.AddRange(
-                            GetTraceImages(resources, shaderAddress: work.ShaderAddress));
                         FlushBatchedGuestCommands();
                         submitted = true;
                     }
@@ -218,8 +203,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
 
-                MarkSampledImagesInitialized(resources);
-                MarkStorageImagesInitialized(resources, traceContents: false);
                 TraceVulkanShader(
                     $"vk.compute_dispatch groups={work.GroupCountX}x" +
                     $"{work.GroupCountY}x{work.GroupCountZ} " +
@@ -365,60 +348,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 error = "no-usable-resources";
                 return false;
-            }
-
-            error = string.Empty;
-            return true;
-        }
-
-        private bool TryValidateStorageImageBindings(
-            VulkanComputeGuestDispatch work,
-            out string error)
-        {
-            var storageTextures = work.Textures
-                .Where(static texture => texture.IsStorage)
-                .ToArray();
-            if (storageTextures.Length == 0)
-            {
-                error = string.Empty;
-                return true;
-            }
-
-            if (!TryReadSpirvStorageImageContracts(
-                    work.ComputeSpirv,
-                    out var shaderContracts,
-                    out error))
-            {
-                error = $"storage-contract-parse-failed({error})";
-                return false;
-            }
-
-            if (shaderContracts.Length != storageTextures.Length)
-            {
-                error = $"storage-binding-count-mismatch(spirv={shaderContracts.Length}," +
-                    $"guest={storageTextures.Length})";
-                return false;
-            }
-
-            for (var index = 0; index < storageTextures.Length; index++)
-            {
-                var texture = storageTextures[index];
-                var shaderContract = shaderContracts[index];
-                var vulkanFormat = GetStorageImageFormat(
-                    GetTextureFormat(texture.Format, texture.NumberType));
-                if (!TryValidateStorageImageContract(
-                        shaderContract,
-                        texture.Format,
-                        texture.NumberType,
-                        texture.Type,
-                        SupportsStorageImage(vulkanFormat),
-                        out _,
-                        out var bindingError))
-                {
-                    error = $"storage-binding[{index}]-invalid(" +
-                        $"addr=0x{texture.Address:X16},reason={bindingError})";
-                    return false;
-                }
             }
 
             error = string.Empty;

@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -140,7 +141,48 @@ public static partial class AgcExports
         uint MipLevel,
         IReadOnlyList<uint> SamplerDescriptor,
         bool IsArrayed = false,
-        IReadOnlyList<uint>? ResourceDescriptor = null);
+        IReadOnlyList<uint>? ResourceDescriptor = null,
+        bool DynamicMip = false,
+        uint Dimension = 1);
+
+    // A backend without CPU snapshots receives the raw descriptor and the compiled shape only.
+    private static GuestDrawTexture CreateDescriptorDrawTexture(TranslatedImageBinding binding)
+    {
+        var descriptor = binding.Descriptor;
+        // A rejected descriptor must remain a null binding when sent to the image cache.
+        var words = descriptor.Address == 0 ? [] : binding.ResourceDescriptor?.ToArray() ?? [];
+        Span<uint> padded = stackalloc uint[8];
+        words.AsSpan(0, Math.Min(words.Length, 8)).CopyTo(padded);
+        var numericClass = GuestPixelFormats.SampledNumericClass(new TextureDescriptorWords(padded).Format);
+        var shape = new ShaderImageShape(
+            Volume: binding.Dimension == 2,
+            Arrayed: binding.IsArrayed,
+            Storage: binding.IsStorage,
+            DynamicMip: binding.DynamicMip,
+            NumericClass: numericClass == TextureNumericClass.Unsupported ? TextureNumericClass.Float : numericClass);
+        return new GuestDrawTexture(
+            descriptor.Address,
+            descriptor.Width,
+            descriptor.Height,
+            descriptor.Format,
+            descriptor.NumberType,
+            [],
+            IsFallback: false,
+            IsStorage: binding.IsStorage,
+            MipLevels: descriptor.MipLevels,
+            MipLevel: binding.MipLevel,
+            BaseMipLevel: descriptor.ViewBaseLevel,
+            ResourceMipLevels: descriptor.ResourceMipLevels,
+            Pitch: descriptor.Pitch,
+            TileMode: descriptor.TileMode,
+            DstSelect: descriptor.DstSelect,
+            Sampler: ToGuestSampler(binding.SamplerDescriptor),
+            ArrayedView: binding.IsArrayed,
+            Type: descriptor.Type,
+            Depth: descriptor.Depth,
+            Descriptor: words,
+            Shape: shape);
+    }
 
     private readonly record struct GuestTextureSnapshotReuseKey(
         TextureDescriptor Descriptor,
@@ -154,6 +196,17 @@ public static partial class AgcExports
         out int fallbackTextureCount)
     {
         var textures = new List<GuestDrawTexture>(bindings.Count);
+        fallbackTextureCount = 0;
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend)
+        {
+            foreach (var binding in bindings)
+            {
+                textures.Add(CreateDescriptorDrawTexture(binding));
+            }
+
+            return textures;
+        }
+
         Dictionary<GuestTextureSnapshotReuseKey, GuestDrawTexture>? snapshots = null;
         if (_reuseGuestTextureSnapshots)
         {
@@ -246,9 +299,8 @@ public static partial class AgcExports
     /// enabled and the format is understood; returns null to keep the raw
     /// bytes (linear surfaces, unknown modes, or non-power-of-two elements).
     /// </summary>
-    // The GPU detile kernel implements these two equation families at 4/8/16 bpp
-    // (one/two/four 32-bit words per element; 1/2 bpp are sub-word and stay on the
-    // CPU). Keep in lockstep with VulkanDetilePass.Supports / MetalDetilePass.Supports.
+    // Keep equation support consistent with MetalDetilePass.Supports.
+    // The GPU handles 4-, 8-, and 16-byte elements; the CPU handles smaller elements.
     private static bool IsGpuDetileEquation(DetileEquation equation) =>
         equation == DetileEquation.ExactXor || equation == DetileEquation.BlockTable;
 
@@ -567,10 +619,11 @@ public static partial class AgcExports
             descriptor.Address != 0)
         {
             var lookupStart = TexturePreparationProfile.Begin();
-            sampledUploadKnown = GuestGpu.Current.IsGuestImageUploadKnown(
-                descriptor.Address,
-                descriptor.Format,
-                descriptor.NumberType);
+            sampledUploadKnown = GuestGpu.Current is IGuestImageSnapshotBackend uploadSnapshots &&
+                uploadSnapshots.IsGuestImageUploadKnown(
+                    descriptor.Address,
+                    descriptor.Format,
+                    descriptor.NumberType);
             TexturePreparationProfile.RecordUploadKnown(lookupStart, sampledUploadKnown);
         }
 
@@ -605,7 +658,8 @@ public static partial class AgcExports
             var initialPixels = Array.Empty<byte>();
             var uploadKnownStart = TexturePreparationProfile.Begin();
             var uploadKnown = descriptor.Address != 0 &&
-                GuestGpu.Current.IsGuestImageUploadKnown(
+                GuestGpu.Current is IGuestImageSnapshotBackend storageSnapshots &&
+                storageSnapshots.IsGuestImageUploadKnown(
                     descriptor.Address,
                     descriptor.Format,
                     descriptor.NumberType);
@@ -735,7 +789,8 @@ public static partial class AgcExports
             descriptor.Address != 0)
         {
             var lookupStart = TexturePreparationProfile.Begin();
-            contentCached = GuestGpu.Current.IsTextureContentCached(
+            contentCached = GuestGpu.Current is IGuestImageSnapshotBackend contentSnapshots &&
+                contentSnapshots.IsTextureContentCached(
                 new TextureCacheLookupIdentity(
                     new TextureContentIdentity(
                         descriptor.Address,
@@ -1356,7 +1411,8 @@ public static partial class AgcExports
         CpuContext ctx,
         RenderTargetDescriptor target)
     {
-        if (!GuestGpu.Current.GuestImageWantsInitialData(target.Address))
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend snapshots ||
+            !snapshots.GuestImageWantsInitialData(target.Address))
         {
             return;
         }
@@ -1382,7 +1438,7 @@ public static partial class AgcExports
 
         if (nonZero)
         {
-            GuestGpu.Current.ProvideGuestImageInitialData(target.Address, initialData);
+            snapshots.ProvideGuestImageInitialData(target.Address, initialData);
         }
     }
 
@@ -1747,7 +1803,7 @@ public static partial class AgcExports
         var metadataAddress = ((((ulong)word7 << 8) | (word6 >> 24)) << 8);
         var descriptorFlags = word6 & 0x00FF_FFFFu;
         var dstSelect = fields[3] & 0xFFFu;
-        if (address == 0 || width == 0 || height == 0 || type is >= 1 and <= 7)
+        if (address == 0 || width == 0 || height == 0 || type < 8)
         {
             return false;
         }

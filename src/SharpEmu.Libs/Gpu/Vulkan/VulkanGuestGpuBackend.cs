@@ -293,11 +293,13 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             threadCountZ);
 
     public bool TrySubmitGuestImage(
+        int videoOutHandle,
+        int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
         uint pitchInPixel) =>
-        VulkanVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
+        VulkanVideoPresenter.TrySubmitGuestImage(videoOutHandle, displayBufferIndex, address, width, height, pitchInPixel);
 
     public bool TrySubmitOrderedGuestImageFlip(
         int videoOutHandle,
@@ -320,28 +322,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         VulkanVideoPresenter.IsGpuGuestImageAvailable(address, format, numberType);
 
-    public bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType) =>
-        VulkanVideoPresenter.TrySubmitGuestImageBlit(
-            sourceAddress,
-            sourceWidth,
-            sourceHeight,
-            sourceFormat,
-            sourceNumberType,
-            destinationAddress,
-            destinationWidth,
-            destinationHeight,
-            destinationFormat,
-            destinationNumberType);
+    public bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination) =>
+        VulkanVideoPresenter.TrySubmitGuestImageBlit(source, destination);
 
     public bool TryGetRenderTargetOutputInfo(
         uint dataFormat,
@@ -371,6 +353,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
+
+    public long SubmitGuestSubmissionCompletion(Action action, string debugName) =>
+        VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName, completesSubmission: true);
 
     public long SubmitGuestCacheOperation(
         GuestGpuCacheOperation operation,
@@ -407,38 +392,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public long CurrentGuestWorkSequenceForDiagnostics =>
         VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
-
-    public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
-        VulkanVideoPresenter.IsGuestImageUploadKnown(address, format, numberType);
-
-    public bool GuestImageWantsInitialData(ulong address) =>
-        VulkanVideoPresenter.GuestImageWantsInitialData(address);
-
-    public void ProvideGuestImageInitialData(ulong address, byte[] rgbaPixels) =>
-        VulkanVideoPresenter.ProvideGuestImageInitialData(address, rgbaPixels);
-
-    public void SubmitGuestImageFill(ulong address, uint fillValue) =>
-        VulkanVideoPresenter.SubmitGuestImageFill(address, fillValue);
-
-    public void SubmitGuestImageWrite(ulong address, byte[] pixels, uint rowOffset = 0) =>
-        VulkanVideoPresenter.SubmitGuestImageWrite(address, pixels, rowOffset);
-
-    public bool SupportsPartialImageWrite => true;
-
-    public void RequestCpuWrittenGuestImageSync(ulong scopeAddress = 0, ulong scopeByteCount = ulong.MaxValue) =>
-        VulkanVideoPresenter.RequestCpuWrittenGuestImageSync(scopeAddress, scopeByteCount);
-
-    public bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount) =>
-        VulkanVideoPresenter.TryGetGuestImageExtent(address, out width, out height, out byteCount);
-
-    public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
-        VulkanVideoPresenter.GetGuestImageExtents();
-
-    public bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
-        VulkanVideoPresenter.IsTextureContentCached(identity);
-
-    public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
-        VulkanVideoPresenter.AttachGuestMemory(memory);
 
     public ulong GuestStorageBufferOffsetAlignment =>
         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;

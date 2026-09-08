@@ -22,6 +22,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageVersion Include="Silk.NET.Vulkan" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.0" />
     <!-- Transitive of Avalonia.Desktop; pinned. Avalonia 12 requires 0.94.1+. -->
     <PackageVersion Include="Tmds.DBus.Protocol" Version="0.94.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />

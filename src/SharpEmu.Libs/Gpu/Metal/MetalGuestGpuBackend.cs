@@ -12,8 +12,11 @@ namespace SharpEmu.Libs.Gpu.Metal;
 /// surface (presentation, guest images, ordered flips, translated draws, and
 /// compute) with no Vulkan, MoltenVK, or windowing-library dependency.
 /// </summary>
-internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
+internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapshotBackend
 {
+    // Only a backend with CPU image snapshots arms the guest image write tracker.
+    public MetalGuestGpuBackend() => SharpEmu.HLE.GuestImageWriteTracker.Configure(true);
+
     public string BackendName => "Metal";
 
     public bool SnapshotsGuestBuffers => true;
@@ -171,6 +174,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         MetalVideoPresenter.Submit(bgraFrame, width, height);
 
     public bool TrySubmitGuestImage(
+        int videoOutHandle,
+        int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
@@ -198,28 +203,18 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         MetalVideoPresenter.IsGuestImageAvailable(address, format, numberType);
 
-    public bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType) =>
+    public bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination) =>
         MetalVideoPresenter.TrySubmitGuestImageBlit(
-            sourceAddress,
-            sourceWidth,
-            sourceHeight,
-            sourceFormat,
-            sourceNumberType,
-            destinationAddress,
-            destinationWidth,
-            destinationHeight,
-            destinationFormat,
-            destinationNumberType);
+            source.Address,
+            source.Width,
+            source.Height,
+            source.Format,
+            source.NumberType,
+            destination.Address,
+            destination.Width,
+            destination.Height,
+            destination.Format,
+            destination.NumberType);
 
     public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) =>
         MetalVideoPresenter.SubmitGuestDraw(drawKind, width, height);

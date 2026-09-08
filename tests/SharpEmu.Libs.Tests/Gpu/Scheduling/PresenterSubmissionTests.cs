@@ -20,6 +20,60 @@ public sealed class PresenterSubmissionTests
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
 
+    [Fact]
+    public void FollowupWork_DoesNotRetryBlockedQueueHeads()
+    {
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var owner = typeof(VulkanVideoPresenter);
+        var gate = owner.GetField("_gate", staticMembers)!.GetValue(null)!;
+        var queues = (IDictionary)owner.GetField("_pendingGuestWorkByQueue", staticMembers)!.GetValue(null)!;
+        var count = owner.GetField("_pendingGuestWorkCount", staticMembers)!;
+        var completed = owner.GetField("_completedGuestWorkSequence", staticMembers)!;
+        var wait = owner.GetMethod("WaitForFollowupGuestWork", staticMembers)!;
+        var pendingType = owner.GetNestedType("PendingGuestWork", BindingFlags.NonPublic)!;
+        var queueType = typeof(LinkedList<>).MakeGenericType(pendingType);
+
+        object CreateQueue(string name, long dependency)
+        {
+            var queue = Activator.CreateInstance(queueType)!;
+            var work = Activator.CreateInstance(pendingType,
+                [new object(), 0UL, 1L, dependency, 0L, new VulkanGuestQueueIdentity(name, 1)])!;
+            queueType.GetMethod("AddLast", [pendingType])!.Invoke(queue, [work]);
+            return queue;
+        }
+
+        bool HasFollowup(HashSet<string>? excluded) => (bool)wait.Invoke(null, [0, excluded])!;
+
+        lock (gate)
+        {
+            Assert.Empty(queues);
+            var previousCount = count.GetValue(null);
+            var previousCompleted = completed.GetValue(null);
+            try
+            {
+                completed.SetValue(null, 0L);
+                queues.Add("blocked", CreateQueue("blocked", 0));
+                count.SetValue(null, 1);
+                Assert.True(HasFollowup(null));
+                Assert.False(HasFollowup(new HashSet<string> { "blocked" }));
+
+                queues.Add("sibling", CreateQueue("sibling", long.MaxValue));
+                count.SetValue(null, 2);
+                Assert.False(HasFollowup(new HashSet<string> { "blocked" }));
+                queues["sibling"] = CreateQueue("sibling", 0);
+                Assert.True(HasFollowup(new HashSet<string> { "blocked" }));
+                Assert.False(HasFollowup(new HashSet<string> { "blocked", "sibling" }));
+                Assert.Equal(2, queues.Count);
+            }
+            finally
+            {
+                queues.Clear();
+                count.SetValue(null, previousCount);
+                completed.SetValue(null, previousCompleted);
+            }
+        }
+    }
+
     [Theory]
     [InlineData("unmap")]
     [InlineData("shutdown")]
@@ -31,11 +85,10 @@ public sealed class PresenterSubmissionTests
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
         foreach (var name in new[]
         {
-            "_batchResources", "_batchTraceImages", "_batchRetireBuffers", "_batchRetireDetile",
+            "_batchResources", "_batchRetireBuffers",
             "_pendingGuestSubmissions", "_lastSubmittedTimelineByGuestQueue",
             "_lastSubmittedGpuLabelDependencyByGuestQueue", "_gpuLabelHostPublications",
-            "_recycledDescriptorPools", "_deferredTextureDestroys",
-            "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys", "_deferredGuestImageVariantDestroys",
+            "_recycledDescriptorPools", "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;

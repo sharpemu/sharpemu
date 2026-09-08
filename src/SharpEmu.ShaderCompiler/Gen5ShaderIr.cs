@@ -373,7 +373,10 @@ public sealed record Gen5ImageBinding(
     Gen5ImageControl Control,
     IReadOnlyList<uint> ResourceDescriptor,
     IReadOnlyList<uint> SamplerDescriptor,
-    uint? MipLevel);
+    uint? MipLevel)
+{
+    public bool HasDynamicMip => Opcode is "ImageLoadMip" or "ImageStoreMip" && MipLevel is null;
+}
 
 // Data arrays may be rented from ArrayPool (oversized): always slice with
 // DataLength, never Data.Length. Ownership transfers to the presenter, which
@@ -448,7 +451,6 @@ public sealed record Gen5ShaderProgram(
     private readonly uint _parameterExportMask = ComputeParameterExportMask(Instructions);
     private const int ScalarRegisterCount = 256;
     private IReadOnlySet<uint>? _runtimeScalarRegisters;
-
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
     public uint ParameterExportMask => _parameterExportMask;

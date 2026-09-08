@@ -251,16 +251,10 @@ internal static unsafe partial class VulkanVideoPresenter
         _pendingGuestImagePresentations.Clear();
         _pendingVideoPresentations.Clear();
         _guestImageWorkSequences.Clear();
-        _availableGuestImages.Clear();
-        _cpuBackedUploadGenerations.Clear();
-        _untrackedGuestImageContentProbes.Clear();
+        _knownDisplayBuffers.Clear();
         _lastOrderedGuestFlipVersions.Clear();
         _guestFlipCompletion.Reset();
         _orderedGuestFlipVersionSequence = 0;
-        _pendingGuestImageUploads.Clear();
-        _pendingGuestImageInitialData.Clear();
-        _pendingGuestImageBufferClears.Clear();
-        _guestImageExtents.Clear();
         _enqueuedGuestWorkSequence = 0;
         _completedGuestWorkSequence = 0;
         _completedGuestWorkOutOfOrder.Clear();
@@ -436,62 +430,9 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    public static bool TrySubmitGuestImage(
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel)
-    {
-        var traceSubmission = false;
-        lock (_gate)
-        {
-            if (_closed ||
-                !_availableGuestImages.ContainsKey(address))
-            {
-                return false;
-            }
-
-            traceSubmission =
-                _tracedGuestImageSubmissions.Add((address, width, height));
-            var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            var requiredWorkSequence = _guestImageWorkSequences.TryGetValue(
-                address,
-                out var imageWorkSequence)
-                ? imageWorkSequence
-                : _completedGuestWorkSequence;
-            var presentation = new Presentation(
-                null,
-                width,
-                height,
-                sequence,
-                GuestDrawKind.None,
-                TranslatedDraw: null,
-                // Wait only for the work that last wrote this image, not for
-                // every later command the guest has already queued. Requiring
-                // the global tail makes a fast guest permanently outrun the
-                // renderer and turns every flip into a dropped black frame.
-                RequiredGuestWorkSequence: requiredWorkSequence,
-                IsSplash: false,
-                GuestImageAddress: address,
-                IsHdr: VideoOutExports.IsHdrOutputRequested);
-            _latestPresentation = presentation;
-            _pendingGuestImagePresentations.Enqueue(presentation);
-            while (_pendingGuestImagePresentations.Count > MaxPendingGuestFlipVersions)
-            {
-                _pendingGuestImagePresentations.Dequeue();
-            }
-        }
-
-        if (traceSubmission)
-        {
-            var effectivePitch = pitchInPixel == 0 ? width : pitchInPixel;
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] vk.submit_guest_image addr=0x{address:X16} " +
-                $"size={width}x{height} pitch={effectivePitch}");
-        }
-
-        return true;
-    }
+    // A flip from the video-out queue captures the display buffer in queue order like a PM4 flip.
+    public static bool TrySubmitGuestImage(int videoOutHandle, int displayBufferIndex, ulong address, uint width, uint height, uint pitchInPixel) =>
+        TrySubmitOrderedGuestImageFlip(videoOutHandle, displayBufferIndex, address, width, height, pitchInPixel);
 
     /// <summary>
     /// Enqueues an AGC flip at its exact position in the logical guest queue.
@@ -512,8 +453,8 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_closed ||
                 _thread is null ||
                 !VulkanGuestFlipSourcePolicy.CanCapture(
-                    _availableGuestImages.ContainsKey(address),
-                    _guestImageExtents.ContainsKey(address),
+                    _knownDisplayBuffers.Contains(address),
+                    materialized: true,
                     _guestImageWorkSequences.ContainsKey(address)))
             {
                 return false;
@@ -572,9 +513,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    // Maps a UNORM swapchain format to the sRGB view of the same bit layout,
-    // or Undefined when no counterpart exists. Used to encode linear-float
-    // guest flips on their way into a UNORM swapchain.
+    // Select the sRGB format with the same byte layout as the UNORM target.
     internal static Format GetSrgbCounterpart(Format format) => format switch
     {
         Format.B8G8R8A8Unorm => Format.B8G8R8A8Srgb,
@@ -587,10 +526,15 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
-    // A copy between the sRGB and UNORM views of the same byte layout keeps
-    // the encoded bytes unchanged. A blit performs format conversion instead
-    // and decodes the sRGB source to linear values, which makes an SDR frame
-    // too dark when those values are then presented through a UNORM swapchain.
+    // Keep encoded display bytes in UNORM snapshots so scaling does not decode them.
+    internal static Format GetPresentationSnapshotFormat(Format sourceFormat) => sourceFormat switch
+    {
+        Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,
+        Format.B8G8R8A8Srgb => Format.B8G8R8A8Unorm,
+        _ => sourceFormat,
+    };
+
+    // A raw copy preserves encoded colors when the source and target byte layouts match.
     internal static bool CanCopyEncodedSrgbPresentSource(
         Format sourceFormat,
         Format swapchainFormat) =>

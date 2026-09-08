@@ -167,4 +167,29 @@ public sealed class AgcHtileMetadataTests
         Assert.Equal(expectedAttachmentClear, mode.ClearAttachment);
         Assert.Equal(expectedDepthStateSuppression, mode.SuppressDrawDepthState);
     }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, true, true, true)]
+    public void DrawAttachmentRequirementPreservesActiveDepthAndStencil(
+        bool test, bool write, bool stencil, bool expected)
+    {
+        var state = new GuestDepthState(test, write, 3, StencilTestEnable: stencil);
+        Assert.Equal(expected, state.RequiresDrawAttachment);
+    }
+
+    [Fact]
+    public void DirectClearDoesNotRequireDepthOnTheFollowingColorDraw()
+    {
+        var state = new GuestDepthState(true, true, 3, ClearEnable: true);
+        var mode = GuestDepthClearMode.Resolve(state, null);
+        Assert.True(mode.ClearDepthAttachment);
+        Assert.True(mode.SuppressDrawDepthState);
+        var drawState = state with { TestEnable = false, WriteEnable = false, ClearEnable = false };
+        Assert.False(drawState.RequiresDrawAttachment);
+        Assert.True((drawState with { StencilTestEnable = true }).RequiresDrawAttachment);
+    }
 }

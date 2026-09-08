@@ -496,16 +496,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 state.KnownRenderTargets[resolveDestination.Address] = resolveDestination;
                 ProvideRenderTargetInitialData(ctx, resolveSource);
                 if (GuestGpu.Current.TrySubmitGuestImageBlit(
-                        resolveSource.Address,
-                        resolveSource.Width,
-                        resolveSource.Height,
-                        resolveSource.Format,
-                        resolveSource.NumberType,
-                        resolveDestination.Address,
-                        resolveDestination.Width,
-                        resolveDestination.Height,
-                        resolveDestination.Format,
-                        resolveDestination.NumberType))
+                        CreateGuestRenderTarget(resolveSource),
+                        CreateGuestRenderTarget(resolveDestination)))
                 {
                     state.RenderTargetWriters[resolveDestination.Address] =
                         new RenderTargetWriter(
@@ -960,7 +952,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 NormalizeSamplerDescriptorForImageOperation(
                     binding.SamplerDescriptor),
                 Gen5ShaderTranslator.IsArrayedImageBinding(binding),
-                binding.ResourceDescriptor));
+                binding.ResourceDescriptor,
+                binding.HasDynamicMip,
+                Gen5ShaderTranslator.IsVolumeImageBinding(binding) ? 2u : 1u));
         }
 
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
@@ -1680,7 +1674,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 NormalizeSamplerDescriptorForImageOperation(
                     binding.SamplerDescriptor),
                     Gen5ShaderTranslator.IsArrayedImageBinding(binding),
-                    binding.ResourceDescriptor));
+                    binding.ResourceDescriptor,
+                    binding.HasDynamicMip,
+                    Gen5ShaderTranslator.IsVolumeImageBinding(binding) ? 2u : 1u));
         }
 
         error = string.Empty;

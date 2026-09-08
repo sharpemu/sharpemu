@@ -6,6 +6,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -16,6 +17,9 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Gpu.Buffers;
 
 // Models the render loop: relay commands first, then one unit of guest work.
+// Scheduler callbacks a test supplies when a presenter under test must see the ticks.
+internal sealed record SchedulerHooks(IRenderingState Rendering, Action<SubmitBundle>? PrepareSubmit, Action<ulong>? Submitted);
+
 internal sealed class CacheWorker : IDisposable
 {
     private readonly object _gate = new();
@@ -23,11 +27,11 @@ internal sealed class CacheWorker : IDisposable
     private readonly Thread _thread;
     private bool _stop;
 
-    public CacheWorker(HeadlessVulkan vulkan)
+    public CacheWorker(HeadlessVulkan vulkan, SchedulerHooks? hooks = null)
     {
         Relay = new GpuWorkerRelay(Wake);
         Device = new LoggingTickDevice(vulkan.NewTickDevice());
-        Scheduler = new SubmissionScheduler(Device, new RecordingRenderingState());
+        Scheduler = new SubmissionScheduler(Device, hooks?.Rendering ?? new RecordingRenderingState(), hooks?.PrepareSubmit, hooks?.Submitted);
         _thread = new Thread(Run) { IsBackground = true };
         _thread.Start();
     }
@@ -139,16 +143,29 @@ internal sealed class CacheHarness : IDisposable
     private bool _shutDown;
     private bool _shutdownFailed;
 
-    public CacheHarness(HeadlessVulkan vulkan, Func<PhysicalVirtualMemory, IGuestBackedSpace>? backing = null)
+    public CacheHarness(
+        HeadlessVulkan vulkan,
+        Func<PhysicalVirtualMemory, IGuestBackedSpace>? backing = null,
+        bool readbackLinearImages = false,
+        ulong backingBytes = BackingBytes,
+        SchedulerHooks? hooks = null,
+        bool startScheduler = true)
     {
         _vulkan = vulkan;
         PageGuard.OnFatal = message => throw new SchedulerFatalException(message);
-        Memory = new PhysicalVirtualMemory(viewHost: _views, backingBytes: BackingBytes);
+        Memory = new PhysicalVirtualMemory(viewHost: _views, backingBytes: backingBytes);
         Gpu = new GuestGpuMemory(Memory);
-        Worker = new CacheWorker(vulkan);
-        Worker.Run(() => Worker.Scheduler.Begin(new SubmissionContext { QueueName = "cache.test", SubmissionId = 1 }));
-        Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, backing?.Invoke(Memory) ?? Memory);
-        Gpu.AttachStores(Cache, null);
+        Worker = new CacheWorker(vulkan, hooks);
+        if (startScheduler)
+        {
+            Worker.Run(() => Worker.Scheduler.Begin(new SubmissionContext { QueueName = "cache.test", SubmissionId = 1 }));
+        }
+
+        var space = backing?.Invoke(Memory) ?? Memory;
+        Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, space);
+        Images = new GuestImageCache(vulkan.DeviceInfo, Worker.Scheduler, Gpu.Pages, Cache, space, readbackLinearImages);
+        Cache.ImageCache = Images;
+        Gpu.AttachStores(Cache, Images);
         Gpu.AttachGpuQueue(Worker.Relay, Worker.Scheduler);
     }
 
@@ -160,7 +177,13 @@ internal sealed class CacheHarness : IDisposable
 
     public GuestBufferCache Cache { get; }
 
+    public GuestImageCache Images { get; }
+
     public IGuestBufferStore Store => Cache;
+
+    public IGuestImageStore ImageStore => Images;
+
+    public HeadlessVulkan Vulkan => _vulkan;
 
     public SubmissionScheduler Scheduler => Worker.Scheduler;
 
@@ -220,13 +243,23 @@ internal sealed class CacheHarness : IDisposable
         return download.Mapped[..(int)size].ToArray();
     });
 
-    public void Shutdown() => Worker.Run(() =>
+    // A test that shut the stores down through another path marks the harness as done.
+    public void MarkShutDown() => _shutDown = true;
+
+    public void Shutdown()
+    {
+        Worker.Run(ShutdownOnWorker);
+        _vulkan.AssertNoValidationMessages();
+    }
+
+    private void ShutdownOnWorker()
     {
         _shutDown = true;
         Worker.Relay.StopAcceptingWork();
         Worker.Relay.RunPendingCommands();
         try
         {
+            Images.Shutdown();
             Cache.Shutdown();
         }
         catch (Exception)
@@ -246,7 +279,7 @@ internal sealed class CacheHarness : IDisposable
             Scheduler.Shutdown();
             Gpu.AttachGpuQueue(null, null);
         }
-    });
+    }
 
     // A failed test still tears down in order so the guard fatal does not hide the assertion.
     public void Dispose()
@@ -262,6 +295,7 @@ internal sealed class CacheHarness : IDisposable
             }
         }
 
+        Images.Dispose();
         Cache.Dispose();
         Worker.Dispose();
         if (_shutdownFailed)

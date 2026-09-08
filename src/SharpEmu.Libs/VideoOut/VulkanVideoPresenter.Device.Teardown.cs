@@ -29,18 +29,6 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            foreach (var texture in _textureCache.Values)
-            {
-                DestroyCachedTextureResource(texture);
-            }
-            _textureCache.Clear();
-            while (_deferredTextureDestroys.TryDequeue(out var textureEntry))
-            {
-                DestroyCachedTextureResource(textureEntry.Texture);
-            }
-            DestroyFeedbackSnapshotPool();
-            ReportFeedbackSnapshotTelemetry(final: true);
-            ClearCachedTextureIdentities();
             foreach (var pipeline in _computePipelines.Values)
             {
                 _vk.DestroyPipeline(_device, pipeline, null);
@@ -67,48 +55,12 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _vk.DestroyDescriptorPool(_device, recycledDescriptorPool, null);
             }
-            foreach (var sampler in _samplers.Values)
-            {
-                _vk.DestroySampler(_device, sampler, null);
-            }
-            _samplers.Clear();
             _shaderDigests.Clear();
+            _imageCache.Dispose();
+            _samplerStore.Dispose();
             _bufferCache.Dispose();
             PerfOverlay.SetGuestBufferCacheBytes(0);
             _hostBufferPool.Dispose();
-            foreach (var guestImage in _guestImages.Values)
-            {
-                DestroyGuestImage(guestImage);
-            }
-            _guestImages.Clear();
-            foreach (var guestImageVariant in _guestImageVariants.Values)
-            {
-                DestroyGuestImage(guestImageVariant);
-            }
-            _guestImageVariants.Clear();
-            var deferredVariantsAtTeardown = _deferredGuestImageVariantDestroys.Count;
-            var retainedVariantsAtTeardown = _retiredGuestImageVariants.Count;
-            while (_deferredGuestImageVariantDestroys.TryDequeue(out var deferredVariant))
-            {
-                DestroyGuestImage(deferredVariant.Image);
-            }
-            foreach (var retiredGuestImageVariant in _retiredGuestImageVariants)
-            {
-                DestroyGuestImage(retiredGuestImageVariant);
-            }
-            _retiredGuestImageVariants.Clear();
-            if (_guestImageVariantConflictCount != 0 ||
-                _guestImageVariantSameResourceCount != 0)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] vk.guest_image_variant_summary " +
-                    $"conflicts={_guestImageVariantConflictCount} " +
-                    $"same_resource={_guestImageVariantSameResourceCount} " +
-                    $"replacements={_guestImageVariantReplacementCount} " +
-                    $"retired_during_runtime={_guestImageVariantDeferredDestroyCount} " +
-                    $"deferred_at_teardown={deferredVariantsAtTeardown} " +
-                    $"retained_at_teardown={retainedVariantsAtTeardown}");
-            }
             foreach (var guestImageVersion in _guestImageVersions.Values)
             {
                 DestroyGuestImage(guestImageVersion);
@@ -118,21 +70,11 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DestroyGuestImage(deferredVersion.Image);
             }
-            foreach (var guestDepth in _guestDepthImages.Values)
-            {
-                DestroyGuestDepth(guestDepth);
-            }
-            _guestDepthImages.Clear();
             lock (_gate)
             {
-                _availableGuestImages.Clear();
-                _cpuBackedUploadGenerations.Clear();
-                _untrackedGuestImageContentProbes.Clear();
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
-            _detilePass?.Dispose();
-            _detilePass = null;
             if (_device.Handle != 0)
             {
                 Volatile.Write(ref _gpuLabelTimelineAvailable, false);

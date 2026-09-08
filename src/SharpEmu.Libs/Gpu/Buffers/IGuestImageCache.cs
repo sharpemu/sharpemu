@@ -3,14 +3,15 @@
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
-public readonly record struct ImageRegionInfo(bool ImageBytes, bool GpuImageBytes);
+// ImagePages: an image shares a tracker page with the range; ImageBytes: an image overlaps its bytes.
+public readonly record struct ImageRegionInfo(bool ImagePages, bool ImageBytes, bool GpuImageBytes);
 
 // Image-cache operations used by the buffer cache.
 public interface IGuestImageCache
 {
     ImageRegionInfo QueryRegion(ulong address, ulong size);
 
-    bool ClearMeta(ulong address);
+    bool ClearMetadata(ulong address);
 
     void InvalidateMemory(ulong address, ulong size);
 

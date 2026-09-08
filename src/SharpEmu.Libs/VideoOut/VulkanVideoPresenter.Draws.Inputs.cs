@@ -15,7 +15,6 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class Presenter
     {
         private int _tracedVertexBufferCount;
-        private bool _tracedTitleDraw;
         private sealed class VertexBufferResource
         {
             public VkBuffer Buffer;

@@ -6,6 +6,7 @@ namespace SharpEmu.Libs.VideoOut;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -31,9 +32,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly GpuWorkerRelay _relay = new(WakeRenderThread, WaitForAcceptedGuestWork);
         private readonly SubmissionContext _submissionContext = new();
         private SubmissionScheduler _scheduler = null!;
+        private GpuDeviceInfo _deviceInfo = null!;
         private GuestBufferCache _bufferCache = null!;
+        private GuestImageCache _imageCache = null!;
+        private SamplerStore _samplerStore = null!;
 
-        bool IRenderingState.IsRendering => _openPassTarget is not null;
+        bool IRenderingState.IsRendering => _openPassActive;
 
         void IRenderingState.EndRendering() => CloseOpenTranslatedRenderPass();
 
@@ -52,26 +56,40 @@ internal static unsafe partial class VulkanVideoPresenter
                 PrepareGuestSubmission,
                 CompleteGuestSubmission);
 
-        // The store shares the manager's page guard and reads guest memory through its address space.
-        private void CreateBufferCache()
+        // Both stores share the manager's page guard and read guest memory through its address space.
+        private static (GuestGpuMemory Memory, ICpuMemory Guest, IGuestBackedSpace Backing) RequireGuestMemory(string store)
         {
             if (GuestGpuMemoryHook.Current is not { AddressSpace: ICpuMemory guest and IGuestBackedSpace backing } memory)
             {
-                throw SubmissionScheduler.Fatal("the buffer store needs the guest GPU memory manager over backed virtual memory");
+                throw SubmissionScheduler.Fatal($"The {store} requires the guest GPU memory manager with backed virtual memory.");
             }
 
-            _bufferCache = new GuestBufferCache(
-                new GpuDeviceInfo(_vk, _physicalDevice, _device), _scheduler, _relay, memory.Pages, guest, backing);
+            return (memory, guest, backing);
+        }
+
+        private void CreateBufferCache()
+        {
+            var (memory, guest, backing) = RequireGuestMemory("buffer store");
+            _bufferCache = new GuestBufferCache(_deviceInfo, _scheduler, _relay, memory.Pages, guest, backing);
             _bufferCache.StreamOffsetAlignment = Math.Max(_bufferCache.StreamOffsetAlignment, GuestStorageBufferOffsetAlignment);
+        }
+
+        // The image store follows the buffer store; readback of linear images stays off.
+        private void CreateImageCache()
+        {
+            var (memory, _, backing) = RequireGuestMemory("image store");
+            _imageCache = new GuestImageCache(_deviceInfo, _scheduler, memory.Pages, _bufferCache, backing, readbackLinearImages: false);
+            _bufferCache.ImageCache = _imageCache;
+            _samplerStore = new SamplerStore(_deviceInfo);
         }
 
         private void AttachGuestGpuMemory()
         {
-            GuestGpuMemoryHook.Current?.AttachStores(_bufferCache, null);
+            GuestGpuMemoryHook.Current?.AttachStores(_bufferCache, _imageCache);
             GuestGpuMemoryHook.Current?.AttachGpuQueue(_relay, _scheduler);
         }
 
-        // Close admission, run accepted commands, drain the store, finish GPU work, shut down, detach.
+        // Close admission, run accepted commands, drain the stores (images first), finish GPU work, shut down, detach.
         private void ShutdownScheduler()
         {
             try
@@ -80,6 +98,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _relay.RunPendingCommands();
                 try
                 {
+                    _imageCache.Shutdown();
                     _bufferCache.Shutdown();
                 }
                 finally

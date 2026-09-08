@@ -3,35 +3,35 @@
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
-// Least-recently-used order of buffer slots keyed by the tick of their last use.
-public sealed class RecencyQueue
+// Least-recently-used order of slots keyed by the tick of their last use.
+public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
 {
     private sealed class Item
     {
-        public BufferSlot Slot;
+        public TSlotIdentifier Slot;
         public ulong Tick;
         public Item? Next;
         public Item? Previous;
     }
 
     private readonly List<Item> _items = new();
-    private readonly Queue<int> _free = new();
+    private readonly Queue<int> _freeEntryIndices = new();
     private Item? _first;
     private Item? _last;
 
-    public int Insert(BufferSlot slot, ulong tick)
+    public int Insert(TSlotIdentifier slot, ulong tick)
     {
-        var id = AllocateItem();
-        var item = _items[id];
+        var entryIndex = AllocateItem();
+        var item = _items[entryIndex];
         item.Slot = slot;
         item.Tick = tick;
         AppendItem(item);
-        return id;
+        return entryIndex;
     }
 
-    public void Touch(int id, ulong tick)
+    public void Touch(int entryIndex, ulong tick)
     {
-        var item = _items[id];
+        var item = _items[entryIndex];
         if (item.Tick >= tick)
         {
             return;
@@ -45,17 +45,17 @@ public sealed class RecencyQueue
         }
     }
 
-    public void Free(int id)
+    public void Free(int entryIndex)
     {
-        var item = _items[id];
+        var item = _items[entryIndex];
         UnlinkItem(item);
         item.Next = null;
         item.Previous = null;
-        _free.Enqueue(id);
+        _freeEntryIndices.Enqueue(entryIndex);
     }
 
     // Visits items whose tick is at most the given one; a true result stops early.
-    public void ForEachItemAtOrBeforeTick(ulong tick, Func<BufferSlot, bool> visit)
+    public void ForEachItemAtOrBeforeTick(ulong tick, Func<TSlotIdentifier, bool> visit)
     {
         for (var item = _first; item != null;)
         {
@@ -76,13 +76,13 @@ public sealed class RecencyQueue
 
     private int AllocateItem()
     {
-        if (_free.Count == 0)
+        if (_freeEntryIndices.Count == 0)
         {
             _items.Add(new Item());
             return _items.Count - 1;
         }
 
-        return _free.Dequeue();
+        return _freeEntryIndices.Dequeue();
     }
 
     private void AppendItem(Item item)

@@ -9,7 +9,7 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanRenderPassReusePolicyTests
 {
     private static readonly VulkanRenderPassReuseKey Key =
-        new(1, 2, 3, 4, 1920, 1080);
+        new(1, 2, 3, 4, 1920, 1080, 1, [10, 11]);
 
     [Fact]
     public void ReuseIsEnabledByDefault()
@@ -74,15 +74,28 @@ public sealed class VulkanRenderPassReusePolicyTests
     }
 
     [Fact]
-    public void DifferentPassOrFramebufferClosesPass()
+    public void DifferentAttachmentViewsClosePass()
     {
         Assert.False(VulkanRenderPassReusePolicy.CanContinue(
             Key,
-            Key with { RenderPass = 6 },
+            Key with { AttachmentViews = [12, 11] },
             VulkanRenderPassReuseHazard.None));
         Assert.False(VulkanRenderPassReusePolicy.CanContinue(
             Key,
-            Key with { Framebuffer = 7 },
+            Key with { AttachmentViews = [10] },
+            VulkanRenderPassReuseHazard.None));
+        Assert.False(VulkanRenderPassReusePolicy.CanContinue(
+            Key,
+            Key with { Layers = 2 },
+            VulkanRenderPassReuseHazard.None));
+    }
+
+    [Fact]
+    public void ThePassAndFramebufferOfTheCandidateDoNotMatter()
+    {
+        Assert.True(VulkanRenderPassReusePolicy.CanContinue(
+            Key,
+            Key with { RenderPass = 0, Framebuffer = 0, AttachmentViews = [10, 11] },
             VulkanRenderPassReuseHazard.None));
     }
 

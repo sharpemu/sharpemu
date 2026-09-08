@@ -49,7 +49,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(_device, &memoryInfo, null, out _overlayImageMemory),
+                _deviceInfo.AllocateMemory(memoryInfo, out _overlayImageMemory),
                 "vkAllocateMemory(overlay)");
             Check(
                 _vk.BindImageMemory(_device, _overlayImage, _overlayImageMemory, 0),

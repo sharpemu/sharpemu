@@ -4,7 +4,10 @@
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
+using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
+using Silk.NET.Vulkan.Extensions.EXT;
+using Xunit;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -12,7 +15,16 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // A window-less Vulkan 1.2 device with timeline semaphores and buffer device addresses; null when the host has none.
 internal sealed unsafe class HeadlessVulkan : IDisposable
 {
-    private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily)
+    // Set SHARPEMU_TEST_VK_VALIDATION=1 to load the validation layer and print its messages.
+    private const string ValidationVariable = "SHARPEMU_TEST_VK_VALIDATION";
+    private static readonly PfnDebugUtilsMessengerCallbackEXT DebugCallbackPointer = new(DebugCallback);
+    private static readonly List<string> ValidationMessages = new();
+
+    private GpuDeviceInfo? _deviceInfo;
+    private ExtDebugUtils? _debugUtils;
+    private DebugUtilsMessengerEXT _debugMessenger;
+
+    private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily, uint apiVersion, in PhysicalDeviceFeatures features)
     {
         Vk = vk;
         Instance = instance;
@@ -20,6 +32,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         Device = device;
         Queue = queue;
         QueueFamily = queueFamily;
+        ApiVersion = apiVersion;
+        SampleRateShading = features.SampleRateShading;
+        SamplerAnisotropy = features.SamplerAnisotropy;
     }
 
     public Vk Vk { get; }
@@ -36,7 +51,38 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
     public object QueueGate { get; } = new();
 
-    public GpuDeviceInfo DeviceInfo => new(Vk, Physical, Device);
+    // The device API version: 1.3 when the loader and the device support it, else 1.2.
+    public uint ApiVersion { get; }
+
+    // SPIR-V 1.6 modules (the compiled reference blobs) need a Vulkan 1.3 device.
+    public bool SupportsSpirv16 => ApiVersion >= Vk.Version13;
+
+    // True when the device was created with the sample-rate-shading feature the blit needs.
+    public bool SampleRateShading { get; }
+
+    public bool SamplerAnisotropy { get; }
+
+    public bool ValidationEnabled => _debugUtils is not null;
+
+    // The validation messages collected since the last call; empty when the layer is off.
+    public string[] TakeValidationMessages()
+    {
+        lock (ValidationMessages)
+        {
+            var messages = ValidationMessages.ToArray();
+            ValidationMessages.Clear();
+            return messages;
+        }
+    }
+
+    public void AssertNoValidationMessages()
+    {
+        var messages = TakeValidationMessages();
+        Assert.True(messages.Length == 0, "Validation layer messages:" + Environment.NewLine + string.Join(Environment.NewLine, messages));
+    }
+
+    // One shared instance so the live allocation counter spans every buffer and image of a test.
+    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device);
 
     public string DeviceName
     {
@@ -87,15 +133,73 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     {
         Vk.DeviceWaitIdle(Device);
         Vk.DestroyDevice(Device, null);
+        if (_debugUtils is { } debugUtils)
+        {
+            debugUtils.DestroyDebugUtilsMessenger(Instance, _debugMessenger, null);
+        }
+
         Vk.DestroyInstance(Instance, null);
+    }
+
+    private static uint DebugCallback(DebugUtilsMessageSeverityFlagsEXT severity, DebugUtilsMessageTypeFlagsEXT type, DebugUtilsMessengerCallbackDataEXT* data, void* userData)
+    {
+        var message = $"[VULKAN][{severity}] {SilkMarshal.PtrToString((nint)data->PMessage)}";
+        Console.Error.WriteLine(message);
+        lock (ValidationMessages)
+        {
+            ValidationMessages.Add(message);
+        }
+
+        return 0;
+    }
+
+    private void RegisterDebugMessenger()
+    {
+        if (!Vk.TryGetInstanceExtension(Instance, out ExtDebugUtils debugUtils))
+        {
+            return;
+        }
+
+        var info = new DebugUtilsMessengerCreateInfoEXT
+        {
+            SType = StructureType.DebugUtilsMessengerCreateInfoExt,
+            MessageSeverity = DebugUtilsMessageSeverityFlagsEXT.WarningBitExt | DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt,
+            MessageType = DebugUtilsMessageTypeFlagsEXT.ValidationBitExt | DebugUtilsMessageTypeFlagsEXT.GeneralBitExt,
+            PfnUserCallback = DebugCallbackPointer,
+        };
+        if (debugUtils.CreateDebugUtilsMessenger(Instance, &info, null, out _debugMessenger) == Result.Success)
+        {
+            _debugUtils = debugUtils;
+        }
     }
 
     private static HeadlessVulkan? Create()
     {
         var vk = Vk.GetApi();
-        var appInfo = new ApplicationInfo { SType = StructureType.ApplicationInfo, ApiVersion = Vk.Version12 };
-        var instanceInfo = new InstanceCreateInfo { SType = StructureType.InstanceCreateInfo, PApplicationInfo = &appInfo };
-        if (vk.CreateInstance(&instanceInfo, null, out var instance) != Result.Success)
+        uint instanceVersion = Vk.Version10;
+        vk.EnumerateInstanceVersion(ref instanceVersion);
+        var apiVersion = instanceVersion >= Vk.Version13 ? Vk.Version13 : Vk.Version12;
+        var appInfo = new ApplicationInfo { SType = StructureType.ApplicationInfo, ApiVersion = apiVersion };
+        var validation = Environment.GetEnvironmentVariable(ValidationVariable) == "1";
+        var layers = validation ? SilkMarshal.StringArrayToPtr(new[] { "VK_LAYER_KHRONOS_validation" }) : 0;
+        var extensions = validation ? SilkMarshal.StringArrayToPtr(new[] { ExtDebugUtils.ExtensionName }) : 0;
+        var instanceInfo = new InstanceCreateInfo
+        {
+            SType = StructureType.InstanceCreateInfo,
+            PApplicationInfo = &appInfo,
+            EnabledLayerCount = validation ? 1u : 0u,
+            PpEnabledLayerNames = (byte**)layers,
+            EnabledExtensionCount = validation ? 1u : 0u,
+            PpEnabledExtensionNames = (byte**)extensions,
+        };
+        var created = vk.CreateInstance(&instanceInfo, null, out var instance);
+        if (validation)
+        {
+            SilkMarshal.Free(layers);
+            SilkMarshal.Free(extensions);
+        }
+
+        if (created != Result.Success)
         {
             return null;
         }
@@ -123,6 +227,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
                 physical = candidate;
                 break;
             }
+        }
+
+        vk.GetPhysicalDeviceProperties(physical, out var physicalProperties);
+        if (physicalProperties.ApiVersion < apiVersion)
+        {
+            apiVersion = Vk.Version12;
         }
 
         uint familyCount = 0;
@@ -161,6 +271,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             return null;
         }
 
+        vk.GetPhysicalDeviceFeatures(physical, out var baseFeatures);
+        var enabledFeatures = new PhysicalDeviceFeatures
+        {
+            SampleRateShading = baseFeatures.SampleRateShading,
+            SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
+        };
         var priority = 1f;
         var queueInfo = new DeviceQueueCreateInfo
         {
@@ -182,6 +298,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             PNext = &timelineFeatures,
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &queueInfo,
+            PEnabledFeatures = &enabledFeatures,
         };
         if (vk.CreateDevice(physical, &deviceInfo, null, out var device) != Result.Success)
         {
@@ -190,7 +307,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
 
         vk.GetDeviceQueue(device, family, 0, out var queue);
-        return new HeadlessVulkan(vk, instance, physical, device, queue, family);
+        var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures);
+        if (validation)
+        {
+            result.RegisterDebugMessenger();
+        }
+
+        return result;
     }
 
     private static void Require(Result result, string operation)

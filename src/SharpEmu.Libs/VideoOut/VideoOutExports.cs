@@ -1448,6 +1448,8 @@ public static class VideoOutExports
             if (submitGpuImage)
             {
                 guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
+                    handle,
+                    bufferIndex,
                     displayBuffer.Address,
                     displayBuffer.Width,
                     displayBuffer.Height,

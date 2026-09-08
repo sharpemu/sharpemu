@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu;
 
@@ -51,7 +52,10 @@ internal sealed record GuestDrawTexture(
     // False when the guest changed the backing range while AGC copied it.
     // Backends must retain an older cached image instead of publishing these
     // bytes or performing an unprotected recovery read.
-    bool CpuSnapshotStable = true);
+    bool CpuSnapshotStable = true,
+    // The raw resource descriptor dwords and the shape the shader module was compiled with.
+    uint[]? Descriptor = null,
+    ShaderImageShape Shape = default);
 
 /// <summary>One linear mip range in a texture staging buffer.</summary>
 internal readonly record struct GuestTextureMipUpload(
@@ -242,6 +246,8 @@ internal readonly record struct GuestDepthState(
     GuestStencilFaceState StencilBack = default)
 {
     public static GuestDepthState Default { get; } = new(false, false, 7, false);
+
+    public bool RequiresDrawAttachment => TestEnable || WriteEnable || StencilTestEnable;
 }
 
 /// <summary>Factors/funcs are raw guest CB_BLEND*_CONTROL register bitfields; the
@@ -306,7 +312,10 @@ internal sealed record GuestRenderTarget(
     uint NumberType,
     uint MipLevels = 1,
     uint ComponentSwap = 0,
-    uint TileMode = 0);
+    uint TileMode = 0,
+    // The raw color-target registers of the slot and its write mask nibble.
+    ColorTargetWords? Registers = null,
+    uint WriteMask = 0xF);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
 internal sealed record GuestDepthTarget(
@@ -325,7 +334,9 @@ internal sealed record GuestDepthTarget(
     bool HasStencil = false,
     ulong StencilReadAddress = 0,
     ulong StencilWriteAddress = 0,
-    bool StencilReadOnly = false)
+    bool StencilReadOnly = false,
+    // The raw depth-target registers.
+    DepthTargetWords? Registers = null)
 {
     public ulong Address => WriteAddress != 0
         ? WriteAddress

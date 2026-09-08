@@ -183,6 +183,7 @@ public enum SpirvOp : ushort
 public enum SpirvCapability : uint
 {
     Shader = 1,
+    SampleRateShading = 35,
     Float16 = 9,
     Float64 = 10,
     Int64 = 11,
@@ -239,6 +240,7 @@ public enum SpirvDecoration : uint
     DescriptorSet = 34,
     Offset = 35,
     NoContraction = 42,
+    NonWritable = 24,
 }
 
 public enum SpirvBuiltIn : uint
@@ -254,6 +256,8 @@ public enum SpirvBuiltIn : uint
     LocalInvocationIndex = 29,
     SubgroupSize = 36,
     SubgroupLocalInvocationId = 41,
+    SampleId = 18,
+    FragDepth = 22,
 }
 
 public enum SpirvImageDim : uint

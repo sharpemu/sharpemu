@@ -2103,6 +2103,18 @@ public static class Gen5ShaderTranslator
             binding.ResourceDescriptor.SequenceEqual(candidate.ResourceDescriptor));
     }
 
+    public static bool IsVolumeImageBinding(Gen5ImageBinding binding)
+    {
+        if (binding.ResourceDescriptor.Count >= 4)
+        {
+            var resourceType = (binding.ResourceDescriptor[3] >> 28) & 0xFu;
+            if (resourceType >= 8)
+                return resourceType == 10;
+        }
+
+        return binding.Control.Dimension == 2;
+    }
+
     public static bool IsArrayedImageBinding(Gen5ImageBinding binding) =>
         binding.Control.IsArray &&
         (binding.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||

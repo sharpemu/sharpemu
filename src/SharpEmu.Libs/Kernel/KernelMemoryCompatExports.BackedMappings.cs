@@ -18,6 +18,33 @@ public static partial class KernelMemoryCompatExports
     private static IGuestBackedSpace? _backingOwner;
     private static int _prtMapWarning;
 
+    internal static bool TryReadPrtBacking(IGuestBackedSpace backing, ulong address, Span<byte> destination)
+    {
+        var size = (ulong)destination.Length;
+        lock (_memoryGate)
+        {
+            if (!ReferenceEquals(backing, _backingOwner) ||
+                !KernelRuntimeCompatExports.ContainsPrtRange(address, size))
+                return false;
+
+            var regions = GetMappingSlices(address, size);
+            if (!MappingsCoverRange(regions, address, size) ||
+                regions.Any(region => !region.IsReserved && !backing.IsBackedRange(region.Address, region.Length)))
+                return false;
+
+            // Keep mappings stable while copying resident bytes and clearing reserved gaps.
+            foreach (var region in regions)
+            {
+                var target = destination.Slice((int)(region.Address - address), (int)region.Length);
+                if (region.IsReserved)
+                    target.Clear();
+                else if (!backing.TryReadBacking(region.Address, target))
+                    return false;
+            }
+            return true;
+        }
+    }
+
     internal static FlexibleBackingPool SetFlexibleBackingForTests(FlexibleBackingPool pool)
     {
         lock (_memoryGate)

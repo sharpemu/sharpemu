@@ -34,7 +34,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly Queue<(GuestImageResource Image, ulong RetireTimeline)>
             _deferredGuestImageVersionDestroys = new();
         private readonly List<(VkBuffer Buffer, DeviceMemory Memory)> _batchRetireBuffers = new();
-        private readonly List<VulkanDetilePass.Transients> _batchRetireDetile = new();
 
         private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
@@ -46,16 +45,27 @@ internal static unsafe partial class VulkanVideoPresenter
         private sealed record PendingGuestSubmission(
             ulong Tick,
             IReadOnlyList<TranslatedDrawResources> Resources,
-            IReadOnlyList<GuestImageResource> TraceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers,
-            IReadOnlyList<VulkanDetilePass.Transients> RetireDetile,
             GuestGpuLabelDependency LabelDependency,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
             long WorkSequence);
 
+        private void PrepareGuestSubmissionCompletion(VulkanOrderedGuestAction work)
+        {
+            if (!work.CollectionPending)
+            {
+                return;
+            }
+
+            // Collect once at the submission boundary, before its final batch is flushed.
+            RunGuestCacheCollection();
+            work.CollectionPending = false;
+        }
+
         private bool TryExecuteOrderedGuestAction(VulkanOrderedGuestAction work)
         {
+            PrepareGuestSubmissionCompletion(work);
             var visible = TryMakeActiveGuestQueueSubmissionsCpuVisible();
             if (!visible)
             {
@@ -83,29 +93,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var resources = CollectGuestCacheResourceRanges();
             foreach (var operation in work.Operations)
             {
-                foreach (var image in _guestImages.Values)
-                {
-                    if (!ShouldTraceGuestImageStateForDiagnostics(image) ||
-                        (!operation.CoversAllMemory &&
-                         !VulkanGuestCacheBarrierPlanner.RangesOverlap(
-                             operation.BaseAddress,
-                             operation.SizeBytes,
-                             image.Address,
-                             image.GuestAllocationByteCount)))
-                    {
-                        continue;
-                    }
-
-                    Console.Error.WriteLine(
-                        $"[LOADER][TRACE] vk.guest_cache_image_overlap " +
-                        $"addr=0x{image.Address:X16} " +
-                        $"operation_base=0x{operation.BaseAddress:X16} " +
-                        $"operation_size=0x{operation.SizeBytes:X16} " +
-                        $"all={operation.CoversAllMemory} " +
-                        $"domains={operation.Domains} actions={operation.Actions} " +
-                        $"scope={operation.Scope} order={operation.Order}");
-                }
-
                 if (TryRecordResourceGuestCacheBarrier(
                         commandBuffer,
                         operation,
@@ -252,8 +239,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"mrt={clear.Targets.Count} " +
                     $"rgba=({clear.Red:0.###},{clear.Green:0.###},{clear.Blue:0.###},{clear.Alpha:0.###}) " +
                     queuePart,
-                VulkanGuestImageWrite imageWrite =>
-                    $"image_write addr=0x{imageWrite.Address:X16} {queuePart}",
+                VulkanGuestImageResolve resolve =>
+                    $"image_resolve src=0x{resolve.Source.Address:X16} dst=0x{resolve.Destination.Address:X16} {queuePart}",
+                VulkanGuestImageClearFromBuffer imageClear =>
+                    $"image_clear addr=0x{imageClear.Address:X16} bytes={imageClear.ByteCount} {queuePart}",
                 VulkanOrderedGuestAction action =>
                     $"ordered_action name={action.DebugName} {queuePart}",
                 VulkanGuestCacheOperation operation =>
@@ -274,46 +263,22 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _batchOpen;
         private int _batchDrawCount;
         private readonly List<TranslatedDrawResources> _batchResources = new();
-        private readonly List<GuestImageResource> _batchTraceImages = new();
 
         // The optional reuse path keeps compatible draws in one render pass.
         // The pass closes before transfer, storage, depth, or barrier work.
-        private GuestImageResource? _openPassTarget;
+        private bool _openPassActive;
 
         private void CloseOpenTranslatedRenderPass()
         {
-            if (_openPassTarget is not { } target)
+            if (!_openPassActive)
             {
                 return;
             }
 
-            _openPassTarget = null;
+            // The store tracks the attachment layouts; the pass only has to end.
+            _openPassActive = false;
             _openPassKey = null;
-            var commandBuffer = new CommandBuffer(_scheduler.Current.Handle);
-            _vk.CmdEndRenderPass(commandBuffer);
-            var toShaderRead = new ImageMemoryBarrier
-            {
-                SType = StructureType.ImageMemoryBarrier,
-                SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
-                DstAccessMask = AccessFlags.ShaderReadBit,
-                OldLayout = ImageLayout.ColorAttachmentOptimal,
-                NewLayout = ImageLayout.ShaderReadOnlyOptimal,
-                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
-                Image = target.Image,
-                SubresourceRange = ColorSubresourceRange(),
-            };
-            _vk.CmdPipelineBarrier(
-                commandBuffer,
-                PipelineStageFlags.ColorAttachmentOutputBit,
-                PipelineStageFlags.AllCommandsBit,
-                0,
-                0,
-                null,
-                0,
-                null,
-                1,
-                &toShaderRead);
+            _vk.CmdEndRenderPass(new CommandBuffer(_scheduler.Current.Handle));
         }
 
         private CommandBuffer BeginBatchedGuestCommands()
@@ -392,13 +357,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _batchOpen = false;
             var resources = _batchResources.ToArray();
-            var traceImages = _batchTraceImages.ToArray();
             var retireBuffers = _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : [];
-            var retireDetile = _batchRetireDetile.Count > 0 ? _batchRetireDetile.ToArray() : [];
             _batchResources.Clear();
-            _batchTraceImages.Clear();
             _batchRetireBuffers.Clear();
-            _batchRetireDetile.Clear();
             var queueName = _scheduler.Current.Context.QueueName;
             if (!_batchLabelDependency.IsEmpty)
             {
@@ -410,9 +371,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 new PendingGuestSubmission(
                     tick,
                     resources,
-                    traceImages,
                     retireBuffers,
-                    retireDetile,
                     _batchLabelDependency,
                     resources.Length > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
@@ -507,18 +466,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _gpuLabelHostPublications.Complete(submission.LabelDependency);
-            foreach (var image in submission.TraceImages)
-            {
-                TraceGuestImageContents(image);
-            }
-
-            // The tick retired, so the detile dispatch that used these is done
-            // reading them; hand them back for the next texture.
-            foreach (var transients in submission.RetireDetile)
-            {
-                _detilePass?.Retire(transients);
-            }
-
             foreach (var resources in submission.Resources)
             {
                 DestroyTranslatedDrawResources(resources);
@@ -527,7 +474,7 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var (buffer, memory) in submission.RetireBuffers)
             {
                 _vk.DestroyBuffer(_device, buffer, null);
-                _vk.FreeMemory(_device, memory, null);
+                _deviceInfo.FreeMemory(memory);
             }
         }
 

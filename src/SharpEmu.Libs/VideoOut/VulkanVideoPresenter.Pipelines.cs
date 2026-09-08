@@ -233,24 +233,24 @@ internal static unsafe partial class VulkanVideoPresenter
             RenderPass renderPass,
             IReadOnlyList<Format> renderTargetFormats,
             Extent2D extent,
-            IReadOnlyList<GuestImageResource>? feedbackTargets = null,
+            TextureResource[]? textures = null,
             bool hasDepthAttachment = false,
-            GuestDepthResource? attachedDepth = null,
-            GuestDepthResource? feedbackDepth = null,
-            GuestDepthResource? directReadOnlyDepthFeedback = null)
+            Format depthAttachmentFormat = Format.Undefined,
+            SampleCountFlags samples = SampleCountFlags.Count1Bit,
+            IReadOnlyList<ulong>? targetAddresses = null)
         {
             var isTitleDraw = IsTitleDraw(draw.VertexBuffers);
             var forceFullscreenVertex = _forceFullscreenPipeline ||
                 _forceFullscreenVertex ||
                 isTitleDraw && _forceTitleFullscreenVertex ||
                 AnyTargetAddressMatches(
-                    feedbackTargets,
+                    targetAddresses,
                     "SHARPEMU_FORCE_FULLSCREEN_VERTEX_TARGETS");
             var forceRasterState = _forceFullscreenPipeline ||
                 _forceDefaultRasterState ||
                 isTitleDraw && _forceTitleDefaultRasterState ||
                 AnyTargetAddressMatches(
-                    feedbackTargets,
+                    targetAddresses,
                     "SHARPEMU_FORCE_DEFAULT_RASTER_STATE_TARGETS");
             var forceTitleSolidFragment =
                 _forceTitleSolidFragment &&
@@ -259,14 +259,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 _forceFullscreenPipeline ||
                 _forceSolidFragment ||
                 AnyTargetAddressMatches(
-                    feedbackTargets,
+                    targetAddresses,
                     "SHARPEMU_FORCE_SOLID_FRAGMENT_TARGETS");
             var attributeFragmentLocation =
                 _forceAttributeFragmentLocation.GetValueOrDefault();
             var forceAttributeFragment =
                 _forceAttributeFragmentLocation.HasValue &&
                 AnyTargetAddressMatches(
-                    feedbackTargets,
+                    targetAddresses,
                     "SHARPEMU_FORCE_ATTRIBUTE_FRAGMENT_TARGETS");
             var vertexSpirv = forceFullscreenVertex
                 ? SpirvFixedShaders.CreateFullscreenVertex(0)
@@ -297,7 +297,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var resources = new TranslatedDrawResources
             {
                 DebugName = "SharpEmu draw",
-                Textures = new TextureResource[draw.Textures.Count],
+                Textures = textures ?? new TextureResource[draw.Textures.Count],
                 GlobalMemoryBuffers =
                     new GlobalBufferResource[draw.GlobalMemoryBuffers.Count],
                 VertexBuffers = new VertexBufferResource[draw.VertexBuffers.Count],
@@ -320,7 +320,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 Raster = ResolvePrimitiveRasterState(draw.PrimitiveType, draw.RenderState.Raster),
                 Depth = draw.RenderState.Depth,
                 HasDepthAttachment = hasDepthAttachment,
-                DepthAttachmentFormat = attachedDepth?.Format ?? Format.Undefined,
+                DepthAttachmentFormat = depthAttachmentFormat,
+                Samples = samples,
                 TargetFormats = renderTargetFormats.ToArray(),
             };
             if (forceFullscreenVertex)
@@ -373,59 +374,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             try
             {
-                foreach (var texture in draw.Textures)
+                if (textures is null)
                 {
-                    // Skip address-0 storage bindings here: the real resolution
-                    // path uses a scratch image for those, but this warm-up pass
-                    // called ResolveStorageGuestImage directly, which throws on
-                    // address 0 and dropped the whole draw (Demon's Souls G-buffer
-                    // normals/IDs passes -> lighting had no input -> black).
-                    if (texture.IsStorage && texture.Address != 0)
-                    {
-                        _ = ResolveStorageGuestImage(texture);
-                    }
-                }
-
-                var hostMovieTextures = FindHostMovieTextureBindings(draw.Textures);
-                for (var index = 0; index < draw.Textures.Count; index++)
-                {
-                    var texture = draw.Textures[index];
-                    var usesDirectReadOnlyDepth =
-                        directReadOnlyDepthFeedback is not null &&
-                        IsMatchingGuestDepthTexture(
-                            texture,
-                            directReadOnlyDepthFeedback);
-                    var resolved = usesDirectReadOnlyDepth
-                        ? CreateReadOnlyDepthFeedbackResource(
-                            texture,
-                            directReadOnlyDepthFeedback!)
-                        : index == hostMovieTextures.Luma
-                        ? CreateHostMovieTextureResource(texture, plane: 0)
-                        : index == hostMovieTextures.Chroma
-                            ? CreateHostMovieTextureResource(texture, plane: 1)
-                            : ResolveTextureResource(texture);
-                    var feedbackTarget = !texture.IsStorage
-                        ? feedbackTargets?.FirstOrDefault(target =>
-                            ReferenceEquals(resolved.GuestImage, target))
-                        : null;
-                    // ResolveTextureResource may deliberately decline an
-                    // address alias when the descriptor is incompatible with
-                    // the render-target image. Only snapshot an alias which
-                    // actually resolved to the target; a separately uploaded
-                    // texture has no Vulkan attachment feedback hazard.
-                    resources.Textures[index] =
-                        usesDirectReadOnlyDepth
-                            ? resolved
-                            : feedbackDepth is not null &&
-                        !texture.IsStorage &&
-                        ReferenceEquals(resolved.GuestDepth, feedbackDepth)
-                            ? CreateDepthFeedbackSnapshot(texture, feedbackDepth)
-                            :
-                        feedbackTarget is not null &&
-                        !texture.IsStorage &&
-                        ReferenceEquals(resolved.GuestImage, feedbackTarget)
-                            ? CreateRenderTargetFeedbackSnapshot(texture, feedbackTarget)
-                            : resolved;
+                    resources.Textures = ResolveDrawTextures(draw.Textures);
                 }
 
                 PrepareCachedBufferAllocations(_bufferCache, draw.GlobalMemoryBuffers, draw.VertexBuffers, draw.IndexBuffer);
@@ -545,45 +496,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             try
             {
-                for (var index = 0; index < dispatch.Textures.Count; index++)
-                {
-                    var texture = dispatch.Textures[index];
-                    // Address-zero storage descriptors are valid scratch bindings.
-                    // ResolveTextureResource creates their transient image below;
-                    // pre-resolving them as guest-backed images throws and drops
-                    // the entire compute dispatch before that path can run.
-                    if (texture.IsStorage && texture.Address != 0)
-                    {
-                        if (traceResources)
-                        {
-                            TraceVulkanShader(
-                                $"vk.compute_resources storage[{index}] begin " +
-                                $"addr=0x{texture.Address:X16} fmt={texture.Format} " +
-                                $"size={texture.Width}x{texture.Height} " +
-                                $"view_mips={texture.BaseMipLevel}+{texture.MipLevels} " +
-                                $"resource_mips={texture.ResourceMipLevels} " +
-                                $"relative_level={texture.MipLevel}");
-                        }
-
-                        _ = ResolveStorageGuestImage(texture);
-                        if (traceResources)
-                        {
-                            TraceVulkanShader($"vk.compute_resources storage[{index}] ready");
-                        }
-                    }
-                }
-
-                if (traceResources)
-                {
-                    TraceVulkanShader("vk.compute_resources resolve begin");
-                }
-
-                for (var index = 0; index < dispatch.Textures.Count; index++)
-                {
-                    resources.Textures[index] =
-                        ResolveTextureResource(dispatch.Textures[index]);
-                }
-
+                resources.Textures = ResolveDrawTextures(dispatch.Textures);
                 if (traceResources)
                 {
                     TraceVulkanShader("vk.compute_resources resolve ready");
@@ -797,27 +710,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 for (var index = 0; index < textureCount; index++)
                 {
                     var isStorage = resources.Textures[index].IsStorage;
-                    if (!isStorage &&
-                        resources.Textures[index].Sampler.Handle == 0)
+                    if (!isStorage && resources.Textures[index].Sampler.Handle == 0)
                     {
-                        resources.Textures[index].Sampler =
-                            CreateSampler(resources.Textures[index].SamplerState);
+                        resources.Textures[index].Sampler = ResolveSampler(resources.Textures[index].SamplerState);
                     }
 
                     imageInfoPointer[index] = new DescriptorImageInfo
                     {
                         Sampler = isStorage ? default : resources.Textures[index].Sampler,
                         ImageView = resources.Textures[index].View,
-                        ImageLayout = resources.Textures[index].ReadOnlyDepthFeedback
-                            ? ImageLayout.DepthStencilReadOnlyOptimal
-                            : isStorage ||
-                            resources.Textures[index].GuestImage is { } guestImage &&
-                            resources.Textures.Any(
-                                texture =>
-                                    texture.IsStorage &&
-                                    texture.GuestImage == guestImage)
-                                ? ImageLayout.General
-                                : ImageLayout.ShaderReadOnlyOptimal,
+                        ImageLayout = resources.Textures[index].Layout,
                     };
                     writePointer[writeIndex++] = new WriteDescriptorSet
                     {
@@ -852,7 +754,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var pipelineKey = new GraphicsPipelineKey(
                 GetShaderDigest(vertexSpirv),
                 GetShaderDigest(fragmentSpirv),
-                string.Join(',', renderTargetFormats.Select(format => (uint)format)),
+                $"{(uint)resources.Samples}|" + string.Join(',', renderTargetFormats.Select(format => (uint)format)),
                 resources.HasDepthAttachment,
                 resources.DepthAttachmentFormat,
                 resources.Topology,
@@ -1012,7 +914,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     var multisample = new PipelineMultisampleStateCreateInfo
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
-                        RasterizationSamples = SampleCountFlags.Count1Bit,
+                        RasterizationSamples = resources.Samples,
                     };
                     var colorBlendAttachments = stackalloc PipelineColorBlendAttachmentState[resources.Blends.Length];
                     for (var index = 0; index < resources.Blends.Length; index++)
@@ -1133,6 +1035,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DestroyShaderModule(_device, vertexModule, null);
             }
         }
+
+        private static CompareOp ToVkCompareOp(uint compareOp) => (CompareOp)Math.Min(compareOp, 7u);
 
         private static StencilOp ToVkStencilOp(
             uint operation,

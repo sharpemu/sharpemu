@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Text;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
@@ -639,7 +640,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 TextureCompressionBC = supportedFeatures.TextureCompressionBC,
                 RobustBufferAccess = supportedFeatures.RobustBufferAccess,
                 DepthBiasClamp = supportedFeatures.DepthBiasClamp,
+                SampleRateShading = supportedFeatures.SampleRateShading,
+                SamplerAnisotropy = supportedFeatures.SamplerAnisotropy,
             };
+
+            if (!supportedFeatures.SampleRateShading)
+            {
+                throw new InvalidOperationException(
+                    "The GPU does not support sampleRateShading, which the multisample depth conversion needs.");
+            }
 
             if (!supportedFeatures.RobustBufferAccess)
             {
@@ -813,8 +822,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device);
             CreateScheduler();
             CreateBufferCache();
+            CreateImageCache();
             if (_gpuLabelTimelineEnabled)
             {
                 CreateGuestTimelineSemaphores();
@@ -822,7 +833,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 Console.Error.WriteLine("[LOADER][INFO] Vulkan GPU label timelines enabled.");
             }
             LoadDebugUtilsCommands();
-            VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex, _queueGate);
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
             {
                 throw new InvalidOperationException("VK_KHR_swapchain is unavailable.");

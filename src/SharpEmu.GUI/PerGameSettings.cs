@@ -8,7 +8,6 @@ namespace SharpEmu.GUI;
 
 public sealed class PerGameSettings
 {
-    private const string GuestImageCpuSyncEnvironmentName = "SHARPEMU_GUEST_IMAGE_CPU_SYNC";
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -229,14 +228,6 @@ public sealed class PerGameSettings
 
             if (parts.Length == 2 && parts[1] == "0")
             {
-                if (string.Equals(
-                        parts[0],
-                        GuestImageCpuSyncEnvironmentName,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    normalized.Add($"{parts[0]}=0");
-                }
-
                 continue;
             }
 

@@ -47,7 +47,6 @@
   "Options.Env.Group.Debug": "Debugowanie",
   "Options.Env.Group.General": "Ogólne",
   "Options.Env.RenderDoc.Desc": "Załaduj API RenderDoc w aplikacji, aby można było przechwytywać klatki z wnętrza emulatora.\nNaciśnij F10 podczas działania gry, aby przechwycić jedną klatkę; przechwycone klatki trafiają do user/logs/capture_logs/<TITLE_ID>.\nWymaga zainstalowanego RenderDoc. Spowalnia GPU i zawiesza niektóre tytuły, więc zostaw wyłączone, chyba że debugujesz.",
-  "Options.Env.GuestImageCpuSync.Desc": "Synchronizuje powierzchnie gościa po zapisaniu ich przez procesor gry.\nDomyślnie włączone, aby obrazy zapisywane przez CPU były poprawne. Wyłącz tylko w celu diagnozy problemu lub ograniczenia zbędnego obciążenia.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "Dostarczaj preambuły buforów poleceń GPU nawet gdy ich docelowa kolejka ich nie odbiera.\nZostaw wyłączone normalnie. Włącz dla tytułów, które zawieszają się w oczekiwaniu na sygnał z GPU.",
   "Options.DefaultProfile.Label": "Domyślna nazwa profilu",
   "Options.DefaultProfile.Desc": "Nazwa używana, gdy gra prosi o wprowadzenie tekstu. Domyślnie Sharp.",
@@ -58,9 +57,6 @@
   "Options.Section.Display": "WYŚWIETLANIE",
   "Options.Graphics": "Grafika",
 
-  "Options.RenderResolution.Label": "Rozdzielczość wewnętrzna",
-  "Options.RenderResolution.Desc": "Renderuj cele pozaekranowe poniżej natywnej rozdzielczości i skaluj w górę przy prezentacji. Niższe wartości zamieniają jakość obrazu na zapas GPU; działa od następnego uruchomienia.",
-  "Options.RenderResolution.Native": "100% (natywna)",
   "Options.WindowMode.Label": "Tryb okna",
   "Options.WindowMode.Desc": "Zwykłe okno, bezramkowe na pulpicie lub pełny ekran wyłączny.",
   "Options.WindowMode.Windowed": "W oknie",

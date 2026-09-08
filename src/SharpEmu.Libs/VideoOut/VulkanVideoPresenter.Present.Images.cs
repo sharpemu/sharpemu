@@ -56,11 +56,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(
-                    _device,
-                    &allocationInfo,
-                    null,
-                    out _presentationImageMemory[index]),
+                _deviceInfo.AllocateMemory(allocationInfo, out _presentationImageMemory[index]),
                 "vkAllocateMemory(HDR presentation source)");
             Check(
                 _vk.BindImageMemory(

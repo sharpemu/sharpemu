@@ -15,6 +15,69 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelBackedMemoryTests
 {
     [Fact]
+    public void SparseImageReadCopiesResidentRangesAndClearsReservedGaps()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong address = 0x1026C00000;
+        const int size = 0x10000;
+        test.Reserve(size, address);
+        test.Allocate(0, 0x8000);
+        test.Map(0, 0x4000, address);
+        test.Map(0x4000, 0x4000, address + 0xC000);
+        SetPrtAperture(test, address, size);
+        try
+        {
+            Assert.True(test.Memory.TryWriteBacking(address, Enumerable.Repeat((byte)0x35, 0x4000).ToArray()));
+            Assert.True(test.Memory.TryWriteBacking(address + 0xC000, Enumerable.Repeat((byte)0x72, 0x4000).ToArray()));
+            var result = Enumerable.Repeat((byte)0xFF, size).ToArray();
+            Assert.False(test.Memory.TryReadBacking(address, result));
+            Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
+            Assert.All(result[..0x4000], value => Assert.Equal(0x35, value));
+            Assert.All(result[0x4000..0xC000], value => Assert.Equal(0, value));
+            Assert.All(result[0xC000..], value => Assert.Equal(0x72, value));
+            Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address + 0x3FF0, result.AsSpan(0, 32)));
+            Assert.All(result[..16], value => Assert.Equal(0x35, value));
+            Assert.All(result[16..32], value => Assert.Equal(0, value));
+        }
+        finally
+        {
+            SetPrtAperture(test, address, 0);
+        }
+    }
+
+    [Fact]
+    public void SparseImageReadRejectsUnreservedAndOutOfApertureRanges()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong address = 0x1026C00000;
+        test.Reserve(0x10000, address);
+        SetPrtAperture(test, address, 0x20000);
+        try
+        {
+            var result = Enumerable.Repeat((byte)0xAB, 0x20000).ToArray();
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
+            Assert.All(result, value => Assert.Equal(0xAB, value));
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, ulong.MaxValue, result));
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, Span<byte>.Empty));
+            SetPrtAperture(test, address, 0);
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result.AsSpan(0, 0x4000)));
+            Assert.All(result, value => Assert.Equal(0xAB, value));
+        }
+        finally
+        {
+            SetPrtAperture(test, address, 0);
+        }
+    }
+
+    private static void SetPrtAperture(BackedKernelMemory test, ulong address, ulong size)
+    {
+        test.Context[CpuRegister.Rdi] = 0;
+        test.Context[CpuRegister.Rsi] = address;
+        test.Context[CpuRegister.Rdx] = size;
+        Assert.Equal(0, KernelRuntimeCompatExports.KernelSetPrtAperture(test.Context));
+    }
+
+    [Fact]
     public void NonFixedReservationHintDoesNotReuseAnExistingReservation()
     {
         using var test = new BackedKernelMemory();

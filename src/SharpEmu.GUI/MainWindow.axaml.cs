@@ -57,13 +57,6 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("Error", "Options.LogLevel.Error"),
         LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
     ];
-    private readonly LocalizedChoice[] _renderResolutionChoices =
-    [
-        LocalizedChoice.FromKey("1.0", "Options.RenderResolution.Native"),
-        LocalizedChoice.Literal("0.75", "75%"),
-        LocalizedChoice.Literal("0.5", "50%"),
-        LocalizedChoice.Literal("0.25", "25%"),
-    ];
     private readonly LocalizedChoice[] _windowModeChoices =
     [
         LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
@@ -254,18 +247,6 @@ public partial class MainWindow : Window
         // it is open already uses the new values.
         LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
         TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
-        RenderResolutionBox.SelectionChanged += (_, _) =>
-        {
-            if (RenderResolutionBox.SelectedItem is LocalizedChoice { Value: var value } &&
-                double.TryParse(
-                    value,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out var scale))
-            {
-                _settings.RenderResolutionScale = scale;
-            }
-        };
         StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
@@ -309,10 +290,6 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
-        EnvGuestImageCpuSyncToggle.IsCheckedChanged += (_, _) =>
-            SetDefaultEnabledEnvironmentToggle(
-                "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
-                EnvGuestImageCpuSyncToggle.IsChecked == true);
         EnvForceSubmitOrphanPreamblesToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle(
                 "SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES",
@@ -1199,7 +1176,6 @@ public partial class MainWindow : Window
     {
         CpuEngineBox.ItemsSource = _cpuEngineChoices;
         LogLevelBox.ItemsSource = _logLevelChoices;
-        RenderResolutionBox.ItemsSource = _renderResolutionChoices;
         WindowModeBox.ItemsSource = _windowModeChoices;
         ScalingModeBox.ItemsSource = _scalingModeChoices;
         HdrModeBox.ItemsSource = _hdrModeChoices;
@@ -1210,7 +1186,6 @@ public partial class MainWindow : Window
     {
         RefreshChoices(_cpuEngineChoices);
         RefreshChoices(_logLevelChoices);
-        RefreshChoices(_renderResolutionChoices);
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
         RefreshChoices(_hdrModeChoices);
@@ -1239,13 +1214,6 @@ public partial class MainWindow : Window
             _ => 2,
         };
         TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
-        RenderResolutionBox.SelectedIndex = _settings.RenderResolutionScale switch
-        {
-            >= 0.875 => 0,
-            >= 0.625 => 1,
-            >= 0.375 => 2,
-            _ => 3,
-        };
         StrictToggle.IsChecked = _settings.StrictDynlibResolution;
         LogToFileToggle.IsChecked = _settings.LogToFile;
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
@@ -1262,11 +1230,6 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvGuestImageCpuSyncToggle.IsChecked =
-            IsEnvironmentEnabled(
-                _settings.EnvironmentToggles,
-                "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
-                defaultEnabled: true);
         EnvForceSubmitOrphanPreamblesToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES");
         EnvRenderDocToggle.IsChecked =
@@ -1495,20 +1458,6 @@ public partial class MainWindow : Window
         else
         {
             _settings.EnvironmentToggles.Remove(name);
-        }
-    }
-
-    private void SetDefaultEnabledEnvironmentToggle(string name, bool enabled)
-    {
-        _settings.EnvironmentToggles.RemoveAll(entry =>
-            string.Equals(
-                entry.Split('=', 2, StringSplitOptions.TrimEntries)[0],
-                name,
-                StringComparison.OrdinalIgnoreCase));
-
-        if (!enabled)
-        {
-            _settings.EnvironmentToggles.Add($"{name}=0");
         }
     }
 

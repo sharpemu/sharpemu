@@ -173,6 +173,8 @@ internal interface IGuestGpuBackend
         uint threadCountZ = uint.MaxValue);
 
     bool TrySubmitGuestImage(
+        int videoOutHandle,
+        int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
@@ -192,17 +194,8 @@ internal interface IGuestGpuBackend
     /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
     bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
 
-    bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType);
+    /// <summary>A hardware color resolve from one color target into another.</summary>
+    bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
 
     /// <summary>
     /// Gets the pixel-output type and component mapping for a guest render target.
@@ -226,6 +219,10 @@ internal interface IGuestGpuBackend
     /// <summary>Enqueues an action at its exact position in the current guest queue;
     /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
     long SubmitOrderedGuestAction(Action action, string debugName);
+
+    // Marks the end of a guest submission without changing its completion ordering.
+    long SubmitGuestSubmissionCompletion(Action action, string debugName) =>
+        SubmitOrderedGuestAction(action, debugName);
 
     /// <summary>
     /// Enqueues a guest cache operation without CPU materialization. The
@@ -267,10 +264,23 @@ internal interface IGuestGpuBackend
     /// <summary>Sequence currently executing on the guest-work consumer; diagnostics only.</summary>
     long CurrentGuestWorkSequenceForDiagnostics { get; }
 
-    // Guest image lifecycle beyond presentation: CPU-visible seeding, writes, and
-    // extent queries the AGC layer uses to keep guest memory and backend images
-    // coherent. Addresses and formats are always raw guest values.
+    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
+    /// they cross the seam.</summary>
+    ulong GuestStorageBufferOffsetAlignment { get; }
 
+    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
+    void CountShaderCompilation();
+
+    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
+
+    /// <summary>Asks a running presenter to close its window.</summary>
+    void RequestClose();
+}
+
+// A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
+// mirrored writes. A backend with a guest image store reads guest memory itself.
+internal interface IGuestImageSnapshotBackend
+{
     /// <summary>Whether the image exists on the backend or an already-queued upload
     /// owns its initialization (a pending image may skip a duplicate upload but is
     /// not yet a valid flip source).</summary>
@@ -318,16 +328,4 @@ internal interface IGuestGpuBackend
     /// <summary>Guest memory handle for backend self-healing (cache misses re-read
     /// texels directly instead of showing a fallback pattern).</summary>
     void AttachGuestMemory(ICpuMemory memory);
-
-    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
-    /// they cross the seam.</summary>
-    ulong GuestStorageBufferOffsetAlignment { get; }
-
-    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
-    void CountShaderCompilation();
-
-    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
-
-    /// <summary>Asks a running presenter to close its window.</summary>
-    void RequestClose();
 }

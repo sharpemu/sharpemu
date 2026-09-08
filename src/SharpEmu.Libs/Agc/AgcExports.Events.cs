@@ -325,7 +325,8 @@ public static partial class AgcExports
         // ThreadPool hop, either of which can only make the interrupt late and
         // reorder it against registration changes (and can wake Unity while its
         // upload data is still stale).
-        if (GuestGpu.Current.SubmitOrderedGuestAction(
+        using var queueScope = GuestGpu.Current.EnterGuestQueue(queueName, submissionId);
+        if (GuestGpu.Current.SubmitGuestSubmissionCompletion(
                 TriggerCompletionEvents,
                 $"agc submit completion {submissionId}") == 0)
         {

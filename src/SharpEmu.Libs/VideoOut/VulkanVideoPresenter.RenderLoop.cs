@@ -13,6 +13,21 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class Presenter
     {
         // This partial drives the Vulkan presenter render loop.
+        private void ProcessGuestCacheReadbacks()
+        {
+            _bufferCache.ProcessPendingFaultBuffer();
+
+            _imageCache.FlushScheduledReadbacks();
+        }
+
+        private void RunGuestCacheCollection()
+        {
+            ProcessGuestCacheReadbacks();
+
+            _imageCache.RunGarbageCollector();
+
+            _bufferCache.RunGarbageCollector();
+        }
 
         private void WaitForRenderWork()
         {
@@ -97,11 +112,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 using var collectScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Collect);
                 CollectCompletedGuestSubmissions(waitForOldest: false);
             }
-            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Evict))
-            {
-                DrainGuestImageCpuSync();
-            }
-
             var completedWork = 0;
             HashSet<string>? deferredOrderedQueues = null;
             var drainStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -154,7 +164,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         _guestWorkFollowupWaitMs <= 0 ||
                         nowTicks >= followupDeadline ||
                         nowTicks >= renderWorkDeadline ||
-                        !WaitForFollowupGuestWork(_guestWorkFollowupWaitMs))
+                        !WaitForFollowupGuestWork(_guestWorkFollowupWaitMs, deferredOrderedQueues))
                     {
                         break;
                     }
@@ -241,10 +251,17 @@ internal static unsafe partial class VulkanVideoPresenter
                             }
 
                             break;
-                        case VulkanGuestImageWrite guestImageWrite:
+                        case VulkanGuestImageResolve imageResolve:
                             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ImageWrite))
                             {
-                                ExecuteGuestImageWrite(guestImageWrite);
+                                ExecuteGuestImageResolve(imageResolve);
+                            }
+
+                            break;
+                        case VulkanGuestImageClearFromBuffer imageClear:
+                            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ImageWrite))
+                            {
+                                ExecuteGuestImageClearFromBuffer(imageClear);
                             }
 
                             break;
@@ -309,21 +326,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         continue;
                     }
 
-                    // macOS: non-blocking defer — exclude this logical queue for
-                    // the rest of the tick so sibling queues can still progress.
-                    // Windows/Linux already blocked in WaitForFences; excluding
-                    // the only busy queue ends the drain immediately and leaves
-                    // OrderedGuestAction stacked. Leave the item at the front and
-                    // end this Render; the next tick retries after GPU progress.
-                    if (OperatingSystem.IsMacOS())
-                    {
-                        deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
-                        deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
-                    }
-                    else
-                    {
-                        break;
-                    }
+                    // Try other queues before waiting for a blocked queue to make progress.
+                    deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
+                    deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
+                    continue;
                 }
 
                 if (workStart != 0)
@@ -366,10 +372,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 FlushBatchedGuestCommands();
             }
 
-            // Collect unused buffers once per render tick.
-            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Collect))
+            // Partial submissions can still publish data without aging cache entries.
+            if (completedWork > 0)
             {
-                _bufferCache.RunGarbageCollector();
+                ProcessGuestCacheReadbacks();
             }
 
             PerfOverlay.SetGuestBufferCacheBytes(_bufferCache.TotalUsedMemory);
@@ -497,15 +503,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     presentation.GuestImageVersion,
                     out presentedGuestImage);
             }
-            else if (presentation.GuestImageAddress != 0)
-            {
-                _guestImages.TryGetValue(
-                    presentation.GuestImageAddress,
-                    out presentedGuestImage);
-            }
 
-            if (presentation.GuestImageAddress != 0 &&
-                (presentedGuestImage is null || !presentedGuestImage.Initialized))
+            if (presentation.GuestImageAddress != 0 && presentedGuestImage is null)
             {
                 if (ShouldTracePresentedGuestImageContentsForDiagnostics())
                 {
@@ -513,7 +512,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"[LOADER][WARN] vk.present_dropped addr=0x{presentation.GuestImageAddress:X16} " +
                         $"version={presentation.GuestImageVersion} " +
                         $"found={(presentedGuestImage is not null)} " +
-                        $"initialized={(presentedGuestImage?.Initialized ?? false)} " +
                         $"— no swapchain present this frame (black).");
                 }
 
@@ -557,16 +555,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         _renderPass,
                         [PresentationTargetFormat],
                         _extent);
-                    if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-                        !_firstGuestDrawPresented &&
-                        translatedResources.Textures is
-                        [
-                        { GuestImage: { } guestImage },
-                        ] &&
-                        _tracedGuestImageContents.Add(guestImage.Address))
-                    {
-                        TraceGuestImageContents(guestImage);
-                    }
                 }
                 catch (Exception exception)
                 {
@@ -696,14 +684,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _frameTimelines[frameSlot] = _submitTimeline;
             _frameInFlight[frameSlot] = true;
             _frameTranslatedResources[frameSlot] = translatedResources;
-            if (translatedResources is not null)
-            {
-                // CPU-side layout bookkeeping only; later command buffers are
-                // recorded after this submission, so queue order makes the
-                // flags valid before any dependent GPU work runs.
-                MarkSampledImagesInitialized(translatedResources);
-                MarkStorageImagesInitialized(translatedResources);
-            }
 
             var swapchain = _swapchain;
             var presentInfo = new PresentInfoKHR
@@ -738,19 +718,11 @@ internal static unsafe partial class VulkanVideoPresenter
             VideoOutExports.ReportPresentedFrame();
             PerfOverlay.RecordPresent();
             RenderPhaseProfile.RecordFrame();
-            if (_swapchainReadbackPending || !_pendingAliasImageDumps.IsEmpty)
+            if (_swapchainReadbackPending)
             {
                 // Diagnostics read back GPU memory and need this frame done.
                 WaitFrameSlot(frameSlot);
-                if (_swapchainReadbackPending)
-                {
-                    TraceSwapchainReadback();
-                }
-
-                while (_pendingAliasImageDumps.TryDequeue(out var aliasImage))
-                {
-                    TraceGuestImageContents(aliasImage);
-                }
+                TraceSwapchainReadback();
             }
 
             CollectCompletedGuestSubmissions(waitForOldest: false);

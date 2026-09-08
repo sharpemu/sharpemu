@@ -81,13 +81,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return new GuestRect(0, 0, extent.Width, extent.Height);
             }
 
-            var rect = _renderResolutionScale == 1.0
-                ? guestRect
-                : new GuestRect(
-                    (int)Math.Round(guestRect.X * _renderResolutionScale),
-                    (int)Math.Round(guestRect.Y * _renderResolutionScale),
-                    Math.Max(1u, (uint)Math.Round(guestRect.Width * _renderResolutionScale)),
-                    Math.Max(1u, (uint)Math.Round(guestRect.Height * _renderResolutionScale)));
+            var rect = guestRect;
 
             var left = Math.Clamp(rect.X, 0, checked((int)extent.Width));
             var top = Math.Clamp(rect.Y, 0, checked((int)extent.Height));
@@ -121,16 +115,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return new Viewport(0, 0, extent.Width, extent.Height, 0, 1);
             }
 
-            var scale = (float)_renderResolutionScale;
-            var rect = scale == 1f
-                ? guestRect
-                : guestRect with
-                {
-                    X = guestRect.X * scale,
-                    Y = guestRect.Y * scale,
-                    Width = guestRect.Width * scale,
-                    Height = guestRect.Height * scale,
-                };
+            var rect = guestRect;
 
             // Do NOT trim the rectangle to the render target: Vulkan allows
             // viewports that extend beyond the framebuffer (rendering is

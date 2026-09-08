@@ -801,6 +801,17 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    internal static bool ContainsPrtRange(ulong address, ulong size)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+            return false;
+        lock (_prtApertureGate)
+        {
+            return _prtApertures.Any(aperture => address >= aperture.Base &&
+                size <= aperture.Size && address - aperture.Base <= aperture.Size - size);
+        }
+    }
+
     [SysAbiExport(
         Nid = "f7KBOafysXo",
         ExportName = "sceKernelGetModuleInfoFromAddr",

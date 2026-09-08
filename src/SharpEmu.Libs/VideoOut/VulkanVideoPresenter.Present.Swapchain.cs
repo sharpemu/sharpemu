@@ -528,7 +528,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 if (_frameUploadMemory[slot].Handle != 0)
                 {
-                    _vk.FreeMemory(_device, _frameUploadMemory[slot], null);
+                    _deviceInfo.FreeMemory(_frameUploadMemory[slot]);
                 }
             }
             _frameUploadBuffers = [];
@@ -541,7 +541,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_stagingMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _stagingMemory, null);
+                _deviceInfo.FreeMemory(_stagingMemory);
                 _stagingMemory = default;
                 _stagingSize = 0;
             }
@@ -568,7 +568,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_overlayImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _overlayImageMemory, null);
+                _deviceInfo.FreeMemory(_overlayImageMemory);
                 _overlayImageMemory = default;
             }
             for (var slot = 0; slot < _overlayStagingBuffers.Length; slot++)
@@ -579,7 +579,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 if (_overlayStagingMemory[slot].Handle != 0)
                 {
-                    _vk.FreeMemory(_device, _overlayStagingMemory[slot], null);
+                    _deviceInfo.FreeMemory(_overlayStagingMemory[slot]);
                 }
             }
             _overlayStagingBuffers = [];
@@ -692,7 +692,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (memory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, memory, null);
+                    _deviceInfo.FreeMemory(memory);
                 }
             }
             _presentationImageMemory = [];

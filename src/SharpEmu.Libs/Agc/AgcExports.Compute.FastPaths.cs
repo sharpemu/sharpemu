@@ -692,16 +692,18 @@ public static partial class AgcExports
                 }
                 else if (source is { } cachedSourceTexture &&
                     GuestGpu.Current.TrySubmitGuestImageBlit(
-                        cachedSourceTexture.Address,
-                        cachedSourceTexture.Width,
-                        cachedSourceTexture.Height,
-                        cachedSourceTexture.Format,
-                        cachedSourceTexture.NumberType,
-                        texture.Address,
-                        texture.Width,
-                        texture.Height,
-                        texture.Format,
-                        texture.NumberType))
+                        new GuestRenderTarget(
+                            cachedSourceTexture.Address,
+                            cachedSourceTexture.Width,
+                            cachedSourceTexture.Height,
+                            cachedSourceTexture.Format,
+                            cachedSourceTexture.NumberType),
+                        new GuestRenderTarget(
+                            texture.Address,
+                            texture.Width,
+                            texture.Height,
+                            texture.Format,
+                            texture.NumberType)))
                 {
                     blits++;
                     TraceAgcShader(

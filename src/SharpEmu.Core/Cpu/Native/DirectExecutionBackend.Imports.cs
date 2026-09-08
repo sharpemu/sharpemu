@@ -72,44 +72,7 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
-		if (!OperatingSystem.IsWindows() &&
-			TryHandleGuestImageWriteFault(exceptionInfo))
-		{
-			return -1;
-		}
-
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
-	}
-
-	/// <summary>
-	/// Windows counterpart of the POSIX SIGSEGV bridge into
-	/// <see cref="SharpEmu.HLE.GuestImageWriteTracker"/>. Guest code runs natively,
-	/// so a store into a surface the GPU backend has cached is an ordinary CPU
-	/// write with nothing to intercept — the page is write-protected instead and
-	/// the resulting fault is what tells the backend to re-upload. Without this
-	/// the cache serves the first upload forever, and anything the guest CPU
-	/// draws (a software-decoded movie frame, a memset fog layer) never reaches
-	/// the screen.
-	/// </summary>
-	private unsafe static bool TryHandleGuestImageWriteFault(void* exceptionInfo)
-	{
-		if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled)
-		{
-			return false;
-		}
-
-		var exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-		// STATUS_ACCESS_VIOLATION, and only the write flavour: ExceptionInformation
-		// is [accessKind, address] with 0=read, 1=write, 8=DEP execute.
-		if (exceptionRecord->ExceptionCode != 3221225477u ||
-			exceptionRecord->NumberParameters < 2 ||
-			exceptionRecord->ExceptionInformation[0] != 1uL)
-		{
-			return false;
-		}
-
-		return SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
-			exceptionRecord->ExceptionInformation[1]);
 	}
 
 	private unsafe static int RawUnhandledFilterManaged(void* exceptionInfo)

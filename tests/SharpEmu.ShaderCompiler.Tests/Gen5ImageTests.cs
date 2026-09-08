@@ -10,7 +10,37 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ImageTests
 {
+    [Theory]
+    [InlineData("ImageLoad", null, false)]
+    [InlineData("ImageStore", null, false)]
+    [InlineData("ImageSample", null, false)]
+    [InlineData("ImageLoadMip", null, true)]
+    [InlineData("ImageStoreMip", null, true)]
+    [InlineData("ImageLoadMip", 0u, false)]
+    [InlineData("ImageStoreMip", 2u, false)]
+    public void DynamicMipRequiresAnUnresolvedMipOperand(string opcode, uint? mipLevel, bool expected)
+    {
+        var binding = new Gen5ImageBinding(0, opcode, null!, [], [], mipLevel);
+        Assert.Equal(expected, binding.HasDynamicMip);
+    }
+
     private const ulong ShaderAddress = 0x1_0000_C000;
+
+    [Theory]
+    [InlineData("ImageSampleLz", 2u, 9u, SpirvImageDim.Dim2D)]
+    [InlineData("ImageStore", 2u, 9u, SpirvImageDim.Dim2D)]
+    [InlineData("ImageSampleLz", 1u, 10u, SpirvImageDim.Dim3D)]
+    [InlineData("ImageStore", 1u, 10u, SpirvImageDim.Dim3D)]
+    public void BoundDescriptorControlsVolumeImageType(
+        string opcode, uint instructionDimension, uint descriptorType, SpirvImageDim expected)
+    {
+        var instructions = ReadSpirvInstructions(CompileImageOperation(opcode, instructionDimension,
+            descriptorType: descriptorType));
+        var imageType = Assert.Single(instructions, item => item.Opcode == SpirvOp.TypeImage);
+        Assert.Equal((uint)expected, imageType.Operands[2]);
+        if (opcode == "ImageStore")
+            AssertCoordinateVectorWidth(instructions, SpirvOp.ImageWrite, 1, expected == SpirvImageDim.Dim3D ? 3u : 2u);
+    }
     private const uint SEndpgm = 0xBF810000;
 
     [Theory]
@@ -172,7 +202,8 @@ public sealed class Gen5ImageTests
         uint dstSelect = Gen5ShaderTranslator.IdentityImageDstSelect,
         uint unifiedFormat = 71u,
         uint samplerWord0 = 0u,
-        uint samplerWord2 = 0u)
+        uint samplerWord2 = 0u,
+        uint? descriptorType = null)
     {
         var coordinateCount = dimension == 2 ? 3 : 2;
         var addressCount = coordinateCount +
@@ -216,7 +247,7 @@ public sealed class Gen5ImageTests
         var scalarRegisters = new uint[256];
         var descriptor = new uint[8];
         descriptor[1] = unifiedFormat << 20;
-        descriptor[3] = ((dimension == 2 ? 10u : 9u) << 28) | dstSelect;
+        descriptor[3] = ((descriptorType ?? (dimension == 2 ? 10u : 9u)) << 28) | dstSelect;
         var evaluation = new Gen5ShaderEvaluation(
             scalarRegisters,
             scalarRegisters,

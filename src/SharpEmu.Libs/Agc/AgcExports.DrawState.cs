@@ -4,6 +4,7 @@
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 
@@ -45,7 +46,41 @@ public static partial class AgcExports
         uint Format,
         uint NumberType,
         uint ComponentSwap,
-        uint TileMode);
+        uint TileMode,
+        ColorTargetWords? Registers = null,
+        uint WriteMask = 0xF);
+
+    private static ulong ReadColorTargetAddress(IReadOnlyDictionary<uint, uint> registers, uint lowRegister, uint highRegister)
+    {
+        registers.TryGetValue(lowRegister, out var lowAddressWord);
+        registers.TryGetValue(highRegister, out var highAddressWord);
+        return ((ulong)(highAddressWord & 0xFFu) << 40) | ((ulong)lowAddressWord << 8);
+    }
+
+    // Every register of the slot, read as the guest left it; missing registers read as zero.
+    private static ColorTargetWords ReadColorTargetWords(IReadOnlyDictionary<uint, uint> registers, uint slot, ulong address)
+    {
+        var stride = slot * CbColorRegisterStride;
+        registers.TryGetValue(CbColor0View + stride, out var view);
+        registers.TryGetValue(CbColor0Info + stride, out var info);
+        registers.TryGetValue(CbColor0Attrib + stride, out var attributeWord);
+        registers.TryGetValue(CbColor0Attrib2 + slot, out var attributeWord2);
+        registers.TryGetValue(CbColor0Attrib3 + slot, out var attributeWord3);
+        registers.TryGetValue(CbColor0DccControl + stride, out var dccControl);
+        registers.TryGetValue(CbColor0ClearWord0 + stride, out var clearWord0);
+        return new ColorTargetWords(
+            address,
+            view,
+            info,
+            attributeWord,
+            attributeWord2,
+            attributeWord3,
+            dccControl,
+            ReadColorTargetAddress(registers, CbColor0Cmask + stride, CbColor0CmaskBaseExt + slot),
+            ReadColorTargetAddress(registers, CbColor0Fmask + stride, CbColor0FmaskBaseExt + slot),
+            clearWord0,
+            ReadColorTargetAddress(registers, CbColor0DccBase + stride, CbColor0DccBaseExt + slot));
+    }
 
 #if DEBUG
     private static void ValidateDepthTargetDecoder()
@@ -112,7 +147,9 @@ public static partial class AgcExports
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
                 ExtractRenderTargetComponentSwap(info),
-                ExtractRenderTargetTileMode(attrib3)));
+                ExtractRenderTargetTileMode(attrib3),
+                ReadColorTargetWords(registers, slot, address),
+                hasTargetMask ? writeMask : 0xFu));
         }
 
         if (targets.Count > 1 &&
@@ -149,7 +186,9 @@ public static partial class AgcExports
             target.NumberType,
             MipLevels: 1,
             ComponentSwap: target.ComponentSwap,
-            TileMode: target.TileMode);
+            TileMode: target.TileMode,
+            Registers: target.Registers,
+            WriteMask: target.WriteMask);
 
     private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
@@ -505,6 +544,23 @@ public static partial class AgcExports
             }
         }
 
+        registers.TryGetValue(DbHtileSurface, out var htileSurfaceWord);
+        registers.TryGetValue(DbRenderControl, out var renderControlWord);
+        registers.TryGetValue(DbDepthControl, out var depthControlWord);
+        var words = new DepthTargetWords(
+            zInfo,
+            stencilInfo,
+            depthView,
+            sizeXy,
+            DepthSizeValid: compositeSizeXy is not null || registers.ContainsKey(DbDepthSizeXy),
+            htileSurfaceWord,
+            renderControlWord,
+            depthControlWord,
+            readAddress,
+            writeAddress,
+            stencilReadAddress,
+            stencilWriteAddress,
+            htileAddress);
         return new GuestDepthTarget(
             readAddress,
             writeAddress,
@@ -521,7 +577,8 @@ public static partial class AgcExports
             StencilReadAddress: stencilReadAddress,
             StencilWriteAddress: stencilWriteAddress,
             StencilReadOnly:
-                (depthView & (1u << 25)) != 0 || stencilWriteAddress == 0);
+                (depthView & (1u << 25)) != 0 || stencilWriteAddress == 0,
+            Registers: words);
     }
 
     // PA_SU_SC_MODE_CNTL (context register 0x205) carries face culling, the

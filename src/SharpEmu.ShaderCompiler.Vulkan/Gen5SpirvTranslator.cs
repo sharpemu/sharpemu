@@ -1050,7 +1050,7 @@ public static partial class Gen5SpirvTranslator
                         SpirvCapability.StorageImageExtendedFormats);
                 }
 
-                var dimension = binding.Control.Dimension == 2
+                var dimension = Gen5ShaderTranslator.IsVolumeImageBinding(binding)
                     ? SpirvImageDim.Dim3D
                     : SpirvImageDim.Dim2D;
                 var isArrayed = dimension != SpirvImageDim.Dim3D &&

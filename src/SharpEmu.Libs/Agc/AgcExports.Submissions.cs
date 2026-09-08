@@ -93,7 +93,7 @@ public static partial class AgcExports
             $"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} " +
             $"dwords={dwordCount} end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
-        GuestGpu.Current.AttachGuestMemory(ctx.Memory);
+        (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         var setupEndTicks = profileEnabled
@@ -196,7 +196,7 @@ public static partial class AgcExports
             $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
             $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
-        GuestGpu.Current.AttachGuestMemory(ctx.Memory);
+        (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
@@ -1178,12 +1178,13 @@ public static partial class AgcExports
         // soft-locked titles (GTA). The presenter's render drain owns the
         // read/upload/re-arm; this call is only a scoped wake.
         _ = ctx;
-        if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled || scopeByteCount == 0)
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend snapshots ||
+            !SharpEmu.HLE.GuestImageWriteTracker.Enabled || scopeByteCount == 0)
         {
             return;
         }
 
-        GuestGpu.Current.RequestCpuWrittenGuestImageSync(scopeAddress, scopeByteCount);
+        snapshots.RequestCpuWrittenGuestImageSync(scopeAddress, scopeByteCount);
     }
 
     private static long _dmaMirrorTraceCount;
@@ -1194,7 +1195,12 @@ public static partial class AgcExports
         ulong byteCount,
         uint? fillValue)
     {
-        var hasImage = GuestGpu.Current.TryGetGuestImageExtent(
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend snapshots)
+        {
+            return;
+        }
+
+        var hasImage = snapshots.TryGetGuestImageExtent(
             destinationAddress,
             out var width,
             out var height,
@@ -1218,14 +1224,14 @@ public static partial class AgcExports
 
         if (fillValue is { } fill)
         {
-            GuestGpu.Current.SubmitGuestImageFill(destinationAddress, fill);
+            snapshots.SubmitGuestImageFill(destinationAddress, fill);
             return;
         }
 
         var pixels = new byte[imageBytes];
         if (ctx.Memory.TryRead(destinationAddress, pixels))
         {
-            GuestGpu.Current.SubmitGuestImageWrite(destinationAddress, pixels);
+            snapshots.SubmitGuestImageWrite(destinationAddress, pixels);
         }
     }
 

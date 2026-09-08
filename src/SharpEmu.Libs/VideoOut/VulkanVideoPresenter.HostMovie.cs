@@ -6,6 +6,7 @@ namespace SharpEmu.Libs.VideoOut;
 using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Media;
+using SharpEmu.Libs.Gpu.Images;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
@@ -337,7 +338,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Width = width,
                 Height = height,
                 RowLength = width,
-                DstSelect = texture.DstSelect,
+                DestinationSelect = texture.DstSelect,
                 NeedsUpload = needsUpload,
                 IsHostMovie = true,
                 HostMoviePlane = plane,
@@ -530,11 +531,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(
-                    _device,
-                    &allocationInfo,
-                    null,
-                    out memory),
+                _deviceInfo.AllocateMemory(allocationInfo, out memory),
                 $"vkAllocateMemory(host movie {planeName})");
             Check(
                 _vk.BindImageMemory(_device, image, memory, 0),
@@ -545,7 +542,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Image = image,
                 ViewType = ImageViewType.Type2D,
                 Format = format,
-                Components = ToVkComponentMapping(dstSelect),
+                Components = ViewFormatRules.ComponentMapping(dstSelect),
                 SubresourceRange = ColorSubresourceRange(),
             };
             Check(
@@ -573,7 +570,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_hostMovieImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _hostMovieImageMemory, null);
+                _deviceInfo.FreeMemory(_hostMovieImageMemory);
                 _hostMovieImageMemory = default;
             }
             if (_hostMovieChromaImageView.Handle != 0)
@@ -588,7 +585,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_hostMovieChromaImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _hostMovieChromaImageMemory, null);
+                _deviceInfo.FreeMemory(_hostMovieChromaImageMemory);
                 _hostMovieChromaImageMemory = default;
             }
             _hostMovieImageWidth = 0;

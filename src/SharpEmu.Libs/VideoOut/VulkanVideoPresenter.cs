@@ -71,6 +71,15 @@ internal sealed record VulkanOffscreenColorClear(
     float Alpha,
     ulong ShaderAddress);
 
+internal sealed record VulkanGuestImageResolve(
+    GuestRenderTarget Source,
+    GuestRenderTarget Destination);
+
+internal sealed record VulkanGuestImageClearFromBuffer(
+    ulong Address,
+    ulong ByteCount,
+    uint PackedValue);
+
 internal sealed record VulkanComputeGuestDispatch(
     ulong ShaderAddress,
     byte[] ComputeSpirv,
@@ -93,7 +102,10 @@ internal sealed record VulkanComputeGuestDispatch(
 
 internal sealed record VulkanOrderedGuestAction(
     Action Action,
-    string DebugName);
+    string DebugName)
+{
+    public bool CollectionPending { get; set; }
+}
 
 internal sealed record VulkanGuestCacheOperation(
     IReadOnlyList<GuestGpuCacheOperation> Operations,
@@ -494,7 +506,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public DescriptorPool DescriptorPool;
             public DescriptorSet DescriptorSet;
             public TextureResource[] Textures = [];
-            public List<(VkBuffer Buffer, DeviceMemory Memory)> DeferredTextureStagingBuffers { get; } = [];
+            public SampleCountFlags Samples = SampleCountFlags.Count1Bit;
             public GlobalBufferResource[] GlobalMemoryBuffers = [];
             public VertexBufferResource[] VertexBuffers = [];
             public VkBuffer IndexBuffer;
@@ -534,11 +546,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
-            if (_retireCachedTextureStaging)
-            {
-                Console.Error.WriteLine(
-                    "[LOADER][INFO] Vulkan cached texture staging retirement enabled.");
-            }
             _window = new SdlHostWindow(
                 VideoOutExports.GetWindowTitle(),
                 _videoOptions,
@@ -569,7 +576,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private static bool AnyTargetAddressMatches(
-            IReadOnlyList<GuestImageResource>? targets,
+            IReadOnlyList<ulong>? targets,
             string environmentVariable)
         {
             if (targets is null)
@@ -579,7 +586,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var target in targets)
             {
-                if (AddressListContains(environmentVariable, target.Address))
+                if (AddressListContains(environmentVariable, target))
                 {
                     return true;
                 }
@@ -591,39 +598,8 @@ internal static unsafe partial class VulkanVideoPresenter
         [ThreadStatic]
         private static string? _pendingShaderModuleDumpPath;
 
-        private static byte[]? TryReadGuestTexturePixels(GuestDrawTexture texture)
-        {
-            var memory = _guestMemory;
-            if (memory is null || texture.Address == 0)
-            {
-                return null;
-            }
-
-            var width = Math.Max(texture.Width, 1);
-            var height = Math.Max(texture.Height, 1);
-            var rowLength = texture.TileMode == 0
-                ? Math.Max(texture.Pitch, width)
-                : width;
-            var depth = GetGuestTextureDepth(texture.Type, texture.Depth);
-            var byteCount = GetTextureByteCount(texture.Format, rowLength, height, depth);
-            if (byteCount == 0 || byteCount > int.MaxValue)
-            {
-                return null;
-            }
-
-            var pixels = new byte[(int)byteCount];
-            return memory.TryRead(texture.Address, pixels) ? pixels : null;
-        }
-
         private void ProcessDeferredTextureDestroys()
         {
-            while (_deferredTextureDestroys.TryPeek(out var entry) &&
-                   entry.RetireTimeline <= _completedTimeline)
-            {
-                _deferredTextureDestroys.Dequeue();
-                DestroyCachedTextureResource(entry.Texture);
-            }
-
             while (_deferredResourceDestroys.TryPeek(out var resourceEntry) &&
                    resourceEntry.RetireTimeline <= _completedTimeline)
             {
@@ -640,14 +616,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 TraceVulkanShader(
                     $"vk.flip_retired version={imageEntry.Image.FlipVersion} " +
                     $"timeline={imageEntry.RetireTimeline} reason=presentation-dropped");
-            }
-
-            while (_deferredGuestImageVariantDestroys.TryPeek(out var variantEntry) &&
-                   variantEntry.RetireTimeline <= _completedTimeline)
-            {
-                _deferredGuestImageVariantDestroys.Dequeue();
-                DestroyGuestImage(variantEntry.Image);
-                _guestImageVariantDeferredDestroyCount++;
             }
         }
 
@@ -694,7 +662,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     memoryFlags,
                     preferredMemoryFlags),
             };
-            Check(_vk.AllocateMemory(_device, &memoryInfo, null, out memory), "vkAllocateMemory");
+            Check(_deviceInfo.AllocateMemory(memoryInfo, out memory), "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
         }

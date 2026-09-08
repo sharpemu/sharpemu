@@ -134,9 +134,8 @@ public sealed class GuiSettingsTests
               "HdrMode": "On",
               "EnvironmentToggles": [
                 "SHARPEMU_VK_VALIDATION",
-                "SHARPEMU_GUEST_IMAGE_CPU_SYNC"
+                "SHARPEMU_DUMP_SPIRV"
               ],
-              "RenderResolutionScale": 0.5,
               "DiscordClientId": "999"
             }
             """;
@@ -163,9 +162,8 @@ public sealed class GuiSettingsTests
         Assert.False(settings.VSync);
         Assert.Equal("On", settings.HdrMode);
         Assert.Equal(
-            ["SHARPEMU_VK_VALIDATION", "SHARPEMU_GUEST_IMAGE_CPU_SYNC"],
+            ["SHARPEMU_VK_VALIDATION", "SHARPEMU_DUMP_SPIRV"],
             settings.EnvironmentToggles);
-        Assert.Equal(0.5, settings.RenderResolutionScale);
         Assert.Equal("999", settings.DiscordClientId);
     }
 

@@ -16,16 +16,16 @@ public sealed class PageOwnerTable
     public const ulong PageCount = 1UL << (AddressSpaceBits - PageBits);
     public const ulong AddressSpaceSize = 1UL << AddressSpaceBits;
 
-    private readonly BufferSlot[]?[] _firstLevel = new BufferSlot[]?[1 << FirstLevelBits];
+    private readonly ResourceSlotIdentifier[]?[] _firstLevel = new ResourceSlotIdentifier[]?[1 << FirstLevelBits];
 
     public int AllocatedBucketCount { get; private set; }
 
-    public BufferSlot Find(ulong page) =>
+    public ResourceSlotIdentifier Find(ulong page) =>
         page < PageCount && _firstLevel[page >> SecondLevelBits] is { } bucket
             ? bucket[page & (BucketEntries - 1)]
-            : BufferSlot.Invalid;
+            : ResourceSlotIdentifier.Invalid;
 
-    public void Set(ulong page, BufferSlot owner)
+    public void Set(ulong page, ResourceSlotIdentifier owner)
     {
         if (page >= PageCount)
         {
@@ -35,7 +35,7 @@ public sealed class PageOwnerTable
         ref var bucket = ref _firstLevel[page >> SecondLevelBits];
         if (bucket == null)
         {
-            bucket = new BufferSlot[BucketEntries];
+            bucket = new ResourceSlotIdentifier[BucketEntries];
             AllocatedBucketCount++;
         }
 

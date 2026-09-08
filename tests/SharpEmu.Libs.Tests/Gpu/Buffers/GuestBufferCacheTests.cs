@@ -14,6 +14,7 @@ using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
+using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 using static SharpEmu.Libs.Tests.Gpu.Scheduling.SchedulingTestSupport;
 
 namespace SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -321,25 +322,48 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
-    public void FillAndCopy_ServeGdsOnlyUntilTheImageCacheIsConnected()
+    public void FillAndCopy_InvalidateImageBytesAndTexelObtainsReadTheImage()
     {
         if (_vulkan is null) return;
         using var harness = new CacheHarness(_vulkan);
-        using var fatal = new FatalScope();
         var address = harness.MapBacked(0x10000, ReadWrite);
 
         harness.Worker.Run(() => harness.Cache.FillBuffer(0x100, 0x40, 0x5A5A5A5A, isGds: true));
         var gds = harness.ReadBack(harness.Cache.GdsBuffer, 0x100, 0x40);
         Assert.All(gds, value => Assert.Equal(0x5A, value));
 
-        harness.Worker.Run(() =>
-        {
-            Assert.Throws<SchedulerFatalException>(() => harness.Cache.FillBuffer(address, 0x40, 1, isGds: false));
-            Assert.Throws<SchedulerFatalException>(() => harness.Cache.CopyBuffer(address, 0x100, 0x40, dstGds: false, srcGds: true));
-            // Larger than a caching page, so the texel obtain reaches the image cross-call.
-            Assert.Throws<SchedulerFatalException>(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false, isTexelBuffer: true));
-        });
-        Assert.Equal(3, fatal.Messages.Count(message => message == "The image cache is not connected."));
+        // A host fill over image bytes lands in guest memory and marks the image dirty.
+        harness.Write(address, Pattern(0x10, 0x01));
+        var request = Color32(address, 4);
+        var imageIdentifier = harness.Acquire(ref request);
+        Assert.False(harness.Image(imageIdentifier).IsCpuDirty);
+        harness.Worker.Run(() => harness.Cache.FillBuffer(address, 0x10, 0x11111111, isGds: false));
+        Assert.True(harness.Image(imageIdentifier).IsDefinitelyCpuDirty);
+        Assert.Equal(Bytes(0x11111111u, 0x11111111u, 0x11111111u, 0x11111111u), harness.Read(address, 0x10));
+        Assert.Equal(imageIdentifier, harness.Acquire(ref request));
+        Assert.False(harness.Image(imageIdentifier).IsCpuDirty);
+        Assert.Equal(Bytes(0x11111111u, 0x11111111u, 0x11111111u, 0x11111111u), harness.ReadImageBytes(harness.Image(imageIdentifier)));
+
+        // A GPU copy from GDS into the image bytes leaves the result in the buffer store.
+        harness.Worker.Run(() => harness.Cache.CopyBuffer(address, 0x100, 0x10, dstGds: false, srcGds: true));
+        Assert.True(harness.Image(imageIdentifier).IsBufferModified);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address, 0x10));
+        Assert.Equal(imageIdentifier, harness.Acquire(ref request));
+        Assert.False(harness.Image(imageIdentifier).IsBufferModified);
+        Assert.Equal(Bytes(0x5A5A5A5Au, 0x5A5A5A5Au, 0x5A5A5A5Au, 0x5A5A5A5Au), harness.ReadImageBytes(harness.Image(imageIdentifier)));
+
+        // A GPU-written image serves a texel obtain of its range through the image store; the
+        // obtain is larger than a caching page so it does not take the stream ring.
+        var texelAddress = address + 0x8000;
+        harness.Write(texelAddress, Pattern(0x10, 0x02));
+        var texelRequest = Color32(texelAddress, 4);
+        var texelImageIdentifier = harness.Acquire(ref texelRequest);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(texelAddress, 0x10, 0x22222222u)));
+        Assert.True(harness.Image(texelImageIdentifier).IsGpuModified);
+        var (texel, texelOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(texelAddress, 0x4100, isWritten: false, isTexelBuffer: true));
+        Assert.True(harness.Image(texelImageIdentifier).IsGpuModified);
+        Assert.Equal(Bytes(0x22222222u, 0x22222222u, 0x22222222u, 0x22222222u), harness.ReadBack(texel, texelOffset, 0x10));
+        Assert.False(harness.Cache.HasGpuDirtyBytes(texelAddress, 0x10));
         harness.Shutdown();
     }
 

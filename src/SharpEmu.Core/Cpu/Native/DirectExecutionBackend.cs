@@ -7569,11 +7569,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_runtimeSymbolsByName.Clear();
 		StopReadyThreadDispatcher();
 		StopStallWatchdog();
-		if (_guestImageWriteFaultHandler != 0)
-		{
-			RemoveVectoredExceptionHandler((void*)_guestImageWriteFaultHandler);
-			_guestImageWriteFaultHandler = 0;
-		}
 		if (_exceptionHandler != 0)
 		{
 			RemoveVectoredExceptionHandler((void*)_exceptionHandler);
@@ -7588,11 +7583,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			VirtualFree((void*)_rawExceptionHandlerStub, 0u, 32768u);
 			_rawExceptionHandlerStub = 0;
-		}
-		if (_guestImageWriteFaultHandlerStub != 0)
-		{
-			VirtualFree((void*)_guestImageWriteFaultHandlerStub, 0u, 32768u);
-			_guestImageWriteFaultHandlerStub = 0;
 		}
 		if (_exceptionHandlerStub != 0)
 		{
