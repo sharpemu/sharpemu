@@ -127,6 +127,97 @@ internal static class RenderPhaseProfile
     private static readonly long[] _ticks = new long[(int)Phase.Count];
     private static readonly long[] _entries = new long[(int)Phase.Count];
     private static long _frames;
+    internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
+
+    private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
+        uint Layers, uint Levels, uint Format, uint TileMode, string Reason,
+        string UploadPath, ulong WriteAddress, ulong WriteSize);
+
+    internal sealed class ImageUploadStatistics
+    {
+        public long Count;
+        public ulong SourceBytes;
+        public long WatchTicks;
+        public long SourceTicks;
+        public long RecordTicks;
+
+        public void Add(ulong sourceBytes, long watchTicks, long sourceTicks, long recordTicks)
+        {
+            Count++;
+            SourceBytes += sourceBytes;
+            WatchTicks += watchTicks;
+            SourceTicks += sourceTicks;
+            RecordTicks += recordTicks;
+        }
+    }
+
+    private static readonly Dictionary<ImageUploadKey, ImageUploadStatistics> _imageUploads = new();
+    private static ImageUploadStatistics _otherImageUploads = new();
+
+    internal static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
+        string reason, long watchTicks, long sourceTicks, long recordTicks,
+        string uploadPath = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
+    {
+        if (!ImageUploadDetailsEnabled)
+        {
+            return;
+        }
+
+        var key = new ImageUploadKey(description.Data.Address, description.Extent.Width,
+            description.Extent.Height, description.Extent.Depth, description.Resources.Layers,
+            description.Resources.Levels, (uint)description.PixelFormat, (uint)description.TileMode, reason,
+            uploadPath, writeAddress, writeSize);
+        if (!_imageUploads.TryGetValue(key, out var statistics))
+        {
+            // Bound diagnostic memory when a frame creates many distinct images.
+            if (_imageUploads.Count >= 256)
+            {
+                _otherImageUploads.Add(description.Data.Size, watchTicks, sourceTicks, recordTicks);
+                return;
+            }
+
+            statistics = new ImageUploadStatistics();
+            _imageUploads.Add(key, statistics);
+        }
+
+        statistics.Add(description.Data.Size, watchTicks, sourceTicks, recordTicks);
+    }
+
+    private static string FormatImageUploadStatistics(ImageUploadStatistics statistics) =>
+        $"uploads={statistics.Count} source_bytes={statistics.SourceBytes} " +
+        $"watch_ms={statistics.WatchTicks * 1000.0 / Stopwatch.Frequency:F2} " +
+        $"source_ms={statistics.SourceTicks * 1000.0 / Stopwatch.Frequency:F2} " +
+        $"record_ms={statistics.RecordTicks * 1000.0 / Stopwatch.Frequency:F2}";
+
+    private static void ReportImageUploads()
+    {
+        var ranked = _imageUploads.OrderByDescending(static pair =>
+            pair.Value.WatchTicks + pair.Value.SourceTicks + pair.Value.RecordTicks).ToArray();
+        foreach (var (key, statistics) in ranked.Take(8))
+        {
+            Console.Error.WriteLine($"[PERF][IMAGE_UPLOAD] address=0x{key.Address:X16} " +
+                $"size={key.Width}x{key.Height}x{key.Depth} layers={key.Layers} levels={key.Levels} " +
+                $"format={key.Format} tile={key.TileMode} reason={key.Reason} path={key.UploadPath} " +
+                $"write_address=0x{key.WriteAddress:X16} write_bytes={key.WriteSize} {FormatImageUploadStatistics(statistics)}");
+        }
+
+        foreach (var (_, statistics) in ranked.Skip(8))
+        {
+            _otherImageUploads.Count += statistics.Count;
+            _otherImageUploads.SourceBytes += statistics.SourceBytes;
+            _otherImageUploads.WatchTicks += statistics.WatchTicks;
+            _otherImageUploads.SourceTicks += statistics.SourceTicks;
+            _otherImageUploads.RecordTicks += statistics.RecordTicks;
+        }
+
+        if (_otherImageUploads.Count > 0)
+        {
+            Console.Error.WriteLine($"[PERF][IMAGE_UPLOAD] other=1 {FormatImageUploadStatistics(_otherImageUploads)}");
+        }
+
+        _imageUploads.Clear();
+        _otherImageUploads = new ImageUploadStatistics();
+    }
     private static long _windowStart = Stopwatch.GetTimestamp();
     private static readonly Dictionary<string, OrderedActionStats> _orderedActions =
         new(StringComparer.Ordinal);
@@ -274,6 +365,7 @@ internal static class RenderPhaseProfile
             Console.Error.WriteLine($"[PERF][ORDERED] {string.Join(" ", ordered)}");
             _orderedActions.Clear();
         }
+        ReportImageUploads();
     }
 
     private static string GetOrderedActionCategory(string debugName)

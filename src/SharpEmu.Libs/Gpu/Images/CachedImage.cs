@@ -229,11 +229,19 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     public void AssociateDepth(ResourceSlotIdentifier depthImage) => DepthOwner = depthImage;
 
+    internal ulong LastCpuWriteAddress { get; private set; }
+    internal ulong LastCpuWriteSize { get; private set; }
+
     // A byte overlap makes the image definitely dirty; a page-only overlap makes it maybe dirty.
     public void InvalidateCpuWrite(ulong address, ulong size)
     {
         if (GuestRangeOverlap.Bytes(Description.Data.Address, Description.Data.Size, address, size))
         {
+            if (SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled)
+            {
+                LastCpuWriteAddress = address;
+                LastCpuWriteSize = size;
+            }
             _cpuDirty = true;
             _maybeCpuDirty = false;
             _maybeHashValid = false;
@@ -294,6 +302,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         _cpuDirty = false;
         _maybeCpuDirty = false;
         _maybeHashValid = false;
+        LastCpuWriteAddress = 0;
+        LastCpuWriteSize = 0;
     }
 
     public bool IsGpuModified => _gpuModified;

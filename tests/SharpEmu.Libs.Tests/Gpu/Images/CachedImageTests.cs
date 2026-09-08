@@ -118,7 +118,11 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
 
         image.InvalidateCpuWrite(imageBase + 0x100, 4);
         Assert.True(image.IsDefinitelyCpuDirty);
+        Assert.Equal(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled ? imageBase + 0x100 : 0UL, image.LastCpuWriteAddress);
+        Assert.Equal(SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled ? 4UL : 0UL, image.LastCpuWriteSize);
         image.RefreshComplete();
+        Assert.Equal(0UL, image.LastCpuWriteAddress);
+        Assert.Equal(0UL, image.LastCpuWriteSize);
         image.MarkGpuModified();
         Assert.True(image.SafeToDownload);
         Assert.True(image.GpuOverlaps(imageBase, 1));

@@ -501,7 +501,7 @@ public sealed partial class GuestImageCache
             source.Binding.NeedsRebind = true;
         }
 
-        PopulateFromGuest(expandedImageIdentifier, ImageRequest.Refresh(description, UploadRole(source)));
+        PopulateFromGuest(expandedImageIdentifier, ImageRequest.Refresh(description, UploadRole(source)), "expand");
         CopyWholeImage(expandedImageIdentifier, sourceImageIdentifier);
         ReleaseImage(sourceImageIdentifier);
         return expandedImageIdentifier;

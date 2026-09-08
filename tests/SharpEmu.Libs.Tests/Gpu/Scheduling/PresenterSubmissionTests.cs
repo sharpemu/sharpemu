@@ -21,6 +21,65 @@ public sealed class PresenterSubmissionTests
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
 
     [Fact]
+    public void ImageUploadProfile_AddsBytesAndSeparatesPreparationCosts()
+    {
+        var statistics = new RenderPhaseProfile.ImageUploadStatistics();
+        statistics.Add(256, 10, 20, 30);
+        statistics.Add(512, 40, 50, 60);
+        Assert.Equal(2, statistics.Count);
+        Assert.Equal(768UL, statistics.SourceBytes);
+        Assert.Equal(50, statistics.WatchTicks);
+        Assert.Equal(70, statistics.SourceTicks);
+        Assert.Equal(90, statistics.RecordTicks);
+    }
+
+    [Fact]
+    public void ImageUploadProfile_BoundsDetailsPreservesOverflowAndResets()
+    {
+        var report = typeof(RenderPhaseProfile).GetMethod("ReportImageUploads", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var previousError = Console.Error;
+        using var output = new StringWriter();
+        try
+        {
+            Console.SetError(output);
+            report.Invoke(null, null);
+            output.GetStringBuilder().Clear();
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Draw))
+            {
+                for (var index = 0; index < 260; index++)
+                {
+                    var description = SharpEmu.Libs.Gpu.Images.ImageDescription.Create();
+                    description.Data = new GuestSpan((ulong)(index + 1) * 4096, 256);
+                    RenderPhaseProfile.RecordImageUpload(description, "cpu-dirty", 1, 2, 3,
+                        "before-clear", description.Data.Address, 256);
+                }
+            }
+
+            report.Invoke(null, null);
+            if (RenderPhaseProfile.Enabled)
+            {
+                Assert.Equal(9, output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Length);
+                Assert.Contains("other=1 uploads=252 source_bytes=64512", output.ToString());
+                Assert.Contains("path=before-clear", output.ToString());
+                Assert.Contains("write_bytes=256", output.ToString());
+            }
+            else
+            {
+                Assert.Empty(output.ToString());
+            }
+
+            output.GetStringBuilder().Clear();
+            report.Invoke(null, null);
+            Assert.Empty(output.ToString());
+        }
+        finally
+        {
+            report.Invoke(null, null);
+            Console.SetError(previousError);
+        }
+    }
+
+    [Fact]
     public async Task SubmissionCompletion_WakesForTheSubmittedTickBeforeFutureCallbacks()
     {
         var device = new FakeTickDevice();

@@ -303,7 +303,7 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // Uploads the guest bytes when the guest or a buffer owns them; watches the image first.
-    private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, string uploadPath)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageUpload);
         var image = _slots[imageIdentifier];
@@ -312,7 +312,10 @@ public sealed unsafe partial class GuestImageCache
             return;
         }
 
+        var measureUpload = RenderPhaseProfile.ImageUploadDetailsEnabled;
+        var watchStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         WatchImage(imageIdentifier);
+        var watchFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         if (image.Description.Metadata.Compression != DisplayCompression.Uncompressed)
         {
             if (image.IsCpuDirty)
@@ -332,9 +335,21 @@ public sealed unsafe partial class GuestImageCache
         var upload = image.IsBufferModified || image.IsCpuDirty;
         if (upload)
         {
+            var reason = image.IsBufferModified
+                ? (image.IsCpuDirty ? "buffer-and-cpu-dirty" : "buffer-dirty")
+                : (image.IsMaybeCpuDirty ? "maybe-cpu-dirty" : "cpu-dirty");
+            var sourceStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
+            var sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             dataImported = true;
             UploadFromBuffer(image, request, source, sourceOffset);
+            if (measureUpload)
+            {
+                RenderPhaseProfile.RecordImageUpload(image.Description, reason,
+                    watchFinished - watchStarted, sourceFinished - sourceStarted,
+                    System.Diagnostics.Stopwatch.GetTimestamp() - sourceFinished,
+                    uploadPath, image.LastCpuWriteAddress, image.LastCpuWriteSize);
+            }
         }
 
         if (dataImported)
@@ -382,7 +397,7 @@ public sealed unsafe partial class GuestImageCache
             return;
         }
 
-        PopulateFromGuest(imageIdentifier, request);
+        PopulateFromGuest(imageIdentifier, request, "refresh");
     }
 
     private void DownloadDepthToBuffer(CachedImage image, GpuBuffer destination, ulong destinationOffset)
@@ -767,7 +782,7 @@ public sealed unsafe partial class GuestImageCache
         }
         else if (image.IsBufferModified || image.IsCpuDirty)
         {
-            PopulateFromGuest(selected, RefreshRequest(image));
+            PopulateFromGuest(selected, RefreshRequest(image), "before-clear");
             if (image.Description.Samples == 1 && (image.IsBufferModified || image.IsCpuDirty))
             {
                 throw SubmissionScheduler.Fatal($"The image clear left guest ownership in place: address=0x{address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty}.");
