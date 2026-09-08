@@ -71,6 +71,34 @@ public sealed class AgcSubmittedVertexSnapshotTests
         Assert.Equal(0, retainedBytes);
     }
 
+    [Fact]
+    public void DiscardedByteCountUsesLargestSharedExtentAndClampsLengths()
+    {
+        var shared = new byte[32];
+        var separate = new byte[12];
+        var inputs = new[]
+        {
+            CreateBinding(0, shared, 16),
+            CreateBinding(1, shared, 48),
+            CreateBinding(2, shared, 8),
+            CreateBinding(3, separate, -1),
+            CreateBinding(4, separate, 10),
+        };
+
+        Assert.Equal(42, DcbSubmissionProfile.CountUniqueVertexBytes(inputs));
+        Assert.Equal(42, DcbSubmissionProfile.CountUniqueVertexBytes(inputs.Reverse().ToArray()));
+        Assert.Equal(0, DcbSubmissionProfile.CountUniqueVertexBytes([]));
+    }
+
+    [Fact]
+    public void SnapshotRemainderExcludesNestedPayloadTime()
+    {
+        Assert.Equal(50, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 35]));
+        Assert.Equal(50, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 0]));
+        Assert.Equal(0, DcbSubmissionProfile.SnapshotRemainder(100, [10, 20, 30, 40, 50, 35]));
+        Assert.Equal(20, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 35, 25, 5]));
+    }
+
     private static Gen5VertexInputBinding CreateBinding(
         uint location,
         byte[] data,

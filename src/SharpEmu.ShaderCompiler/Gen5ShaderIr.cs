@@ -432,6 +432,7 @@ public sealed record Gen5ShaderEvaluation(
     IReadOnlySet<uint>? RuntimeScalarRegisters = null,
     IReadOnlyList<Gen5VertexInputBinding>? VertexInputs = null)
 {
+    public long VertexCaptureTicks { get; init; }
     public bool ReusedVertexInputs { get; init; }
 }
 

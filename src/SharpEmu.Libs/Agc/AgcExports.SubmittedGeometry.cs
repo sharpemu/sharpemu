@@ -481,6 +481,7 @@ public static partial class AgcExports
 
             if (NeedsGeometryRegisterUpdate(opcode, register))
             {
+                using var registerProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Registers);
                 ApplySubmittedRegisters(
                     ctx,
                     captureState,
@@ -507,6 +508,7 @@ public static partial class AgcExports
                     retainedIndexBytes + (long)byteCount64 <=
                         MaximumRetainedIndexBytesPerSubmission)
                 {
+                    using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
                     var data = new byte[(int)byteCount64];
                     if (ctx.Memory.TryRead(indexAddress, data) ||
                         KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
@@ -604,34 +606,53 @@ public static partial class AgcExports
         }
         state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
 
-        if (!Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                exportShaderAddress,
-                exportShaderHeader,
-                state.ShRegisters,
-                SelectExportUserDataRegister(state.ShRegisters),
-                out var exportState,
-                out _,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
-                shaderChecksum: exportShaderChecksum) ||
-            !TryGetRequiredVertexRecordCount(
-                ctx,
-                state,
-                drawCount,
-                indexed,
-                out var recordCount) ||
-            !Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                exportState,
-                out var evaluation,
-                out _,
-                resolveVertexInputs: true,
-                requiredVertexRecordCount: recordCount,
-                captureVertexInputsOnly: true,
-                profileStage: Gen5ShaderEvaluationStage.Vertex))
+        Gen5ShaderState exportState;
+        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.ShaderState))
         {
-            return;
+            if (!Gen5ShaderTranslator.TryCreateState(
+                    ctx,
+                    exportShaderAddress,
+                    exportShaderHeader,
+                    state.ShRegisters,
+                    SelectExportUserDataRegister(state.ShRegisters),
+                    out exportState,
+                    out _,
+                    userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
+                    shaderChecksum: exportShaderChecksum))
+            {
+                return;
+            }
         }
+        uint recordCount;
+        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexScan))
+        {
+            if (!TryGetRequiredVertexRecordCount(
+                    ctx,
+                    state,
+                    drawCount,
+                    indexed,
+                    out recordCount))
+            {
+                return;
+            }
+        }
+        Gen5ShaderEvaluation evaluation;
+        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Evaluation))
+        {
+            if (!Gen5ShaderScalarEvaluator.TryEvaluate(
+                    ctx,
+                    exportState,
+                    out evaluation,
+                    out _,
+                    resolveVertexInputs: true,
+                    requiredVertexRecordCount: recordCount,
+                    captureVertexInputsOnly: true,
+                    profileStage: Gen5ShaderEvaluationStage.Vertex))
+            {
+                return;
+            }
+        }
+        DcbSubmissionProfile.RecordSnapshotPhase(DcbSubmissionProfile.SnapshotPhase.PayloadCapture, evaluation.VertexCaptureTicks);
 
         try
         {
@@ -640,6 +661,7 @@ public static partial class AgcExports
                 return;
             }
 
+            using var copyProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.RetainedCopy);
             if (!TryCopySubmittedVertexInputs(
                     inputs,
                     MaximumRetainedVertexBytesPerSubmission - retainedBytes,
@@ -653,9 +675,11 @@ public static partial class AgcExports
                 exportShaderAddress,
                 retainedInputs);
             retainedBytes += snapshotBytes;
+            DcbSubmissionProfile.RecordRetainedVertexBytes(snapshotBytes);
         }
         finally
         {
+            using var cleanupProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Cleanup);
             ReturnPooledEvaluationArrays(evaluation);
         }
     }
@@ -729,6 +753,7 @@ public static partial class AgcExports
             current is null ||
             current.Count != snapshot.Bindings.Count)
         {
+            DcbSubmissionProfile.RecordVertexSnapshot(snapshot is not null, matched: false);
             return;
         }
 
@@ -742,10 +767,16 @@ public static partial class AgcExports
                 live.Stride != retained.Stride ||
                 live.OffsetBytes != retained.OffsetBytes)
             {
+                DcbSubmissionProfile.RecordVertexSnapshot(available: true, matched: false);
                 return;
             }
         }
 
+        if (DcbSubmissionProfile.Enabled)
+        {
+            DcbSubmissionProfile.RecordVertexSnapshot(available: true, matched: true,
+                DcbSubmissionProfile.CountUniqueVertexBytes(current), evaluation.VertexCaptureTicks, evaluation.ReusedVertexInputs);
+        }
         if (evaluation.ReusedVertexInputs)
         {
             return;

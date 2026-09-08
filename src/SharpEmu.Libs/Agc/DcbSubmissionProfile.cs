@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -29,8 +30,103 @@ internal static class DcbSubmissionProfile
     private static long _maxTotalTicks;
     private static long _maxQueuePumpTicks;
     private static int _reporting;
+    private static long _vertexSnapshotMisses;
+    private static long _vertexSnapshotMismatches;
+    private static long _vertexSnapshotReuses;
+    private static long _discardedVertexBytes;
+    private static long _discardedVertexCaptureTicks;
+    private static long _earlyVertexReuses;
+    private static long _avoidedVertexBytes;
+    private static long _vertexReuseCheckTicks;
 
     public static bool Enabled => _enabled;
+
+    internal enum SnapshotPhase { IndexCapture, ShaderState, IndexScan, Evaluation, RetainedCopy, PayloadCapture, Registers, Cleanup }
+    private static readonly long[] _snapshotPhaseTicks = new long[8];
+    private static readonly long[] _snapshotPhaseCalls = new long[8];
+    private static long _retainedVertexBytes;
+
+    internal readonly struct SnapshotScope(SnapshotPhase phase) : IDisposable
+    {
+        private readonly long _started = Enabled ? Stopwatch.GetTimestamp() : 0;
+        public void Dispose()
+        {
+            if (_started != 0) RecordSnapshotPhase(phase, Stopwatch.GetTimestamp() - _started);
+        }
+    }
+
+    internal static void RecordSnapshotPhase(SnapshotPhase phase, long ticks)
+    {
+        if (!Enabled) return;
+        Interlocked.Add(ref _snapshotPhaseTicks[(int)phase], ticks);
+        Interlocked.Increment(ref _snapshotPhaseCalls[(int)phase]);
+    }
+
+    internal static long SnapshotRemainder(long total, ReadOnlySpan<long> phases)
+    {
+        long accounted = 0;
+        for (var index = 0; index < phases.Length; index++)
+        {
+            if (index != (int)SnapshotPhase.PayloadCapture) accounted += phases[index];
+        }
+        return Math.Max(0, total - accounted);
+    }
+
+    internal static void RecordRetainedVertexBytes(long bytes)
+    {
+        if (Enabled) Interlocked.Add(ref _retainedVertexBytes, bytes);
+    }
+
+    public static void RecordVertexSnapshot(bool available, bool matched, long bytes = 0, long captureTicks = 0, bool reusedBeforeCapture = false)
+    {
+        if (!_enabled)
+        {
+            return;
+        }
+        if (!available)
+        {
+            Interlocked.Increment(ref _vertexSnapshotMisses);
+        }
+        else if (!matched)
+        {
+            Interlocked.Increment(ref _vertexSnapshotMismatches);
+        }
+        else
+        {
+            Interlocked.Increment(ref _vertexSnapshotReuses);
+            if (reusedBeforeCapture)
+            {
+                Interlocked.Increment(ref _earlyVertexReuses);
+                Interlocked.Add(ref _avoidedVertexBytes, bytes);
+                Interlocked.Add(ref _vertexReuseCheckTicks, captureTicks);
+            }
+            else
+            {
+                Interlocked.Add(ref _discardedVertexBytes, bytes);
+                Interlocked.Add(ref _discardedVertexCaptureTicks, captureTicks);
+            }
+        }
+    }
+
+    internal static long CountUniqueVertexBytes(IReadOnlyList<Gen5VertexInputBinding> bindings)
+    {
+        long bytes = 0;
+        for (var index = 0; index < bindings.Count; index++)
+        {
+            var binding = bindings[index];
+            var length = Math.Clamp(binding.DataLength, 0, binding.Data.Length);
+            var previousLength = 0;
+            for (var previous = 0; previous < index; previous++)
+            {
+                if (ReferenceEquals(bindings[previous].Data, binding.Data))
+                {
+                    previousLength = Math.Max(previousLength, Math.Clamp(bindings[previous].DataLength, 0, binding.Data.Length));
+                }
+            }
+            bytes += Math.Max(0, length - previousLength);
+        }
+        return bytes;
+    }
 
     public static void Record(
         uint dwordCount,
@@ -87,6 +183,22 @@ internal static class DcbSubmissionProfile
             var totalTicks = Interlocked.Exchange(ref _totalTicks, 0);
             var maxTotalTicks = Interlocked.Exchange(ref _maxTotalTicks, 0);
             var maxQueuePumpTicks = Interlocked.Exchange(ref _maxQueuePumpTicks, 0);
+            var snapshotMisses = Interlocked.Exchange(ref _vertexSnapshotMisses, 0);
+            var snapshotMismatches = Interlocked.Exchange(ref _vertexSnapshotMismatches, 0);
+            var snapshotReuses = Interlocked.Exchange(ref _vertexSnapshotReuses, 0);
+            var discardedBytes = Interlocked.Exchange(ref _discardedVertexBytes, 0);
+            var discardedCaptureTicks = Interlocked.Exchange(ref _discardedVertexCaptureTicks, 0);
+            var earlyReuses = Interlocked.Exchange(ref _earlyVertexReuses, 0);
+            var avoidedBytes = Interlocked.Exchange(ref _avoidedVertexBytes, 0);
+            var reuseCheckTicks = Interlocked.Exchange(ref _vertexReuseCheckTicks, 0);
+            var phaseTicks = new long[_snapshotPhaseTicks.Length];
+            var phaseCalls = new long[_snapshotPhaseCalls.Length];
+            for (var index = 0; index < phaseTicks.Length; index++)
+            {
+                phaseTicks[index] = Interlocked.Exchange(ref _snapshotPhaseTicks[index], 0);
+                phaseCalls[index] = Interlocked.Exchange(ref _snapshotPhaseCalls[index], 0);
+            }
+            var retainedBytes = Interlocked.Exchange(ref _retainedVertexBytes, 0);
 
             if (calls == 0)
             {
@@ -107,6 +219,22 @@ internal static class DcbSubmissionProfile
                 $"avg_call_ms={ToMilliseconds(totalTicks) / calls:F3} " +
                 $"max_call_ms={ToMilliseconds(maxTotalTicks):F3} " +
                 $"max_queue_pump_ms={ToMilliseconds(maxQueuePumpTicks):F3}");
+            Console.Error.WriteLine(
+                $"[PERF][VERTEX_SNAPSHOT] window={elapsedSeconds:F1}s reused={snapshotReuses} " +
+                $"missing={snapshotMisses} mismatch={snapshotMismatches} discarded_bytes={discardedBytes} " +
+                $"discarded_capture_ms={ToMilliseconds(discardedCaptureTicks):F2} " +
+                $"early_reused={earlyReuses} avoided_bytes={avoidedBytes} reuse_check_ms={ToMilliseconds(reuseCheckTicks):F2}");
+            Console.Error.WriteLine(
+                $"[PERF][SNAPSHOT_PREPASS] window={elapsedSeconds:F1}s total_ms={ToMilliseconds(snapshotTicks):F2} " +
+                $"packet_other_ms={ToMilliseconds(SnapshotRemainder(snapshotTicks, phaseTicks)):F2} " +
+                $"index_capture_ms={ToMilliseconds(phaseTicks[0]):F2}/n{phaseCalls[0]} " +
+                $"shader_state_ms={ToMilliseconds(phaseTicks[1]):F2}/n{phaseCalls[1]} " +
+                $"index_scan_ms={ToMilliseconds(phaseTicks[2]):F2}/n{phaseCalls[2]} " +
+                $"evaluation_ms={ToMilliseconds(phaseTicks[3]):F2}/n{phaseCalls[3]} " +
+                $"retained_copy_ms={ToMilliseconds(phaseTicks[4]):F2}/n{phaseCalls[4]} retained_bytes={retainedBytes} " +
+                $"payload_nested_ms={ToMilliseconds(phaseTicks[5]):F2}/n{phaseCalls[5]} " +
+                $"registers_ms={ToMilliseconds(phaseTicks[6]):F2}/n{phaseCalls[6]} " +
+                $"cleanup_ms={ToMilliseconds(phaseTicks[7]):F2}/n{phaseCalls[7]}");
         }
         finally
         {

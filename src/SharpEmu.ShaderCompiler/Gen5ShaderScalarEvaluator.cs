@@ -1030,6 +1030,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
         }
 
+        var vertexCaptureTicks = 0L;
         var reusedVertexInputs = false;
         if (vertexInputBindings.Count != 0)
         {
@@ -1045,6 +1046,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
 
             TraceVertexInputShape(vertexInputBindings);
+            var captureStart = Gen5ShaderEvaluationProfile.Enabled ? Stopwatch.GetTimestamp() : 0L;
             if (!TryCaptureVertexInputData(
                     ctx,
                     vertexInputBindings,
@@ -1057,6 +1059,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
 
             vertexInputBindings = capturedVertexInputs;
+            vertexCaptureTicks = Gen5ShaderEvaluationProfile.Enabled ? Stopwatch.GetTimestamp() - captureStart : 0L;
         }
 
         evaluation = new Gen5ShaderEvaluation(
@@ -1068,6 +1071,7 @@ public static partial class Gen5ShaderScalarEvaluator
             runtimeScalarRegisters,
             vertexInputBindings)
         {
+            VertexCaptureTicks = vertexCaptureTicks,
             ReusedVertexInputs = reusedVertexInputs,
         };
         pooledData.TransferOwnership();
