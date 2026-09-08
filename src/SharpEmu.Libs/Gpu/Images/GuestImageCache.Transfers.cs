@@ -760,7 +760,12 @@ public sealed unsafe partial class GuestImageCache
             return false;
         }
 
-        if (image.IsBufferModified || image.IsCpuDirty)
+        if (aspect == ImageAspectFlags.ColorBit)
+        {
+            // The full color clear replaces all texels. Keep the watch without copying old data.
+            WatchImage(selected);
+        }
+        else if (image.IsBufferModified || image.IsCpuDirty)
         {
             PopulateFromGuest(selected, RefreshRequest(image));
             if (image.Description.Samples == 1 && (image.IsBufferModified || image.IsCpuDirty))

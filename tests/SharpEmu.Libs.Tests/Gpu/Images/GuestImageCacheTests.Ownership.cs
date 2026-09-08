@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
@@ -81,11 +82,60 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x6000, 4, 0xaabbccddu)));
         Assert.False(harness.Image(clearId).IsBufferModified);
         Assert.True(harness.Image(clearId).IsGpuModified);
-        harness.MarkGpuWritten(clearId);
+        Assert.True(harness.Image(clearId).IsWatched);
         var reread = clear;
         Assert.Equal(clearId, harness.Find(ref reread));
         Assert.Equal(new byte[] { 0xdd, 0xcc, 0xbb, 0xaa }, harness.ReadImageBytes(harness.Image(clearId)));
         harness.Shutdown();
+    }
+
+    [Fact]
+    public void FullColorClear_SkipsSourceBufferAndRetainsWriteObservation()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        ImageClearBacking? backing = null;
+        using var harness = new CacheHarness(_vulkan, backing: memory => backing = new ImageClearBacking(memory));
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x01020304u));
+        var request = Color32(address);
+        var imageIdentifier = harness.Find(ref request);
+        var bufferCount = harness.Cache.BufferCount;
+        var readCount = backing!.ReadCount;
+        Assert.True(harness.Image(imageIdentifier).IsCpuDirty);
+
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 4, 0xaabbccddu)));
+
+        Assert.Equal(bufferCount, harness.Cache.BufferCount);
+        Assert.Equal(readCount, backing.ReadCount);
+        Assert.False(harness.Image(imageIdentifier).IsCpuDirty);
+        Assert.True(harness.Image(imageIdentifier).IsGpuModified);
+        Assert.True(harness.Image(imageIdentifier).IsWatched);
+        Assert.Equal(Bytes(0xaabbccddu), harness.ReadImageBytes(harness.Image(imageIdentifier)));
+        Assert.True(harness.WriteFault(address));
+        Assert.True(harness.Image(imageIdentifier).IsCpuDirty);
+        harness.Shutdown();
+    }
+
+    private sealed class ImageClearBacking(IGuestBackedSpace inner) : IGuestBackedSpace
+    {
+        public int ReadCount { get; private set; }
+
+        public bool TryHoldRange(ulong address, ulong size) => inner.TryHoldRange(address, size);
+        public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address) =>
+            inner.TryHoldRangeAtOrAbove(searchStart, size, alignment, out address);
+        public bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure) =>
+            inner.TryMapBacked(address, size, backingOffset, protection, out failure);
+        public bool TryUnmapBacked(ulong address, ulong size) => inner.TryUnmapBacked(address, size);
+        public bool TryClearBacking(ulong offset, ulong size) => inner.TryClearBacking(offset, size);
+        public bool IsBackedView(ulong address) => inner.IsBackedView(address);
+        public bool IsBackedRange(ulong address, ulong size) => inner.IsBackedRange(address, size);
+        public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data) => inner.TryWriteBacking(address, data);
+
+        public bool TryReadBacking(ulong address, Span<byte> data)
+        {
+            ReadCount++;
+            return inner.TryReadBacking(address, data);
+        }
     }
 
     [Fact]
