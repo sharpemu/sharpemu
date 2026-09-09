@@ -143382,7 +143382,9 @@ sceVoiceQoSInitHQ
 sceVoiceQoSReadPacket
 sceVoiceQoSSetConnectionAttribute
 sceVoiceQoSSetLocalEndpointAttribute
+sceVoiceQoSSetMode
 sceVoiceQoSSetRemoteEndpointAttribute
+sceVoiceQoSTerminate
 sceVoiceQoSWritePacket
 sceVoiceReadFromOPort
 sceVoiceResetPort
