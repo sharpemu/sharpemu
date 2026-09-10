@@ -51,6 +51,8 @@ public static partial class Gen5ShaderScalarEvaluator
     }
 
     private static readonly ConditionalWeakTable<Gen5ShaderProgram, Ir.Gen5ScalarSsa> _scalarSsaCache = [];
+    private static readonly ConditionalWeakTable<Gen5ShaderProgram, ConcurrentDictionary<uint, ulong>>
+        _scalarLoadExtentCache = [];
 
     private static readonly bool _divergentDescriptorGuard = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_IR_DESCRIPTOR_GUARD"),
@@ -2866,6 +2868,27 @@ public static partial class Gen5ShaderScalarEvaluator
 
         var failedReads = 0;
         var suppressedReads = 0;
+        Span<byte> componentBytes = stackalloc byte[16 * sizeof(uint)];
+        var componentCount = instruction.Destinations.Count;
+        var componentByteCount = (ulong)componentCount * sizeof(uint);
+        var canReadTogether = componentCount is > 1 and <= 16 &&
+            !bufferUnbound && !scalarPointerUnbound &&
+            address <= ulong.MaxValue - componentByteCount &&
+            byteOffset <= ulong.MaxValue - componentByteCount &&
+            (!isBufferLoad || byteOffset <= bufferSize && componentByteCount <= bufferSize - byteOffset);
+        if (canReadTogether)
+        {
+            foreach (var destination in instruction.Destinations)
+            {
+                if (destination.Kind != Gen5OperandKind.ScalarRegister || destination.Value >= ScalarRegisterCount)
+                {
+                    canReadTogether = false;
+                    break;
+                }
+            }
+        }
+        var readTogether = canReadTogether &&
+            TryReadScalarComponents(ctx, address, componentBytes[..(int)componentByteCount]);
         for (var index = 0; index < instruction.Destinations.Count; index++)
         {
             var destination = instruction.Destinations[index];
@@ -2896,10 +2919,13 @@ public static partial class Gen5ShaderScalarEvaluator
                 continue;
             }
 
-            if (!TryReadUInt32(
+            var value = readTogether
+                ? BinaryPrimitives.ReadUInt32LittleEndian(componentBytes.Slice(index * sizeof(uint), sizeof(uint)))
+                : 0u;
+            if (!readTogether && !TryReadUInt32(
                     ctx,
                     address + (ulong)(index * sizeof(uint)),
-                    out var value))
+                    out value))
             {
                 failedReads++;
                 if (isBufferLoad || !_strictScalarLoad)
@@ -3115,7 +3141,20 @@ public static partial class Gen5ShaderScalarEvaluator
             $"{dynamic} address=0x{address:X16}";
     }
 
-    private static bool TryGetScalarLoadBindingExtent(
+    internal static bool TryGetScalarLoadBindingExtent(
+        Gen5ShaderState state,
+        uint scalarBase,
+        out ulong extent)
+    {
+        // Store bounds with the decoded program, not with a mutable guest address.
+        // Zero retains the conservative path when no bound can be proved.
+        var extents = _scalarLoadExtentCache.GetValue(state.Program, static _ => new());
+        extent = extents.GetOrAdd(scalarBase, static (register, shaderState) =>
+            TryAnalyzeScalarLoadBindingExtent(shaderState, register, out var result) ? result : 0, state);
+        return extent != 0;
+    }
+
+    private static bool TryAnalyzeScalarLoadBindingExtent(
         Gen5ShaderState state,
         uint scalarBase,
         out ulong extent)
@@ -3317,6 +3356,20 @@ public static partial class Gen5ShaderScalarEvaluator
     private static bool UsesSampler(string opcode) =>
         opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
         opcode.StartsWith("ImageGather", StringComparison.Ordinal);
+
+    private static bool TryReadScalarComponents(CpuContext ctx, ulong address, Span<byte> bytes)
+    {
+        var memory = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Current;
+        // Partial coverage keeps the per-component synchronization path.
+        if (memory is not null &&
+            (!memory.Covers(address, (ulong)bytes.Length) ||
+             memory.Buffers is { } buffers && !buffers.TrySynchronizeCpuRead(address, (ulong)bytes.Length)))
+        {
+            return false;
+        }
+        // Failed range reads keep the existing per-component and fallback behavior.
+        return ctx.Memory.TryRead(address, bytes);
+    }
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {

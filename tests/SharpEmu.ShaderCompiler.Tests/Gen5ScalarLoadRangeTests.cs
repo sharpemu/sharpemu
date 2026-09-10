@@ -15,6 +15,69 @@ public sealed class Gen5ScalarLoadRangeTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void ComponentLoadsUseOneReadOrRetainIndividualReadFallback(bool rejectCombinedRead)
+    {
+        var memory = new RangeMemory { RejectCombinedRead = rejectCombinedRead, UseAddressValues = true };
+        Evaluate(false, memory, [Load(0, offsetRegister: null)], binding =>
+        {
+            Assert.Equal(16UL, binding.Size);
+            Assert.Equal(rejectCombinedRead ? 5 : 1, memory.ReadCalls);
+        }, evaluation => Assert.Equal(new uint[] { 1, 2, 3, 4 }, evaluation.ScalarRegisters.Skip(4).Take(4)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CachedBoundsDoNotDependOnRuntimePointerOrOffset(bool bounded)
+    {
+        var program = new Gen5ShaderProgram(0,
+            [MaskOffset(0, 0x1F0), Load(8, offsetRegister: bounded ? 106u : 2u)]);
+        var firstState = new Gen5ShaderState(program, [0u, 1u, 16u], null);
+        var secondState = new Gen5ShaderState(program, [4096u, 2u, 0xFFFFu], null);
+        Assert.Equal(bounded, Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(firstState, 0, out var firstExtent));
+        Assert.Equal(bounded, Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(secondState, 0, out var secondExtent));
+        Assert.Equal(bounded ? 512UL : 0UL, firstExtent);
+        Assert.Equal(firstExtent, secondExtent);
+        Assert.False(Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(firstState, 8, out _));
+    }
+
+    [Fact]
+    public void NewProgramAtTheSameAddressGetsItsOwnBound()
+    {
+        var firstState = new Gen5ShaderState(new Gen5ShaderProgram(0,
+            [Load(0, offsetRegister: null, immediateOffset: 64)]), [], null);
+        var secondState = new Gen5ShaderState(new Gen5ShaderProgram(0,
+            [Load(0, offsetRegister: null, immediateOffset: 128)]), [], null);
+        Assert.True(Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(firstState, 0, out var firstExtent));
+        Assert.True(Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(secondState, 0, out var secondExtent));
+        Assert.Equal(80UL, firstExtent);
+        Assert.Equal(144UL, secondExtent);
+    }
+
+    [Fact]
+    public void CachedBoundsSupportConcurrentReadersWithoutHitAllocations()
+    {
+        var state = new Gen5ShaderState(new Gen5ShaderProgram(0,
+            [Load(0, offsetRegister: null, immediateOffset: 64)]), [], null);
+        Parallel.For(0, 64, _ =>
+        {
+            Assert.True(Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(state, 0, out var extent));
+            Assert.Equal(80UL, extent);
+        });
+        for (var warmup = 0; warmup < 256; warmup++)
+            Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(state, 0, out _);
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var correct = true;
+        for (var lookup = 0; lookup < 1024; lookup++)
+            correct &= Gen5ShaderScalarEvaluator.TryGetScalarLoadBindingExtent(state, 0, out var extent) && extent == 80;
+        var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        Assert.True(correct);
+        Assert.Equal(0, allocatedBytes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void MaskedLoadsUseTheirFullRuntimeBound(bool snapshot)
     {
         var memory = new RangeMemory();
@@ -129,7 +192,8 @@ public sealed class Gen5ScalarLoadRangeTests
         bool snapshot,
         RangeMemory memory,
         IReadOnlyList<Gen5ShaderInstruction> instructions,
-        Action<Gen5GlobalMemoryBinding> checkBinding)
+        Action<Gen5GlobalMemoryBinding> checkBinding,
+        Action<Gen5ShaderEvaluation>? checkEvaluation = null)
     {
         var state = new Gen5ShaderState(
             new Gen5ShaderProgram(0, instructions),
@@ -142,6 +206,7 @@ public sealed class Gen5ScalarLoadRangeTests
             Assert.True(Gen5ShaderScalarEvaluator.TryEvaluate(
                 new CpuContext(memory, Generation.Gen5), state, out evaluation, out var error), error);
             checkBinding(Assert.Single(evaluation.GlobalMemoryBindings));
+            checkEvaluation?.Invoke(evaluation);
         }
         finally
         {
@@ -161,6 +226,9 @@ public sealed class Gen5ScalarLoadRangeTests
 
     private sealed class RangeMemory : ICpuMemory
     {
+        public bool RejectCombinedRead { get; init; }
+        public bool UseAddressValues { get; init; }
+        public int ReadCalls { get; private set; }
         public ulong AccessibleBytes { get; set; } = 256 * 1024;
         public ulong LargestRequest { get; private set; }
 
@@ -173,12 +241,22 @@ public sealed class Gen5ScalarLoadRangeTests
 
         public bool TryRead(ulong address, Span<byte> destination)
         {
+            ReadCalls++;
+            if (RejectCombinedRead && destination.Length > sizeof(uint)) return false;
             if (!CanRead(address, (ulong)destination.Length))
             {
                 return false;
             }
 
             destination.Clear();
+            if (UseAddressValues)
+            {
+                for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
+                {
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..],
+                        (uint)((address - GuestAddress + (ulong)offset) / sizeof(uint) + 1));
+                }
+            }
             return true;
         }
 
