@@ -178,6 +178,7 @@ public static class KernelEventQueueCompatExports
         }
 
         private KernelQueuedEvent[]? _reservedEvents;
+        private readonly object _completionLock = new();
         private int _reservedCount;
         private WaitCompletion _completion;
 
@@ -193,7 +194,7 @@ public static class KernelEventQueueCompatExports
             KernelQueuedEvent[]? reservedEvents;
             int reservedCount;
             WaitCompletion completion;
-            lock (this)
+            lock (_completionLock)
             {
                 if (_completion == WaitCompletion.Waiting)
                 {
@@ -235,7 +236,7 @@ public static class KernelEventQueueCompatExports
 
         public bool TryWake()
         {
-            lock (this)
+            lock (_completionLock)
             {
                 if (_completion != WaitCompletion.Waiting)
                 {
