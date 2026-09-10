@@ -6428,6 +6428,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		_stallWatchdogStop = false;
 
+		// A synchronous HLE call can legitimately run past the stall window
+		// (e.g. a first-boot asset-tree index) without the guest being stuck.
+		// Let it refresh the same "last progress" timestamp the watchdog
+		// checks, instead of only ever being reset by import dispatch.
+		GuestThreadExecution.HostWorkProgressObserved += MarkExecutionProgress;
+
 		// Drives woken threads when every guest thread is parked (nothing dispatches then).
 		var dispatcherThread = new Thread(new ThreadStart(delegate
 		{

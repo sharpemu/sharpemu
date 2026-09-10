@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Ampr;
 
@@ -176,6 +177,7 @@ internal static class AmprFileRegistry
             var relatives = new List<string>(256 * 1024);
             try
             {
+                var enumerated = 0;
                 foreach (var hostPath in Directory.EnumerateFiles(
                              normalizedRoot,
                              "*",
@@ -190,6 +192,16 @@ internal static class AmprFileRegistry
                     }
 
                     relatives.Add(relative);
+
+                    // A large app0 walk can run well past the native backend's
+                    // stall-watchdog window on its own -- this is a slow but
+                    // live guest export, not a stuck one. Keep resetting the
+                    // watchdog's "no progress" timer for as long as we're
+                    // still finding files.
+                    if (++enumerated % 2000 == 0)
+                    {
+                        GuestThreadExecution.NotifyHostWorkProgress();
+                    }
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -206,6 +218,7 @@ internal static class AmprFileRegistry
 
             // Hash + dictionary fill dominates under Rosetta once the walk is
             // done; parallelize across cores without re-walking the tree.
+            var hashed = 0;
             Parallel.ForEach(
                 relatives,
                 new ParallelOptions
@@ -216,6 +229,13 @@ internal static class AmprFileRegistry
                 {
                     var hostPath = Path.Combine(normalizedRoot, relative.Replace('/', Path.DirectorySeparatorChar));
                     RegisterApp0Relative(relative, hostPath);
+
+                    // See the matching comment on the enumeration loop above --
+                    // same rationale, same fixed cadence.
+                    if (Interlocked.Increment(ref hashed) % 2000 == 0)
+                    {
+                        GuestThreadExecution.NotifyHostWorkProgress();
+                    }
                 });
 
             lock (_indexGate)
@@ -488,6 +508,7 @@ internal static class AmprFileRegistry
             }
 
             var relatives = new HashSet<string>(HostFsPath.Comparer);
+            var relativized = 0;
             foreach (var hostPath in _hostPathsById.Values)
             {
                 var relative = Path.GetRelativePath(normalizedRoot, hostPath)
@@ -499,6 +520,15 @@ internal static class AmprFileRegistry
                 }
 
                 relatives.Add(relative);
+
+                // Same rationale as the walk above: this re-derives a relative
+                // path (and, below, re-hashes it) for every one of potentially
+                // several hundred thousand ids, which on its own can run past
+                // the stall watchdog's window on a large title.
+                if (++relativized % 2000 == 0)
+                {
+                    GuestThreadExecution.NotifyHostWorkProgress();
+                }
             }
 
             var tempPath = cachePath + ".tmp";
@@ -510,6 +540,7 @@ internal static class AmprFileRegistry
                 writer.Write(normalizedRoot);
                 writer.Write(relatives.Count);
                 writer.Write(paramTicks);
+                var written = 0;
                 foreach (var relative in relatives)
                 {
                     writer.Write(relative);
@@ -518,6 +549,11 @@ internal static class AmprFileRegistry
                     writer.Write(id1);
                     writer.Write(id2);
                     writer.Write(id3);
+
+                    if (++written % 2000 == 0)
+                    {
+                        GuestThreadExecution.NotifyHostWorkProgress();
+                    }
                 }
             }
 

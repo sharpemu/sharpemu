@@ -244,6 +244,28 @@ public static class GuestThreadExecution
         }
     }
 
+    /// <summary>
+    /// Fired by an HLE call that is doing real, progressing work synchronously
+    /// on the guest thread but can legitimately take longer than the native
+    /// backend's stall-watchdog window (e.g. a first-boot asset-tree index).
+    /// The backend subscribes to reset its "no progress" timer, so a slow but
+    /// live operation is not mistaken for a genuine stuck guest and killed.
+    /// </summary>
+    public static event Action? HostWorkProgressObserved;
+
+    public static void NotifyHostWorkProgress()
+    {
+        try
+        {
+            HostWorkProgressObserved?.Invoke();
+        }
+        catch
+        {
+            // Best-effort signal only; a broken subscriber must not fault the
+            // HLE call that's reporting real progress.
+        }
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
