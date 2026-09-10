@@ -20,6 +20,121 @@ public sealed class Gen5ShaderScalarEvaluatorPoolTests
     private const ulong GuestAddress = 0x1_0000_0000;
 
     [Fact]
+    public void EvaluationWorkSeparatesCaptureAndExecution()
+    {
+        var field = typeof(Gen5ShaderEvaluationProfile).GetField("_evaluationWork",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var counters = (long[])field.GetValue(null)!;
+        var saved = (long[])counters.Clone();
+        try
+        {
+            Array.Clear(counters);
+            var work = new Gen5ShaderEvaluationProfile.EvaluationWork
+            {
+                SetupTicks = 2, WalkTicks = 3, Instructions = 7, Paths = 1,
+            };
+            Gen5ShaderEvaluationProfile.RecordWork(Gen5ShaderEvaluationStage.Unknown, false, work, 10, 64, 4, true);
+            Gen5ShaderEvaluationProfile.RecordWork(Gen5ShaderEvaluationStage.Unknown, true, work, 20, 128, 5, false);
+            if (Gen5ShaderEvaluationProfile.Enabled)
+            {
+                Assert.Equal(new long[] { 1, 10, 2, 3, 4, 64, 7, 1, 0 }, counters[..9]);
+                Assert.Equal(new long[] { 1, 20, 2, 3, 5, 128, 7, 1, 1 }, counters[9..18]);
+                Assert.All(counters[18..], value => Assert.Equal(0, value));
+            }
+            else
+            {
+                Assert.All(counters, value => Assert.Equal(0, value));
+            }
+        }
+        finally
+        {
+            saved.CopyTo(counters, 0);
+        }
+    }
+
+    [Fact]
+    public void InstructionSamplingKeepsCaptureAndExecutionSeparate()
+    {
+        var captureSamples = 0;
+        var executionSamples = 0;
+        for (var evaluationIndex = 0; evaluationIndex < 64; evaluationIndex++)
+        {
+            if (Gen5ShaderEvaluationProfile.ShouldSampleInstructions(true)) captureSamples++;
+            if (Gen5ShaderEvaluationProfile.ShouldSampleInstructions(false)) executionSamples++;
+        }
+        Assert.Equal(Gen5ShaderEvaluationProfile.Enabled ? 1 : 0, captureSamples);
+        Assert.Equal(Gen5ShaderEvaluationProfile.Enabled ? 1 : 0, executionSamples);
+    }
+
+    [Fact]
+    public void InstructionTimingRecordsFailuresAndIgnoresInactiveScopes()
+    {
+        var field = typeof(Gen5ShaderEvaluationProfile).GetField("_instructionWork",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var counters = (long[])field.GetValue(null)!;
+        var saved = (long[])counters.Clone();
+        try
+        {
+            Array.Clear(counters);
+            using (new Gen5ShaderEvaluationProfile.InstructionScope(
+                Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarLoad, false, false)) { }
+            Assert.All(counters, value => Assert.Equal(0, value));
+            Assert.Throws<InvalidOperationException>((Action)(() =>
+            {
+                using var timing = new Gen5ShaderEvaluationProfile.InstructionScope(
+                    Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarLoad, true, true);
+                throw new InvalidOperationException();
+            }));
+            var captureOffset = (int)Gen5ShaderEvaluationProfile.InstructionWorkKind.Count * 2;
+            Assert.Equal(Gen5ShaderEvaluationProfile.Enabled ? 1 : 0, counters[captureOffset]);
+            Assert.True(counters[captureOffset + 1] >= 0);
+            Assert.All(counters[..captureOffset], value => Assert.Equal(0, value));
+            Assert.All(counters[(captureOffset + 2)..], value => Assert.Equal(0, value));
+        }
+        finally
+        {
+            saved.CopyTo(counters, 0);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ScalarTimingSwitchesCategoriesWithoutCountingThemTwice(bool captureOnly)
+    {
+        var field = typeof(Gen5ShaderEvaluationProfile).GetField("_instructionWork",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var counters = (long[])field.GetValue(null)!;
+        var saved = (long[])counters.Clone();
+        try
+        {
+            Array.Clear(counters);
+            Assert.Throws<InvalidOperationException>((Action)(() =>
+            {
+                using var timing = new Gen5ShaderEvaluationProfile.InstructionScope(
+                    Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarDescriptorChecks, captureOnly, true);
+                timing.SwitchKind(Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarBindingCreation);
+                timing.SwitchKind(Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarComponentReads);
+                throw new InvalidOperationException();
+            }));
+            for (var counterIndex = 0; counterIndex < counters.Length; counterIndex += 2)
+            {
+                var kind = counterIndex / 2 % (int)Gen5ShaderEvaluationProfile.InstructionWorkKind.Count;
+                var captureGroup = counterIndex / 2 / (int)Gen5ShaderEvaluationProfile.InstructionWorkKind.Count;
+                var expected = Gen5ShaderEvaluationProfile.Enabled && captureGroup == (captureOnly ? 1 : 0) &&
+                    kind >= (int)Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarDescriptorChecks &&
+                    kind <= (int)Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarComponentReads ? 1 : 0;
+                Assert.Equal(expected, counters[counterIndex]);
+                Assert.True(counters[counterIndex + 1] >= 0);
+            }
+        }
+        finally
+        {
+            saved.CopyTo(counters, 0);
+        }
+    }
+
+    [Fact]
     public void RetainedInterleavedInputsSkipGuestReadsAndPoolRentals()
     {
         var memory = new ReadableCpuMemory();

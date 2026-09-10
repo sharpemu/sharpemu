@@ -44,6 +44,91 @@ internal readonly record struct Gen5EvaluationPlanSignature(
 
 internal static class Gen5ShaderEvaluationProfile
 {
+    internal enum InstructionWorkKind
+    {
+        ScalarLoad,
+        ScalarOperation,
+        BufferBinding,
+        GlobalBinding,
+        ImageBinding,
+        Other,
+        ScalarDescriptorChecks,
+        ScalarBindingCreation,
+        ScalarComponentReads,
+        ScalarTrace,
+        Count,
+    }
+
+    private static readonly long[] _instructionWork = new long[2 * (int)InstructionWorkKind.Count * 2];
+    [ThreadStatic] private static int _captureSampleSequence;
+    [ThreadStatic] private static int _executionSampleSequence;
+
+    internal static bool ShouldSampleInstructions(bool captureOnly)
+    {
+        if (!_enabled) return false;
+        ref var sequence = ref (captureOnly ? ref _captureSampleSequence : ref _executionSampleSequence);
+        sequence = (sequence + 1) & 63;
+        return sequence == 0;
+    }
+
+    internal struct InstructionScope : IDisposable
+    {
+        private long _started;
+        private int _offset;
+        private readonly bool _active;
+        private readonly bool _captureOnly;
+
+        internal InstructionScope(InstructionWorkKind kind, bool captureOnly, bool active)
+        {
+            _active = active && _enabled;
+            _captureOnly = captureOnly;
+            _offset = ((captureOnly ? (int)InstructionWorkKind.Count : 0) + (int)kind) * 2;
+            _started = _active ? Stopwatch.GetTimestamp() : 0;
+        }
+
+        internal void SwitchKind(InstructionWorkKind kind)
+        {
+            if (!_active) return;
+            Dispose();
+            _offset = ((_captureOnly ? (int)InstructionWorkKind.Count : 0) + (int)kind) * 2;
+            _started = Stopwatch.GetTimestamp();
+        }
+
+        public void Dispose()
+        {
+            if (!_active) return;
+            var elapsed = Stopwatch.GetTimestamp() - _started;
+            Interlocked.Increment(ref _instructionWork[_offset]);
+            Interlocked.Add(ref _instructionWork[_offset + 1], elapsed);
+        }
+    }
+
+    internal struct EvaluationWork
+    {
+        public long SetupTicks;
+        public long WalkTicks;
+        public long Instructions;
+        public long Paths;
+    }
+
+    private const int WorkFieldCount = 9;
+    private static readonly long[] _evaluationWork = new long[8 * WorkFieldCount];
+
+    internal static void RecordWork(Gen5ShaderEvaluationStage stage, bool captureOnly,
+        in EvaluationWork work, long elapsedTicks, long allocatedBytes, long captureTicks, bool succeeded)
+    {
+        if (!_enabled) return;
+        var offset = ((int)stage * 2 + (captureOnly ? 1 : 0)) * WorkFieldCount;
+        Interlocked.Increment(ref _evaluationWork[offset]);
+        Interlocked.Add(ref _evaluationWork[offset + 1], elapsedTicks);
+        Interlocked.Add(ref _evaluationWork[offset + 2], work.SetupTicks);
+        Interlocked.Add(ref _evaluationWork[offset + 3], work.WalkTicks);
+        Interlocked.Add(ref _evaluationWork[offset + 4], captureTicks);
+        Interlocked.Add(ref _evaluationWork[offset + 5], allocatedBytes);
+        Interlocked.Add(ref _evaluationWork[offset + 6], work.Instructions);
+        Interlocked.Add(ref _evaluationWork[offset + 7], work.Paths);
+        if (!succeeded) Interlocked.Increment(ref _evaluationWork[offset + 8]);
+    }
     private const int ReportIntervalSeconds = 5;
     private const double BytesPerMebibyte = 1024.0 * 1024.0;
 
@@ -227,6 +312,7 @@ internal static class Gen5ShaderEvaluationProfile
 
         var calls = ExchangeAll(_evaluationCalls);
         var failures = ExchangeAll(_evaluationFailures);
+        var work = ExchangeAll(_evaluationWork);
         var ticks = ExchangeAll(_evaluationTicks);
         var readCalls = ExchangeAll(_readCalls);
         var readFailures = ExchangeAll(_readFailures);
@@ -249,6 +335,31 @@ internal static class Gen5ShaderEvaluationProfile
             $"ps={FormatStage(calls, failures, ticks, Gen5ShaderEvaluationStage.Pixel)} " +
             $"cs={FormatStage(calls, failures, ticks, Gen5ShaderEvaluationStage.Compute)} " +
             $"other={FormatStage(calls, failures, ticks, Gen5ShaderEvaluationStage.Unknown)}");
+        for (var group = 0; group < 8; group++)
+        {
+            var offset = group * WorkFieldCount;
+            if (work[offset] == 0) continue;
+            var millisecondsPerTick = 1000.0 / Stopwatch.Frequency;
+            Console.Error.WriteLine($"[PERF][SHADER_WORK] window_s={seconds:F1} stage={(Gen5ShaderEvaluationStage)(group / 2)} " +
+                $"capture_only={group % 2} calls={work[offset]} failures={work[offset + 8]} " +
+                $"total_ms={work[offset + 1] * millisecondsPerTick:F2} setup_ms={work[offset + 2] * millisecondsPerTick:F2} " +
+                $"walk_ms={work[offset + 3] * millisecondsPerTick:F2} capture_ms={work[offset + 4] * millisecondsPerTick:F2} " +
+                $"allocated_bytes={work[offset + 5]} instructions={work[offset + 6]} paths={work[offset + 7]}");
+        }
+        var instructionWork = ExchangeAll(_instructionWork);
+        for (var captureGroup = 0; captureGroup < 2; captureGroup++)
+        {
+            for (var kind = 0; kind < (int)InstructionWorkKind.Count; kind++)
+            {
+                var offset = (captureGroup * (int)InstructionWorkKind.Count + kind) * 2;
+                if (instructionWork[offset] == 0) continue;
+                // These timings cover sampled instructions, not the full report window.
+                Console.Error.WriteLine($"[PERF][SHADER_WALK_SAMPLE] window_s={seconds:F1} vertex_inputs=1 " +
+                    $"capture_only={captureGroup} sample_every=64 kind={(InstructionWorkKind)kind} " +
+                    $"scope={(kind >= (int)InstructionWorkKind.ScalarDescriptorChecks ? "scalar_load_detail" : "instruction")} " +
+                    $"instructions={instructionWork[offset]} sampled_ms={instructionWork[offset + 1] * 1000.0 / Stopwatch.Frequency:F3}");
+            }
+        }
         Console.Error.WriteLine(
             $"[PERF][SHADER_MEMORY] " +
             $"unknown={FormatReads(readCalls, readFailures, readBytes, readTicks, Gen5GlobalMemoryReadKind.UnknownSize)} " +

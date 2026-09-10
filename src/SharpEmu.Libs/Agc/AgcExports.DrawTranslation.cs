@@ -814,6 +814,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         out TranslatedGuestDraw draw,
         out string error)
     {
+        using var creationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawStateCreation);
         draw = default!;
         error = string.Empty;
         ulong exportShaderHeader;
@@ -825,6 +826,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         TryRegisterEmbeddedFusedProgram(ctx, exportShaderAddress, exportShaderHeader);
         state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawDepthShaderPreparation);
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
                 exportShaderAddress,
@@ -854,6 +856,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawShaderCache);
         var exportFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(exportEvaluation)
             : ComputeShaderStructuralFingerprint(exportEvaluation);
@@ -902,6 +905,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             _depthOnlyVertexShaderCache.TryAdd(cacheKey, vertexShader!);
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawBindingAssembly);
         var textures = new List<TranslatedImageBinding>(
             exportEvaluation.ImageBindings.Count);
         foreach (var binding in exportEvaluation.ImageBindings)
@@ -934,6 +938,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 Gen5ShaderTranslator.IsVolumeImageBinding(binding) ? 2u : 1u));
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawRenderState);
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
             exportEvaluation.VertexInputs ?? [];
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
@@ -1022,6 +1027,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         out bool intentionallySkipped,
         out string error)
     {
+        using var creationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawStateCreation);
         draw = default!;
         intentionallySkipped = false;
         error = string.Empty;
@@ -1037,6 +1043,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
         state.ShRegisters.TryGetValue(SpiShaderPgmChksumPs, out var pixelShaderChecksum);
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawVertexShaderSetup);
         // Sequential (not short-circuited into one condition) so a failure
         // after an evaluation succeeded can return that evaluation's pooled
         // buffer arrays to the pool instead of leaking them.
@@ -1054,6 +1061,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawVertexEvaluation);
         var retainedVertexInputs = (!indexed || !UsesCachedGpuIndices(state, vertexCount)) &&
             state.CurrentVertexSnapshot is { } retainedSnapshot &&
             retainedSnapshot.ExportShaderAddress == exportShaderAddress
@@ -1079,6 +1087,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawVertexMetadata);
         if (!indexed || !UsesCachedGpuIndices(state, vertexCount))
         {
             ApplySubmittedVertexSnapshot(
@@ -1087,6 +1096,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 ref exportEvaluation);
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawPixelShaderSetup);
         if (!Gen5ShaderTranslator.TryCreateState(
                 ctx,
                 pixelShaderAddress,
@@ -1101,6 +1111,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawPixelEvaluation);
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 pixelState,
@@ -1112,6 +1123,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawBindingAssembly);
         // Empty SRT/EUD is fine for clears/passthroughs that bind nothing
         // (Astro title PS 0x808E88000 is a procedural fullscreen clear).
         // Reject only when evaluation produced image/global slots that
@@ -1212,6 +1224,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         // unpatched sharp — that turns UI glyphs into gradient triangles.
         // Match by stride+offset (not bare base address) so interleaved streams
         // keep loading-video bindings intact.
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawVertexMetadata);
         if (exportEvaluation.VertexInputs is { Count: > 0 } discoveredInputs &&
             AgcVertexMetadata.TryGetVertexTableRegisters(
                 ctx,
@@ -1238,6 +1251,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             }
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawTargetLayout);
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
         if (AgcPrimitiveHelpers.ShouldSkipRectListWithoutParameterExports(
@@ -1331,6 +1345,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
         var outputMappings = PackPixelOutputMappings(renderTargetOutputMappings);
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawShaderCache);
         var exportStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(exportEvaluation)
             : ComputeShaderStructuralFingerprint(exportEvaluation);
@@ -1482,6 +1497,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             fullscreenClearColor = DecodeSolidClearColor(pixelEvaluation);
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawBindingAssembly);
         var useFixedFullscreenClear = usedFixedFullscreenClear;
 
         List<TranslatedImageBinding> textures;
@@ -1537,6 +1553,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             vertexInputs = exportEvaluation.VertexInputs ?? [];
         }
 
+        creationScope.SwitchPhase(RenderPhaseProfile.Phase.DrawRenderState);
         var guestTargets = new GuestRenderTarget[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {

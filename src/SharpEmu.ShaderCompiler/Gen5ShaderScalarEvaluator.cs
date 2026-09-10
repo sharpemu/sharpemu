@@ -303,7 +303,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 resolveVertexInputs,
                 requiredVertexRecordCount,
                 captureVertexInputsOnly,
-                retainedVertexInputs);
+                retainedVertexInputs,
+                out _);
         }
 
         var inputSignature = default(Gen5EvaluationInputSignature);
@@ -318,6 +319,8 @@ public static partial class Gen5ShaderScalarEvaluator
         }
 
         var started = profileEnabled ? Stopwatch.GetTimestamp() : 0L;
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var work = default(Gen5ShaderEvaluationProfile.EvaluationWork);
         var succeeded = false;
         Gen5ShaderEvaluation? evaluationForProfile = null;
         try
@@ -330,7 +333,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 resolveVertexInputs,
                 requiredVertexRecordCount,
                 captureVertexInputsOnly,
-                retainedVertexInputs);
+                retainedVertexInputs,
+                out work);
             if (succeeded)
             {
                 evaluationForProfile = evaluation;
@@ -340,6 +344,10 @@ public static partial class Gen5ShaderScalarEvaluator
         }
         finally
         {
+            var elapsedTicks = Stopwatch.GetTimestamp() - started;
+            var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            Gen5ShaderEvaluationProfile.RecordWork(profileStage, captureVertexInputsOnly, work,
+                elapsedTicks, allocatedBytes, evaluationForProfile?.VertexCaptureTicks ?? 0, succeeded);
             if (detailedProfileEnabled && evaluationForProfile is not null)
             {
                 Gen5ShaderEvaluationProfile.RecordSignature(inputSignature, evaluationForProfile);
@@ -349,7 +357,7 @@ public static partial class Gen5ShaderScalarEvaluator
             {
                 Gen5ShaderEvaluationProfile.RecordEvaluation(
                     profileStage,
-                    Stopwatch.GetTimestamp() - started,
+                    elapsedTicks,
                     succeeded);
             }
         }
@@ -363,8 +371,12 @@ public static partial class Gen5ShaderScalarEvaluator
         bool resolveVertexInputs,
         uint? requiredVertexRecordCount,
         bool captureVertexInputsOnly,
-        IReadOnlyList<Gen5VertexInputBinding>? retainedVertexInputs)
+        IReadOnlyList<Gen5VertexInputBinding>? retainedVertexInputs,
+        out Gen5ShaderEvaluationProfile.EvaluationWork work)
     {
+        work = default;
+        var measureWork = Gen5ShaderEvaluationProfile.Enabled;
+        var setupStarted = measureWork ? Stopwatch.GetTimestamp() : 0L;
         evaluation = default!;
         error = string.Empty;
         var scalarRegisters = new uint[ScalarRegisterCount];
@@ -456,8 +468,13 @@ public static partial class Gen5ShaderScalarEvaluator
                 supplemental: false);
         }
 
+        var walkStarted = measureWork ? Stopwatch.GetTimestamp() : 0L;
+        var sampleInstructions = measureWork && resolveVertexInputs &&
+            Gen5ShaderEvaluationProfile.ShouldSampleInstructions(captureVertexInputsOnly);
+        if (measureWork) work.SetupTicks = walkStarted - setupStarted;
         while (pendingPaths.Count != 0 || pendingImageEntries is { Count: > 0 })
         {
+            if (measureWork) work.Paths++;
             var path = pendingImageEntries is { Count: > 0 } ? pendingImageEntries.Dequeue() : pendingPaths.Pop();
             scalarRegisters = path.ScalarRegisters;
             var vectorLaneValues = path.VectorLaneValues;
@@ -468,6 +485,7 @@ public static partial class Gen5ShaderScalarEvaluator
 
             foreach (var instruction in state.Program.Instructions)
             {
+                if (measureWork) work.Instructions++;
                 if (skipUntilPc.HasValue)
                 {
                     if (instruction.Pc < skipUntilPc.Value)
@@ -477,6 +495,21 @@ public static partial class Gen5ShaderScalarEvaluator
 
                     skipUntilPc = null;
                 }
+
+                using var instructionTiming = sampleInstructions
+                    ? new Gen5ShaderEvaluationProfile.InstructionScope(
+                        instruction.Control switch
+                        {
+                            Gen5ScalarMemoryControl => Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarLoad,
+                            Gen5BufferMemoryControl => Gen5ShaderEvaluationProfile.InstructionWorkKind.BufferBinding,
+                            Gen5GlobalMemoryControl => Gen5ShaderEvaluationProfile.InstructionWorkKind.GlobalBinding,
+                            Gen5ImageControl => Gen5ShaderEvaluationProfile.InstructionWorkKind.ImageBinding,
+                            _ when instruction.Encoding is Gen5ShaderEncoding.Sop1 or Gen5ShaderEncoding.Sop2 or
+                                Gen5ShaderEncoding.Sopk or Gen5ShaderEncoding.Sopc or Gen5ShaderEncoding.Sopp =>
+                                Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarOperation,
+                            _ => Gen5ShaderEvaluationProfile.InstructionWorkKind.Other,
+                        }, captureVertexInputsOnly, true)
+                    : default;
 
                 if (instruction.Opcode == "SEndpgm")
                 {
@@ -624,7 +657,9 @@ public static partial class Gen5ShaderScalarEvaluator
                         runtimeScalarRegisters,
                         laneRestoredScalarRegisters,
                         recordBinding,
-                        out error))
+                        out error,
+                        sampleInstructions,
+                        captureVertexInputsOnly))
                 {
                     return false;
                 }
@@ -1032,6 +1067,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
         }
 
+        if (measureWork) work.WalkTicks = Stopwatch.GetTimestamp() - walkStarted;
         var vertexCaptureTicks = 0L;
         var reusedVertexInputs = false;
         if (vertexInputBindings.Count != 0)
@@ -2682,8 +2718,13 @@ public static partial class Gen5ShaderScalarEvaluator
         IReadOnlySet<uint> runtimeScalarRegisters,
         IReadOnlySet<uint> laneRestoredScalarRegisters,
         bool recordBinding,
-        out string error)
+        out string error,
+        bool sampleInstructions,
+        bool captureVertexInputsOnly)
     {
+        using var scalarTiming = new Gen5ShaderEvaluationProfile.InstructionScope(
+            Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarDescriptorChecks,
+            captureVertexInputsOnly, sampleInstructions);
         error = string.Empty;
         if (instruction.Sources.Count == 0 ||
             instruction.Sources[0] is not
@@ -2763,6 +2804,7 @@ public static partial class Gen5ShaderScalarEvaluator
                 baseAddress,
                 dynamicOffset);
         }
+        scalarTiming.SwitchKind(Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarBindingCreation);
         var bufferSize = ulong.MaxValue;
         if (recordBinding && isBufferLoad)
         {
@@ -2852,6 +2894,7 @@ public static partial class Gen5ShaderScalarEvaluator
             }
         }
 
+        scalarTiming.SwitchKind(Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarComponentReads);
         if (!bufferUnbound && !scalarPointerUnbound && address == 0)
         {
             error = FormatScalarLoadError(
@@ -2949,6 +2992,7 @@ public static partial class Gen5ShaderScalarEvaluator
             scalarRegisters[destination.Value] = value;
         }
 
+        scalarTiming.SwitchKind(Gen5ShaderEvaluationProfile.InstructionWorkKind.ScalarTrace);
         if (_scalarTraceShaderAddress != 0 && state.Program.Address == _scalarTraceShaderAddress &&
             Interlocked.Increment(ref _scalarLoadTraceCount) <= 128)
         {
