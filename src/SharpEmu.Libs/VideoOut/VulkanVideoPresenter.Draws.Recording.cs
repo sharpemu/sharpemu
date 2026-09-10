@@ -109,13 +109,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
                 "1",
                 StringComparison.Ordinal);
-        private static readonly long _traceGuestImageOccurrence =
-            long.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_OCCURRENCE"),
-                out var traceGuestImageOccurrence) &&
-            traceGuestImageOccurrence > 0
-                ? traceGuestImageOccurrence
-                : 0;
         private static readonly uint _traceGuestImageWidth =
             uint.TryParse(
                 Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_WIDTH"),
@@ -138,10 +131,6 @@ internal static unsafe partial class VulkanVideoPresenter
             tracePresentedGuestImageOccurrence > 0
                 ? tracePresentedGuestImageOccurrence
                 : 0;
-        private static readonly bool _traceGuestImageShaderFilterEnabled =
-            !string.IsNullOrWhiteSpace(
-                Environment.GetEnvironmentVariable(
-                    "SHARPEMU_TRACE_GUEST_IMAGE_SHADER_ADDRS"));
         private static readonly bool _traceGuestImageAddressFilterEnabled =
             !string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable(
@@ -170,43 +159,9 @@ internal static unsafe partial class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_DUMP_FIXED_SOLID_FRAGMENT");
         private static readonly bool _chunkedDrawsEnabled =
             Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_CHUNKED_DRAWS") == "1";
-        private static readonly string? _traceGuestWritesMode =
-            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITES");
-        private static readonly long _traceGuestWriteOrdinal =
-            long.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITE_ORDINAL"),
-                out var traceGuestWriteOrdinal)
-                    ? traceGuestWriteOrdinal
-                    : 0;
-        private static readonly long _traceLargeGuestWriteOrdinal =
-            ParseTraceLargeGuestWriteOrdinal(_traceGuestWritesMode);
-        private static readonly int _tracePixelSpirvBytes =
-            int.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SPIRV_BYTES"),
-                out var tracePixelSpirvBytes)
-                    ? tracePixelSpirvBytes
-                    : 0;
-        private static readonly int _tracePixelSpirvOccurrence =
-            int.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SPIRV_OCCURRENCE"),
-                out var tracePixelSpirvOccurrence)
-                    ? Math.Max(tracePixelSpirvOccurrence, 1)
-                    : 1;
-        private static readonly bool _traceTitleDrawEnabled =
-            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_DRAW") == "1";
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<
             string,
             (bool Wildcard, ulong[] Addresses)> _cachedAddressLists = new();
-
-        private static long ParseTraceLargeGuestWriteOrdinal(string? mode)
-        {
-            return mode is not null &&
-                mode.StartsWith("large@", StringComparison.Ordinal) &&
-                long.TryParse(mode.AsSpan("large@".Length), out var ordinal) &&
-                ordinal > 0
-                    ? ordinal
-                    : 0;
-        }
 
         private static bool ShouldTraceGuestImageContentsForDiagnostics() =>
             _traceGuestImagesEnabled;

@@ -273,13 +273,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] vk.present_dropped addr=0x{presentation.GuestImageAddress:X16} " +
                         $"version={presentation.GuestImageVersion} " +
-                        $"found={(presentedGuestImage is not null)} " +
+                        "found=False " +
                         $"— no swapchain present this frame (black).");
-                }
-
-                if (ownsPresentedGuestImageVersion && presentedGuestImage is not null)
-                {
-                    DestroyGuestImage(presentedGuestImage);
                 }
 
                 CompletePresentation(in presentation, presented: false);

@@ -10,7 +10,6 @@ namespace SharpEmu.Libs.Agc;
 // This partial records translated-draw diagnostics, including compiled-shader dumps.
 public static partial class AgcExports
 {
-    private static readonly HashSet<(ulong Es, ulong Ps, GuestDrawKind Kind)> _tracedShaderTranslations = new();
     private static readonly HashSet<(ulong Es, ulong Ps)> _tracedShaderDecodePairs = new();
     private static readonly HashSet<(ulong Ps, string Error)> _tracedShaderFailures = new();
 

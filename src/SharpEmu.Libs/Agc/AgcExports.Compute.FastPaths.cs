@@ -806,9 +806,7 @@ public static partial class AgcExports
         for (var index = 0; index < sampleCount; index++)
         {
             var maxOffset = totalBytes > sampleSize ? totalBytes - sampleSize : 0;
-            var offset = sampleCount == 1
-                ? 0
-                : maxOffset * (ulong)index / (sampleCount - 1);
+            var offset = maxOffset * (ulong)index / (sampleCount - 1);
             if (!ctx.Memory.TryRead(texture.Address + offset, sample))
             {
                 continue;

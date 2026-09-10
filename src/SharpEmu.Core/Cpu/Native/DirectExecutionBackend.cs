@@ -139,15 +139,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 #pragma warning restore CS0649
 
-	private const ulong SYSTEM_RESERVED = 34359738368uL;
 
-	private const ulong CODE_BASE_OFFSET = 4294967296uL;
 
-	private const ulong CODE_BASE_INCR = 268435456uL;
 
-	private const ulong GuestImageScanStart = 34359738368uL;
 
-	private const ulong GuestImageScanEnd = 36507222016uL;
 
 	// See CpuDispatcher: the 0x7FFx window is Windows-only; POSIX hosts
 	// (dyld shared cache, Rosetta 2 runtime) use 0x6FFx instead.
@@ -178,15 +173,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const uint PAGE_EXECUTE_READWRITE = 64u;
 
-	private const uint PAGE_READWRITE = 4u;
 
 	private const uint PAGE_EXECUTE_READ = 32u;
 
 	private const int TlsHandlerRegionSize = 16384;
 
-	private const ulong TlsModuleAllocStart = 140726751354880uL;
 
-	private const ulong TlsModuleAllocStride = 65536uL;
 
 	private readonly IModuleManager _moduleManager;
 
@@ -368,9 +360,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private int _importLoopGuardSeconds;
 
-	private readonly HashSet<ulong> _patchedResolverReturnSites = new HashSet<ulong>();
 
-	private readonly HashSet<ulong> _patchedTlsImmediateThunkTargets = new HashSet<ulong>();
 
 	private readonly HashSet<ulong> _contextualUnresolvedReturnSites = new HashSet<ulong>();
 
@@ -798,7 +788,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly nint RawUnhandledFilterPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawUnhandledFilterDelegateInstance);
 
-	private const int CTX_MXCSR = 52;
 
 	private const int CTX_RAX = 120;
 
@@ -849,11 +838,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const uint MEM_COMMIT = 4096u;
 
-	private const uint MEM_RESERVE = 8192u;
 
-	private const uint MEM_FREE = 65536u;
 
-	private const uint MEM_RELEASE = 32768u;
 
 	private const uint PAGE_EXECUTE = 16u;
 

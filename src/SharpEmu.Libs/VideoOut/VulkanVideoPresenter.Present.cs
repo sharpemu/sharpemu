@@ -13,8 +13,6 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     // This partial owns guest presentation scheduling and presenter thread lifecycle.
 
-    private const uint DefaultWindowWidth = 1920;
-    private const uint DefaultWindowHeight = 1080;
 
     // A captured 4K flip can consume tens of MiB of device-local memory.
     // Retain only a short presentation queue while always preserving the

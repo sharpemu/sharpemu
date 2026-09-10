@@ -33,7 +33,6 @@ public static partial class AgcExports
     private const uint ItNop = 0x10;
     private const uint ItSetBase = 0x11;
     private const uint ItIndexBufferSize = 0x13;
-    private const uint ItAtomicMem = 0x1E;
     private const uint ItIndexBase = 0x26;
     private const uint ItDrawIndirect = 0x24;
     private const uint ItDrawIndexIndirect = 0x25;
@@ -53,11 +52,8 @@ public static partial class AgcExports
     private const uint ItCondExec = 0x22;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
-    private const uint ItCopyData = 0x40;
     private const uint ItCondWrite = 0x45;
     private const uint ItEventWrite = 0x46;
-    private const uint ItReleaseMem = 0x49;
-    private const uint ItDmaData = 0x50;
     private const uint ItRewind = 0x59;
     private const uint ItSetShRegIndirect = 0x63;
     private const uint ItSetUconfigRegIndirect = 0x64;
@@ -88,10 +84,6 @@ public static partial class AgcExports
     private const uint RReleaseMem = 0x18;
     private const uint RDmaData = 0x19;
 
-    // Command rings advance through contiguous fixed-size chunks; the sentinel
-    // terminator (IT_INDIRECT_BUFFER target=1 size=0) continues at the next one.
-    private const uint RingChunkBytes = 0x10000;
-
     // release_mem here raises an EOP interrupt; above this range it's
     // GPU-internal queue sync with no interrupt.
     private const ulong GpuLabelPoolBase = 0x2000000000UL;
@@ -101,10 +93,6 @@ public static partial class AgcExports
         address >= GpuLabelPoolBase &&
         address < GpuLabelPoolBase + GpuLabelPoolSize;
 
-    // Parse window for a ring resuming at appended commands: covers a full
-    // chunk, safe since parsing re-suspends at the next unwritten word.
-    private const uint RingResumeWindowDwords = 0x8000;
-    private const uint RIndexBase = 0x1B;
     private const uint RIndexCount = 0x1C;
     private const uint SpiShaderPgmLoPs = 0x8;
     private const uint SpiShaderPgmHiPs = 0x9;
@@ -218,16 +206,6 @@ public static partial class AgcExports
     private const uint Gen5TextureType1DArray = 12;
     private const uint Gen5TextureType2DArray = 13;
     private const ulong MaxPresentedTextureBytes = 128UL * 1024UL * 1024UL;
-    private const ulong VideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
-    private const ulong VideoOutPixelFormatA8B8G8R8Srgb = 0x80002200;
-    private const ulong VideoOutPixelFormat2R8G8B8A8Srgb = 0x8000000022000000;
-    private const ulong VideoOutPixelFormat2B8G8R8A8Srgb = 0x8000000000000000;
-    private const ulong VideoOutPixelFormat2R10G10B10A2 = 0x8100000622000000;
-    private const ulong VideoOutPixelFormat2B10G10R10A2 = 0x8100000600000000;
-    private const ulong VideoOutPixelFormat2R10G10B10A2Srgb = 0x8100000022000000;
-    private const ulong VideoOutPixelFormat2B10G10R10A2Srgb = 0x8100000000000000;
-    private const ulong VideoOutPixelFormat2R10G10B10A2Bt2100Pq = 0x8100070422000000;
-    private const ulong VideoOutPixelFormat2B10G10R10A2Bt2100Pq = 0x8100070400000000;
 
     private const ulong CommandBufferCursorUpOffset = 0x10;
     private const ulong CommandBufferCursorDownOffset = 0x18;

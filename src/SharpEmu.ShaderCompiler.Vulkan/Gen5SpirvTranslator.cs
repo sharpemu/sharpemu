@@ -7,7 +7,6 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 
 public static partial class Gen5SpirvTranslator
 {
-    private const uint ScalarRegisterCount = 256;
     private const uint VectorRegisterCount = 512;
     private const uint LdsDwordCount = 8192;
     // Graphics stages model LDS as a per-invocation Private array rather than

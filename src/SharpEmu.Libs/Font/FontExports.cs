@@ -10,7 +10,6 @@ public static class FontExports
 {
     private const ushort GlyphMagic = 0x0F03;
     private const int GlyphSize = 0x100;
-    private const int GlyphMetricsSize = 8 * sizeof(float);
     private const int RenderOutputSize = 0x40;
 
     private static readonly object AllocationGate = new();

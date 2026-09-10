@@ -302,11 +302,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
-        private readonly HashSet<(ulong Address, uint Width, uint Height, Format Format)> _tracedTextureCacheHits = new();
-        private readonly HashSet<(ulong Address, int ActualSize, ulong ExpectedSize, Format Format)>
-            _rejectedGuestImageUploads = new();
-        private readonly Dictionary<ulong, int> _tracedGuestWriteCounts = new();
-        private readonly Dictionary<int, int> _pixelSpirvWriteCounts = new();
 
         private sealed class TranslatedDrawResources
         {

@@ -71,12 +71,9 @@ public static class SaveDataExports
     }
 
     // Additional error codes and the async-event model (see sceSaveDataGetEventResult).
-    private const int OrbisSaveDataErrorBusy = unchecked((int)0x809F0006);
     private const int OrbisSaveDataErrorNoEvent = unchecked((int)0x809F0008); // NOT_FOUND: no pending event
     private const int OrbisSaveDataErrorBadMounted = unchecked((int)0x809F0013);
     // SceSaveDataEventType
-    private const uint EventTypeUmountBackupEnd = 1;
-    private const uint EventTypeBackupEnd = 2;
     private const uint EventTypeSaveDataMemorySyncEnd = 3;
     private const int SaveDataEventSize = 0x60;
     private const int MountInfoSize = 0x40;

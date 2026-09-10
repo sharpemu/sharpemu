@@ -30,7 +30,6 @@ public static partial class VideoOutExports
     private const int OrbisVideoOutErrorInvalidOption = unchecked((int)0x8029001A);
     private const int SceVideoOutBusTypeMain = 0;
     private const int SceVideoOutBufferAttributeOptionNone = 0;
-    private const int SceVideoOutTilingModeLinear = 1;
     private const int MaxOpenPorts = 4;
     private const int MaxDisplayBuffers = 16;
     private const int MaxDisplayBufferGroups = 4;
