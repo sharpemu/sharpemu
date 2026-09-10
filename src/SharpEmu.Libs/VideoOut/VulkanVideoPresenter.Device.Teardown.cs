@@ -70,33 +70,12 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DestroyGuestImage(deferredVersion.Image);
             }
-            lock (_gate)
-            {
-                _lastOrderedGuestFlipVersions.Clear();
-            }
             DestroySwapchainResources();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
                 $"peak_allocations={_deviceInfo.PeakAllocations} limit={_deviceInfo.MaxMemoryAllocationCount}");
             if (_device.Handle != 0)
             {
-                Volatile.Write(ref _gpuLabelTimelineAvailable, false);
-                if (_gpuLabelTimelineEnabled)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][PERF] vk.gpu_label_timeline " +
-                        $"signals={_gpuLabelTimelineSignalCount} " +
-                        $"waits={_gpuLabelTimelineWaitCount} " +
-                        $"graphics_value={_graphicsGuestTimelineValue}");
-                }
-                if (_graphicsGuestTimelineSemaphore.Handle != 0)
-                {
-                    _vk.DestroySemaphore(
-                        _device,
-                        _graphicsGuestTimelineSemaphore,
-                        null);
-                    _graphicsGuestTimelineSemaphore = default;
-                }
                 _scheduler.Dispose();
                 if (_pipelineCache.Handle != 0)
                 {

@@ -42,17 +42,12 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!_deviceLostLogged)
             {
                 _deviceLostLogged = true;
-                var work = !string.IsNullOrEmpty(_activeGuestWorkLabel)
-                    ? $"work={_activeGuestWorkLabel}"
-                    : !string.IsNullOrEmpty(_lastGuestWorkLabel)
-                        ? $"last_work={_lastGuestWorkLabel}"
-                        : "work=<none>";
                 var submit = string.IsNullOrEmpty(_lastSubmitDebugName)
-                    ? string.Empty
-                    : $" last_submit={_lastSubmitDebugName}";
+                    ? "submit=<none>"
+                    : $"submit={_lastSubmitDebugName}";
                 Console.Error.WriteLine(
                     "[LOADER][ERROR] Vulkan device lost; dropping subsequent guest GPU work. " +
-                    $"{work}{submit} {exception.Message}");
+                    $"{submit} {exception.Message}");
             }
 
             return true;

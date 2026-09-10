@@ -8,6 +8,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
@@ -224,10 +225,10 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             SetField("_samplerStore", Samplers);
             SetField("_trackedImageBindings", new List<ResourceSlotIdentifier>());
             SetField("_submissionContext", new SubmissionContext { QueueName = "presenter.test", SubmissionId = 1 });
+            SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
             foreach (var name in new[]
             {
-                "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions", "_lastSubmittedTimelineByGuestQueue",
-                "_lastSubmittedGpuLabelDependencyByGuestQueue", "_gpuLabelHostPublications", "_recycledDescriptorPools",
+                "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions", "_recycledDescriptorPools",
                 "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys",
             })
             {
@@ -326,67 +327,6 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         presenter.Harness.Finish();
         presenter.Harness.Shutdown();
-    }
-
-    [Fact]
-    public void CacheCollection_UsesSubmissionBoundariesInsteadOfPartialProgress()
-    {
-        if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var presenter = new PresenterUnderTest(_vulkan);
-        var harness = presenter.Harness;
-        var address = harness.MapBacked(0x10000, ReadWrite);
-        presenter.Run(() =>
-        {
-            // Check steady reuse after the initial collection-age window.
-            for (var warmup = 0; warmup < 20; warmup++)
-            {
-                presenter.InvokeMethod("RunGuestCacheCollection");
-            }
-
-            var resource = AcquireTexture(presenter, Texture(address));
-            var imageIdentifier = (ResourceSlotIdentifier)GetFieldValue(resource, "ImageIdentifier");
-            presenter.InvokeMethod("ResetImageBindings");
-            var initialTick = (ulong)GetFieldValue(harness.Images, "_collectionTick");
-            var ordinaryAction = new VulkanOrderedGuestAction(() => { }, "ordinary action");
-            for (var retry = 0; retry < 100; retry++)
-            {
-                presenter.InvokeMethod("ProcessGuestCacheReadbacks");
-                presenter.InvokeMethod("PrepareGuestSubmissionCompletion", ordinaryAction);
-            }
-
-            Assert.Equal(initialTick, (ulong)GetFieldValue(harness.Images, "_collectionTick"));
-            Assert.True(harness.Images.Contains(imageIdentifier));
-            var completion = new VulkanOrderedGuestAction(() => { }, "submission end")
-            {
-                CollectionPending = true,
-            };
-            presenter.InvokeMethod("PrepareGuestSubmissionCompletion", completion);
-            Assert.False(completion.CollectionPending);
-            for (var retry = 0; retry < 100; retry++)
-            {
-                presenter.InvokeMethod("PrepareGuestSubmissionCompletion", completion);
-            }
-
-            Assert.Equal(initialTick + 1, (ulong)GetFieldValue(harness.Images, "_collectionTick"));
-            for (var frame = 0; frame < 3; frame++)
-            {
-                _ = AcquireTexture(presenter, Texture(address));
-                presenter.InvokeMethod("ResetImageBindings");
-                for (var submission = 0; submission < 12; submission++)
-                {
-                    presenter.InvokeMethod("ProcessGuestCacheReadbacks");
-                    presenter.InvokeMethod("ProcessGuestCacheReadbacks");
-                    presenter.InvokeMethod("PrepareGuestSubmissionCompletion",
-                        new VulkanOrderedGuestAction(() => { }, "submission end") { CollectionPending = true });
-                }
-
-                Assert.True(harness.Images.Contains(imageIdentifier));
-            }
-
-            Assert.Equal(initialTick + 37, (ulong)GetFieldValue(harness.Images, "_collectionTick"));
-        });
-        harness.Finish();
-        harness.Shutdown();
     }
 
     [Fact]

@@ -183,6 +183,7 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
+        var drawModifier = ctx[CpuRegister.Rdx];
         var emit = Interlocked.Increment(ref _indirectDrawEmitCount);
 
         if (emit <= 12 || emit % 250 == 0)
@@ -208,12 +209,25 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
+        var modifierBits = (uint)drawModifier;
+        var shaderStage = modifierBits >> 29;
+        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
+        var firstVertexRegister = (modifierBits & 1u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu)
+            : 0x280u;
+        var firstInstanceRegister = (modifierBits & 4u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu)
+            : 0x280u;
+        var drawInitiator = (drawModifier & (1UL << 32)) != 0
+            ? 2u
+            : ((modifierBits >> 3) & 0x20u) | 2u;
+
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var drawCommand) ||
             !TryWriteUInt32(ctx, drawCommand, Pm4(5, ItDrawIndirect, 0)) ||
             !TryWriteUInt32(ctx, drawCommand + 4, dataOffset) ||
-            !TryWriteUInt32(ctx, drawCommand + 8, 0) ||
-            !TryWriteUInt32(ctx, drawCommand + 12, 0) ||
-            !TryWriteUInt32(ctx, drawCommand + 16, 0))
+            !TryWriteUInt32(ctx, drawCommand + 8, firstVertexRegister) ||
+            !TryWriteUInt32(ctx, drawCommand + 12, firstInstanceRegister) ||
+            !TryWriteUInt32(ctx, drawCommand + 16, drawInitiator))
         {
             var rejects = Interlocked.Increment(ref _indirectDrawEmitRejectCount);
             if (rejects <= 8 || rejects % 250 == 0)
@@ -300,19 +314,37 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
-        var drawCount = (uint)ctx[CpuRegister.Rdx];
-        var stride = DrawIndexedIndirectArgsSize;
-        var modifier = (uint)ctx[CpuRegister.R8];
+        var countFromMemory = (uint)ctx[CpuRegister.Rdx];
+        var drawCount = (uint)ctx[CpuRegister.Rcx];
+        var countAddress = ctx[CpuRegister.R8];
+        var stride = (uint)ctx[CpuRegister.R9];
+        if (countFromMemory > 1 ||
+            !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + sizeof(ulong), out var modifier))
+            return ReturnPointer(ctx, 0);
+
+        var modifierBits = (uint)modifier;
+        var shaderStage = modifierBits >> 29;
+        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
+        ulong registerLocations = (modifierBits & 1u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
+        var firstInstanceRegister = (modifierBits & 4u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
+        registerLocations |= (ulong)firstInstanceRegister << 32;
+        if ((modifierBits & 2u) != 0)
+            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
+        var drawInitiator = (modifier & (1UL << 32)) != 0
+            ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
+
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItDrawIndexIndirectMulti, 0)) ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 10, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(10, ItDrawIndexIndirectMulti, 0)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, 0) ||
+            !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, countFromMemory << 30) ||
             !TryWriteUInt32(ctx, commandAddress + 20, drawCount) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, stride) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, modifier))
+            !ctx.TryWriteUInt64(commandAddress + 24, countAddress & ~3UL) ||
+            !TryWriteUInt32(ctx, commandAddress + 32, stride) ||
+            !TryWriteUInt32(ctx, commandAddress + 36, drawInitiator))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -342,8 +374,7 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int DcbDrawIndexIndirectMultiGetSize(CpuContext ctx)
     {
-        // Eight, matching the packet DcbDrawIndexIndirectMulti emits.
-        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        ctx[CpuRegister.Rax] = 10u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
     }
 
@@ -386,23 +417,27 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var indexOffset = (uint)ctx[CpuRegister.Rsi];
         var indexCount = (uint)ctx[CpuRegister.Rdx];
-        var flags = (uint)ctx[CpuRegister.Rcx];
+        var drawModifier = ctx[CpuRegister.Rcx];
         if (commandBufferAddress == 0)
         {
             return ReturnPointer(ctx, 0);
         }
 
+        // The API modifier is not a packet initiator. Bit 32 disables its bit-8 selection.
+        var drawInitiator = (drawModifier & (1UL << 32)) != 0
+            ? 0u
+            : ((uint)drawModifier >> 3) & 0x20u;
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDrawIndexOffset2, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, indexCount) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, Math.Max(indexCount, 1u)) ||
             !TryWriteUInt32(ctx, commandAddress + 8, indexOffset) ||
             !TryWriteUInt32(ctx, commandAddress + 12, indexCount) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, flags & 0xE000_0001u))
+            !TryWriteUInt32(ctx, commandAddress + 16, drawInitiator))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        TraceAgc($"agc.dcb_draw_index_offset buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset={indexOffset} count={indexCount} flags=0x{flags:X8}");
+        TraceAgc($"agc.dcb_draw_index_offset buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset={indexOffset} count={indexCount} flags=0x{drawModifier:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 

@@ -164,7 +164,6 @@
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "Generale",
   "Options.Env.RenderDoc.Desc": "Carica l'API in-application di RenderDoc per catturare i frame dall'interno dell'emulatore.\nPremi F10 mentre il gioco è in esecuzione per catturare un frame; le catture finiscono in user/logs/capture_logs/<TITLE_ID>.\nRichiede RenderDoc installato. Rallenta la GPU e blocca alcuni titoli, quindi lascialo disattivato se non stai facendo debug.",
-  "Options.Env.ForceSubmitOrphanPreambles.Desc": "Consegna i preamboli del buffer di comandi GPU anche quando la coda di destinazione non li preleva mai.\nLasciare disattivato normalmente. Attivare per i titoli che si bloccano in attesa di una fence GPU che non segnala mai.",
   "Common.Save": "Salva",
   "Common.Cancel": "Annulla",
   "Options.About": "Informazioni",

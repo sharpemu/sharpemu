@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -298,23 +300,15 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) =>
-        VulkanVideoPresenter.TrySubmitGuestImage(videoOutHandle, displayBufferIndex, address, width, height, pitchInPixel);
+        uint pitchInPixel,
+        ulong flipRequestId) =>
+        VulkanVideoPresenter.TrySubmitGuestImage(videoOutHandle, displayBufferIndex, address, width, height, pitchInPixel, flipRequestId);
 
-    public bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel) =>
-        VulkanVideoPresenter.TrySubmitOrderedGuestImageFlip(
-            videoOutHandle,
-            displayBufferIndex,
-            address,
-            width,
-            height,
-            pitchInPixel);
+    public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots) =>
+        VulkanVideoPresenter.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+
+    public IdleOutcome SubmitDone(ICpuMemory memory) =>
+        VulkanVideoPresenter.SubmitDone(memory);
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
@@ -347,51 +341,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         componentMapping = default;
         return false;
     }
-
-    public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
-        VulkanVideoPresenter.EnterGuestQueue(queueName, submissionId);
-
-    public long SubmitOrderedGuestAction(Action action, string debugName) =>
-        VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
-
-    public long SubmitGuestSubmissionCompletion(Action action, string debugName) =>
-        VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName, completesSubmission: true);
-
-    public long SubmitGuestCacheOperation(
-        GuestGpuCacheOperation operation,
-        Action applyHostState,
-        string debugName) =>
-        VulkanVideoPresenter.SubmitGuestCacheOperation(
-            operation,
-            applyHostState,
-            debugName);
-
-    public long SubmitGuestCacheOperations(
-        IReadOnlyList<GuestGpuCacheOperation> operations,
-        Action applyHostState,
-        string debugName) =>
-        VulkanVideoPresenter.SubmitGuestCacheOperations(
-            operations,
-            applyHostState,
-            debugName);
-
-    public long SubmitGpuLabelSignal(
-        Action<GuestGpuLabelDependency> publishGpu,
-        Action? publishHost,
-        string debugName) =>
-        VulkanVideoPresenter.SubmitGpuLabelSignal(publishGpu, publishHost, debugName);
-
-    public void RequireGpuLabelDependency(GuestGpuLabelDependency dependency) =>
-        VulkanVideoPresenter.RequireGpuLabelDependency(dependency);
-
-    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
-        VulkanVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
-
-    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) =>
-        VulkanVideoPresenter.WaitForGuestWork(workSequence, timeoutMilliseconds);
-
-    public long CurrentGuestWorkSequenceForDiagnostics =>
-        VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
 
     public ulong GuestStorageBufferOffsetAlignment =>
         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;

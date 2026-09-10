@@ -14,7 +14,7 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         // This partial executes offscreen guest rendering commands through the image store.
 
-        private void ExecuteOffscreenDraw(VulkanOffscreenGuestDraw work)
+        internal void ExecuteOffscreenDraw(VulkanOffscreenGuestDraw work)
         {
             if (_deviceLost || work.Targets.Count == 0)
             {

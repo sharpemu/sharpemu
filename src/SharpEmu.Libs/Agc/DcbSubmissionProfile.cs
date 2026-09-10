@@ -38,6 +38,24 @@ internal static class DcbSubmissionProfile
     private static long _earlyVertexReuses;
     private static long _avoidedVertexBytes;
     private static long _vertexReuseCheckTicks;
+    private static readonly long[] _captureSelections = new long[3];
+    private static int _reportedCaptureRejection;
+
+    internal static void RecordCaptureSelection(AgcExports.GeometrySnapshotDecision decision)
+    {
+        if (Enabled)
+        {
+            Interlocked.Increment(ref _captureSelections[(int)decision]);
+        }
+    }
+
+    internal static void RecordCaptureRejection(string field, ulong captured, ulong current)
+    {
+        if (Enabled && Interlocked.Exchange(ref _reportedCaptureRejection, 1) == 0)
+        {
+            Console.Error.WriteLine($"[PERF][GEOMETRY_CAPTURE_REJECTION] field={field} captured=0x{captured:X} current=0x{current:X}");
+        }
+    }
 
     public static bool Enabled => _enabled;
 
@@ -186,6 +204,10 @@ internal static class DcbSubmissionProfile
             var snapshotMisses = Interlocked.Exchange(ref _vertexSnapshotMisses, 0);
             var snapshotMismatches = Interlocked.Exchange(ref _vertexSnapshotMismatches, 0);
             var snapshotReuses = Interlocked.Exchange(ref _vertexSnapshotReuses, 0);
+            var captureMissing = Interlocked.Exchange(ref _captureSelections[0], 0);
+            var captureAccepted = Interlocked.Exchange(ref _captureSelections[1], 0);
+            var captureRejected = Interlocked.Exchange(ref _captureSelections[2], 0);
+            Interlocked.Exchange(ref _reportedCaptureRejection, 0);
             var discardedBytes = Interlocked.Exchange(ref _discardedVertexBytes, 0);
             var discardedCaptureTicks = Interlocked.Exchange(ref _discardedVertexCaptureTicks, 0);
             var earlyReuses = Interlocked.Exchange(ref _earlyVertexReuses, 0);
@@ -223,7 +245,8 @@ internal static class DcbSubmissionProfile
                 $"[PERF][VERTEX_SNAPSHOT] window={elapsedSeconds:F1}s reused={snapshotReuses} " +
                 $"missing={snapshotMisses} mismatch={snapshotMismatches} discarded_bytes={discardedBytes} " +
                 $"discarded_capture_ms={ToMilliseconds(discardedCaptureTicks):F2} " +
-                $"early_reused={earlyReuses} avoided_bytes={avoidedBytes} reuse_check_ms={ToMilliseconds(reuseCheckTicks):F2}");
+                $"early_reused={earlyReuses} avoided_bytes={avoidedBytes} reuse_check_ms={ToMilliseconds(reuseCheckTicks):F2} " +
+                $"capture_missing={captureMissing} capture_accepted={captureAccepted} capture_rejected={captureRejected}");
             Console.Error.WriteLine(
                 $"[PERF][SNAPSHOT_PREPASS] window={elapsedSeconds:F1}s total_ms={ToMilliseconds(snapshotTicks):F2} " +
                 $"packet_other_ms={ToMilliseconds(SnapshotRemainder(snapshotTicks, phaseTicks)):F2} " +

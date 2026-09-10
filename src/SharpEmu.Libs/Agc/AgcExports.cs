@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -24,10 +25,7 @@ public static partial class AgcExports
 #if DEBUG
     static AgcExports()
     {
-        ValidateWriteDataControlDecoders();
         ValidateDispatchInitiators();
-        ValidateSubmittedQueueAndReleaseMemDecoders();
-        ValidateAcquireMemAndQueueResetDecoders();
         ValidateDepthTargetDecoder();
     }
 #endif
@@ -35,6 +33,7 @@ public static partial class AgcExports
     private const uint ItNop = 0x10;
     private const uint ItSetBase = 0x11;
     private const uint ItIndexBufferSize = 0x13;
+    private const uint ItAtomicMem = 0x1E;
     private const uint ItIndexBase = 0x26;
     private const uint ItDrawIndirect = 0x24;
     private const uint ItDrawIndexIndirect = 0x25;
@@ -54,6 +53,7 @@ public static partial class AgcExports
     private const uint ItCondExec = 0x22;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
+    private const uint ItCopyData = 0x40;
     private const uint ItCondWrite = 0x45;
     private const uint ItEventWrite = 0x46;
     private const uint ItReleaseMem = 0x49;
@@ -307,37 +307,44 @@ public static partial class AgcExports
         float ClearAlpha = 1f,
         bool IsDccFastClear = false);
 
-    private readonly record struct SubmittedAcquireMem(
-        uint Engine,
-        uint CbDbControl,
-        ulong BaseAddress,
-        ulong SizeBytes,
-        uint PollInterval,
-        AcquireMemGcrControl GcrControl)
-    {
-        public AgcGpuCacheSemantics Semantics =>
-            GcrControl.ToSemantics(SizeBytes == 0);
-
-        public bool InvalidatesGuestResources => GcrControl.HasResourceOperation;
-
-        public bool CoversAllGuestMemory => Semantics.CoversAllMemory;
-    }
-
     private sealed class SubmittedDcbState
     {
-        public readonly record struct PendingSubmission(
-            ulong CommandAddress,
-            uint DwordCount,
-            ulong SubmissionId,
-            bool TracePackets,
-            Dictionary<ulong, SubmittedIndexSnapshot>? IndexSnapshots,
-            Dictionary<ulong, SubmittedVertexSnapshot>? VertexSnapshots,
-            ulong PublicationGeneration);
+        private uint? _compositeDepthSizeXy;
+        private CommandRegisterBanks? _interpreterBanks;
 
-        public Dictionary<uint, uint> CxRegisters { get; } = new();
-        public Dictionary<uint, uint> ShRegisters { get; } = new();
-        public Dictionary<uint, uint> UcRegisters { get; } = new();
-        public uint? CompositeDepthSizeXy { get; set; }
+        public Dictionary<uint, uint> CxRegisters { get; private set; } = new();
+        public Dictionary<uint, uint> ShRegisters { get; private set; } = new();
+        public Dictionary<uint, uint> UcRegisters { get; private set; } = new();
+
+        // With an interpreter attached the banks and the composite extent are its own.
+        public uint? CompositeDepthSizeXy
+        {
+            get => _interpreterBanks is { } banks ? banks.CompositeDepthSizeXy : _compositeDepthSizeXy;
+            set
+            {
+                if (_interpreterBanks is { } banks)
+                {
+                    banks.CompositeDepthSizeXy = value;
+                }
+                else
+                {
+                    _compositeDepthSizeXy = value;
+                }
+            }
+        }
+
+        public void AttachInterpreter(GpuCommandInterpreter interpreter)
+        {
+            if (ReferenceEquals(_interpreterBanks, interpreter.Registers))
+            {
+                return;
+            }
+
+            _interpreterBanks = interpreter.Registers;
+            CxRegisters = interpreter.Registers.Context;
+            ShRegisters = interpreter.Registers.Shader;
+            UcRegisters = interpreter.Registers.UserConfig;
+        }
         public TextureDescriptor? PresenterTexture { get; set; }
         public GuestDrawKind GuestDrawKind { get; set; }
         public TranslatedGuestDraw? TranslatedDraw { get; set; }
@@ -351,8 +358,6 @@ public static partial class AgcExports
         public uint IndexSize { get; set; }
         public uint InstanceCount { get; set; } = 1;
         public uint DrawIndexOffset { get; set; }
-        public bool PredicateSkip { get; set; }
-        public bool ConditionalWaitEnabled { get; set; }
         public string QueueName { get; set; } = "graphics";
         // Ident this queue's end-of-pipe completion interrupt is published under.
         // The graphics queue keeps 0; a compute queue takes the owner handle it
@@ -360,66 +365,22 @@ public static partial class AgcExports
         // sceAgcDriverAddEqEvent.
         public ulong CompletionEventId { get; set; }
         public ulong ActiveSubmissionId { get; set; }
-        public SubmittedCompletionState? ActiveCompletionState { get; set; }
-        public ulong ActiveSubmissionPublicationGeneration { get; set; }
         public Dictionary<ulong, SubmittedIndexSnapshot>? ActiveIndexSnapshots { get; set; }
         public SubmittedIndexSnapshot? CurrentIndexSnapshot { get; set; }
         public Dictionary<ulong, SubmittedVertexSnapshot>? ActiveVertexSnapshots { get; set; }
         public SubmittedVertexSnapshot? CurrentVertexSnapshot { get; set; }
-        public Queue<PendingSubmission> PendingSubmissions { get; } = new();
-        public bool HasActiveSubmission { get; set; }
-        public bool IsSuspended { get; set; }
-        public bool IsFaulted { get; set; }
-        public string? FaultReason { get; set; }
-        public bool FaultedSubmissionReported { get; set; }
-        public ulong AtomicReturnMeData { get; set; }
-        public bool AtomicReturnMeValid { get; set; }
-        public bool AtomicReturnMePending { get; set; }
-        public ulong AtomicReturnMeSequence { get; set; }
-        public ulong AtomicReturnMeCompletedSequence { get; set; }
-        public ulong AtomicReturnPfpData { get; set; }
-        public bool AtomicReturnPfpValid { get; set; }
-        public bool AtomicReturnPfpPending { get; set; }
-        public ulong AtomicReturnPfpSequence { get; set; }
-        public ulong AtomicReturnPfpCompletedSequence { get; set; }
-
-        // Set when parsing stops on an INDIRECT_BUFFER packet so the caller can
-        // continue into the buffer it links to.
-        public ulong PendingChainAddress { get; set; }
-        public uint PendingChainDwords { get; set; }
-        public (ulong Address, uint Dwords, ulong RingChunkBase)?
-            IndirectCallReturn { get; set; }
-
-        // Base of the ring chunk currently being parsed; advances by RingChunkBytes.
-        public ulong RingChunkBase { get; set; }
-        public bool FollowedChunkAdvance { get; set; }
-        public ulong CompletionEventNotifiedSubmissionId { get; set; }
-        public Dictionary<(uint Op, uint Register), uint> FramePacketCounts { get; } = new();
-        public uint FramePacketCount { get; set; }
         public uint FrameDrawCount { get; set; }
         public uint FrameDispatchCount { get; set; }
         public ulong FlipCount { get; set; }
-        // Keep exact ACQUIRE_MEM ranges in one presenter work item. This avoids
-        // queue growth without widening disjoint guest cache operations.
-        public List<GuestGpuCacheOperation> PendingAcquireInvalidations { get; } = [];
-
-        // Growing ring: never follows the chunk-advance sentinel (builders jump
-        // to non-contiguous chunks), parks on the first not-yet-written word instead.
-        public bool IsForceSubmittedRing { get; set; }
-
-        // Address of a synthetic ring-tail park (SuspendOnUnwrittenRingWord);
-        // abandoned if a new submission means the game moved to a fresh ring.
-        public ulong RingTailParkAddress { get; set; }
-
-        // One-past the last fully-processed packet, so the orphan sweep can
-        // reach packets a suspended queue never got back to.
-        public ulong LastParsedAddress { get; set; }
     }
 
     private sealed class SubmittedGpuState
     {
         public object Gate { get; } = new();
+        public object CommandSubmissionGate { get; } = new();
         public SubmittedDcbState Graphics { get; } = new();
+        // The submit-time geometry prepass shadow; only the prepass reads or writes it.
+        public SubmittedDcbState GeometryCapture { get; } = new();
         public Dictionary<uint, SubmittedDcbState> ComputeQueues { get; } = new();
         public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
         public AgcHtileMetadataTracker HtileMetadata { get; } = new();
@@ -434,14 +395,6 @@ public static partial class AgcExports
         public uint NextResource { get; set; } = 1;
         public ulong WorkSequence { get; set; }
         public ulong SubmissionSequence { get; set; }
-        public bool WaitMonitorRunning { get; set; }
-        public object WaitMonitorSignalGate { get; } = new();
-        public long WaitMonitorSignalVersion { get; set; }
-
-        // Coalesced drain scheduling; fields (not properties) so Interlocked can target them.
-        public int DrainWorkerActive;
-        public int DrainPending;
-        public CpuContext? PendingDrainContext;
     }
 
     private readonly record struct RegisterDefaultValue(uint Offset, uint Value);
@@ -885,25 +838,6 @@ public static partial class AgcExports
         var remainingDwords = GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords);
         if (sizeDwords > remainingDwords)
         {
-            // The one place that knows an arena's true final cursor before a
-            // switch happens, regardless of which builder export wrote its
-            // last bytes — fires only on genuine exhaustion, not per packet.
-            if (_forceSubmitOrphanPreamblesEnabled &&
-                TryReadUInt64(ctx, commandBufferAddress, out var exhaustedBase) &&
-                exhaustedBase != 0)
-            {
-                lock (_orphanPreambleGate)
-                {
-                    if ((!_builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen) ||
-                        seen.Base != exhaustedBase ||
-                        cursorUp > seen.Cursor))
-                    {
-                        _builderArenaLastSeen[commandBufferAddress] =
-                            (exhaustedBase, cursorUp, GuestThreadExecution.CurrentGuestThreadHandle, System.Diagnostics.Stopwatch.GetTimestamp());
-                    }
-                }
-            }
-
             TraceAgc($"agc.cmd_alloc_full buf=0x{commandBufferAddress:X16} need={sizeDwords} remaining={remainingDwords} callback=0x{callback:X16}");
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
@@ -984,19 +918,6 @@ public static partial class AgcExports
         ((op & 0xFFu) << 8) |
         ((register & 0x3Fu) << 2);
 
-    internal static bool IsValidWaitOperation(uint operation) =>
-        operation is 0 or 1 or 4;
-
-    internal static bool ShouldExecuteWaitOperation(
-        uint operation,
-        bool conditionalWaitEnabled) =>
-        operation != 4 || conditionalWaitEnabled;
-
-    internal static uint DecodeWaitOperation(uint control, bool is64Bit) =>
-        is64Bit
-            ? ((control >> 8) & 0x1u) | ((control >> 5) & 0x6u)
-            : ((control >> 8) & 0x3u) | ((control >> 4) & 0xCu);
-
     private static uint Pm4Length(uint header) =>
         ((header >> 16) & 0x3FFFu) + 2u;
 
@@ -1013,70 +934,8 @@ public static partial class AgcExports
         return true;
     }
 
-    // A submitted command buffer is bulk-copied once per submit and served
-    // from this thread-local window: the previous per-dword reads each took
-    // the guest-memory reader lock and ran a region binary search, which
-    // dominated submit parsing (thousands of locked 4-byte reads per DCB).
-    [ThreadStatic]
-    private static byte[]? _dcbWindowBuffer;
-    [ThreadStatic]
-    private static ulong _dcbWindowStart;
-    [ThreadStatic]
-    private static int _dcbWindowByteLength;
-    [ThreadStatic]
-    private static DcbWindowInvalidationRegistry.Lease? _dcbWindowLease;
-
-    /// <summary>
-    /// Drops the bulk-read window when a self-patching command buffer writes
-    /// into its own bytes during parse, so subsequent reads see live guest
-    /// memory instead of the pre-write snapshot. Self-patching is rare, so
-    /// paying live-read cost for the rest of that one submit is acceptable.
-    /// </summary>
-    private static void InvalidateDcbWindowIfOverlaps(ulong address, ulong length)
-    {
-        if (length == 0)
-        {
-            return;
-        }
-
-        DcbWindowInvalidationRegistry.Invalidate(address, length);
-
-        if (_dcbWindowBuffer is not null &&
-            address < SaturatingAdd(_dcbWindowStart, (ulong)_dcbWindowByteLength) &&
-            SaturatingAdd(address, length) > _dcbWindowStart)
-        {
-            DropCurrentDcbWindow();
-        }
-    }
-
-    private static void DropCurrentDcbWindow()
-    {
-        DcbWindowInvalidationRegistry.Unregister(_dcbWindowLease);
-        _dcbWindowLease = null;
-        _dcbWindowBuffer = null;
-        _dcbWindowByteLength = 0;
-    }
-
-    private static ulong SaturatingAdd(ulong value, ulong addend) =>
-        ulong.MaxValue - value < addend ? ulong.MaxValue : value + addend;
-
     private static bool TryReadUInt16(CpuContext ctx, ulong address, out ushort value)
     {
-        if (_dcbWindowBuffer is { } window &&
-            _dcbWindowLease is { } lease &&
-            address >= _dcbWindowStart &&
-            address - _dcbWindowStart + sizeof(ushort) <= (ulong)_dcbWindowByteLength)
-        {
-            value = BinaryPrimitives.ReadUInt16LittleEndian(
-                window.AsSpan((int)(address - _dcbWindowStart)));
-            if (DcbWindowInvalidationRegistry.IsValid(lease))
-            {
-                return true;
-            }
-
-            DropCurrentDcbWindow();
-        }
-
         Span<byte> buffer = stackalloc byte[sizeof(ushort)];
         if (!ctx.Memory.TryRead(address, buffer))
         {
@@ -1090,21 +949,6 @@ public static partial class AgcExports
 
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
-        if (_dcbWindowBuffer is { } window &&
-            _dcbWindowLease is { } lease &&
-            address >= _dcbWindowStart &&
-            address - _dcbWindowStart + sizeof(uint) <= (ulong)_dcbWindowByteLength)
-        {
-            value = BinaryPrimitives.ReadUInt32LittleEndian(
-                window.AsSpan((int)(address - _dcbWindowStart)));
-            if (DcbWindowInvalidationRegistry.IsValid(lease))
-            {
-                return true;
-            }
-
-            DropCurrentDcbWindow();
-        }
-
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, buffer))
         {
@@ -1151,21 +995,6 @@ public static partial class AgcExports
 
     private static bool TryReadUInt64(CpuContext ctx, ulong address, out ulong value)
     {
-        if (_dcbWindowBuffer is { } window &&
-            _dcbWindowLease is { } lease &&
-            address >= _dcbWindowStart &&
-            address - _dcbWindowStart + sizeof(ulong) <= (ulong)_dcbWindowByteLength)
-        {
-            value = BinaryPrimitives.ReadUInt64LittleEndian(
-                window.AsSpan((int)(address - _dcbWindowStart)));
-            if (DcbWindowInvalidationRegistry.IsValid(lease))
-            {
-                return true;
-            }
-
-            DropCurrentDcbWindow();
-        }
-
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
         if (!ctx.Memory.TryRead(address, buffer))
         {

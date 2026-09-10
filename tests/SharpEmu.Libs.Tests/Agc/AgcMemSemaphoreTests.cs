@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -19,7 +20,7 @@ public sealed class AgcMemSemaphoreTests
     [Fact]
     public void Decoder_ReadsSignalLayout()
     {
-        var packet = AgcExports.DecodeMemSemaphorePacket(
+        var packet = MemorySemaphorePacket.Decode(
             0x207,
             1,
             (1u << 16) | (1u << 20) | (6u << 29));
@@ -35,7 +36,7 @@ public sealed class AgcMemSemaphoreTests
     [Fact]
     public void Decoder_RejectsUnknownSelection()
     {
-        var packet = AgcExports.DecodeMemSemaphorePacket(
+        var packet = MemorySemaphorePacket.Decode(
             0x200,
             1,
             5u << 29);
@@ -127,7 +128,8 @@ public sealed class AgcMemSemaphoreTests
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         Write(memory, 4);
 
-        Assert.True(AgcExports.TrySignalMemSemaphore(
+        Assert.True(MemorySemaphorePacket.TrySignal(
+            memory.TryRead,
             memory,
             SemaphoreAddress,
             writeSignal: false,
@@ -142,7 +144,8 @@ public sealed class AgcMemSemaphoreTests
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         Write(memory, 19);
 
-        Assert.True(AgcExports.TrySignalMemSemaphore(
+        Assert.True(MemorySemaphorePacket.TrySignal(
+            memory.TryRead,
             memory,
             SemaphoreAddress,
             writeSignal: true,
@@ -157,7 +160,8 @@ public sealed class AgcMemSemaphoreTests
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
         Write(memory, 2);
 
-        Assert.True(AgcExports.TryConsumeMemSemaphore(
+        Assert.True(MemorySemaphorePacket.TryConsume(
+            memory.TryRead,
             memory,
             SemaphoreAddress,
             out var prior));
@@ -170,7 +174,8 @@ public sealed class AgcMemSemaphoreTests
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
 
-        Assert.True(AgcExports.TryConsumeMemSemaphore(
+        Assert.True(MemorySemaphorePacket.TryConsume(
+            memory.TryRead,
             memory,
             SemaphoreAddress,
             out var prior));
@@ -185,8 +190,11 @@ public sealed class AgcMemSemaphoreTests
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
 
-        Assert.False(AgcExports.TryConsumeMemSemaphore(memory, address, out _));
-        Assert.False(AgcExports.TrySignalMemSemaphore(
+        Assert.False(MemorySemaphorePacket.TryConsume(
+            memory.TryRead,
+            memory, address, out _));
+        Assert.False(MemorySemaphorePacket.TrySignal(
+            memory.TryRead,
             memory,
             address,
             writeSignal: false,

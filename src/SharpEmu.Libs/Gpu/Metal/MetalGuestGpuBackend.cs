@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -179,23 +181,68 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) =>
-        MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
+        uint pitchInPixel,
+        ulong flipRequestId)
+    {
+        // With a command stream the flip queues behind the graphics submissions before it.
+        CommandStreamQueue? commandStream;
+        lock (_commandStreamGate)
+        {
+            commandStream = _commandStream;
+        }
 
-    public bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel) =>
-        MetalVideoPresenter.TrySubmitOrderedGuestImageFlip(
-            videoOutHandle,
-            displayBufferIndex,
-            address,
-            width,
-            height,
-            pitchInPixel);
+        if (commandStream is not null)
+        {
+            return commandStream.TryEnqueueFlipPreparation(videoOutHandle, displayBufferIndex, flipRequestId);
+        }
+
+        var submitted = MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
+        if (submitted)
+        {
+            VideoOut.VideoOutExports.MarkFlipPresented(flipRequestId);
+        }
+
+        return submitted;
+    }
+
+    // The worker runs the interpreter and retries blocked submissions.
+    private readonly object _commandStreamGate = new();
+    private CommandStreamQueue? _commandStream;
+    private CommandStreamWorker? _commandStreamWorker;
+
+    private CommandStreamQueue EnsureCommandStream(ICpuMemory memory)
+    {
+        lock (_commandStreamGate)
+        {
+            if (_commandStream is { } existing)
+            {
+                return existing;
+            }
+
+            var host = new MetalCommandStreamHost(memory, this);
+            var queue = new CommandStreamQueue(host);
+            host.AttachQueue(queue);
+            _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream");
+            _commandStreamWorker.Start();
+            _commandStream = queue;
+            return queue;
+        }
+    }
+
+    public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
+    {
+        var commandStream = EnsureCommandStream(memory);
+        if (queue == 0)
+        {
+            commandStream.EnqueueGraphics(address, dwordCount, submissionId, geometrySnapshots);
+        }
+        else
+        {
+            commandStream.EnqueueCompute(queue, address, dwordCount, submissionId, geometrySnapshots);
+        }
+    }
+
+    public IdleOutcome SubmitDone(ICpuMemory memory) => EnsureCommandStream(memory).Done();
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         MetalVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
@@ -379,53 +426,6 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
 
     private long _perfShaderCompilations;
 
-    public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
-        MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
-
-    public long SubmitOrderedGuestAction(Action action, string debugName) =>
-        MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
-
-    public long SubmitGuestCacheOperation(
-        GuestGpuCacheOperation operation,
-        Action applyHostState,
-        string debugName)
-    {
-        _ = operation;
-        return MetalVideoPresenter.SubmitOrderedGuestAction(applyHostState, debugName);
-    }
-
-    public long SubmitGuestCacheOperations(
-        IReadOnlyList<GuestGpuCacheOperation> operations,
-        Action applyHostState,
-        string debugName)
-    {
-        _ = operations;
-        return MetalVideoPresenter.SubmitOrderedGuestAction(applyHostState, debugName);
-    }
-
-    public long SubmitGpuLabelSignal(
-        Action<GuestGpuLabelDependency> publishGpu,
-        Action? publishHost,
-        string debugName)
-    {
-        _ = publishGpu;
-        _ = publishHost;
-        _ = debugName;
-        return 0;
-    }
-
-    public void RequireGpuLabelDependency(GuestGpuLabelDependency dependency) =>
-        _ = dependency;
-
-    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
-        MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
-
-    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) =>
-        MetalVideoPresenter.WaitForGuestWork(workSequence, timeoutMilliseconds);
-
-    public long CurrentGuestWorkSequenceForDiagnostics =>
-        MetalVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
-
     public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
         MetalVideoPresenter.IsGuestImageUploadKnown(address, format, numberType);
 
@@ -469,7 +469,17 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         return (draws, drawMs, pipelines, Interlocked.Exchange(ref _perfShaderCompilations, 0));
     }
 
-    public void RequestClose() =>
+    // The worker drains before the presenter closes, so its last flips still reach the queue.
+    public void RequestClose()
+    {
+        CommandStreamWorker? worker;
+        lock (_commandStreamGate)
+        {
+            worker = _commandStreamWorker;
+        }
+
+        worker?.Stop();
         MetalVideoPresenter.RequestClose();
+    }
 
 }

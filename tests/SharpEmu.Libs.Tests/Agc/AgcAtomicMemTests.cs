@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -15,7 +16,7 @@ public sealed class AgcAtomicMemTests
     [Fact]
     public void Decoder_Reads64BitReturnCompareSwapLoop()
     {
-        var packet = AgcExports.DecodeAtomicMemPacket(
+        var packet = AtomicMemoryPacket.Decode(
             0x28u | (1u << 8) | (2u << 25),
             unchecked((uint)AtomicAddress),
             (uint)(AtomicAddress >> 32),
@@ -43,7 +44,7 @@ public sealed class AgcAtomicMemTests
     [Fact]
     public void Decoder_RejectsGraphicsReservedEngineSelection()
     {
-        var packet = AgcExports.DecodeAtomicMemPacket(
+        var packet = AtomicMemoryPacket.Decode(
             0x4Fu | (2u << 8) | (2u << 30),
             unchecked((uint)AtomicAddress),
             (uint)(AtomicAddress >> 32),
@@ -69,9 +70,9 @@ public sealed class AgcAtomicMemTests
             source: 0x5678,
             compare: 0x1234);
 
-        Assert.True(AgcExports.TryApplyAtomicMem(
+        Assert.True(packet.TryApply(
+            memory.TryRead,
             memory,
-            packet,
             out var prior,
             out var current,
             out var comparePassed));
@@ -92,9 +93,9 @@ public sealed class AgcAtomicMemTests
             source: 0x5678,
             compare: 0x9999);
 
-        Assert.True(AgcExports.TryApplyAtomicMem(
+        Assert.True(packet.TryApply(
+            memory.TryRead,
             memory,
-            packet,
             out var prior,
             out var current,
             out var comparePassed));
@@ -122,9 +123,9 @@ public sealed class AgcAtomicMemTests
         Write32(memory, initial);
         var packet = Packet(operation, command: 2, source, compare: 0);
 
-        Assert.True(AgcExports.TryApplyAtomicMem(
+        Assert.True(packet.TryApply(
+            memory.TryRead,
             memory,
-            packet,
             out var prior,
             out var current,
             out _));
@@ -144,9 +145,9 @@ public sealed class AgcAtomicMemTests
             source: uint.MaxValue,
             compare: 0);
 
-        Assert.True(AgcExports.TryApplyAtomicMem(
+        Assert.True(packet.TryApply(
+            memory.TryRead,
             memory,
-            packet,
             out _,
             out var current,
             out _));
@@ -176,30 +177,15 @@ public sealed class AgcAtomicMemTests
             source: 0x5678,
             compare: 0xAABB_CCDD_0000_1234);
 
-        Assert.Equal(0x1234UL, AgcExports.GetAtomicLoopReferenceValue(packet));
+        Assert.Equal(0x1234UL, packet.LoopReferenceValue);
     }
 
-    [Fact]
-    public void AtomicLoopWait_UsesExactEquality()
-    {
-        var waiter = new GpuWaitRegistry.WaitingDcb
-        {
-            ReferenceValue = 5,
-            Mask = uint.MaxValue,
-            CompareFunction = 3,
-            RequiresExactEquality = true,
-        };
-
-        Assert.True(GpuWaitRegistry.Compare(waiter, 5));
-        Assert.False(GpuWaitRegistry.Compare(waiter, 6));
-    }
-
-    private static AgcExports.AtomicMemPacket Packet(
+    private static AtomicMemoryPacket Packet(
         uint operation,
         uint command,
         ulong source,
         ulong compare) =>
-        AgcExports.DecodeAtomicMemPacket(
+        AtomicMemoryPacket.Decode(
             operation | (command << 8),
             unchecked((uint)AtomicAddress),
             (uint)(AtomicAddress >> 32),

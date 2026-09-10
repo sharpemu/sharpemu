@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -13,20 +14,11 @@ public static partial class AgcExports
 {
     // This partial handles AGC event signaling, including flips and queued interrupts.
 
-    private static readonly bool _compatibilitySubmitCompletionEvent = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_AGC_SUBMIT_COMPLETION_EVENT"),
-        "1",
-        StringComparison.Ordinal);
     private static readonly bool _traceAgcEqAccessors = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_AGC_EQ_ACCESSORS"),
         "1",
         StringComparison.Ordinal);
     private static long _agcEqAccessorTraceCount;
-
-    private sealed class SubmittedCompletionState
-    {
-        public bool RaisedQueuedInterrupt { get; set; }
-    }
 
     [SysAbiExport(
         Nid = "cFazmnXpJOE",
@@ -273,96 +265,6 @@ public static partial class AgcExports
             $"udata=0x{userData:X16} thread='{Thread.CurrentThread.Name}' " +
             $"managed={Environment.CurrentManagedThreadId}");
     }
-
-    private static void NotifySubmittedDcbCompleted(
-        SubmittedGpuState gpuState,
-        SubmittedDcbState state,
-        ulong submissionId)
-    {
-        if (state.CompletionEventNotifiedSubmissionId == submissionId)
-        {
-            return;
-        }
-
-        state.CompletionEventNotifiedSubmissionId = submissionId;
-        var completionState = state.ActiveCompletionState;
-        var completionEventId = state.CompletionEventId;
-        var isGraphics = ReferenceEquals(state, gpuState.Graphics);
-        var queueName = state.QueueName;
-        void TriggerCompletionEvents()
-        {
-            // A queued interrupt already reports the ordered completion. Do not
-            // add a second event for the same submission.
-            if (completionState?.RaisedQueuedInterrupt == true)
-            {
-                TraceAgc(
-                    $"agc.completion_event_suppressed queue={queueName} " +
-                    $"submission={submissionId} reason=queued_interrupt");
-                return;
-            }
-
-            var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                completionEventId,
-                KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                completionEventId);
-            // The broad fan-out wakes graphics registrations whose ident never
-            // matches anything the driver publishes. That is a compatibility
-            // guess rather than hardware behavior, so it stays opt-in and stays
-            // on the graphics queue where it was measured.
-            if (isGraphics && _compatibilitySubmitCompletionEvent)
-            {
-                triggered += KernelEventQueueCompatExports.TriggerRegisteredEventsDistinct(
-                    KernelEventQueueCompatExports.KernelEventFilterGraphics);
-            }
-            TraceAgc(
-                $"agc.completion_event queue={queueName} submission={submissionId} " +
-                $"event=0x{completionEventId:X} queues={triggered}");
-        }
-
-        // A submission is complete only after its translated Vulkan work and
-        // ordered guest-memory writes have finished. Put the notification on that
-        // same logical queue instead of approximating completion with a timer or a
-        // ThreadPool hop, either of which can only make the interrupt late and
-        // reorder it against registration changes (and can wake Unity while its
-        // upload data is still stale).
-        using var queueScope = GuestGpu.Current.EnterGuestQueue(queueName, submissionId);
-        if (GuestGpu.Current.SubmitGuestSubmissionCompletion(
-                TriggerCompletionEvents,
-                $"agc submit completion {submissionId}") == 0)
-        {
-            TriggerCompletionEvents();
-        }
-    }
-
-    internal readonly record struct QueuedInterruptDecision(
-        bool WritesData,
-        bool RaisesInterrupt);
-
-    internal static QueuedInterruptDecision EvaluateQueuedInterrupt(
-        uint interrupt,
-        bool isAsyncCompute,
-        uint dataSelection,
-        bool conditionReadable,
-        ulong conditionValue,
-        ulong data)
-    {
-        var writesData = dataSelection != 0 && interrupt switch
-        {
-            0 or 2 or 3 => true,
-            1 => isAsyncCompute,
-            _ => false,
-        };
-        var raisesInterrupt = interrupt switch
-        {
-            1 or 2 or 4 => true,
-            5 => conditionReadable &&
-                 unchecked((uint)conditionValue) <= unchecked((uint)data),
-            6 => conditionReadable && conditionValue <= data,
-            _ => false,
-        };
-        return new QueuedInterruptDecision(writesData, raisesInterrupt);
-    }
-
     private static bool TryReadQueuedInterruptCondition(
         CpuContext ctx,
         uint interrupt,
@@ -384,138 +286,4 @@ public static partial class AgcExports
         return interrupt == 6 && TryReadLiveUInt64(ctx, address, out value);
     }
 
-    private static readonly Dictionary<(ulong Source, ulong Destination), ulong> _softwarePresenterFingerprints = new();
-
-    private static bool TrySoftwarePresent(
-        CpuContext ctx,
-        TextureDescriptor source,
-        int videoOutHandle,
-        int displayBufferIndex)
-    {
-        if (source.Format != Gen5TextureFormatR8G8B8A8Unorm ||
-            source.TileMode != 0 ||
-            source.Type != Gen5TextureType2D ||
-            source.Width > 8192 ||
-            source.Height > 8192 ||
-            !VideoOutExports.TryGetDisplayBufferInfo(videoOutHandle, displayBufferIndex, out var destination) ||
-            destination.Address == 0 ||
-            destination.Width == 0 ||
-            destination.Height == 0 ||
-            destination.Width > 8192 ||
-            destination.Height > 8192 ||
-            destination.TilingMode != 0 ||
-            destination.PixelFormat is not (
-                VideoOutPixelFormatA8R8G8B8Srgb or
-                VideoOutPixelFormatA8B8G8R8Srgb or
-                VideoOutPixelFormat2R8G8B8A8Srgb or
-                VideoOutPixelFormat2B8G8R8A8Srgb or
-                VideoOutPixelFormat2R10G10B10A2 or
-                VideoOutPixelFormat2B10G10R10A2 or
-                VideoOutPixelFormat2R10G10B10A2Srgb or
-                VideoOutPixelFormat2B10G10R10A2Srgb or
-                VideoOutPixelFormat2R10G10B10A2Bt2100Pq or
-                VideoOutPixelFormat2B10G10R10A2Bt2100Pq))
-        {
-            return false;
-        }
-
-        var sourceByteCount = checked((ulong)source.Width * source.Height * 4);
-        if (sourceByteCount > 256UL * 1024UL * 1024UL)
-        {
-            return false;
-        }
-
-        var sourceBytes = new byte[(int)sourceByteCount];
-        if (!ctx.Memory.TryRead(source.Address, sourceBytes))
-        {
-            return false;
-        }
-
-        var fingerprint = ComputeFingerprint(sourceBytes);
-        var fingerprintKey = (source.Address, destination.Address);
-        lock (_softwarePresenterGate)
-        {
-            if (_softwarePresenterFingerprints.TryGetValue(fingerprintKey, out var previousFingerprint) &&
-                previousFingerprint == fingerprint)
-            {
-                return true;
-            }
-        }
-
-        var destinationPitch = destination.PitchInPixel == 0
-            ? destination.Width
-            : destination.PitchInPixel;
-        if (destinationPitch < destination.Width)
-        {
-            return false;
-        }
-
-        var destinationRow = new byte[checked((int)destinationPitch * 4)];
-        var rgbaDestination = destination.PixelFormat is
-            VideoOutPixelFormatA8B8G8R8Srgb or
-            VideoOutPixelFormat2R8G8B8A8Srgb;
-        var packed10Destination =
-            VideoOutExports.IsPacked10BitPixelFormat(destination.PixelFormat);
-        for (uint y = 0; y < destination.Height; y++)
-        {
-            var sourceY = (uint)(((ulong)y * source.Height) / destination.Height);
-            for (uint x = 0; x < destination.Width; x++)
-            {
-                var sourceX = (uint)(((ulong)x * source.Width) / destination.Width);
-                var sourceOffset = checked((int)(((ulong)sourceY * source.Width + sourceX) * 4));
-                var destinationOffset = checked((int)x * 4);
-                if (packed10Destination)
-                {
-                    if (!VideoOutExports.TryPackRgba8Pixel(
-                            destination.PixelFormat,
-                            sourceBytes[sourceOffset + 0],
-                            sourceBytes[sourceOffset + 1],
-                            sourceBytes[sourceOffset + 2],
-                            sourceBytes[sourceOffset + 3],
-                            out var packed))
-                    {
-                        return false;
-                    }
-
-                    BinaryPrimitives.WriteUInt32LittleEndian(
-                        destinationRow.AsSpan(destinationOffset, sizeof(uint)),
-                        packed);
-                }
-                else if (rgbaDestination)
-                {
-                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 0];
-                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
-                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 2];
-                }
-                else
-                {
-                    destinationRow[destinationOffset + 0] = sourceBytes[sourceOffset + 2];
-                    destinationRow[destinationOffset + 1] = sourceBytes[sourceOffset + 1];
-                    destinationRow[destinationOffset + 2] = sourceBytes[sourceOffset + 0];
-                }
-
-                if (!packed10Destination)
-                {
-                    destinationRow[destinationOffset + 3] = sourceBytes[sourceOffset + 3];
-                }
-            }
-
-            var destinationAddress = destination.Address + ((ulong)y * destinationPitch * 4);
-            if (!ctx.Memory.TryWrite(destinationAddress, destinationRow))
-            {
-                return false;
-            }
-        }
-
-        lock (_softwarePresenterGate)
-        {
-            _softwarePresenterFingerprints[fingerprintKey] = fingerprint;
-        }
-
-        VideoOutExports.SubmitHostRgbaFrame(sourceBytes, source.Width, source.Height);
-        TraceAgc(
-            $"agc.software_presenter src=0x{source.Address:X16} {source.Width}x{source.Height} fmt={source.Format}/num{source.NumberType} " +
-            $"dst=0x{destination.Address:X16} {destination.Width}x{destination.Height} fingerprint=0x{fingerprint:X16}");
-        return true;
-    }
 }

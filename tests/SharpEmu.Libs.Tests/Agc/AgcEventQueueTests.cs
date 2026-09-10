@@ -9,19 +9,13 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// The kernel event-queue registry is process-wide static state, and these tests assert over
-// every graphics registration in it, so they cannot run beside another suite that registers
-// graphics events.
+// These tests use process-wide event state. Do not run them with other graphics-event tests.
 [CollectionDefinition(GraphicsEventQueueStateCollection.Name, DisableParallelization = true)]
 public sealed class GraphicsEventQueueStateCollection
 {
     public const string Name = "GraphicsEventQueueState";
 }
 
-// IT_EVENT_WRITE carries a 6-bit hardware EVENT_TYPE, but sceAgcDriverAddEqEvent registers the
-// listener with a guest-defined eventId. Those two values are not the same numbering scheme, so
-// exact ident matching never wakes anything (issue #173). TriggerRegisteredEventsByFilter wakes
-// every graphics registration instead.
 [Collection(GraphicsEventQueueStateCollection.Name)]
 public sealed class AgcEventQueueTests
 {
@@ -61,7 +55,7 @@ public sealed class AgcEventQueueTests
     }
 
     [Fact]
-    public void TriggerRegisteredEventsByFilter_DifferentIdentThanEventType_WakesGraphicsWaiter()
+    public void TriggerRegisteredEventsByFilter_MatchingIdentifierWakesGraphicsWaiter()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
@@ -71,14 +65,12 @@ public sealed class AgcEventQueueTests
         const ulong outCountAddress = BaseAddress + 0x300;
         const ulong timeoutAddress = BaseAddress + 0x400;
 
-        // Create an event queue.
         ctx[CpuRegister.Rdi] = handleOutAddress;
         var createResult = KernelEventQueueCompatExports.KernelCreateEqueue(ctx);
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, createResult);
 
         var handle = ReadUInt64(memory, handleOutAddress);
 
-        // Register a graphics event with eventId 0x20 (as Poppy Playtime does).
         const ulong registeredEventId = 0x20;
         const ulong userData = 0xDEAD_BEEF;
         var registered = KernelEventQueueCompatExports.RegisterEvent(
@@ -88,14 +80,14 @@ public sealed class AgcEventQueueTests
             userData);
         Assert.True(registered);
 
-        // The command buffer fires EVENT_WRITE with eventType 0x07. This does not match 0x20.
         const ulong eventType = 0x07;
         var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
             KernelEventQueueCompatExports.KernelEventFilterGraphics,
-            eventType);
+            eventType,
+            registeredEventId);
         Assert.Equal(1, triggered);
 
-        // Wait with timeout=0. The event is already pending, so this returns immediately.
+        // The event is pending, so a zero timeout returns it immediately.
         WriteUInt64(memory, timeoutAddress, 0);
         ctx[CpuRegister.Rdi] = handle;
         ctx[CpuRegister.Rsi] = eventsAddress;
@@ -106,7 +98,6 @@ public sealed class AgcEventQueueTests
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, waitResult);
         Assert.Equal(1u, ReadUInt32(memory, outCountAddress));
 
-        // Verify the queued event carries the registered ident and the event type as data.
         Assert.Equal(registeredEventId, ReadUInt64(memory, eventsAddress + 0x00));
         Assert.Equal(KernelEventQueueCompatExports.KernelEventFilterGraphics, ReadInt16(memory, eventsAddress + 0x08));
         Assert.Equal(
@@ -116,9 +107,7 @@ public sealed class AgcEventQueueTests
         Assert.Equal(eventType, ReadUInt64(memory, eventsAddress + 0x10));
         Assert.Equal(userData, ReadUInt64(memory, eventsAddress + 0x18));
 
-        // Registrations live in process-wide static state, and a sibling test asserts that
-        // no graphics registration exists at all. Drop this one instead of relying on
-        // execution order.
+        // Remove process-wide state before another test uses the registry.
         ctx[CpuRegister.Rdi] = handle;
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
@@ -147,7 +136,8 @@ public sealed class AgcEventQueueTests
 
         var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
             KernelEventQueueCompatExports.KernelEventFilterGraphics,
-            0x07);
+            0x07,
+            0x20);
 
         Assert.Equal(0, triggered);
     }

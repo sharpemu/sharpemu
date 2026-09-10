@@ -164,25 +164,17 @@ public static partial class AgcExports
             }
         }
 
+        // The dispatch runs in stream order on the worker, so the replacement writes at once.
         var destinationAddress = destination.BaseAddress;
-        workSequence = GuestGpu.Current.SubmitOrderedGuestAction(
-            () =>
-            {
-                if (!ctx.Memory.TryWrite(destinationAddress, output))
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][ERROR] AGC masked-copy fast path failed " +
-                        $"dst=0x{destinationAddress:X16} bytes={output.Length}");
-                    return;
-                }
+        if (!ctx.Memory.TryWrite(destinationAddress, output))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][ERROR] AGC masked-copy fast path failed " +
+                $"dst=0x{destinationAddress:X16} bytes={output.Length}");
+            return false;
+        }
 
-                GuestImageWriteTracker.TrackManagedWriter(
-                    destinationAddress,
-                    (ulong)output.Length,
-                    GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics,
-                    "agc.masked-dword-copy");
-            },
-            $"masked_dword_copy dst=0x{destinationAddress:X16} bytes={output.Length}");
+        workSequence = 1;
         description =
             $"dst=0x{destinationAddress:X16} bytes={output.Length} " +
             $"elements={elementCount} mask=0x{sourceMask:X8} " +
@@ -359,48 +351,29 @@ public static partial class AgcExports
             scalars[4] == scalars[6] &&
             scalars[5] == scalars[7];
         var descriptorByteCount = checked((ulong)numRecords * FillRecordBytes);
-        workSequence = VulkanVideoPresenter.SubmitOrderedGuestAction(
-            () =>
-            {
-                if (!ctx.Memory.TryWrite(destinationAddress, output))
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][ERROR] AGC constant-fill fast path failed " +
-                        $"dst=0x{destinationAddress:X16} bytes={output.Length}");
-                    return;
-                }
-
-                // TryWrite reports the complete write through
-                // NotifyManagedWrite before it copies the bytes. Keep this
-                // range on the managed-writer path so each constant fill does
-                // not protect and immediately fault the same pages again.
-                GuestImageWriteTracker.TrackManagedWriter(
-                    destinationAddress,
-                    (ulong)output.Length,
-                    VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
-                    "agc.constant-fill");
-
-                if (isFullUniformFill)
-                {
-                    RecordDccFill(
-                        destinationAddress,
-                        descriptorByteCount,
-                        scalars[4]);
-                }
-            },
-            $"constant_fill dst=0x{destinationAddress:X16} bytes={output.Length}");
-        if (workSequence > 0 && isRepeatedPairFill)
+        _ = isRepeatedPairFill;
+        // A uniform fill goes through the host: the store clears the metadata and the image it covers.
+        if (isFullUniformFill && (destinationAddress & 3) == 0 && _activeCommandStreamHost is { } host)
         {
-            var clearSequence = VulkanVideoPresenter.SubmitGuestImagePatternFromBuffer(
-                destinationAddress,
-                descriptorByteCount,
-                scalars[4],
-                scalars[5],
-                scalars[6],
-                scalars[7]);
-            workSequence = Math.Max(workSequence, clearSequence);
+            host.FillBuffer(destinationAddress, (ulong)output.Length, scalars[4], isGds: false);
+        }
+        else if (!ctx.Memory.TryWrite(destinationAddress, output))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][ERROR] AGC constant-fill fast path failed " +
+                $"dst=0x{destinationAddress:X16} bytes={output.Length}");
+            return false;
         }
 
+        if (isFullUniformFill)
+        {
+            RecordDccFill(
+                destinationAddress,
+                descriptorByteCount,
+                scalars[4]);
+        }
+
+        workSequence = 1;
         description =
             $"dst=0x{destinationAddress:X16} bytes={output.Length} " +
             $"records={outputRecords} pattern=0x{scalars[7]:X8}{scalars[6]:X8}{scalars[5]:X8}{scalars[4]:X8} " +

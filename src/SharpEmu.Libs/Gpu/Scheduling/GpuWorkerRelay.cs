@@ -14,25 +14,15 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     private readonly object _gate = new();
     private readonly Queue<Action> _commands = new();
     private readonly Action _wake;
-    private readonly Func<bool>? _waitForAcceptedWork;
     private int _pendingCount;
     private bool _accepting = true;
 
-    public GpuWorkerRelay(Action wake, Func<bool>? waitForAcceptedWork = null)
+    public GpuWorkerRelay(Action wake)
     {
         _wake = wake;
-        _waitForAcceptedWork = waitForAcceptedWork;
     }
 
-    public bool TryRunAfterPendingWork(Action work)
-    {
-        if (!IsGpuQueueThread && _waitForAcceptedWork?.Invoke() == false)
-        {
-            return false;
-        }
-
-        return TryRunOnGpuQueue(work);
-    }
+    public bool TryRunAfterPendingWork(Action work) => TryRunOnGpuQueue(work);
 
     public bool IsGpuQueueThread => _boundWorker == this;
 

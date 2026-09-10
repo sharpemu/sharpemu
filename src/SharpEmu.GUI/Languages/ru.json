@@ -45,7 +45,6 @@
   "Options.Env.Group.Debug": "Отладка",
   "Options.Env.Group.General": "Общие",
   "Options.Env.RenderDoc.Desc": "Загружает внутренний API RenderDoc, чтобы кадры можно было захватывать из эмулятора.\nНажмите F10 во время игры, чтобы захватить один кадр; захваты сохраняются в user/logs/capture_logs/<TITLE_ID>.\nТребует установленного RenderDoc. Замедляет GPU и подвешивает некоторые игры, поэтому оставьте выключенным, если не занимаетесь отладкой.",
-  "Options.Env.ForceSubmitOrphanPreambles.Desc": "Доставляет преамбулы буфера команд GPU, даже если целевая очередь их так и не забирает.\nОбычно оставляйте выключенным. Включайте для игр, которые зависают в ожидании GPU-fence, который никогда не срабатывает.",
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
   "Options.Section.Launcher": "ЛАУНЧЕР",

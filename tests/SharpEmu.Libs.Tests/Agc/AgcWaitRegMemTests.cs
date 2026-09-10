@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -214,7 +215,7 @@ public sealed class AgcWaitRegMemTests
         bool expected) =>
         Assert.Equal(
             expected,
-            AgcExports.CompareConditionalValue(value, reference, mask, compareFunction));
+            WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied) && satisfied);
 
     [Theory]
     [InlineData(0u, true)]
@@ -226,7 +227,7 @@ public sealed class AgcWaitRegMemTests
     public void WaitOperationValidation_AcceptsOnlyDocumentedValues(
         uint operation,
         bool expected) =>
-        Assert.Equal(expected, AgcExports.IsValidWaitOperation(operation));
+        Assert.Equal(expected, WaitOperation.IsValid(operation));
 
     [Theory]
     [InlineData(0u, false, true)]
@@ -239,7 +240,7 @@ public sealed class AgcWaitRegMemTests
         bool expected) =>
         Assert.Equal(
             expected,
-            AgcExports.ShouldExecuteWaitOperation(operation, scratchEnabled));
+            WaitOperation.ShouldExecute(operation, scratchEnabled));
 
     [Theory]
     [InlineData(0x0400_0013u, false, 0u)]
@@ -252,7 +253,7 @@ public sealed class AgcWaitRegMemTests
         uint control,
         bool is64Bit,
         uint expected) =>
-        Assert.Equal(expected, AgcExports.DecodeWaitOperation(control, is64Bit));
+        Assert.Equal(expected, WaitOperation.Decode(control, is64Bit));
 
     [Theory]
     [InlineData(0u, false, 1u, false, 0UL, 0UL, true, false)]
@@ -279,7 +280,7 @@ public sealed class AgcWaitRegMemTests
         bool expectedWrite,
         bool expectedInterrupt)
     {
-        var decision = AgcExports.EvaluateQueuedInterrupt(
+        var decision = InterruptDecision.Evaluate(
             interrupt,
             isAsyncCompute,
             dataSelection,

@@ -1140,17 +1140,11 @@ public static class KernelEventQueueCompatExports
         return triggeredCount;
     }
 
-    /// <summary>
-    /// Triggers every registered event on every queue that matches <paramref name="filter"/>
-    /// regardless of the registration's <c>ident</c>. This is a workaround for PS5 AGC command
-    /// buffers, where <c>IT_EVENT_WRITE</c> carries a hardware <c>EVENT_TYPE</c> that does not
-    /// match the <c>eventId</c> the guest registered with <c>sceAgcDriverAddEqEvent</c>.
-    /// See issue #173.
-    /// </summary>
+    // Add one event to each queue that registered this filter and identifier.
     public static int TriggerRegisteredEventsByFilter(
         short filter,
         ulong data,
-        ulong? ident = null)
+        ulong ident)
     {
         List<EventQueueState>? wakeQueues = null;
         var triggeredCount = 0;
@@ -1166,8 +1160,7 @@ public static class KernelEventQueueCompatExports
 
                 foreach (var registration in registrations.Values)
                 {
-                    if (registration.Filter != filter ||
-                        (ident is { } eventIdent && registration.Ident != eventIdent))
+                    if (registration.Filter != filter || registration.Ident != ident)
                     {
                         continue;
                     }
@@ -1178,13 +1171,7 @@ public static class KernelEventQueueCompatExports
                         _pendingEvents[handle] = queue;
                     }
 
-                    // GPU interrupt events must not coalesce: the AGC driver's
-                    // interrupt thread accounts exactly one completion per
-                    // delivered kevent (it never reads the kevent payload), so
-                    // merging N triggers into one pending entry silently drops
-                    // N-1 completions and wedges its dependency counters. Queue
-                    // a distinct entry per trigger, with a defensive cap so an
-                    // undrained queue cannot grow without bound.
+                    // Keep each interrupt as a separate event. Limit growth when the queue is not read.
                     var queuedEvent = new KernelQueuedEvent(
                         registration.Ident,
                         registration.Filter,
@@ -1204,8 +1191,7 @@ public static class KernelEventQueueCompatExports
                     (wakeQueues ??= []).Add(state);
                     triggeredCount++;
 
-                    // A single queue only needs to be woken once, even if multiple
-                    // registrations matched.
+                    // Wake a queue one time for this trigger.
                     break;
                 }
             }

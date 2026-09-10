@@ -90,21 +90,6 @@ public static partial class AgcExports
         uint VertexCount,
         uint PrimitiveType);
 
-    private const int IndirectArgsFlushTimeoutMilliseconds = 250;
-
-    private static void FlushGpuWorkForIndirectArgs(SubmittedGpuState gpuState)
-    {
-        var pending = gpuState.WorkSequence;
-        if (pending == 0 || pending > long.MaxValue)
-        {
-            return;
-        }
-
-        GuestGpu.Current.WaitForGuestWork(
-            (long)pending,
-            IndirectArgsFlushTimeoutMilliseconds);
-    }
-
     private static bool TryReadSubmittedDrawCount(
         CpuContext ctx,
         SubmittedGpuState gpuState,
@@ -535,14 +520,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             // modelling DCC block state.
             if (translatedDraw.IsDccFastClear)
             {
-                foreach (var target in translatedDraw.GuestTargets)
-                {
-                    if (target.Address != 0)
-                    {
-                        VulkanVideoPresenter.RequestGuestColorClear(target.Address);
-                    }
-                }
-
                 ReturnPooledDrawArrays(
                     translatedDraw,
                     globals: true,

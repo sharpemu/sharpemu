@@ -2,20 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu;
-
-internal readonly record struct GuestGpuLabelDependency(
-    ulong GraphicsTimeline,
-    ulong ComputeTimeline)
-{
-    public bool IsEmpty => GraphicsTimeline == 0 && ComputeTimeline == 0;
-
-    public GuestGpuLabelDependency Merge(GuestGpuLabelDependency other) => new(
-        Math.Max(GraphicsTimeline, other.GraphicsTimeline),
-        Math.Max(ComputeTimeline, other.ComputeTimeline));
-}
 
 /// <summary>
 /// The guest-GPU backend seam: everything the AGC/VideoOut export layers need from a
@@ -172,21 +162,21 @@ internal interface IGuestGpuBackend
         uint threadCountY = uint.MaxValue,
         uint threadCountZ = uint.MaxValue);
 
+    // A video-out export flip: the presenter captures the buffer and marks the request presented.
     bool TrySubmitGuestImage(
         int videoOutHandle,
         int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel);
+        uint pitchInPixel,
+        ulong flipRequestId);
 
-    bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel);
+    // Enqueues a guest command stream; queue 0 is graphics, 0x20 to 0x57 are the compute owners.
+    void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots);
+
+    // Marks the frame boundary; off the worker it first waits for the accepted submissions.
+    IdleOutcome SubmitDone(ICpuMemory memory);
 
     /// <summary>Registers a display buffer with its guest texture format tag.</summary>
     void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
@@ -207,62 +197,6 @@ internal interface IGuestGpuBackend
         uint componentSwap,
         out Gen5PixelOutputKind outputKind,
         out Gen5ColorComponentMapping componentMapping);
-
-    // Guest work ordering. AGC submissions execute on a single backend consumer in
-    // logical guest-queue order; sequences returned here are backend work tickets.
-    // A backend without a running presenter returns 0 from the Submit* methods and
-    // callers fall back to executing inline.
-
-    /// <summary>Scopes subsequent submissions on this thread to a named guest queue.</summary>
-    IDisposable EnterGuestQueue(string queueName, ulong submissionId);
-
-    /// <summary>Enqueues an action at its exact position in the current guest queue;
-    /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
-    long SubmitOrderedGuestAction(Action action, string debugName);
-
-    // Marks the end of a guest submission without changing its completion ordering.
-    long SubmitGuestSubmissionCompletion(Action action, string debugName) =>
-        SubmitOrderedGuestAction(action, debugName);
-
-    /// <summary>
-    /// Enqueues a guest cache operation without CPU materialization. The
-    /// callback updates host resource state after the queue dependency.
-    /// </summary>
-    long SubmitGuestCacheOperation(
-        GuestGpuCacheOperation operation,
-        Action applyHostState,
-        string debugName);
-
-    /// <summary>
-    /// Enqueues cache operations as one ordered backend work item.
-    /// </summary>
-    long SubmitGuestCacheOperations(
-        IReadOnlyList<GuestGpuCacheOperation> operations,
-        Action applyHostState,
-        string debugName);
-
-    /// <summary>
-    /// Enqueues a GPU-only label marker. The callback receives the producer
-    /// queue timeline. Returns zero when the backend cannot preserve GPU-only
-    /// visibility.
-    /// </summary>
-    long SubmitGpuLabelSignal(
-        Action<GuestGpuLabelDependency> publishGpu,
-        Action? publishHost,
-        string debugName);
-
-    /// <summary>Adds a producer dependency to the current logical queue.</summary>
-    void RequireGpuLabelDependency(GuestGpuLabelDependency dependency);
-
-    /// <summary>Preserves sceAgcDcbWaitUntilSafeForRendering in queue order.</summary>
-    long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex);
-
-    /// <summary>Blocks until the given work sequence completes; false on timeout,
-    /// close, or a non-positive sequence.</summary>
-    bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite);
-
-    /// <summary>Sequence currently executing on the guest-work consumer; diagnostics only.</summary>
-    long CurrentGuestWorkSequenceForDiagnostics { get; }
 
     /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
     /// they cross the seam.</summary>

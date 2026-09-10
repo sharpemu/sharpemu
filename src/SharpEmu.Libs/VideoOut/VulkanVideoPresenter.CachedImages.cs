@@ -51,32 +51,6 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
-    // A constant fill of one image's bytes clears it on the GPU; the store keeps the result.
-    internal static long SubmitGuestImageClearFromBuffer(ulong address, ulong byteCount, uint packedValue)
-    {
-        if (address == 0 || byteCount == 0)
-        {
-            return 0;
-        }
-
-        lock (_gate)
-        {
-            if (_closed)
-            {
-                return 0;
-            }
-
-            var workSequence = EnqueueGuestWorkLocked(new VulkanGuestImageClearFromBuffer(address, byteCount, packedValue));
-            _guestImageWorkSequences[address] = workSequence;
-            return workSequence;
-        }
-    }
-
-    internal static long SubmitGuestImagePatternFromBuffer(ulong address, ulong byteCount, uint packedValue0, uint packedValue1, uint packedValue2, uint packedValue3) =>
-        packedValue0 == packedValue1 && packedValue0 == packedValue2 && packedValue0 == packedValue3
-            ? SubmitGuestImageClearFromBuffer(address, byteCount, packedValue0)
-            : 0;
-
     // A presenter-owned copy of a display surface taken by an ordered flip.
     private sealed class GuestImageResource
     {
@@ -291,20 +265,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 target.Clear = true;
                 target.ClearValue = default;
             }
-        }
-
-        private void ExecuteGuestImageClearFromBuffer(VulkanGuestImageClearFromBuffer work)
-        {
-            if (_deviceLost)
-            {
-                return;
-            }
-
-            EnsureGuestSubmissionCapacity();
-            _ = BeginBatchedGuestCommands();
-            CloseOpenTranslatedRenderPass();
-            _ = _imageCache.TryClearImageFromBuffer(work.Address, work.ByteCount, work.PackedValue);
-            _ = BeginBatchedGuestCommands();
         }
 
         // A DCC fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
@@ -789,7 +749,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Clears every target of the work item on the GPU; the store owns the result.
-        private void ExecuteOffscreenColorClear(VulkanOffscreenColorClear work)
+        internal void ExecuteOffscreenColorClear(VulkanOffscreenColorClear work)
         {
             if (_deviceLost || work.Targets.Count == 0)
             {
@@ -837,7 +797,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // A hardware color resolve: the destination takes the source through the store's resolve copy.
-        private void ExecuteGuestImageResolve(VulkanGuestImageResolve work)
+        internal void ExecuteGuestImageResolve(VulkanGuestImageResolve work)
         {
             if (_deviceLost)
             {

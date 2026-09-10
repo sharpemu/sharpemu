@@ -4,12 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
+// The submit exports run the inline command stream, so every effect lands before they return.
 [Collection(AgcCommandBufferChainCollection.Name)]
-public sealed class AgcAtomicMemRuntimeTests : IDisposable
+public sealed class AgcAtomicMemRuntimeTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x1_0000;
@@ -24,16 +26,8 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
     private const uint ItWriteData = 0x37;
     private const uint ItCopyData = 0x40;
     private const uint ItAtomicMem = 0x1E;
-
-    public AgcAtomicMemRuntimeTests()
-    {
-        GpuWaitRegistry.Clear();
-    }
-
-    public void Dispose()
-    {
-        GpuWaitRegistry.Clear();
-    }
+    private const uint FirstComputeOwner = 0x20;
+    private const uint SecondComputeOwner = 0x21;
 
     [Fact]
     public void ConfirmedAdd_PrecedesLaterMemoryCopyInTheSameQueue()
@@ -57,9 +51,7 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
 
         SubmitDcb(ctx, memory, GraphicsCommandAddress, 15);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, ResultAddress) == 8,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(8u, ReadUInt32(memory, ResultAddress));
         Assert.Equal(8u, ReadUInt32(memory, AtomicAddress));
     }
 
@@ -78,11 +70,9 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
             source: 3,
             compare: 0);
 
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 9, owner: 2);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 9, owner: SecondComputeOwner);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt64(memory, AtomicAddress) == 13,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(13UL, ReadUInt64(memory, AtomicAddress));
     }
 
     [Fact]
@@ -106,29 +96,29 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
             0xCAFE_BABE);
 
         SubmitDcb(ctx, memory, GraphicsCommandAddress, 14);
-        Assert.True(SpinWait.SpinUntil(
-            () => GpuWaitRegistry.Count == 1,
-            TimeSpan.FromSeconds(5)));
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
         Assert.Equal(1u, ReadUInt32(memory, AtomicAddress));
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
 
+        // The compute completion unblocks the graphics head, which then passes its comparison.
         WriteCopyImmediate32(
             memory,
             ComputeCommandAddress,
             value: 5,
             AtomicAddress);
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: 1);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: FirstComputeOwner);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, ResultAddress) == 0xCAFE_BABE,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0xCAFE_BABEu, ReadUInt32(memory, ResultAddress));
         Assert.Equal(9u, ReadUInt32(memory, AtomicAddress));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.False(stream.Queue.HasPending);
     }
 
+    // An unsupported atomic is fatal; the stream refuses every later submission.
     [Fact]
-    public void UnsupportedAtomic_StopsCurrentAndLaterQueueWork()
+    public void UnsupportedAtomic_IsFatalAndStopsLaterQueueWork()
     {
+        using var fatal = new FatalScope();
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
         WriteUInt32(memory, AtomicAddress, 5);
@@ -146,7 +136,8 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
             ResultAddress,
             0x1111_1111);
 
-        SubmitDcb(ctx, memory, GraphicsCommandAddress, 14);
+        Assert.Throws<SchedulerFatalException>(() => SubmitDcb(ctx, memory, GraphicsCommandAddress, 14));
+        Assert.Contains("The atomic packet is not supported", fatal.Messages[0]);
         Assert.Equal(5u, ReadUInt32(memory, AtomicAddress));
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
 
@@ -155,7 +146,8 @@ public sealed class AgcAtomicMemRuntimeTests : IDisposable
             LaterGraphicsCommandAddress,
             ResultAddress,
             0x2222_2222);
-        SubmitDcb(ctx, memory, LaterGraphicsCommandAddress, 5);
+        Assert.Throws<SchedulerFatalException>(() => SubmitDcb(ctx, memory, LaterGraphicsCommandAddress, 5));
+        Assert.Contains("no longer accepts", fatal.Messages[1]);
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
     }
 

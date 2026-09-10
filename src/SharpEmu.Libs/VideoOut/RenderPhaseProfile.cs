@@ -23,26 +23,40 @@ internal static class RenderPhaseProfile
     {
         /// <summary>Outside any measured phase — loop overhead.</summary>
         Unattributed = 0,
-        /// <summary>Parked because no guest work and no newer flip exist.</summary>
+        /// <summary>Parked because no command stream or newer flip exists.</summary>
         Idle,
         /// <summary>Blocked on the frame slot's fence: the GPU is behind.</summary>
         FrameSlotWait,
         /// <summary>Reaping completed guest submissions (fence polls).</summary>
         Collect,
         Evict,
-        /// <summary>Dequeuing the next guest work item.</summary>
-        TakeWork,
-        /// <summary>Building the diagnostic label for a work item.</summary>
-        Describe,
-        /// <summary>Publishing a work item's completion to its waiters.</summary>
-        CompleteWork,
         /// <summary>Selecting the presentation to show this iteration.</summary>
         TakePresentation,
+        /// <summary>Running one slice of the guest command stream.</summary>
+        CommandStream,
+        CommandMemorySync,
+        CommandMemoryRead,
+        CommandGpuWait,
+        CommandMemoryTransfer,
+        CommandEndOfPipe,
+        CommandDrawTranslation,
+        CommandDispatchTranslation,
+        GeometrySnapshotValidation,
+        CommandDrawStateCreation,
+        DrawVertexShaderSetup,
+        DrawVertexEvaluation,
+        DrawPixelShaderSetup,
+        DrawPixelEvaluation,
+        DrawVertexMetadata,
+        DrawTargetLayout,
+        DrawShaderCache,
+        DrawBindingAssembly,
+        DrawRenderState,
+        DrawDepthShaderPreparation,
         Draw,
         Compute,
         ColorClear,
         ImageWrite,
-        OrderedAction,
         Flip,
         /// <summary>Closing and submitting the batched guest command buffer.</summary>
         Flush,
@@ -86,7 +100,6 @@ internal static class RenderPhaseProfile
         WindowState,
         WindowDelay,
         QueueContext,
-        FollowupWait,
         PresentationPreparation,
         Count,
     }
@@ -94,21 +107,6 @@ internal static class RenderPhaseProfile
     public static readonly bool Enabled =
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER"),
-            "1",
-            StringComparison.Ordinal) ||
-        string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
-            "1",
-            StringComparison.Ordinal);
-
-    /// <summary>
-    /// Breaks down the CPU-visible actions which are deliberately serialized
-    /// behind guest GPU work. The dedicated and unified performance switches
-    /// both opt into this bounded, render-thread-local category accounting.
-    /// </summary>
-    public static readonly bool OrderedActionDetailsEnabled =
-        string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_ORDERED_ACTION"),
             "1",
             StringComparison.Ordinal) ||
         string.Equals(
@@ -127,6 +125,20 @@ internal static class RenderPhaseProfile
     private static readonly long[] _ticks = new long[(int)Phase.Count];
     private static readonly long[] _entries = new long[(int)Phase.Count];
     private static long _frames;
+    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
+    private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
+    private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
+
+    internal static void RecordCommandRead(CommandReadKind kind, int bytes)
+    {
+        if (!Enabled || _scopeDepth == 0)
+        {
+            return;
+        }
+
+        _commandReadCalls[(int)kind]++;
+        _commandReadBytes[(int)kind] += bytes;
+    }
     internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
 
     private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
@@ -219,9 +231,6 @@ internal static class RenderPhaseProfile
         _otherImageUploads = new ImageUploadStatistics();
     }
     private static long _windowStart = Stopwatch.GetTimestamp();
-    private static readonly Dictionary<string, OrderedActionStats> _orderedActions =
-        new(StringComparer.Ordinal);
-
     // The render loop is single-threaded, so plain fields are enough and keep
     // the per-scope cost to two timestamp reads.
     [ThreadStatic] private static Phase _current;
@@ -249,6 +258,18 @@ internal static class RenderPhaseProfile
             Charge(_previous);
             _scopeDepth--;
         }
+
+        // Switch sequential work in this scope. Nested scopes must finish first.
+        public void SwitchPhase(Phase phase)
+        {
+            if (!_active)
+            {
+                return;
+            }
+
+            Charge(phase);
+            _entries[(int)phase]++;
+        }
     }
 
     public static Scope Measure(Phase phase)
@@ -267,22 +288,6 @@ internal static class RenderPhaseProfile
     // Cache calls on other threads must not enter the render-thread counters.
     internal static Scope MeasureDetail(Phase phase) =>
         _scopeDepth > 0 ? Measure(phase) : default;
-
-    public static void RecordOrderedAction(string debugName, bool completed)
-    {
-        if (!OrderedActionDetailsEnabled)
-        {
-            return;
-        }
-
-        var category = GetOrderedActionCategory(debugName);
-        ref var stats = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(
-            _orderedActions,
-            category,
-            out _);
-        stats.Executed += completed ? 1 : 0;
-        stats.Deferred += completed ? 0 : 1;
-    }
 
     /// <summary>
     /// Closes out the running phase and switches to <paramref name="next"/>,
@@ -355,47 +360,21 @@ internal static class RenderPhaseProfile
             $"[PERF][RENDER_MS] window_s={seconds:F1} frames={frames} " +
             string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
-        if (OrderedActionDetailsEnabled && _orderedActions.Count != 0)
-        {
-            var ordered = _orderedActions
-                .OrderByDescending(static pair => pair.Value.Executed + pair.Value.Deferred)
-                .Take(12)
-                .Select(static pair =>
-                    $"{pair.Key}=ok{pair.Value.Executed}/defer{pair.Value.Deferred}");
-            Console.Error.WriteLine($"[PERF][ORDERED] {string.Join(" ", ordered)}");
-            _orderedActions.Clear();
-        }
         ReportImageUploads();
+        var commandReads = new List<string>();
+        for (var index = 0; index < (int)CommandReadKind.Count; index++)
+        {
+            if (_commandReadCalls[index] != 0)
+            {
+                commandReads.Add($"{(CommandReadKind)index}={_commandReadCalls[index]}/bytes{_commandReadBytes[index]}");
+            }
+            _commandReadCalls[index] = 0;
+            _commandReadBytes[index] = 0;
+        }
+        if (commandReads.Count != 0)
+        {
+            Console.Error.WriteLine($"[PERF][COMMAND_READS] window_s={seconds:F1} {string.Join(" ", commandReads)}");
+        }
     }
 
-    private static string GetOrderedActionCategory(string debugName)
-    {
-        if (debugName.EndsWith(" completion", StringComparison.Ordinal))
-        {
-            return "completion";
-        }
-
-        var firstSpace = debugName.IndexOf(' ');
-        if (firstSpace < 0)
-        {
-            return debugName;
-        }
-
-        // AGC labels conventionally begin with "agc <packet>". Keeping the
-        // packet token separates DMA, submit and register traffic without
-        // retaining guest addresses in the diagnostic key.
-        if (debugName.StartsWith("agc ", StringComparison.Ordinal))
-        {
-            var secondSpace = debugName.IndexOf(' ', firstSpace + 1);
-            return secondSpace < 0 ? debugName : debugName[..secondSpace];
-        }
-
-        return debugName[..firstSpace];
-    }
-
-    private struct OrderedActionStats
-    {
-        public long Executed;
-        public long Deferred;
-    }
 }

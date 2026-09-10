@@ -290,10 +290,6 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
-        EnvForceSubmitOrphanPreamblesToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle(
-                "SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES",
-                EnvForceSubmitOrphanPreamblesToggle.IsChecked == true);
         DefaultProfileBox.TextChanged += (_, _) =>
             _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
@@ -1230,8 +1226,6 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
-        EnvForceSubmitOrphanPreamblesToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES");
         EnvRenderDocToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
         DefaultProfileBox.Text = _settings.DefaultProfile;

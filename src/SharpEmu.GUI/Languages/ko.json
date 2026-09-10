@@ -159,7 +159,6 @@
   "Options.Env.Group.Debug": "디버그",
   "Options.Env.Group.General": "일반",
   "Options.Env.RenderDoc.Desc": "RenderDoc의 인앱 API를 로드하여 에뮬레이터 내부에서 프레임을 캡처할 수 있게 합니다.\n게임 실행 중 F10을 누르면 한 프레임을 캡처하며, 캡처 파일은 user/logs/capture_logs/<TITLE_ID>에 저장됩니다.\nRenderDoc이 설치되어 있어야 합니다. GPU 속도가 느려지고 일부 타이틀은 멈추므로 디버깅할 때가 아니면 꺼 두세요.",
-  "Options.Env.ForceSubmitOrphanPreambles.Desc": "대상 큐가 절대 가져가지 않아도 GPU 명령 버퍼 프리앰블을 전달합니다.\n평소에는 꺼 두세요. 절대 신호를 보내지 않는 GPU 펜스를 기다리며 멈추는 타이틀에서 켜세요.",
   "Common.Save": "저장",
   "Common.Cancel": "취소",
   "Options.About": "정보",

@@ -17,7 +17,7 @@ using System.Threading;
 
 namespace SharpEmu.Libs.VideoOut;
 
-public static class VideoOutExports
+public static partial class VideoOutExports
 {
     private const int OrbisVideoOutErrorInvalidValue = unchecked((int)0x80290001);
     private const int OrbisVideoOutErrorInvalidAddress = unchecked((int)0x80290002);
@@ -244,6 +244,7 @@ public static class VideoOutExports
         public List<FlipEventRegistration> VblankEvents { get; } = new();
         public long OpenTimestamp;
         public long LastVblankTimestamp;
+        public long LastPresentationTimestamp = -1;
     }
 
     private sealed class VideoOutBufferGroup
@@ -374,6 +375,10 @@ public static class VideoOutExports
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         lock (_stateGate)
         {
+            foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+            {
+                CancelFlipLocked(request);
+            }
             _ports.Remove(handle);
             Monitor.PulseAll(_stateGate);
         }
@@ -909,7 +914,7 @@ public static class VideoOutExports
         var bufferIndex = unchecked((int)ctx[CpuRegister.Rsi]);
         var flipMode = unchecked((int)ctx[CpuRegister.Rdx]);
         var flipArg = unchecked((long)ctx[CpuRegister.Rcx]);
-        return SubmitFlip(ctx, handle, bufferIndex, flipMode, flipArg, submitGpuImage: true);
+        return SubmitFlip(ctx, handle, bufferIndex, flipMode, flipArg);
     }
 
     [SysAbiExport(
@@ -1050,28 +1055,6 @@ public static class VideoOutExports
         return ctx.TryWriteUInt64(dataAddress, decodedData)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-    }
-
-    public static int SubmitFlipFromAgc(CpuContext ctx, int handle, int bufferIndex, int flipMode, long flipArg) =>
-        SubmitFlip(ctx, handle, bufferIndex, flipMode, flipArg, submitGpuImage: false);
-
-    internal static void SubmitHostRgbaFrame(ReadOnlySpan<byte> rgbaFrame, uint width, uint height)
-    {
-        if (rgbaFrame.Length != checked((int)(width * height * 4)))
-        {
-            return;
-        }
-
-        var bgraFrame = new byte[rgbaFrame.Length];
-        for (var offset = 0; offset < rgbaFrame.Length; offset += 4)
-        {
-            bgraFrame[offset + 0] = rgbaFrame[offset + 2];
-            bgraFrame[offset + 1] = rgbaFrame[offset + 1];
-            bgraFrame[offset + 2] = rgbaFrame[offset + 0];
-            bgraFrame[offset + 3] = rgbaFrame[offset + 3];
-        }
-
-        GuestGpu.Current.Submit(bgraFrame, width, height);
     }
 
     internal static bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info)
@@ -1376,61 +1359,19 @@ public static class VideoOutExports
         return groupIndex < 0 ? groupIndex : setIndex;
     }
 
-    private static int SubmitFlip(
-        CpuContext ctx,
-        int handle,
-        int bufferIndex,
-        int flipMode,
-        long flipArg,
-        bool submitGpuImage)
+    // The video-out export flip: paced on the guest thread, completed at submit.
+    private static int SubmitFlip(CpuContext ctx, int handle, int bufferIndex, int flipMode, long flipArg)
     {
+        var result = TryReserveFlipRequest(handle, bufferIndex, flipMode, flipArg, gpuQueued: false, out var requestId);
+        if (result != 0)
+        {
+            return result;
+        }
+
         if (!TryGetPort(handle, out var port))
         {
+            CancelFlip(requestId);
             return OrbisVideoOutErrorInvalidHandle;
-        }
-
-        if (bufferIndex < -1 || bufferIndex >= MaxDisplayBuffers)
-        {
-            return OrbisVideoOutErrorInvalidIndex;
-        }
-
-        // Pooled snapshot for the same reason as SignalVblank: triggers run outside
-        // _stateGate, and SubmitFlip is per-frame so a fresh List copy is steady churn.
-        ulong eventHint;
-        FlipEventRegistration[]? flipEvents = null;
-        int flipEventCount;
-        lock (_stateGate)
-        {
-            if (bufferIndex != -1 && port.BufferSlots[bufferIndex].GroupIndex < 0)
-            {
-                return OrbisVideoOutErrorInvalidIndex;
-            }
-
-            var submittedAt = Stopwatch.GetTimestamp();
-            if (port.LatencyStartPoints.Remove(flipArg, out var startedAt))
-            {
-                port.LastLatencyFirstSectionUsec = (long)Math.Max(
-                    0,
-                    Math.Floor(
-                        (submittedAt - startedAt) * 1_000_000d /
-                        Stopwatch.Frequency));
-            }
-
-            port.FlipPendingCount++;
-            if (!submitGpuImage)
-            {
-                port.GpuQueueCount++;
-            }
-
-            port.SubmitProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
-            eventHint = SceVideoOutInternalEventFlip |
-                ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
-            flipEventCount = port.FlipEvents.Count;
-            if (flipEventCount != 0)
-            {
-                flipEvents = ArrayPool<FlipEventRegistration>.Shared.Rent(flipEventCount);
-                port.FlipEvents.CopyTo(flipEvents);
-            }
         }
 
         PaceFlip(port.FlipRate);
@@ -1441,96 +1382,38 @@ public static class VideoOutExports
         if (bufferIndex >= 0 &&
             TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
         {
-            Interlocked.Exchange(
-                ref _hdrOutputRequested,
-                IsHdrPixelFormat(displayBuffer.PixelFormat) ? 1 : 0);
             guestImageAddress = displayBuffer.Address;
-            if (submitGpuImage)
-            {
-                guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
-                    handle,
-                    bufferIndex,
-                    displayBuffer.Address,
-                    displayBuffer.Width,
-                    displayBuffer.Height,
-                    displayBuffer.PitchInPixel);
-            }
+            guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
+                handle,
+                bufferIndex,
+                displayBuffer.Address,
+                displayBuffer.Width,
+                displayBuffer.Height,
+                displayBuffer.PitchInPixel,
+                requestId);
         }
 
         if (_dumpVideoOut)
         {
-            _ = TryDumpFrame(ctx, port, bufferIndex, flipMode, flipArg);
+            _ = TryDumpFrame(ctx.Memory, port, bufferIndex, flipMode, flipArg);
         }
 
-        void TriggerFlipEvents()
+        var flipEventCount = GetFlipEventCount(requestId);
+        CompleteFlip(requestId);
+        if (!guestImageSubmitted)
         {
-            lock (_stateGate)
-            {
-                port.FlipCount++;
-                port.FlipProcessTime = KernelRuntimeCompatExports.ReadProcessTimeMicroseconds();
-                port.FlipProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
-                port.FlipArg = flipArg;
-                port.CurrentBuffer = bufferIndex;
-                port.FlipPendingCount = Math.Max(0, port.FlipPendingCount - 1);
-                if (!submitGpuImage)
-                {
-                    port.GpuQueueCount = Math.Max(0, port.GpuQueueCount - 1);
-                }
-
-                var completedAt = Stopwatch.GetTimestamp();
-                port.CompletedLatencyFlipArgs[flipArg] = completedAt;
-                port.CompletedLatencyFlipArgOrder.Enqueue((flipArg, completedAt));
-                PruneTimestampHistory(
-                    port.CompletedLatencyFlipArgs,
-                    port.CompletedLatencyFlipArgOrder);
-                Monitor.PulseAll(_stateGate);
-            }
-
-            if (flipEvents is null)
-            {
-                return;
-            }
-
-            try
-            {
-                for (var i = 0; i < flipEventCount; i++)
-                {
-                    _ = KernelEventQueueCompatExports.TriggerDisplayEvent(
-                        flipEvents[i].Equeue,
-                        SceVideoOutInternalEventFlip,
-                        OrbisKernelEventFilterVideoOut,
-                        eventHint,
-                        flipEvents[i].UserData);
-                }
-            }
-            finally
-            {
-                ArrayPool<FlipEventRegistration>.Shared.Return(flipEvents);
-                flipEvents = null;
-            }
-        }
-
-        if (submitGpuImage)
-        {
-            TriggerFlipEvents();
-        }
-        else if (GuestGpu.Current.SubmitOrderedGuestAction(
-                     TriggerFlipEvents,
-                     $"videoout flip complete handle={handle} index={bufferIndex}") == 0)
-        {
-            // Headless startup has no render queue to order against.
-            TriggerFlipEvents();
+            MarkFlipPresented(requestId);
         }
 
         TraceVideoOut(
             $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
             $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
-            $"events={flipEventCount} ordered_completion={!submitGpuImage}");
+            $"events={flipEventCount} ordered_completion=False");
         LoadProgressDiagnostics.TraceFlipSubmit(
             handle,
             bufferIndex,
             flipMode,
-            submitGpuImage,
+            true,
             guestImageSubmitted,
             guestImageAddress,
             flipEventCount);
@@ -1820,7 +1703,7 @@ public static class VideoOutExports
         return true;
     }
 
-    private static bool TryDumpFrame(CpuContext ctx, VideoOutPortState port, int bufferIndex, int flipMode, long flipArg)
+    private static bool TryDumpFrame(ICpuMemory memory, VideoOutPortState port, int bufferIndex, int flipMode, long flipArg)
     {
         if (bufferIndex < 0)
         {
@@ -1851,7 +1734,7 @@ public static class VideoOutExports
         var bytesPerPixel = GetBytesPerPixel(attribute.PixelFormat);
         if (bytesPerPixel == 0)
         {
-            return DumpRawFrame(ctx, port.Handle, slot.AddressLeft, attribute, bufferIndex, flipMode, flipArg, "unsupported-format");
+            return DumpRawFrame(memory, port.Handle, slot.AddressLeft, attribute, bufferIndex, flipMode, flipArg, "unsupported-format");
         }
 
         var pitch = attribute.PitchInPixel == 0 ? attribute.Width : attribute.PitchInPixel;
@@ -1877,7 +1760,7 @@ public static class VideoOutExports
         var row = new byte[rowBytes];
         for (uint y = 0; y < attribute.Height; y++)
         {
-            if (!ctx.Memory.TryRead(slot.AddressLeft + ((ulong)y * (ulong)rowBytes), row))
+            if (!memory.TryRead(slot.AddressLeft + ((ulong)y * (ulong)rowBytes), row))
             {
                 return false;
             }
@@ -1910,7 +1793,7 @@ public static class VideoOutExports
         var rgbOffset = 0;
         for (uint y = 0; y < attribute.Height; y++)
         {
-            if (!ctx.Memory.TryRead(slot.AddressLeft + ((ulong)y * (ulong)rowBytes), row))
+            if (!memory.TryRead(slot.AddressLeft + ((ulong)y * (ulong)rowBytes), row))
             {
                 return false;
             }
@@ -1930,7 +1813,7 @@ public static class VideoOutExports
         return true;
     }
 
-    private static bool DumpRawFrame(CpuContext ctx, int handle, ulong address, BufferAttribute attribute, int bufferIndex, int flipMode, long flipArg, string reason)
+    private static bool DumpRawFrame(ICpuMemory memory, int handle, ulong address, BufferAttribute attribute, int bufferIndex, int flipMode, long flipArg, string reason)
     {
         var bytesPerPixel = Math.Max(GetBytesPerPixel(attribute.PixelFormat), 4u);
         var pitch = attribute.PitchInPixel == 0 ? attribute.Width : attribute.PitchInPixel;
@@ -1941,7 +1824,7 @@ public static class VideoOutExports
         }
 
         var bytes = new byte[(int)byteCount];
-        if (!ctx.Memory.TryRead(address, bytes))
+        if (!memory.TryRead(address, bytes))
         {
             return false;
         }

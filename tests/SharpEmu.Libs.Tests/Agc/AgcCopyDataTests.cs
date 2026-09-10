@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -18,7 +19,7 @@ public sealed class AgcCopyDataTests
             (1u << 16) |
             (1u << 20) |
             (2u << 25);
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             control,
             0x5566_7788,
             0x1122_3344,
@@ -39,7 +40,7 @@ public sealed class AgcCopyDataTests
     public void ImmediateCopy_Writes64BitValue()
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             5u | (2u << 8) | (1u << 16),
             0xEEFF_0011,
             0xAABB_CCDD,
@@ -47,7 +48,7 @@ public sealed class AgcCopyDataTests
             1,
             usesAsyncEncoding: true);
 
-        Assert.True(AgcExports.TryApplyCopyData(memory, packet, out var value));
+        Assert.True(packet.TryApply(memory, out var value));
         Assert.Equal(0xAABB_CCDD_EEFF_0011UL, value);
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         Assert.True(memory.TryRead(BaseAddress + 0x200, bytes));
@@ -63,7 +64,7 @@ public sealed class AgcCopyDataTests
         Span<byte> sourceBytes = stackalloc byte[sizeof(uint)];
         BitConverter.TryWriteBytes(sourceBytes, 0xCAFE_BABEu);
         Assert.True(memory.TryWrite(source, sourceBytes));
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             2u | (2u << 8),
             (uint)source,
             (uint)(source >> 32),
@@ -71,7 +72,7 @@ public sealed class AgcCopyDataTests
             (uint)(destination >> 32),
             usesAsyncEncoding: true);
 
-        Assert.True(AgcExports.TryApplyCopyData(memory, packet, out var value));
+        Assert.True(packet.TryApply(memory, out var value));
         Assert.Equal(0xCAFE_BABEUL, value);
         Span<byte> destinationBytes = stackalloc byte[sizeof(uint)];
         Assert.True(memory.TryRead(destination, destinationBytes));
@@ -82,7 +83,7 @@ public sealed class AgcCopyDataTests
     public void AtomicReturnCopy_RequiresAValidReturnValue()
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             6u | (2u << 8) | (1u << 16),
             0,
             0,
@@ -90,10 +91,8 @@ public sealed class AgcCopyDataTests
             1,
             usesAsyncEncoding: true);
 
-        Assert.False(AgcExports.TryApplyCopyData(memory, packet, out _));
-        Assert.True(AgcExports.TryApplyCopyData(
-            memory,
-            packet,
+        Assert.False(packet.TryApply(memory, out _));
+        Assert.True(packet.TryApply(memory,
             0x1122_3344_5566_7788,
             atomicReturnDataValid: true,
             out var value));
@@ -106,7 +105,7 @@ public sealed class AgcCopyDataTests
     [InlineData(5u, 3u)]
     public void UnsupportedSelectors_AreRejected(uint source, uint destination)
     {
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             source | (destination << 8),
             0,
             0,
@@ -135,7 +134,7 @@ public sealed class AgcCopyDataTests
             control |= 1u << 30;
         }
 
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             control,
             0,
             0,
@@ -162,7 +161,7 @@ public sealed class AgcCopyDataTests
             control |= 1u << 30;
         }
 
-        var packet = AgcExports.DecodeCopyDataPacket(
+        var packet = CopyDataPacket.Decode(
             control,
             0,
             0,

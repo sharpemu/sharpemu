@@ -81,11 +81,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            int pendingWork;
-            lock (_gate)
-            {
-                pendingWork = _pendingGuestWorkCount;
-            }
+            var pendingWork = _commandStream.PendingSubmissionCount;
 
             var pixels = new Span<byte>(
                 (void*)_overlayStagingMapped[frameSlot],

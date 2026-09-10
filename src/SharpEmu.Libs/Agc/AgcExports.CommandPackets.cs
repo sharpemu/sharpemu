@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -378,11 +379,6 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
-        if (interrupt is 0 or 2 or 3 && dataSelection != 0)
-        {
-            TrackCbReleaseMemTarget(ctx, commandBufferAddress, destinationAddress);
-        }
-        RecordRingChunkWriter(commandAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -588,7 +584,6 @@ public static partial class AgcExports
                 $"increment={increment} confirm={writeConfirm}");
         }
 
-        RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -680,7 +675,7 @@ public static partial class AgcExports
         if (commandBufferAddress == 0 ||
             size > 1 ||
             compareFunction > 7 ||
-            !IsValidWaitOperation(operation) ||
+            !WaitOperation.IsValid(operation) ||
             cachePolicy > 3)
         {
             return ReturnPointer(ctx, 0);

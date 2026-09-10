@@ -182,6 +182,35 @@ public static partial class AgcExports
                 "zero-dimension");
         }
 
+        return TryDecodeComputeDispatchCore(
+            state,
+            dimensionsAddress,
+            initiator,
+            dispatchSource,
+            dispatchEndX,
+            dispatchEndY,
+            dispatchEndZ,
+            out dispatch,
+            opcode,
+            packetAddress,
+            packetLength);
+    }
+
+    // The register-dependent half of the dispatch decode: start groups, sizes and thread bounds.
+    private static bool TryDecodeComputeDispatchCore(
+        SubmittedDcbState state,
+        ulong dimensionsAddress,
+        uint initiator,
+        string dispatchSource,
+        uint dispatchEndX,
+        uint dispatchEndY,
+        uint dispatchEndZ,
+        out ComputeDispatch dispatch,
+        uint opcode = 0,
+        ulong packetAddress = 0,
+        uint packetLength = 0)
+    {
+        dispatch = default;
         // When FORCE_START_AT_000 is clear, RDNA2 interprets the three packet
         // values as end coordinates, not group counts. Vulkan expresses the
         // same operation as vkCmdDispatchBase(base, end - base). Ignoring the
@@ -604,20 +633,7 @@ public static partial class AgcExports
                 $"agc.compute_semantic_fast_path cs=0x{shaderAddress:X16} " +
                 $"queue={state.QueueName} submission={state.ActiveSubmissionId} " +
                 copyDescription);
-            // The scalar evaluator snapshots guest buffers while parsing the
-            // command stream.  Do not let another submission (or the CPU)
-            // observe that snapshot until the semantic replacement has
-            // reached the same CPU-visible completion point as a translated
-            // writable-buffer dispatch below.  Returning early here allowed
-            // the guest to reuse a transient heap while its delayed clear was
-            // still queued, so the clear could erase newly constructed CPU
-            // objects.  Waiting on the work sequence also retires preceding
-            // Vulkan writes before the next evaluator snapshot is captured.
-            if (!GuestGpu.Current.WaitForGuestWork(semanticCopySequence))
-            {
-                computeError =
-                    $"semantic-global-write-sync-timeout sequence={semanticCopySequence}";
-            }
+            _ = semanticCopySequence;
         }
         else if (!hasStorageBinding &&
             writesGlobalMemory &&
@@ -638,13 +654,7 @@ public static partial class AgcExports
                 $"agc.compute_semantic_fast_path cs=0x{shaderAddress:X16} " +
                 $"queue={state.QueueName} submission={state.ActiveSubmissionId} " +
                 fillDescription);
-            // Same CPU-visibility ordering requirement as the masked-copy
-            // replacement above.
-            if (!VulkanVideoPresenter.WaitForGuestWork(semanticFillSequence))
-            {
-                computeError =
-                    $"semantic-global-write-sync-timeout sequence={semanticFillSequence}";
-            }
+            _ = semanticFillSequence;
         }
         else if ((hasStorageBinding || writesGlobalMemory) &&
             (ulong)localSizeX * localSizeY * localSizeZ <= 1024)

@@ -14,22 +14,14 @@ using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
-    // A same-queue wait is only safe when its signal was submitted earlier on this queue.
-    internal static void CheckLabelWaitOrder(ulong waitValue, ulong lastSignalledValue)
-    {
-        if (waitValue > lastSignalledValue)
-        {
-            throw SubmissionScheduler.Fatal(
-                $"label wait {waitValue} precedes its signal (last signalled {lastSignalledValue})");
-        }
-    }
-
     private sealed partial class Presenter : IRenderingState
     {
         // This partial owns the submission scheduler and the GPU worker relay.
 
         private readonly object _queueGate = new();
-        private readonly GpuWorkerRelay _relay = new(WakeRenderThread, WaitForAcceptedGuestWork);
+        private readonly GpuWorkerRelay _relay = new(WakeRenderThread);
+
+        internal GpuWorkerRelay Relay => _relay;
         private readonly SubmissionContext _submissionContext = new();
         private SubmissionScheduler _scheduler = null!;
         private GpuDeviceInfo _deviceInfo = null!;
@@ -41,7 +33,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         void IRenderingState.EndRendering() => CloseOpenTranslatedRenderPass();
 
-        private static void WakeRenderThread()
+        internal static void WakeRenderThread()
         {
             lock (_gate)
             {
@@ -95,6 +87,15 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             try
             {
+                // Drain accepted submissions before closing the relay.
+                // Cancel blocked submissions if a full retry cycle makes no progress.
+                _commandStream.StopAccepting();
+                var outcome = _commandStream.DrainForShutdown(cancelBlockedOnNoProgress: true);
+                FlushBatchedGuestCommands();
+                Console.Error.WriteLine(
+                    $"[LOADER][PERF] command_stream submissions={_commandStream.SubmissionsStarted} " +
+                    $"slices={_commandStream.SlicesRun} blocked_retries={_commandStream.BlockedRetries} " +
+                    $"outcome={outcome} fatal=0");
                 _relay.StopAcceptingWork();
                 _relay.RunPendingCommands();
                 try
@@ -119,6 +120,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 // An unmap waiting for the relay to go away must not outlive a failed shutdown.
                 GuestGpuMemoryHook.Current?.AttachGpuQueue(null, null);
+                VideoOutExports.CancelOutstandingFlips();
             }
         }
 

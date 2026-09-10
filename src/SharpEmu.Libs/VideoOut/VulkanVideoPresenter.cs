@@ -8,6 +8,7 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -75,11 +76,6 @@ internal sealed record VulkanGuestImageResolve(
     GuestRenderTarget Source,
     GuestRenderTarget Destination);
 
-internal sealed record VulkanGuestImageClearFromBuffer(
-    ulong Address,
-    ulong ByteCount,
-    uint PackedValue);
-
 internal sealed record VulkanComputeGuestDispatch(
     ulong ShaderAddress,
     byte[] ComputeSpirv,
@@ -99,124 +95,6 @@ internal sealed record VulkanComputeGuestDispatch(
     uint ThreadCountX = uint.MaxValue,
     uint ThreadCountY = uint.MaxValue,
     uint ThreadCountZ = uint.MaxValue);
-
-internal sealed record VulkanOrderedGuestAction(
-    Action Action,
-    string DebugName)
-{
-    public bool CollectionPending { get; set; }
-}
-
-internal sealed record VulkanGuestCacheOperation(
-    IReadOnlyList<GuestGpuCacheOperation> Operations,
-    Action ApplyHostState,
-    string DebugName);
-
-internal readonly record struct VulkanGuestCacheBarrier(
-    PipelineStageFlags DestinationStages,
-    AccessFlags DestinationAccess);
-
-internal enum VulkanGuestCacheResourceKind
-{
-    Buffer,
-    DepthImage,
-    ImageWithoutTrackedLayout,
-}
-
-internal readonly record struct VulkanGuestCacheResourceRange(
-    ulong BaseAddress,
-    ulong SizeBytes,
-    VulkanGuestCacheResourceKind Kind);
-
-internal readonly record struct VulkanGuestCacheResourcePlan(
-    bool UseGlobalBarrier,
-    int MatchedResourceCount);
-
-internal static class VulkanGuestCacheBarrierPlanner
-{
-    private const GuestGpuCacheDomain ShaderDomains =
-        GuestGpuCacheDomain.Instruction |
-        GuestGpuCacheDomain.Scalar |
-        GuestGpuCacheDomain.Vector |
-        GuestGpuCacheDomain.ShaderL1 |
-        GuestGpuCacheDomain.ShaderL2;
-
-    public static VulkanGuestCacheBarrier Resolve(GuestGpuCacheOperation operation)
-    {
-        var hasNonShaderDomain = (operation.Domains & ~ShaderDomains) != 0;
-        return hasNonShaderDomain || operation.Domains == GuestGpuCacheDomain.None
-            ? new VulkanGuestCacheBarrier(
-                PipelineStageFlags.AllCommandsBit,
-                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit)
-            : new VulkanGuestCacheBarrier(
-                PipelineStageFlags.AllGraphicsBit | PipelineStageFlags.ComputeShaderBit,
-                AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
-    }
-
-    public static VulkanGuestCacheResourcePlan ResolveResources(
-        GuestGpuCacheOperation operation,
-        IReadOnlyList<VulkanGuestCacheResourceRange> resources)
-    {
-        if (operation.CoversAllMemory ||
-            operation.SizeBytes == 0 ||
-            operation.SizeBytes == ulong.MaxValue)
-        {
-            return new VulkanGuestCacheResourcePlan(
-                UseGlobalBarrier: true,
-                MatchedResourceCount: 0);
-        }
-
-        var matches = 0;
-        foreach (var resource in resources)
-        {
-            if (!RangesOverlap(
-                    operation.BaseAddress,
-                    operation.SizeBytes,
-                    resource.BaseAddress,
-                    resource.SizeBytes))
-            {
-                continue;
-            }
-
-            matches++;
-            if (resource.Kind ==
-                VulkanGuestCacheResourceKind.ImageWithoutTrackedLayout)
-            {
-                return new VulkanGuestCacheResourcePlan(
-                    UseGlobalBarrier: true,
-                    MatchedResourceCount: matches);
-            }
-        }
-
-        return new VulkanGuestCacheResourcePlan(
-            UseGlobalBarrier: matches == 0,
-            MatchedResourceCount: matches);
-    }
-
-    internal static bool RangesOverlap(
-        ulong leftBase,
-        ulong leftSize,
-        ulong rightBase,
-        ulong rightSize)
-    {
-        if (leftSize == 0 || rightSize == 0)
-        {
-            return false;
-        }
-
-        var leftEnd = SaturatingEnd(leftBase, leftSize);
-        var rightEnd = SaturatingEnd(rightBase, rightSize);
-        return leftBase < rightEnd && rightBase < leftEnd;
-    }
-
-    internal static ulong SaturatingEnd(ulong address, ulong size) =>
-        address > ulong.MaxValue - size ? ulong.MaxValue : address + size;
-}
-
-internal sealed record VulkanGpuLabelSignal(
-    Action<GuestGpuLabelDependency> PublishGpu,
-    Action? PublishHost,
-    string DebugName);
 
 internal static class VulkanVertexBindingPlanner
 {
@@ -270,6 +148,15 @@ internal readonly record struct VulkanGuestQueueIdentity(
 
 internal static unsafe partial class VulkanVideoPresenter
 {
+    private static readonly object _gate = new();
+    private const string DebugUtilsExtensionName = "VK_EXT_debug_utils";
+    private const string SwapchainColorspaceExtensionName = "VK_EXT_swapchain_colorspace";
+    private const uint NvidiaVendorId = 0x10DE;
+    private const uint AmdVendorId = 0x1002;
+    private const int LastResortPenalty = 1000;
+    private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
+    private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
+
     private static int _nativeSubgroupSize;
 
     internal static bool GraphicsSubgroupOperationsEnabled =>
@@ -308,35 +195,7 @@ internal static unsafe partial class VulkanVideoPresenter
     // thread's physical-device query) gives shader translation and descriptor
     // creation one stable aliasing contract on every conformant device.
     internal const ulong GuestStorageBufferOffsetAlignment = 256;
-    // The pending queue and per-render drain budget bound how much guest GPU
-    // work can be buffered ahead of the presenter. Draws are batched into
-    // shared command buffers, so draining a large batch per render tick is
-    // cheap; small caps here throttle games that issue more than a handful
-    // of draws per frame to a fraction of the display rate. The pending cap
-    // stays tighter than the drain budget because queued draws pin their
-    // pooled guest-data arrays until the render thread uploads them.
-    // The Cocoa event loop must stay responsive while guest work is pending,
-    // but Windows and Linux render on a dedicated host thread. Keeping the
-    // macOS item limit everywhere throttles draw-heavy games well below their
-    // display rate before the byte budget is remotely close to full.
-    private static readonly int _maxPendingGuestWorkItems =
-        int.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_WORK_ITEMS"),
-            out var pendingGuestWorkItems) && pendingGuestWorkItems > 0
-            ? pendingGuestWorkItems
-            : OperatingSystem.IsMacOS() ? 64 : 512;
     private const ulong MaximumCachedHostBufferBytes = 128UL * 1024 * 1024;
-    // A count-only queue bound is not a memory bound: one compute dispatch can
-    // carry dozens of full-resolution texture snapshots.  At 4K, 64 queued
-    // dispatches retained more than 12 GiB of managed byte arrays before the
-    // render thread could upload them.  Keep the count cap for small work and
-    // independently apply backpressure to the actual retained payload.
-    private static readonly ulong _maxPendingGuestWorkBytes =
-        (ulong.TryParse(
-             Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_WORK_MB"),
-             out var pendingGuestWorkMb) && pendingGuestWorkMb > 0
-            ? pendingGuestWorkMb
-            : 256UL) * 1024UL * 1024UL;
     private static readonly int _maxGuestWorkPerRender =
         int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MAX_GUEST_WORK_PER_RENDER"),
@@ -359,53 +218,11 @@ internal static unsafe partial class VulkanVideoPresenter
             ? renderBudgetMs
             : OperatingSystem.IsMacOS() ? 12L : 0L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
-    private static readonly int _guestWorkFollowupWaitMs =
-        int.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_WAIT_MS"),
-            out var followupWaitMs) && followupWaitMs >= 0
-            ? followupWaitMs
-            : 2;
-    private static readonly long _guestWorkFollowupBudgetTicks =
-        (long.TryParse(
-             Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_BUDGET_MS"),
-             out var followupBudgetMs) && followupBudgetMs >= 0
-            ? followupBudgetMs
-            : 24L) *
-        System.Diagnostics.Stopwatch.Frequency / 1000L;
-    private static long _guestQueueBackpressureTraceCount;
-    private static long _guestQueueStarvationTraceCount;
-    private static long _guestQueueStarvationLastQueued = -1;
-    // Zero-payload sync (ordered actions / flip markers) may exceed the
-    // payload item cap without hard-blocking producers; byte budget still
-    // bounds fat compute/draw snapshots. Override with
-    // SHARPEMU_PENDING_GUEST_SYNC_ITEMS (default 8x payload item cap).
-    private static readonly int _maxPendingGuestSyncItems =
-        int.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_SYNC_ITEMS"),
-            out var pendingGuestSyncItems) && pendingGuestSyncItems > 0
-            ? pendingGuestSyncItems
-            : Math.Max(_maxPendingGuestWorkItems * 8, 4096);
-    private static int _pendingPayloadGuestWorkCount;
-    private static int _pendingSyncGuestWorkCount;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
     // run long / GPU-hang and starve the present). Isolates whether the
     // geometry+composite path renders on its own.
     private static readonly bool _skipAllCompute =
         Environment.GetEnvironmentVariable("SHARPEMU_SKIP_ALL_COMPUTE") == "1";
-    private static readonly bool _gpuLabelTimelineRequested =
-        IsGpuLabelTimelineRequested(
-            Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_TIMELINE"));
-    private static readonly bool _gpuLabelVirtualWritesEnabled =
-        _gpuLabelTimelineRequested &&
-        !string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_GPU_LABEL_VIRTUAL_WRITES"),
-            "0",
-            StringComparison.Ordinal);
-    private static bool _gpuLabelTimelineAvailable;
-
-    internal static bool IsGpuLabelTimelineRequested(string? setting) =>
-        !string.Equals(setting, "0", StringComparison.Ordinal);
-
     // Diagnostic: skip compute dispatches whose GroupCountZ is at least this,
     // to isolate a specific tall dispatch (e.g. Demon's Souls' 27x15x72 froxel
     // shader that hangs the Metal queue) without needing its ASLR-varying
@@ -474,17 +291,13 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _presentedSequence;
         private long _presentNotTakenLoggedSequence = long.MinValue;
         private bool _vulkanReady;
+
+        internal bool IsVulkanReady => _vulkanReady;
         private bool _firstFramePresented;
         private bool _firstGuestDrawPresented;
         private bool _splashPresented;
         private bool _deviceLost;
         private bool _deviceLostLogged;
-        // Last guest work the render thread entered; included in device-lost
-        // reports so QueueSubmit faults name the offending dispatch/draw.
-        private string _activeGuestWorkLabel = string.Empty;
-        // Survives the per-work finally clear: batched submits often flush
-        // after the label is reset (queue switch / end-of-drain).
-        private string _lastGuestWorkLabel = string.Empty;
         private string _lastSubmitDebugName = string.Empty;
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
@@ -543,6 +356,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public Presenter(uint width, uint height)
         {
+            _commandStream = new CommandStreamQueue(this);
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);

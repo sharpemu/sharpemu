@@ -46,11 +46,6 @@ internal static partial class MetalVideoPresenter
         uint Height,
         uint PitchInPixel);
 
-    private sealed record OrderedGuestFlipWait(
-        long Version,
-        int VideoOutHandle,
-        int DisplayBufferIndex);
-
     private sealed record GuestImageBlit(ulong SourceAddress, ulong DestinationAddress);
 
     /// <summary>A guest-addressed Metal texture (or an immutable captured version).</summary>
@@ -126,8 +121,6 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
     private static readonly Queue<Presentation> _pendingGuestImagePresentations = new();
     private static readonly Dictionary<long, GuestImage> _guestImageVersions = new();
-    private static readonly Dictionary<(int Handle, int BufferIndex), long>
-        _lastOrderedGuestFlipVersions = new();
     private static readonly Dictionary<ulong, ulong> _untrackedGuestImageContentProbes = new();
     private static long _orderedGuestFlipVersionSequence;
     private static volatile ICpuMemory? _guestMemory;
@@ -189,25 +182,6 @@ internal static partial class MetalVideoPresenter
                 : EnqueueGuestWorkLocked(new OrderedGuestAction(action, debugName));
         }
     }
-
-    public static long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex)
-    {
-        lock (_gate)
-        {
-            var version = _lastOrderedGuestFlipVersions.TryGetValue(
-                (videoOutHandle, displayBufferIndex),
-                out var lastVersion)
-                    ? lastVersion
-                    : 0;
-            return _closed || _thread is null
-                ? 0
-                : EnqueueGuestWorkLocked(
-                    new OrderedGuestFlipWait(version, videoOutHandle, displayBufferIndex));
-        }
-    }
-
-    public static long CurrentGuestWorkSequenceForDiagnostics =>
-        Volatile.Read(ref _executingGuestWorkSequence);
 
     public static bool WaitForGuestWork(long workSequence, int timeoutMilliseconds)
     {
@@ -511,7 +485,6 @@ internal static partial class MetalVideoPresenter
             }
 
             var version = ++_orderedGuestFlipVersionSequence;
-            _lastOrderedGuestFlipVersions[(videoOutHandle, displayBufferIndex)] = version;
             return EnqueueGuestWorkLocked(
                 new OrderedGuestFlip(
                     version,
@@ -752,10 +725,6 @@ internal static partial class MetalVideoPresenter
                         case OrderedGuestFlip flip:
                             FlushBatchedGuestCommands();
                             ExecuteOrderedGuestFlip(device, queue, flip);
-                            break;
-                        case OrderedGuestFlipWait:
-                            // Reaching this marker in queue order is the guarantee:
-                            // the flip it follows has already captured its image.
                             break;
                         case GuestImageBlit blit:
                             FlushBatchedGuestCommands();

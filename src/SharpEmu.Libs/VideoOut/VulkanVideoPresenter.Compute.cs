@@ -36,7 +36,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // producer can be fixed without changing the guest value.
         private const ulong MaxCredibleGuestWorkgroupsPerDispatch = 16UL * 1024 * 1024;
 
-        private void ExecuteComputeDispatch(VulkanComputeGuestDispatch work)
+        internal void ExecuteComputeDispatch(VulkanComputeGuestDispatch work)
         {
             var perfStart = Stopwatch.GetTimestamp();
             Interlocked.Increment(ref _perfDrawCount);

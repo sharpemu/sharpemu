@@ -63,27 +63,6 @@ public sealed class AgcHtileMetadataTests
     }
 
     [Theory]
-    [InlineData(false, 0x00020000u, true)]
-    [InlineData(false, 0x00020003u, true)]
-    [InlineData(false, 0x00000000u, false)]
-    [InlineData(false, 0x00020001u, false)]
-    [InlineData(true, 0x00000002u, true)]
-    [InlineData(true, 0x00000302u, true)]
-    [InlineData(true, 0x00000000u, false)]
-    [InlineData(true, 0x00000102u, false)]
-    public void WrappedDmaFillRequiresImmediateSourceAndMemoryDestination(
-        bool compactLayout,
-        uint selectorControl,
-        bool expected)
-    {
-        Assert.Equal(
-            expected,
-            AgcExports.IsWrappedDmaGuestMemoryFill(
-                compactLayout,
-                selectorControl));
-    }
-
-    [Theory]
     [InlineData("BufferStoreDword", true)]
     [InlineData("TBufferStoreFormatX", true)]
     [InlineData("GlobalStoreDword", true)]

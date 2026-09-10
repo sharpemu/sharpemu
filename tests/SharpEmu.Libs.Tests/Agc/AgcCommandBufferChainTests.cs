@@ -4,13 +4,11 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
-using SharpEmu.Libs.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// The kernel event-queue registry is process-wide static state; serialize against
-// other suites that register graphics events.
+// The inline command stream is keyed by memory; serialize the suites that fault it.
 [CollectionDefinition(AgcCommandBufferChainCollection.Name, DisableParallelization = true)]
 public sealed class AgcCommandBufferChainCollection
 {
@@ -28,10 +26,6 @@ public sealed class AgcCommandBufferChainTests
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x14000;
 
-    private const ulong HandleOutAddress = BaseAddress + 0x100;
-    private const ulong EventsAddress = BaseAddress + 0x200;
-    private const ulong OutCountAddress = BaseAddress + 0x300;
-    private const ulong TimeoutAddress = BaseAddress + 0x400;
     private const ulong SubmitPacketAddress = BaseAddress + 0x500;
     private const ulong StackAddress = BaseAddress + 0x600;
 
@@ -40,41 +34,29 @@ public sealed class AgcCommandBufferChainTests
     private const ulong SecondLinkAddress = BaseAddress + 0x2000;
     private const ulong WaitLabelAddress = BaseAddress + 0x3000;
 
-    // Graphics-queue completions land on ident 0, so its absence is how a suspended
-    // queue is observed without standing up a GPU backend.
-    private const ulong GraphicsCompletionIdent = 0;
+    private static SharpEmu.Libs.Gpu.GpuCommands.CommandStreamQueue StreamOf(FakeCpuMemory memory) =>
+        AgcExports.GetHeadlessCommandStreamForTests(memory).Queue;
 
     [Fact]
     public void SubmittedDcb_FollowsIndirectBufferIntoTheChainedBuffer()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        var equeue = CreateEqueue(ctx, memory);
 
-        try
-        {
-            RegisterGraphicsCompletion(equeue);
+        // The chained buffer parks on a label that never reaches its reference,
+        // so reaching it at all suspends the queue.
+        var secondLinkDwords = WriteUnsatisfiedWait(ctx, memory, SecondLinkAddress);
+        var firstLinkDwords = WriteChain(
+            ctx,
+            memory,
+            FirstLinkAddress,
+            SecondLinkAddress,
+            secondLinkDwords);
 
-            // The chained buffer parks on a label that never reaches its reference,
-            // so reaching it at all suspends the queue.
-            var secondLinkDwords = WriteUnsatisfiedWait(ctx, memory, SecondLinkAddress);
-            var firstLinkDwords = WriteChain(
-                ctx,
-                memory,
-                FirstLinkAddress,
-                SecondLinkAddress,
-                secondLinkDwords);
+        SubmitDcb(ctx, memory, FirstLinkAddress, firstLinkDwords);
 
-            SubmitDcb(ctx, memory, FirstLinkAddress, firstLinkDwords);
-
-            Assert.NotEqual(
-                (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                WaitEqueue(ctx, memory, equeue));
-        }
-        finally
-        {
-            DeleteEqueue(ctx, equeue);
-        }
+        Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+        Assert.Equal(SecondLinkAddress, StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
     }
 
     // Titles emit a zeroed INDIRECT_BUFFER as padding for a branch they decided not to
@@ -84,28 +66,17 @@ public sealed class AgcCommandBufferChainTests
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        var equeue = CreateEqueue(ctx, memory);
 
-        try
-        {
-            RegisterGraphicsCompletion(equeue);
+        var paddingDwords = WriteChain(ctx, memory, FirstLinkAddress, target: 0, targetDwords: 0);
+        var waitDwords = WriteUnsatisfiedWait(
+            ctx,
+            memory,
+            FirstLinkAddress + (paddingDwords * sizeof(uint)));
 
-            var paddingDwords = WriteChain(ctx, memory, FirstLinkAddress, target: 0, targetDwords: 0);
-            var waitDwords = WriteUnsatisfiedWait(
-                ctx,
-                memory,
-                FirstLinkAddress + (paddingDwords * sizeof(uint)));
+        SubmitDcb(ctx, memory, FirstLinkAddress, paddingDwords + waitDwords);
 
-            SubmitDcb(ctx, memory, FirstLinkAddress, paddingDwords + waitDwords);
-
-            Assert.NotEqual(
-                (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                WaitEqueue(ctx, memory, equeue));
-        }
-        finally
-        {
-            DeleteEqueue(ctx, equeue);
-        }
+        Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+        Assert.Equal(FirstLinkAddress + (paddingDwords * sizeof(uint)), StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
     }
 
     [Fact]
@@ -149,43 +120,31 @@ public sealed class AgcCommandBufferChainTests
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        var equeue = CreateEqueue(ctx, memory);
+        WriteUInt32(memory, SecondLinkAddress, 0x8000_0000u);
+        var callDwords = WriteJump(
+            ctx,
+            memory,
+            FirstLinkAddress,
+            mode: 0,
+            SecondLinkAddress,
+            targetDwords: 1);
+        var waitDwords = WriteUnsatisfiedWait(
+            ctx,
+            memory,
+            FirstLinkAddress + (callDwords * sizeof(uint)));
 
-        try
-        {
-            RegisterGraphicsCompletion(equeue);
-            WriteUInt32(memory, SecondLinkAddress, 0x8000_0000u);
-            var callDwords = WriteJump(
-                ctx,
-                memory,
-                FirstLinkAddress,
-                mode: 0,
-                SecondLinkAddress,
-                targetDwords: 1);
-            var waitDwords = WriteUnsatisfiedWait(
-                ctx,
-                memory,
-                FirstLinkAddress + (callDwords * sizeof(uint)));
+        SubmitDcb(ctx, memory, FirstLinkAddress, callDwords + waitDwords);
 
-            SubmitDcb(ctx, memory, FirstLinkAddress, callDwords + waitDwords);
-
-            Assert.NotEqual(
-                (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                WaitEqueue(ctx, memory, equeue));
-        }
-        finally
-        {
-            DeleteEqueue(ctx, equeue);
-        }
+        // The wait after the call is reached only when the call returned to its parent.
+        Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+        Assert.Equal(FirstLinkAddress + (callDwords * sizeof(uint)), StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
     }
 
     [Fact]
     public void SubmittedDcb_IndirectCallRestoresParentRingBase()
     {
-        GpuWaitRegistry.Clear();
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        try
         {
             WriteUInt32(memory, SecondLinkAddress, 0x8000_0000u);
             var continuation = FirstLinkAddress + 0x10000;
@@ -210,11 +169,9 @@ public sealed class AgcCommandBufferChainTests
                 FirstLinkAddress,
                 callDwords + sentinelDwords);
 
-            Assert.NotNull(GpuWaitRegistry.SnapshotAt(memory, WaitLabelAddress));
-        }
-        finally
-        {
-            GpuWaitRegistry.Clear();
+            // The chunk advance after the call continues from the parent's ring chunk.
+            Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+            Assert.Equal(continuation, StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
         }
     }
 
@@ -225,32 +182,12 @@ public sealed class AgcCommandBufferChainTests
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
-        var equeue = CreateEqueue(ctx, memory);
+        var paddingDwords = WriteChain(ctx, memory, FirstLinkAddress, target: 0, targetDwords: 0);
 
-        try
-        {
-            RegisterGraphicsCompletion(equeue);
+        SubmitDcb(ctx, memory, FirstLinkAddress, paddingDwords);
 
-            var paddingDwords = WriteChain(ctx, memory, FirstLinkAddress, target: 0, targetDwords: 0);
-            SubmitDcb(ctx, memory, FirstLinkAddress, paddingDwords);
-
-            Assert.Equal(
-                (int)OrbisGen2Result.ORBIS_GEN2_OK,
-                WaitEqueue(ctx, memory, equeue));
-            Assert.Equal(GraphicsCompletionIdent, ReadUInt64(memory, EventsAddress + 0x00));
-        }
-        finally
-        {
-            DeleteEqueue(ctx, equeue);
-        }
+        Assert.False(StreamOf(memory).HasPending);
     }
-
-    private static void RegisterGraphicsCompletion(ulong equeue) =>
-        Assert.True(KernelEventQueueCompatExports.RegisterEvent(
-            equeue,
-            GraphicsCompletionIdent,
-            KernelEventQueueCompatExports.KernelEventFilterGraphics,
-            userData: 0));
 
     private static uint WriteChain(
         CpuContext ctx,
@@ -315,31 +252,8 @@ public sealed class AgcCommandBufferChainTests
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DriverSubmitDcb(ctx));
     }
 
-    private static ulong CreateEqueue(CpuContext ctx, FakeCpuMemory memory)
-    {
-        ctx[CpuRegister.Rdi] = HandleOutAddress;
-        Assert.Equal(
-            (int)OrbisGen2Result.ORBIS_GEN2_OK,
-            KernelEventQueueCompatExports.KernelCreateEqueue(ctx));
-        return ReadUInt64(memory, HandleOutAddress);
-    }
 
-    private static void DeleteEqueue(CpuContext ctx, ulong equeue)
-    {
-        ctx[CpuRegister.Rdi] = equeue;
-        _ = KernelEventQueueCompatExports.KernelDeleteEqueue(ctx);
-    }
 
-    private static int WaitEqueue(CpuContext ctx, FakeCpuMemory memory, ulong equeue)
-    {
-        WriteUInt64(memory, TimeoutAddress, 0);
-        ctx[CpuRegister.Rdi] = equeue;
-        ctx[CpuRegister.Rsi] = EventsAddress;
-        ctx[CpuRegister.Rdx] = 4;
-        ctx[CpuRegister.Rcx] = OutCountAddress;
-        ctx[CpuRegister.R8] = TimeoutAddress;
-        return KernelEventQueueCompatExports.KernelWaitEqueue(ctx);
-    }
 
     private static ulong ReadUInt64(FakeCpuMemory memory, ulong address)
     {

@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -34,15 +35,64 @@ public static partial class AgcExports
         "0",
         StringComparison.Ordinal);
 
+    // The state a snapshot was captured under; the draw validates it against the live banks.
+    private sealed record GeometryCaptureFingerprint(
+        uint IndexSize,
+        ulong IndexAddress,
+        uint IndexCount,
+        uint DrawIndexOffset,
+        uint InstanceCount,
+        KeyValuePair<uint, uint>[] ShaderRegisters);
+
     private sealed record SubmittedIndexSnapshot(
         ulong SourceAddress,
         uint IndexCount,
         int IndexStride,
-        byte[] Data);
+        byte[] Data,
+        GeometryCaptureFingerprint Capture);
 
     private sealed record SubmittedVertexSnapshot(
         ulong ExportShaderAddress,
-        IReadOnlyList<Gen5VertexInputBinding> Bindings);
+        IReadOnlyList<Gen5VertexInputBinding> Bindings,
+        GeometryCaptureFingerprint Capture);
+
+    private const uint ShaderRegisterWindowLength = 8;
+    private const uint UserDataRegisterWindowLength = 32;
+
+    // The shader registers the vertex fetch resolution can read: the stage program windows and its user data.
+    private static KeyValuePair<uint, uint>[] RecordShaderRegisters(IReadOnlyDictionary<uint, uint> registers)
+    {
+        // The windows can overlap; each offset is recorded once, in offset order.
+        var recorded = new SortedDictionary<uint, uint>();
+        void RecordRegisterWindow(uint start, uint length)
+        {
+            for (var offset = start; offset < start + length; offset++)
+            {
+                if (registers.TryGetValue(offset, out var value))
+                {
+                    recorded[offset] = value;
+                }
+            }
+        }
+
+        RecordRegisterWindow(SpiShaderPgmLoVs, ShaderRegisterWindowLength);
+        RecordRegisterWindow(SpiShaderPgmLoGs, ShaderRegisterWindowLength);
+        RecordRegisterWindow(SpiShaderPgmLoEs, ShaderRegisterWindowLength);
+        RecordRegisterWindow(SelectExportUserDataRegister(registers), UserDataRegisterWindowLength);
+        return recorded.ToArray();
+    }
+
+    private static GeometryCaptureFingerprint CreateCaptureFingerprint(
+        SubmittedDcbState captureState,
+        ulong indexAddress,
+        uint count) =>
+        new(
+            captureState.IndexSize,
+            indexAddress,
+            count,
+            captureState.DrawIndexOffset,
+            captureState.InstanceCount,
+            RecordShaderRegisters(captureState.ShRegisters));
 
     private static AgcIndexHelpers.ProsperoIndexType GetProsperoIndexType(SubmittedDcbState state) =>
         // IndexSize is latched from ItIndexType and from UC VGT_INDEX_TYPE
@@ -380,11 +430,29 @@ public static partial class AgcExports
     private const long MaximumRetainedIndexBytesPerSubmission = 64L * 1024 * 1024;
     private const long MaximumRetainedVertexBytesPerSubmission = 64L * 1024 * 1024;
 
+    // The prepass owns this shadow; it inherits the state of every earlier accepted submission.
+    private static SubmittedGeometrySnapshots? CaptureSubmittedGeometry(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong commandAddress,
+        uint dwordCount)
+    {
+        var indexSnapshots = CaptureSubmittedIndexPackets(
+            ctx,
+            gpuState.GeometryCapture,
+            commandAddress,
+            dwordCount,
+            out var vertexSnapshots);
+        return indexSnapshots is null && vertexSnapshots is null
+            ? null
+            : new SubmittedGeometrySnapshots(indexSnapshots, vertexSnapshots);
+    }
+
     private static Dictionary<ulong, SubmittedIndexSnapshot>? CaptureSubmittedIndexPackets(
         CpuContext ctx,
+        SubmittedDcbState captureState,
         ulong commandAddress,
         uint dwordCount,
-        uint initialIndexSize,
         out Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots)
     {
         vertexSnapshots = null;
@@ -401,10 +469,6 @@ public static partial class AgcExports
         vertexSnapshots = _retainSubmittedVertexData
             ? new Dictionary<ulong, SubmittedVertexSnapshot>()
             : null;
-        var captureState = new SubmittedDcbState
-        {
-            IndexSize = initialIndexSize,
-        };
         var retainedIndexBytes = 0L;
         var retainedVertexBytes = 0L;
         CaptureSubmittedIndexPacketsCore(
@@ -479,6 +543,8 @@ public static partial class AgcExports
                 captureState.IndexSize = packetIndexSize & 0x3u;
             }
 
+            ApplyGeometryStatePacket(ctx, captureState, packetAddress, length, opcode, register);
+
             if (NeedsGeometryRegisterUpdate(opcode, register))
             {
                 using var registerProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Registers);
@@ -501,6 +567,8 @@ public static partial class AgcExports
                 var indexStride = AgcIndexHelpers.GetGuestStrideBytes(
                     AgcIndexHelpers.Decode(captureState.IndexSize));
                 var byteCount64 = (ulong)indexCount * (uint)indexStride;
+                captureState.DrawIndexOffset = 0;
+                var capture = CreateCaptureFingerprint(captureState, indexAddress, indexCount);
                 SubmittedIndexSnapshot? indexSnapshot = null;
                 if (indexSnapshots is not null &&
                     byteCount64 != 0 &&
@@ -517,7 +585,8 @@ public static partial class AgcExports
                             indexAddress,
                             indexCount,
                             indexStride,
-                            data);
+                            data,
+                            capture);
                         indexSnapshots[packetAddress] = indexSnapshot;
                         retainedIndexBytes += data.Length;
                     }
@@ -525,7 +594,6 @@ public static partial class AgcExports
 
                 captureState.IndexBufferAddress = indexAddress;
                 captureState.IndexBufferCount = maximumIndexCount;
-                captureState.DrawIndexOffset = 0;
                 captureState.CurrentIndexSnapshot = indexSnapshot;
                 TryCaptureSubmittedVertexSnapshot(
                     ctx,
@@ -533,6 +601,7 @@ public static partial class AgcExports
                     packetAddress,
                     indexCount,
                     indexed: true,
+                    capture,
                     vertexSnapshots,
                     ref retainedVertexBytes);
                 captureState.CurrentIndexSnapshot = null;
@@ -546,6 +615,7 @@ public static partial class AgcExports
                     packetAddress,
                     vertexCount,
                     indexed: false,
+                    CreateCaptureFingerprint(captureState, 0, vertexCount),
                     vertexSnapshots,
                     ref retainedVertexBytes);
             }
@@ -574,6 +644,56 @@ public static partial class AgcExports
         }
     }
 
+    // The index, instance and reset packets the prepass must follow to stay self-sufficient.
+    private static void ApplyGeometryStatePacket(
+        CpuContext ctx,
+        SubmittedDcbState captureState,
+        ulong packetAddress,
+        uint length,
+        uint opcode,
+        uint register)
+    {
+        if (opcode == ItNop && register is RDrawReset or RAcbReset or PacketCustomCode.DispatchReset && length >= 2)
+        {
+            captureState.CxRegisters.Clear();
+            captureState.ShRegisters.Clear();
+            captureState.UcRegisters.Clear();
+            captureState.IndexBufferAddress = 0;
+            captureState.IndexBufferCount = 0;
+            captureState.IndexSize = 0;
+            captureState.InstanceCount = 1;
+            captureState.DrawIndexOffset = 0;
+            return;
+        }
+
+        if (opcode == ItIndexBase && length >= 3 &&
+            TryReadUInt32(ctx, packetAddress + 4, out var indexBaseLo) &&
+            TryReadUInt32(ctx, packetAddress + 8, out var indexBaseHi))
+        {
+            captureState.IndexBufferAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
+        }
+        else if (opcode == ItIndexBufferSize && length >= 2 &&
+            TryReadUInt32(ctx, packetAddress + 4, out var indexBufferCount))
+        {
+            captureState.IndexBufferCount = indexBufferCount;
+        }
+        else if (opcode == ItNop && register == RIndexCount && length >= 2 &&
+            TryReadUInt32(ctx, packetAddress + 4, out var customIndexCount))
+        {
+            captureState.IndexBufferCount = customIndexCount;
+        }
+        else if (opcode == ItNumInstances && length >= 2 &&
+            TryReadUInt32(ctx, packetAddress + 4, out var instanceCount))
+        {
+            captureState.InstanceCount = Math.Max(instanceCount, 1);
+        }
+        else if (opcode == ItDrawIndexOffset2 && length >= 5 &&
+            TryReadUInt32(ctx, packetAddress + 8, out var indexOffset))
+        {
+            captureState.DrawIndexOffset = indexOffset;
+        }
+    }
+
     // Geometry capture does not consume context state. The main parser still applies it.
     internal static bool NeedsGeometryRegisterUpdate(uint opcode, uint register) =>
         opcode is not (ItSetContextReg or ItSetContextRegIndirect) &&
@@ -585,6 +705,7 @@ public static partial class AgcExports
         ulong packetAddress,
         uint drawCount,
         bool indexed,
+        GeometryCaptureFingerprint capture,
         Dictionary<ulong, SubmittedVertexSnapshot>? snapshots,
         ref long retainedBytes)
     {
@@ -673,7 +794,8 @@ public static partial class AgcExports
 
             snapshots[packetAddress] = new SubmittedVertexSnapshot(
                 exportShaderAddress,
-                retainedInputs);
+                retainedInputs,
+                capture);
             retainedBytes += snapshotBytes;
             DcbSubmissionProfile.RecordRetainedVertexBytes(snapshotBytes);
         }

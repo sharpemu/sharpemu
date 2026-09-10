@@ -4,12 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
+// Semaphore waits suspend the submission; a completion on any queue retries the blocked heads.
 [Collection(AgcCommandBufferChainCollection.Name)]
-public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
+public sealed class AgcMemSemaphoreRuntimeTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x1_0000;
@@ -27,16 +29,8 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
 
     private const uint ItWriteData = 0x37;
     private const uint ItMemSemaphore = 0x39;
-
-    public AgcMemSemaphoreRuntimeTests()
-    {
-        GpuWaitRegistry.Clear();
-    }
-
-    public void Dispose()
-    {
-        GpuWaitRegistry.Clear();
-    }
+    private const uint FirstComputeOwner = 0x20;
+    private const uint SecondComputeOwner = 0x21;
 
     [Fact]
     public void Signals_ReleaseOneWaitingSubmissionEach()
@@ -54,27 +48,25 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
             SecondResultAddress,
             0x2222_2222);
         var signalDwords = WriteSignal(memory, SignalAddress);
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
 
         SubmitDcb(ctx, memory, FirstWaitAddress, firstDwords);
-        SubmitAcb(ctx, memory, SecondWaitAddress, secondDwords, owner: 1);
+        SubmitAcb(ctx, memory, SecondWaitAddress, secondDwords, owner: FirstComputeOwner);
         Assert.Equal(0u, ReadUInt32(memory, FirstResultAddress));
         Assert.Equal(0u, ReadUInt32(memory, SecondResultAddress));
-        Assert.Equal(2, GpuWaitRegistry.Count);
+        Assert.Equal(2, stream.Queue.BlockedQueueCount);
 
-        SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: 2);
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, FirstResultAddress) == 0x1111_1111 &&
-                  GpuWaitRegistry.Count == 1,
-            TimeSpan.FromSeconds(5)));
+        SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: SecondComputeOwner);
+        Assert.Equal(0x1111_1111u, ReadUInt32(memory, FirstResultAddress));
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
         Assert.Equal(0u, ReadUInt32(memory, SecondResultAddress));
         Assert.Equal(0UL, ReadUInt64(memory, SemaphoreAddress));
 
-        SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: 2);
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, SecondResultAddress) == 0x2222_2222,
-            TimeSpan.FromSeconds(5)));
+        SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: SecondComputeOwner);
+        Assert.Equal(0x2222_2222u, ReadUInt32(memory, SecondResultAddress));
         Assert.Equal(0UL, ReadUInt64(memory, SemaphoreAddress));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.Equal(0, stream.Queue.BlockedQueueCount);
+        Assert.False(stream.Queue.HasPending);
     }
 
     [Fact]
@@ -91,16 +83,16 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
 
         SubmitDcb(ctx, memory, FirstWaitAddress, dwords);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, FirstResultAddress) == 0xABCD_1234,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0xABCD_1234u, ReadUInt32(memory, FirstResultAddress));
         Assert.Equal(0UL, ReadUInt64(memory, SemaphoreAddress));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.False(AgcExports.GetHeadlessCommandStreamForTests(memory).Queue.HasPending);
     }
 
+    // An unsupported semaphore selection is fatal; the stream refuses every later submission.
     [Fact]
-    public void UnsupportedPacket_StopsCurrentAndLaterSubmissions()
+    public void UnsupportedPacket_IsFatalAndStopsLaterSubmissions()
     {
+        using var fatal = new FatalScope();
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
         WriteDwords(
@@ -116,7 +108,8 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
             unchecked((uint)(FirstResultAddress >> 32)),
             0x1111_1111);
 
-        SubmitDcb(ctx, memory, FirstWaitAddress, 9);
+        Assert.Throws<SchedulerFatalException>(() => SubmitDcb(ctx, memory, FirstWaitAddress, 9));
+        Assert.Contains("The semaphore packet is not supported", fatal.Messages[0]);
         Assert.Equal(0u, ReadUInt32(memory, FirstResultAddress));
 
         var laterDwords = WriteResult(
@@ -124,7 +117,7 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
             SecondWaitAddress,
             SecondResultAddress,
             0x2222_2222);
-        SubmitDcb(ctx, memory, SecondWaitAddress, laterDwords);
+        Assert.Throws<SchedulerFatalException>(() => SubmitDcb(ctx, memory, SecondWaitAddress, laterDwords));
         Assert.Equal(0u, ReadUInt32(memory, SecondResultAddress));
 
         var multiCommandAddress = BaseAddress + 0x6000;
@@ -133,13 +126,15 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
             multiCommandAddress,
             ThirdResultAddress,
             0x3333_3333);
-        SubmitMultiDcb(ctx, memory, multiCommandAddress, multiDwords);
+        Assert.Throws<SchedulerFatalException>(() => SubmitMultiDcb(ctx, memory, multiCommandAddress, multiDwords));
         Assert.Equal(0u, ReadUInt32(memory, ThirdResultAddress));
     }
 
+    // The fatal strikes when the released head resumes, inside the signal's submit call.
     [Fact]
     public void FaultAfterWait_DropsSubmissionThatWasAlreadyQueued()
     {
+        using var fatal = new FatalScope();
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
         var waitingDwords = WriteWaitResultThenUnsupported(memory, FirstWaitAddress);
@@ -149,18 +144,17 @@ public sealed class AgcMemSemaphoreRuntimeTests : IDisposable
             SecondResultAddress,
             0x2222_2222);
         var signalDwords = WriteSignal(memory, SignalAddress);
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
 
         SubmitDcb(ctx, memory, FirstWaitAddress, waitingDwords);
         SubmitDcb(ctx, memory, SecondWaitAddress, pendingDwords);
-        Assert.Equal(1, GpuWaitRegistry.Count);
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
         Assert.Equal(0u, ReadUInt32(memory, FirstResultAddress));
         Assert.Equal(0u, ReadUInt32(memory, SecondResultAddress));
 
-        SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: 1);
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, FirstResultAddress) == 0x1111_1111,
-            TimeSpan.FromSeconds(5)));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.Throws<SchedulerFatalException>(() => SubmitAcb(ctx, memory, SignalAddress, signalDwords, owner: FirstComputeOwner));
+        Assert.Equal(0x1111_1111u, ReadUInt32(memory, FirstResultAddress));
+        Assert.False(stream.Queue.HasPending);
         Assert.Equal(0u, ReadUInt32(memory, SecondResultAddress));
     }
 

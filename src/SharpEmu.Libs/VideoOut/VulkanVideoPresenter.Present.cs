@@ -9,105 +9,6 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 
-internal sealed record VulkanOrderedGuestFlip(
-    long Version,
-    int VideoOutHandle,
-    int DisplayBufferIndex,
-    ulong Address,
-    uint Width,
-    uint Height,
-    uint PitchInPixel);
-
-internal sealed record VulkanOrderedGuestFlipWait(
-    long Version,
-    int VideoOutHandle,
-    int DisplayBufferIndex);
-
-internal static class VulkanGuestFlipSourcePolicy
-{
-    public static bool CanCapture(
-        bool registered,
-        bool materialized,
-        bool hasQueuedWriter) =>
-        registered && (materialized || hasQueuedWriter);
-}
-
-internal sealed class VulkanGuestFlipCompletionTracker
-{
-    private sealed class BufferState
-    {
-        public long CompletedThrough;
-        public SortedDictionary<long, bool> Pending { get; } = new();
-    }
-
-    private readonly Lock _gate = new();
-    private readonly Dictionary<(int Handle, int BufferIndex), BufferState> _states = new();
-
-    public void Register(int handle, int bufferIndex, long version)
-    {
-        lock (_gate)
-        {
-            var state = GetOrCreateState(handle, bufferIndex);
-            state.Pending.TryAdd(version, false);
-        }
-    }
-
-    public bool IsSafe(int handle, int bufferIndex, long version)
-    {
-        if (version == 0)
-        {
-            return true;
-        }
-
-        lock (_gate)
-        {
-            return _states.TryGetValue((handle, bufferIndex), out var state) &&
-                (version <= state.CompletedThrough ||
-                 state.Pending.GetValueOrDefault(version));
-        }
-    }
-
-    public void MarkSafe(int handle, int bufferIndex, long version)
-    {
-        lock (_gate)
-        {
-            var state = GetOrCreateState(handle, bufferIndex);
-            state.Pending[version] = true;
-            while (state.Pending.Count != 0)
-            {
-                var first = state.Pending.First();
-                if (!first.Value)
-                {
-                    break;
-                }
-
-                state.CompletedThrough = first.Key;
-                state.Pending.Remove(first.Key);
-            }
-        }
-    }
-
-    public void Reset()
-    {
-        lock (_gate)
-        {
-            _states.Clear();
-        }
-    }
-
-    private BufferState GetOrCreateState(int handle, int bufferIndex)
-    {
-        var key = (handle, bufferIndex);
-        if (!_states.TryGetValue(key, out var state))
-        {
-            state = new BufferState();
-            _states.Add(key, state);
-        }
-
-        return state;
-    }
-}
-
 internal static unsafe partial class VulkanVideoPresenter
 {
     // This partial owns guest presentation scheduling and presenter thread lifecycle.
@@ -129,16 +30,11 @@ internal static unsafe partial class VulkanVideoPresenter
     // Same fix as _pendingGuestImagePresentations above, for Submit()'s decoded video
     // frames: a single "latest wins" slot dropped frames the render loop didn't poll in time.
     private static readonly Queue<Presentation> _pendingVideoPresentations = new();
-    private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
-    private static readonly Dictionary<(int Handle, int BufferIndex), long>
-        _lastOrderedGuestFlipVersions = new();
-    private static readonly VulkanGuestFlipCompletionTracker _guestFlipCompletion = new();
-    private static long _orderedGuestFlipVersionSequence;
+    private static long _guestFlipVersionSequence;
 
     private static Thread? _thread;
     private static HostVideoOptions _videoOptions = HostVideoOptions.Default;
     private static Presentation? _latestPresentation;
-    private static byte[]? _copyFragmentSpirv;
     private static uint _windowWidth;
     private static uint _windowHeight;
     private static bool _closed;
@@ -197,7 +93,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     1,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: 0,
                     IsSplash: false)
                 : hasSplash
                 ? new Presentation(
@@ -207,7 +102,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     1,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: 0,
                     IsSplash: true)
                 : new Presentation(
                     null,
@@ -216,7 +110,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     0,
                     GuestDrawKind.None,
                     TranslatedDraw: null,
-                    RequiredGuestWorkSequence: 0,
                     IsSplash: false);
             StartPresenterLocked();
         }
@@ -241,27 +134,10 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         _latestPresentation = null;
         _splashHidden = false;
-        _pendingGuestWorkByQueue.Clear();
-        _pendingGuestQueueSchedule.Clear();
-        _pendingGuestQueueCursor = 0;
-        _pendingGuestWorkCount = 0;
-        _pendingPayloadGuestWorkCount = 0;
-        _pendingSyncGuestWorkCount = 0;
-        _pendingGuestWorkBytes = 0;
         _pendingGuestImagePresentations.Clear();
         _pendingVideoPresentations.Clear();
-        _guestImageWorkSequences.Clear();
         _knownDisplayBuffers.Clear();
-        _lastOrderedGuestFlipVersions.Clear();
-        _guestFlipCompletion.Reset();
-        _orderedGuestFlipVersionSequence = 0;
-        _enqueuedGuestWorkSequence = 0;
-        _completedGuestWorkSequence = 0;
-        _completedGuestWorkOutOfOrder.Clear();
-        _lastEnqueuedGuestWorkByQueue.Clear();
-        _requiredGpuLabelDependenciesByGuestQueue.Clear();
-        Volatile.Write(ref _gpuLabelTimelineAvailable, false);
-        _executingGuestWorkSequence = 0;
+        _guestFlipVersionSequence = 0;
     }
 
     public static void HideSplashScreen()
@@ -282,7 +158,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 sequence,
                 GuestDrawKind.None,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: 0,
                 IsSplash: false);
             Console.Error.WriteLine("[LOADER][INFO] Vulkan VideoOut hid splash");
         }
@@ -310,7 +185,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 sequence,
                 GuestDrawKind.None,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: 0,
                 IsSplash: false);
 
             // Also dual-written to _latestPresentation as a fallback once the queue drains.
@@ -358,7 +232,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 sequence,
                 drawKind,
                 TranslatedDraw: null,
-                RequiredGuestWorkSequence: CurrentSubmittingQueueTailLocked(),
                 IsSplash: false);
             if (_thread is not null)
             {
@@ -417,7 +290,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     primitiveType,
                     indexBuffer,
                     renderState ?? GuestRenderState.Default),
-                RequiredGuestWorkSequence: CurrentSubmittingQueueTailLocked(),
                 IsSplash: false);
             if (_thread is not null)
             {
@@ -427,89 +299,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _windowWidth = width;
             _windowHeight = height;
             StartPresenterLocked();
-        }
-    }
-
-    // A flip from the video-out queue captures the display buffer in queue order like a PM4 flip.
-    public static bool TrySubmitGuestImage(int videoOutHandle, int displayBufferIndex, ulong address, uint width, uint height, uint pitchInPixel) =>
-        TrySubmitOrderedGuestImageFlip(videoOutHandle, displayBufferIndex, address, width, height, pitchInPixel);
-
-    /// <summary>
-    /// Enqueues an AGC flip at its exact position in the logical guest queue.
-    /// The presenter captures the named image into an immutable Vulkan image
-    /// before it executes later work from the same queue. Presentation then
-    /// consumes that captured generation rather than the mutable render target.
-    /// </summary>
-    public static bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel)
-    {
-        lock (_gate)
-        {
-            if (_closed ||
-                _thread is null ||
-                !VulkanGuestFlipSourcePolicy.CanCapture(
-                    _knownDisplayBuffers.Contains(address),
-                    materialized: true,
-                    _guestImageWorkSequences.ContainsKey(address)))
-            {
-                return false;
-            }
-
-            var version = ++_orderedGuestFlipVersionSequence;
-            _lastOrderedGuestFlipVersions[(videoOutHandle, displayBufferIndex)] = version;
-            var enqueued = EnqueueGuestWorkLocked(
-                new VulkanOrderedGuestFlip(
-                    version,
-                    videoOutHandle,
-                    displayBufferIndex,
-                    address,
-                    width,
-                    height,
-                    pitchInPixel)) > 0;
-            if (enqueued)
-            {
-                _guestFlipCompletion.Register(videoOutHandle, displayBufferIndex, version);
-            }
-            SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceOrderedFlipEnqueue(
-                videoOutHandle,
-                displayBufferIndex,
-                address,
-                version,
-                enqueued);
-            return enqueued;
-        }
-    }
-
-    /// <summary>
-    /// Preserves sceAgcDcbWaitUntilSafeForRendering in queue order. Because an
-    /// ordered flip first copies the mutable render target into an immutable
-    /// generation on the same Vulkan queue, reaching this marker proves later
-    /// rendering cannot change the frame selected by that flip. No CPU wait or
-    /// event-loop stall is required.
-    /// </summary>
-    public static long SubmitOrderedGuestFlipWait(
-        int videoOutHandle,
-        int displayBufferIndex)
-    {
-        lock (_gate)
-        {
-            var version = _lastOrderedGuestFlipVersions.TryGetValue(
-                (videoOutHandle, displayBufferIndex),
-                out var lastVersion)
-                    ? lastVersion
-                    : 0;
-            return _closed || _thread is null
-                ? 0
-                : EnqueueGuestWorkLocked(
-                    new VulkanOrderedGuestFlipWait(
-                        version,
-                        videoOutHandle,
-                        displayBufferIndex));
         }
     }
 
@@ -607,6 +396,11 @@ internal static unsafe partial class VulkanVideoPresenter
         try
         {
             using var presenter = new Presenter(width, height);
+            lock (_gate)
+            {
+                _activePresenter = presenter;
+            }
+
             presenter.Run();
         }
         catch (Exception exception)
@@ -619,79 +413,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _closed = true;
                 _thread = null;
+                _activePresenter = null;
                 System.Threading.Monitor.PulseAll(_gate);
             }
-        }
-    }
-
-    private static bool TryTakePresentation(long presentedSequence, out Presentation presentation)
-    {
-        lock (_gate)
-        {
-            // Guest flips are retained in submission order. The renderer is
-            // deliberately allowed to lag a frame or two behind the guest
-            // while it drains expensive work, so use the first completed flip
-            // rather than repeatedly asking only for the newest one.
-            while (_pendingGuestImagePresentations.Count > 0 &&
-                   _pendingGuestImagePresentations.Peek().Sequence <= presentedSequence)
-            {
-                _pendingGuestImagePresentations.Dequeue();
-            }
-
-            if (_pendingGuestImagePresentations.Count > 0)
-            {
-                var pending = _pendingGuestImagePresentations.Peek();
-                if (IsGuestWorkCompletedLocked(pending.RequiredGuestWorkSequence))
-                {
-                    presentation = _pendingGuestImagePresentations.Dequeue();
-                    TryReplaceWithHostMovieFrame(ref presentation);
-                    return true;
-                }
-
-                presentation = default;
-                return false;
-            }
-
-            // Video's RequiredGuestWorkSequence is always 0, so this never blocks like the guest-image queue can.
-            while (_pendingVideoPresentations.Count > 0 &&
-                   _pendingVideoPresentations.Peek().Sequence <= presentedSequence)
-            {
-                _pendingVideoPresentations.Dequeue();
-            }
-
-            if (_pendingVideoPresentations.Count > 0)
-            {
-                presentation = _pendingVideoPresentations.Dequeue();
-                return true;
-            }
-
-            if (_latestPresentation is not { } latest ||
-                latest.Sequence == presentedSequence ||
-                !IsGuestWorkCompletedLocked(latest.RequiredGuestWorkSequence))
-            {
-                if (_latestPresentation is { } rej &&
-                    rej.GuestImageAddress != 0 &&
-					rej.Sequence != presentedSequence &&
-                    _tracedGuestImagePresentRejections.Add(rej.Sequence))
-                {
-                    var reason = rej.Sequence == presentedSequence
-                        ? "already-presented(seq==presented)"
-                        : !IsGuestWorkCompletedLocked(rej.RequiredGuestWorkSequence)
-                            ? $"work-not-done(req={rej.RequiredGuestWorkSequence}>" +
-                              $"contiguous_done={_completedGuestWorkSequence})"
-                            : "unknown";
-                    Console.Error.WriteLine(
-                        $"[LOADER][WARN] vk.guest_present_rejected addr=0x{rej.GuestImageAddress:X16} " +
-                        $"seq={rej.Sequence} presentedSeq={presentedSequence} reason={reason}");
-                }
-
-                presentation = default;
-                return false;
-            }
-
-            presentation = latest;
-            TryReplaceWithHostMovieFrame(ref presentation);
-            return true;
         }
     }
 
@@ -715,8 +439,9 @@ internal static unsafe partial class VulkanVideoPresenter
             presentation.Sequence,
             GuestDrawKind.None,
             TranslatedDraw: null,
-            presentation.RequiredGuestWorkSequence,
-            IsSplash: false);
+            IsSplash: false,
+            RequiredTick: presentation.RequiredTick,
+            FlipRequestId: presentation.FlipRequestId);
     }
 
     /// <summary>
@@ -743,7 +468,6 @@ internal static unsafe partial class VulkanVideoPresenter
             presentedSequence,
             GuestDrawKind.None,
             TranslatedDraw: null,
-            RequiredGuestWorkSequence: 0,
             IsSplash: false);
         return true;
     }
@@ -799,9 +523,10 @@ internal static unsafe partial class VulkanVideoPresenter
         long Sequence,
         GuestDrawKind DrawKind,
         VulkanTranslatedGuestDraw? TranslatedDraw,
-        long RequiredGuestWorkSequence,
         bool IsSplash,
         ulong GuestImageAddress = 0,
         long GuestImageVersion = 0,
-        bool IsHdr = false);
+        bool IsHdr = false,
+        ulong RequiredTick = 0,
+        ulong FlipRequestId = 0);
 }

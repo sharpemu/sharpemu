@@ -159,7 +159,6 @@
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "Allgemein",
   "Options.Env.RenderDoc.Desc": "Lädt die RenderDoc-In-Application-API, damit Frames aus dem Emulator heraus aufgezeichnet werden können.\nDrücke F10 während das Spiel läuft, um ein Frame aufzuzeichnen; Aufzeichnungen landen in user/logs/capture_logs/<TITLE_ID>.\nErfordert eine RenderDoc-Installation. Verlangsamt die GPU und lässt manche Titel hängen, lass es also aus, wenn du nicht debuggst.",
-  "Options.Env.ForceSubmitOrphanPreambles.Desc": "Liefert GPU-Befehlspuffer-Präambeln auch dann aus, wenn die Zielwarteschlange sie nie abholt.\nNormalerweise aus lassen. Für Titel aktivieren, die beim Warten auf einen GPU-Fence hängen bleiben, der nie signalisiert.",
   "Common.Save": "Speichern",
   "Common.Cancel": "Abbrechen",
   "Options.About": "Über",

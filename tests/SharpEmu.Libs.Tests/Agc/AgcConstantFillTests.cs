@@ -45,18 +45,25 @@ public sealed class AgcConstantFillTests
         var diagnostic = typeof(AgcExports).GetMethod("GetConstantFillDiagnosticReason", BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.Equal(reason, diagnostic.Invoke(null, [program, evaluation, dispatch, 64u, 1u, 1u]));
 
-        var context = new CpuContext(new FakeCpuMemory(address, 1024), Generation.Gen5);
+        var memory = new FakeCpuMemory(address, 1024);
+        var context = new CpuContext(memory, Generation.Gen5);
         object?[] args = [context, program, evaluation, dispatch, 64u, 1u, 1u, 0L, ""];
         var submit = typeof(AgcExports).GetMethod("TrySubmitConstantFillKernel", BindingFlags.Static | BindingFlags.NonPublic)!;
-        // No presenter runs here. Verify preparation independently of queue execution.
-        Assert.False((bool)submit.Invoke(null, args)!);
+        // The replacement runs in stream order on the caller: an eligible shape writes the pattern now.
+        var applied = (bool)submit.Invoke(null, args)!;
         if (reason == "eligible")
         {
+            Assert.True(applied);
             Assert.Contains(records, (string)args[8]!);
             Assert.Contains("pattern=0x3C000000000000003C00000000000000", (string)args[8]!);
+            Span<byte> record = stackalloc byte[16];
+            Assert.True(memory.TryRead(address, record));
+            Assert.Equal(0x3C000000u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record[4..]));
+            Assert.Equal(0x3C000000u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record[12..]));
         }
         else
         {
+            Assert.False(applied);
             Assert.Equal("", args[8]);
         }
     }

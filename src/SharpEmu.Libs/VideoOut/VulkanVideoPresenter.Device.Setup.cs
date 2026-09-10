@@ -784,7 +784,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         "the buffer store needs bufferDeviceAddress, which this device lacks");
                 }
 
-                _gpuLabelTimelineEnabled = _gpuLabelTimelineRequested;
                 timelineSemaphoreFeatures.TimelineSemaphore = true;
                 timelineSemaphoreFeatures.PNext = supportsRobustness2
                     ? &robustness2Features
@@ -826,12 +825,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateScheduler();
             CreateBufferCache();
             CreateImageCache();
-            if (_gpuLabelTimelineEnabled)
-            {
-                CreateGuestTimelineSemaphores();
-                Volatile.Write(ref _gpuLabelTimelineAvailable, true);
-                Console.Error.WriteLine("[LOADER][INFO] Vulkan GPU label timelines enabled.");
-            }
+            CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
             {

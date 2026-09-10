@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using SharpEmu.Libs.VideoOut;
@@ -19,6 +20,85 @@ public sealed class PresenterSubmissionTests
 {
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+
+    [Fact]
+    public void FlipCapacity_SuspendsAtTheBoundAndReopensAfterDequeue()
+    {
+        var queueField = typeof(VulkanVideoPresenter).GetField("_pendingGuestImagePresentations", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var queue = queueField.GetValue(null)!;
+        var enqueue = queue.GetType().GetMethod("Enqueue")!;
+        var dequeue = queue.GetType().GetMethod("Dequeue")!;
+        var clear = queue.GetType().GetMethod("Clear")!;
+        var presentation = Activator.CreateInstance(queue.GetType().GenericTypeArguments[0])!;
+        var host = (ICommandStreamHost)RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var capacity = (int)typeof(VulkanVideoPresenter).GetField("MaxPendingGuestFlipVersions", BindingFlags.Static | BindingFlags.NonPublic)!.GetRawConstantValue()!;
+        Assert.Empty((IEnumerable)queue);
+        try
+        {
+            for (var index = 0; index < capacity; index++)
+            {
+                Assert.True(host.HasFlipSlot());
+                enqueue.Invoke(queue, new[] { presentation });
+            }
+            Assert.False(host.HasFlipSlot());
+            dequeue.Invoke(queue, null);
+            Assert.True(host.HasFlipSlot());
+        }
+        finally
+        {
+            clear.Invoke(queue, null);
+        }
+    }
+
+    [Fact]
+    public void ClosedPortFrame_IsRemovedBeforeCheckingTheNextFramesGpuTick()
+    {
+        var context = new CpuContext(new FakeCpuMemory(0x10000, 0x1000), Generation.Gen5);
+        var closedHandle = VideoOutExports.VideoOutOpen(context);
+        var liveHandle = VideoOutExports.VideoOutOpen(context);
+        Assert.True(closedHandle > 0);
+        Assert.True(liveHandle > 0);
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(closedHandle, -1, 0, 0, true, out var closedRequest));
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(liveHandle, -1, 0, 0, true, out var liveRequest));
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var queue = typeof(VulkanVideoPresenter).GetField("_pendingGuestImagePresentations", staticMembers)!.GetValue(null)!;
+        var presentationType = queue.GetType().GenericTypeArguments[0];
+        var enqueue = queue.GetType().GetMethod("Enqueue")!;
+        var clear = queue.GetType().GetMethod("Clear")!;
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
+        Set(presenter, "_commandStream", commands);
+        Assert.Empty((IEnumerable)queue);
+        try
+        {
+            foreach (var requestId in new[] { closedRequest, liveRequest })
+            {
+                var frame = Activator.CreateInstance(presentationType)!;
+                presentationType.GetProperty("Sequence")!.SetValue(frame, requestId == closedRequest ? 1L : 2L);
+                presentationType.GetProperty("FlipRequestId")!.SetValue(frame, requestId);
+                presentationType.GetProperty("RequiredTick")!.SetValue(frame, ulong.MaxValue);
+                enqueue.Invoke(queue, new[] { frame });
+            }
+            context[CpuRegister.Rdi] = (ulong)closedHandle;
+            VideoOutExports.VideoOutClose(context);
+            Assert.True((bool)PresenterType.GetMethod("HasReadyPresentationLocked", InstanceMembers)!.Invoke(presenter, null)!);
+            var take = PresenterType.GetMethod("TryTakePresentation", InstanceMembers)!;
+            Assert.False((bool)take.Invoke(presenter, new object?[] { null })!);
+            var remaining = Assert.Single(((IEnumerable)queue).Cast<object>());
+            Assert.Equal(liveRequest, presentationType.GetProperty("FlipRequestId")!.GetValue(remaining));
+            Assert.True(VideoOutExports.IsFlipPresentationPending(liveRequest));
+            Assert.False((bool)PresenterType.GetMethod("HasReadyPresentationLocked", InstanceMembers)!.Invoke(presenter, null)!);
+            Assert.Equal(1L, (long)commands.BlockedRetries);
+        }
+        finally
+        {
+            clear.Invoke(queue, null);
+            context[CpuRegister.Rdi] = (ulong)closedHandle;
+            VideoOutExports.VideoOutClose(context);
+            context[CpuRegister.Rdi] = (ulong)liveHandle;
+            VideoOutExports.VideoOutClose(context);
+        }
+    }
 
     [Fact]
     public void ImageUploadProfile_AddsBytesAndSeparatesPreparationCosts()
@@ -216,7 +296,7 @@ public sealed class PresenterSubmissionTests
     }
 
     [Fact]
-    public void RenderProfile_WindowScopesRestoreTheRenderPhase()
+    public void RenderProfile_DetailScopesRestoreTheRenderPhase()
     {
         const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
         var profile = typeof(RenderPhaseProfile);
@@ -231,8 +311,16 @@ public sealed class PresenterSubmissionTests
             RenderPhaseProfile.Phase.WindowState,
             RenderPhaseProfile.Phase.WindowDelay,
             RenderPhaseProfile.Phase.QueueContext,
-            RenderPhaseProfile.Phase.FollowupWait,
             RenderPhaseProfile.Phase.PresentationPreparation,
+            RenderPhaseProfile.Phase.CommandMemorySync,
+            RenderPhaseProfile.Phase.CommandMemoryRead,
+            RenderPhaseProfile.Phase.CommandGpuWait,
+            RenderPhaseProfile.Phase.CommandMemoryTransfer,
+            RenderPhaseProfile.Phase.CommandEndOfPipe,
+            RenderPhaseProfile.Phase.CommandDrawTranslation,
+            RenderPhaseProfile.Phase.CommandDispatchTranslation,
+            RenderPhaseProfile.Phase.GeometrySnapshotValidation,
+            RenderPhaseProfile.Phase.CommandDrawStateCreation,
         };
         var initialEntries = phases.Select(phase => entries[(int)phase]).ToArray();
         Assert.Equal(0, (int)depth.GetValue(null)!);
@@ -266,65 +354,69 @@ public sealed class PresenterSubmissionTests
     }
 
     [Fact]
-    public void FollowupWork_DoesNotRetryBlockedQueueHeads()
+    public void RenderProfile_CommandReadsCountOnlyInsideRenderScopes()
     {
         const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
-        var owner = typeof(VulkanVideoPresenter);
-        var gate = owner.GetField("_gate", staticMembers)!.GetValue(null)!;
-        var queues = (IDictionary)owner.GetField("_pendingGuestWorkByQueue", staticMembers)!.GetValue(null)!;
-        var count = owner.GetField("_pendingGuestWorkCount", staticMembers)!;
-        var completed = owner.GetField("_completedGuestWorkSequence", staticMembers)!;
-        var wait = owner.GetMethod("WaitForFollowupGuestWork", staticMembers)!;
-        var ready = owner.GetMethod("HasReadyGuestWorkLocked", staticMembers)!;
-        var pendingType = owner.GetNestedType("PendingGuestWork", BindingFlags.NonPublic)!;
-        var queueType = typeof(LinkedList<>).MakeGenericType(pendingType);
-
-        object CreateQueue(string name, long dependency, long sequence = 1)
+        var profile = typeof(RenderPhaseProfile);
+        var calls = (long[])profile.GetField("_commandReadCalls", staticMembers)!.GetValue(null)!;
+        var bytes = (long[])profile.GetField("_commandReadBytes", staticMembers)!.GetValue(null)!;
+        var category = RenderPhaseProfile.CommandReadKind.RegisterTable;
+        var index = (int)category;
+        var initialCalls = calls[index];
+        var initialBytes = bytes[index];
+        try
         {
-            var queue = Activator.CreateInstance(queueType)!;
-            var work = Activator.CreateInstance(pendingType,
-                [new object(), 0UL, sequence, dependency, 0L, new VulkanGuestQueueIdentity(name, 1)])!;
-            queueType.GetMethod("AddLast", [pendingType])!.Invoke(queue, [work]);
-            return queue;
+            RenderPhaseProfile.RecordCommandRead(category, 4);
+            Assert.Equal(initialCalls, calls[index]);
+            Assert.Equal(initialBytes, bytes[index]);
+            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
+            {
+                RenderPhaseProfile.RecordCommandRead(category, 4);
+                RenderPhaseProfile.RecordCommandRead(category, 8);
+            }
+            Assert.Equal(initialCalls + (RenderPhaseProfile.Enabled ? 2 : 0), calls[index]);
+            Assert.Equal(initialBytes + (RenderPhaseProfile.Enabled ? 12 : 0), bytes[index]);
         }
-
-        bool HasFollowup(HashSet<string>? excluded) => (bool)wait.Invoke(null, [0, excluded])!;
-
-        lock (gate)
+        finally
         {
-            Assert.Empty(queues);
-            var previousCount = count.GetValue(null);
-            var previousCompleted = completed.GetValue(null);
-            try
-            {
-                completed.SetValue(null, 0L);
-                queues.Add("blocked", CreateQueue("blocked", 0));
-                count.SetValue(null, 1);
-                Assert.True(HasFollowup(null));
-                Assert.False(HasFollowup(new HashSet<string> { "blocked" }));
+            calls[index] = initialCalls;
+            bytes[index] = initialBytes;
+        }
+    }
 
-                queues.Add("sibling", CreateQueue("sibling", long.MaxValue));
-                count.SetValue(null, 2);
-                Assert.False(HasFollowup(new HashSet<string> { "blocked" }));
-                queues["sibling"] = CreateQueue("sibling", 0);
-                Assert.True(HasFollowup(new HashSet<string> { "blocked" }));
-                Assert.False(HasFollowup(new HashSet<string> { "blocked", "sibling" }));
-                var blockedTicks = new Dictionary<long, ulong> { [1] = 7 };
-                Assert.False((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
-                Assert.True((bool)ready.Invoke(null, [null, blockedTicks, 7UL])!);
-                queues["sibling"] = CreateQueue("sibling", 0, 2);
-                Assert.True((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
-                queues["sibling"] = CreateQueue("sibling", long.MaxValue, 2);
-                Assert.False((bool)ready.Invoke(null, [null, blockedTicks, 6UL])!);
-                Assert.Equal(2, queues.Count);
-            }
-            finally
+    [Fact]
+    public void RenderProfile_SequentialPhasesRestoreTheParentAfterAnException()
+    {
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var profile = typeof(RenderPhaseProfile);
+        var current = profile.GetField("_current", staticMembers)!;
+        var depth = profile.GetField("_scopeDepth", staticMembers)!;
+        using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandDrawTranslation))
+        {
+            Assert.Throws<InvalidOperationException>((Action)(() =>
             {
-                queues.Clear();
-                count.SetValue(null, previousCount);
-                completed.SetValue(null, previousCompleted);
+                using var creation = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawStateCreation);
+                creation.SwitchPhase(RenderPhaseProfile.Phase.DrawVertexShaderSetup);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexEvaluation)) { }
+                if (RenderPhaseProfile.Enabled)
+                {
+                    Assert.Equal(RenderPhaseProfile.Phase.DrawVertexShaderSetup, current.GetValue(null));
+                }
+                creation.SwitchPhase(RenderPhaseProfile.Phase.DrawBindingAssembly);
+                if (RenderPhaseProfile.Enabled)
+                {
+                    Assert.Equal(RenderPhaseProfile.Phase.DrawBindingAssembly, current.GetValue(null));
+                    Assert.Equal(2, (int)depth.GetValue(null)!);
+                }
+                throw new InvalidOperationException();
+            }));
+            if (RenderPhaseProfile.Enabled)
+            {
+                Assert.Equal(RenderPhaseProfile.Phase.CommandDrawTranslation, current.GetValue(null));
+                Assert.Equal(1, (int)depth.GetValue(null)!);
             }
         }
+        Assert.Equal(0, (int)depth.GetValue(null)!);
     }
 
     [Theory]
@@ -336,11 +428,11 @@ public sealed class PresenterSubmissionTests
     {
         // Use the presenter bookkeeping without creating a window or Vulkan resources.
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        Set(presenter, "_commandStream", new CommandStreamQueue((ICommandStreamHost)presenter));
         foreach (var name in new[]
         {
             "_batchResources", "_batchRetireBuffers",
-            "_pendingGuestSubmissions", "_lastSubmittedTimelineByGuestQueue",
-            "_lastSubmittedGpuLabelDependencyByGuestQueue", "_gpuLabelHostPublications",
+            "_pendingGuestSubmissions",
             "_recycledDescriptorPools", "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys",
         })
         {
@@ -350,8 +442,6 @@ public sealed class PresenterSubmissionTests
 
         Set(presenter, "_batchOpen", true);
         Set(presenter, "_activeGuestQueue", new VulkanGuestQueueIdentity("test.queue", 7));
-        Set(presenter, "_gpuLabelTimelineEnabled", true);
-        Set(presenter, "_graphicsGuestTimelineSemaphore", new Silk.NET.Vulkan.Semaphore(100));
 
         var binding = NewNested("GlobalBufferResource");
         Set(binding, "Writable", true);
@@ -388,7 +478,7 @@ public sealed class PresenterSubmissionTests
         }
 
         Assert.Equal(1UL, Assert.Single(device.Submits).Tick);
-        Assert.Equal(2, device.Submits[0].Signals);
+        Assert.Equal(1, device.Submits[0].Signals);
         Assert.False((bool)Get(presenter, "_batchOpen"));
         Assert.Empty((IEnumerable)Get(presenter, "_batchResources"));
         Assert.Equal(1UL, Get(presenter, "_submitTimeline"));

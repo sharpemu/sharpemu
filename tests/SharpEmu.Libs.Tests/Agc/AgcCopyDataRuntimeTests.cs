@@ -4,12 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
+// The submit exports run the inline command stream, so every effect lands before they return.
 [Collection(AgcCommandBufferChainCollection.Name)]
-public sealed class AgcCopyDataRuntimeTests : IDisposable
+public sealed class AgcCopyDataRuntimeTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x1_0000;
@@ -29,16 +31,7 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
     private const uint ItWriteData = 0x37;
     private const uint ItCopyData = 0x40;
     private const uint RWaitMem32 = 0x0A;
-
-    public AgcCopyDataRuntimeTests()
-    {
-        GpuWaitRegistry.Clear();
-    }
-
-    public void Dispose()
-    {
-        GpuWaitRegistry.Clear();
-    }
+    private const uint FirstComputeOwner = 0x20;
 
     [Fact]
     public void ImmediateCopy_ReleasesWaitingGraphicsSubmission()
@@ -48,8 +41,9 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
         const uint expected = 0x1122_3344;
         var graphicsDwords = WriteWaitThenResult(memory, LabelAddress, expected);
 
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
         SubmitDcb(ctx, memory, GraphicsCommandAddress, graphicsDwords);
-        Assert.Equal(1, GpuWaitRegistry.Count);
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
 
         WriteCopyData(
@@ -58,13 +52,11 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             control: 5u | (2u << 8),
             source: expected,
             destination: LabelAddress);
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: 1);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: FirstComputeOwner);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, ResultAddress) == 0xCAFE_BABE,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0xCAFE_BABEu, ReadUInt32(memory, ResultAddress));
         Assert.Equal(expected, ReadUInt32(memory, LabelAddress));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.False(stream.Queue.HasPending);
     }
 
     [Fact]
@@ -82,9 +74,7 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
 
         SubmitDcb(ctx, memory, GraphicsCommandAddress, 6);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, DestinationAddress) == 0xA5A5_5A5A,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0xA5A5_5A5Au, ReadUInt32(memory, DestinationAddress));
     }
 
     [Fact]
@@ -95,8 +85,9 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
         const uint highDword = 0xAABB_CCDD;
         var graphicsDwords = WriteWaitThenResult(memory, LabelAddress + sizeof(uint), highDword);
 
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
         SubmitDcb(ctx, memory, GraphicsCommandAddress, graphicsDwords);
-        Assert.Equal(1, GpuWaitRegistry.Count);
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
 
         const ulong value = ((ulong)highDword << 32) | 0x1122_3344u;
         WriteCopyData(
@@ -105,13 +96,11 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             control: 5u | (2u << 8) | (1u << 16),
             source: value,
             destination: LabelAddress);
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: 3);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 6, owner: FirstComputeOwner + 2);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, ResultAddress) == 0xCAFE_BABE,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0xCAFE_BABEu, ReadUInt32(memory, ResultAddress));
         Assert.Equal(value, ReadUInt64(memory, LabelAddress));
-        Assert.Equal(0, GpuWaitRegistry.Count);
+        Assert.False(stream.Queue.HasPending);
     }
 
     [Fact]
@@ -136,9 +125,7 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
 
         SubmitDcb(ctx, memory, GraphicsCommandAddress, 15);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, DestinationAddress) == 5,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(5u, ReadUInt32(memory, DestinationAddress));
         Assert.Equal(8u, ReadUInt32(memory, SourceAddress));
     }
 
@@ -175,11 +162,9 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             source: 0,
             destination: SecondResultAddress);
 
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 30, owner: 5);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 30, owner: FirstComputeOwner + 4);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt32(memory, SecondResultAddress) == 11,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(11u, ReadUInt32(memory, SecondResultAddress));
         Assert.Equal(10u, ReadUInt32(memory, DestinationAddress));
         Assert.Equal(13u, ReadUInt32(memory, SourceAddress));
     }
@@ -204,17 +189,17 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             source: 0,
             destination: DestinationAddress);
 
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 15, owner: 6);
+        SubmitAcb(ctx, memory, ComputeCommandAddress, 15, owner: FirstComputeOwner + 5);
 
-        Assert.True(SpinWait.SpinUntil(
-            () => ReadUInt64(memory, DestinationAddress) == 0x1_0000_0005,
-            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0x1_0000_0005UL, ReadUInt64(memory, DestinationAddress));
         Assert.Equal(0x1_0000_0008UL, ReadUInt64(memory, SourceAddress));
     }
 
+    // An atomic-return copy with no atomic before it is fatal; the stream refuses later work.
     [Fact]
-    public void AtomicReturnCopy_WithoutAtomicStopsCurrentAndLaterQueueWork()
+    public void AtomicReturnCopy_WithoutAtomicIsFatalAndStopsLaterQueueWork()
     {
+        using var fatal = new FatalScope();
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
         WriteCopyData(
@@ -225,12 +210,12 @@ public sealed class AgcCopyDataRuntimeTests : IDisposable
             destination: DestinationAddress);
         WriteWriteData(memory, ComputeCommandAddress + (6 * sizeof(uint)), ResultAddress, 0x1111_1111);
 
-        SubmitAcb(ctx, memory, ComputeCommandAddress, 11, owner: 4);
+        Assert.Throws<SchedulerFatalException>(() => SubmitAcb(ctx, memory, ComputeCommandAddress, 11, owner: FirstComputeOwner + 3));
         Assert.Equal(0u, ReadUInt32(memory, DestinationAddress));
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
 
         WriteWriteData(memory, LaterComputeCommandAddress, ResultAddress, 0x2222_2222);
-        SubmitAcb(ctx, memory, LaterComputeCommandAddress, 5, owner: 4);
+        Assert.Throws<SchedulerFatalException>(() => SubmitAcb(ctx, memory, LaterComputeCommandAddress, 5, owner: FirstComputeOwner + 3));
         Assert.Equal(0u, ReadUInt32(memory, ResultAddress));
     }
 

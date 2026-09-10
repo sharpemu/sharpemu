@@ -1110,15 +1110,6 @@ public static class AmprExports
             return false;
         }
 
-        // GPU waits can watch either dword of this 64-bit completion label.
-        // Publish both halves as one write so each waiter sees the correct
-        // address and value.
-        _ = GpuWaitRegistry.RecordProduced(
-            ctx.Memory,
-            address,
-            value,
-            hasHighDword: true);
-
         TraceAmpr(ctx, "complete_write_address", address, value, 0);
         return true;
     }
