@@ -20,6 +20,44 @@ public sealed unsafe class SharedBackingViewsTests
 {
     private static byte[] Pattern(int length, byte value) => Enumerable.Repeat(value, length).ToArray();
 
+    [Fact]
+    public void SingleMappingReadsDoNotAllocateTemporarySegments()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        using var store = new SharedBackingViews(host, BackingSize);
+        var hole = HoleSize(host);
+        var baseAddress = ReserveFreeHole(host, hole);
+        Assert.True(host.SplitHole(baseAddress, Segment));
+        Assert.True(store.TryMapReservedRange(baseAddress, Segment, Segment, HostPageProtection.ReadWrite, out _));
+        try
+        {
+            *(ulong*)(baseAddress + Segment - 8) = Marker;
+            Span<byte> bytes = stackalloc byte[8];
+            for (var index = 0; index < 256; index++)
+                Assert.True(store.TryReadBacking(baseAddress + Segment - 8, bytes));
+
+            var initialAllocation = GC.GetAllocatedBytesForCurrentThread();
+            var succeeded = true;
+            for (var index = 0; index < 1024; index++)
+                succeeded &= store.TryReadBacking(baseAddress + Segment - 8, bytes);
+            var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - initialAllocation;
+
+            Assert.True(succeeded);
+            Assert.Equal(Marker, System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes));
+            Assert.Equal(0L, allocatedBytes);
+            bytes.Fill(0xA5);
+            Assert.False(store.TryReadBacking(baseAddress + Segment - 4, bytes));
+            Assert.True(bytes.SequenceEqual(new byte[] { 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5 }));
+        }
+        finally
+        {
+            Assert.True(store.Unmap(baseAddress, Segment, out _));
+            Assert.True(host.JoinHoles(baseAddress, hole));
+            Assert.True(host.FreeHole(baseAddress, hole));
+        }
+    }
+
     private static ulong[] Read(SharedBackingViews store, ulong address, int count)
     {
         var bytes = new byte[count * 8];

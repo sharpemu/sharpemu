@@ -66,6 +66,19 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
+            // A read inside one mapping needs no temporary segment list.
+            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            {
+                var offset = record.Offset + address - record.Address;
+                if (!IsWithinBacking(offset, (ulong)data.Length))
+                {
+                    return false;
+                }
+
+                new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                return true;
+            }
+
             if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
             {
                 return false;
