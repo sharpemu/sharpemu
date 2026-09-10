@@ -23,7 +23,7 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
     // The worker waits inside Finish with the lock held: pending GPU work and a completion action
     // drain first, then the guest writer that spun on the lock completes.
     [Fact]
-    public void GuestWrite_WaitsWhileTheWorkerDrainsInsideFinishUnderTheImageLock()
+    public async Task GuestWrite_WaitsWhileTheWorkerDrainsInsideFinishUnderTheImageLock()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new CacheHarness(_vulkan);
@@ -55,15 +55,17 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
         {
             Assert.True(inFinish.Wait(5000));
             write.Start();
-            Assert.False(write.Wait(250));
+            await Assert.ThrowsAsync<TimeoutException>(async () =>
+            {
+                _ = await write.WaitAsync(TimeSpan.FromMilliseconds(250));
+            });
         }
         finally
         {
             release.Set();
         }
 
-        Assert.True(write.Wait(5000));
-        Assert.True(write.Result);
+        Assert.True(await write.WaitAsync(TimeSpan.FromSeconds(5)));
         harness.Worker.Run(() => { });
         Assert.True(completionRan);
         Assert.False(writeSeenByCompletion);
