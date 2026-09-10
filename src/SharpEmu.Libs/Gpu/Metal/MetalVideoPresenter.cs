@@ -600,7 +600,7 @@ internal static partial class MetalVideoPresenter
             MetalNative.Selector("setViewport:"),
             new MtlViewport
             {
-                OriginX = margin,
+                OriginX = _drawableWidth - margin - panelWidth,
                 OriginY = margin,
                 Width = panelWidth,
                 Height = panelHeight,

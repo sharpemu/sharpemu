@@ -76,7 +76,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordOverlayBlit(uint imageIndex, int frameSlot)
         {
-            if (_overlayImage.Handle == 0 || _overlayStagingMapped.Length <= frameSlot)
+            const int margin = 12;
+            if (_overlayImage.Handle == 0 || _overlayStagingMapped.Length <= frameSlot ||
+                _extent.Width <= margin || _extent.Height <= margin)
             {
                 return;
             }
@@ -153,7 +155,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 PipelineStageFlags.TransferBit,
                 0, 0, null, 0, null, 2, preBlitBarriers);
 
-            const int margin = 12;
             var panelWidth = (int)Math.Min(PerfOverlay.PanelWidth, _extent.Width - margin);
             var panelHeight = (int)Math.Min(PerfOverlay.PanelHeight, _extent.Height - margin);
             // Source and destination are both B8G8R8A8 and the panel is not
@@ -167,7 +168,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
                 DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
                 SrcOffset = new Offset3D(0, 0, 0),
-                DstOffset = new Offset3D(margin, margin, 0),
+                DstOffset = new Offset3D((int)_extent.Width - margin - panelWidth, margin, 0),
                 Extent = new Extent3D((uint)panelWidth, (uint)panelHeight, 1),
             };
             _vk.CmdCopyImage(

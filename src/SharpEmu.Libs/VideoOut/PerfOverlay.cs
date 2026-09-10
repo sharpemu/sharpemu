@@ -14,7 +14,7 @@ namespace SharpEmu.Libs.VideoOut;
 /// </summary>
 public static class PerfOverlay
 {
-    public const int PanelWidth = 376;
+    public const int PanelWidth = 405;
     public const int PanelHeight = 176;
 
     private const int GlyphColumns = 5;
