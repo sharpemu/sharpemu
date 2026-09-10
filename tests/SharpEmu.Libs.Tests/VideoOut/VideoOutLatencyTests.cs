@@ -3,10 +3,12 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
+[Collection(SchedulingStateCollection.Name)]
 public sealed class VideoOutLatencyTests
 {
     private const string OpenNid = "Up36PTk687E";

@@ -5,12 +5,14 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 // Completion (counters, events) and presentation (the frame is done) are independent
 // responsibilities; the request leaves the table only after both, in either order.
+[Collection(SchedulingStateCollection.Name)]
 public sealed class VideoOutFlipRequestTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
@@ -33,9 +35,24 @@ public sealed class VideoOutFlipRequestTests : IDisposable
 
     public void Dispose()
     {
-        VideoOutExports.CancelOutstandingFlips();
         _context[CpuRegister.Rdi] = unchecked((ulong)_handle);
         _ = VideoOutExports.VideoOutClose(_context);
+    }
+
+    [Fact]
+    public void CleanupPreservesAnotherPortsPendingFlip()
+    {
+        var request = Reserve(42);
+        using (var otherPort = new VideoOutFlipRequestTests())
+        {
+            otherPort.Reserve(43);
+        }
+
+        Assert.Equal(VideoOutExports.FlipOutcome.Pending, VideoOutExports.GetFlipOutcomeForTests(request));
+        var before = FlipCount();
+        VideoOutExports.CompleteFlip(request);
+        Assert.Equal(before + 1, FlipCount());
+        VideoOutExports.MarkFlipPresented(request);
     }
 
     private ulong Reserve(long flipArg)
