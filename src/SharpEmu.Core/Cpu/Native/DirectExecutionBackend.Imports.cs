@@ -1520,7 +1520,7 @@ public sealed partial class DirectExecutionBackend
 			"DfivPArhucg" or // memcmp
 			"8zTFvBIAIN8";   // memset
 
-	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
+	internal bool ShouldLogImportResult(string nid, OrbisGen2Result result)
 	{
 		var resultValue = unchecked((int)result);
 		if (resultValue > 0)
@@ -1558,25 +1558,35 @@ public sealed partial class DirectExecutionBackend
 		var expectedPlayGoChunkEnumerationEnd =
 			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80B2000C);
-		if (!expectedFileProbeMiss &&
-			!expectedTimedWaitTimeout &&
-			!expectedEqueueTimeout &&
-			!expectedMutexTrylockBusy &&
-			!expectedSemaphoreTrywaitAgain &&
-			!expectedPollSemaBusy &&
-			!expectedNetAcceptWouldBlock &&
-			!expectedUserServiceNoEvent &&
-			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
-		{
-			return true;
-		}
+		var isExpectedTransient =
+			expectedFileProbeMiss ||
+			expectedTimedWaitTimeout ||
+			expectedEqueueTimeout ||
+			expectedMutexTrylockBusy ||
+			expectedSemaphoreTrywaitAgain ||
+			expectedPollSemaBusy ||
+			expectedNetAcceptWouldBlock ||
+			expectedUserServiceNoEvent ||
+			expectedPrivacyInvalidParameter ||
+			expectedPlayGoChunkEnumerationEnd;
 
-		if (!ShouldLogExpectedImportResults())
+		if (isExpectedTransient && !ShouldLogExpectedImportResults())
 		{
+			// Known-benign polling noise (trylock-busy, semaphore timeouts, ...)
+			// stays silent by default; SHARPEMU_LOG_EXPECTED_IMPORT_RESULTS=1
+			// opts back into seeing it, sampled the same as everything else
+			// below.
 			return false;
 		}
 
+		// Anything not on the expected-transient list is presumed rare enough
+		// to show every time -- true for a genuine one-off error, but a title
+		// that retries an unresolved/failing import in a tight loop with no
+		// backoff of its own (e.g. #619) turns that assumption into millions
+		// of identical log lines, each allocating and writing to Console.Error
+		// with no cap. Route both cases through the same per-(nid,result)
+		// sample counter so a runaway retry loop degrades to occasional
+		// samples instead of unbounded output.
 		var key = nid + "\0" + resultValue;
 		int count;
 		lock (_importResultLogSampleGate)
