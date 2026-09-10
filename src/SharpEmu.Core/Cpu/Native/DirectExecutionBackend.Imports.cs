@@ -1771,6 +1771,21 @@ public sealed partial class DirectExecutionBackend
 		ActiveForcedGuestExit = true;
 		LastError = $"Detected repeating import loop at import#{dispatchIndex} ({nid}) and forced guest exit.";
 		Console.Error.WriteLine($"[LOADER][ERROR] Import-loop guard fired at import#{dispatchIndex}: nid={nid} ret=0x{returnRip:X16} -> host_exit=0x{num:X16}");
+		var cpuContext = _cpuContext;
+		if (cpuContext is not null)
+		{
+			var stackTrace = DescribeGuestStackTrace(cpuContext.TryReadUInt64, cpuContext[CpuRegister.Rbp]);
+			if (stackTrace is not null)
+			{
+				// The repeat count alone only tells you which import is being
+				// hammered, not who is doing the hammering -- a mutex/condvar
+				// wrapper reused across the whole runtime looks identical
+				// regardless of which caller is spinning on it. This is the
+				// one piece of context that can actually point at the guest
+				// loop responsible instead of the shared primitive it calls.
+				Console.Error.WriteLine($"[LOADER][ERROR] Import-loop guest stack (rbp-chain, best-effort): {stackTrace}");
+			}
+		}
 		DumpRecentImportTrace();
 		return true;
 	}

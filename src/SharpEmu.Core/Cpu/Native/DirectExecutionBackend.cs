@@ -6797,6 +6797,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall stack: [rsp]=0x{value:X16} [rsp+8]=0x{value2:X16}");
 			}
 
+			var stallStackTrace = DescribeGuestStackTrace(cpuContext.TryReadUInt64, cpuContext[CpuRegister.Rbp]);
+			if (stallStackTrace is not null)
+			{
+				Console.Error.WriteLine($"[LOADER][ERROR] Stall guest stack (rbp-chain, best-effort): {stallStackTrace}");
+			}
+
 			var mainHostThreadId = Volatile.Read(ref _mainHostThreadId);
 			if (mainHostThreadId != 0 && TryCaptureHostThreadContext(mainHostThreadId, out var mainCtx))
 			{

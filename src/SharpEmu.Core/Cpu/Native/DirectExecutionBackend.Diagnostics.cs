@@ -15,6 +15,95 @@ namespace SharpEmu.Core.Cpu.Native;
 
 public sealed partial class DirectExecutionBackend
 {
+	/// <summary>
+	/// Matches <see cref="SharpEmu.HLE.CpuContext.TryReadUInt64(ulong, out ulong)"/>
+	/// so <see cref="WalkGuestStackReturnAddresses"/> can bind directly to it at
+	/// the real call site and to a fake dictionary-backed reader in tests.
+	/// </summary>
+	internal delegate bool TryReadUInt64Delegate(ulong address, out ulong value);
+
+	/// <summary>
+	/// Best-effort guest call-stack walk from a saved RBP chain, for diagnostic
+	/// snapshots (e.g. the stall watchdog). This only understands the classic
+	/// push-rbp/mov-rbp-rsp frame layout: a function built with frame pointers
+	/// omitted breaks the chain and the walk stops there rather than printing
+	/// garbage. That is a real, known limitation — this is not DWARF/.eh_frame
+	/// unwinding, just the same low-cost heuristic most "best effort" native
+	/// stack dumpers use, good enough to identify a caller that repeat-calls a
+	/// known function without needing full single-step/interrupt support.
+	/// </summary>
+	internal static List<ulong> WalkGuestStackReturnAddresses(
+		TryReadUInt64Delegate tryReadUInt64,
+		ulong rbp,
+		int maxFrames = 32)
+	{
+		var frames = new List<ulong>(maxFrames);
+		var previousRbp = 0UL;
+		for (var i = 0; i < maxFrames; i++)
+		{
+			// The stack grows down, so a genuine caller's frame must sit at a
+			// strictly higher address than the callee's. A saved RBP that
+			// doesn't satisfy that is not a real chain link (omitted frame
+			// pointer, corrupted stack, or we walked off the end) -- stop
+			// instead of following it into unrelated memory.
+			if (rbp == 0 || (previousRbp != 0 && rbp <= previousRbp))
+			{
+				break;
+			}
+
+			if (!tryReadUInt64(rbp + 8, out var returnAddress) || returnAddress == 0)
+			{
+				break;
+			}
+
+			frames.Add(returnAddress);
+
+			if (!tryReadUInt64(rbp, out var savedRbp))
+			{
+				break;
+			}
+
+			previousRbp = rbp;
+			rbp = savedRbp;
+		}
+
+		return frames;
+	}
+
+	/// <summary>
+	/// Formats a best-effort guest stack trace for diagnostic logging, resolving
+	/// any frame that lands on a known import stub to its NID/export name the
+	/// same way a stalled RIP already is. Returns null when the RBP chain
+	/// yields no frames (omitted frame pointers, corrupted stack, or genuinely
+	/// at the top of the call chain) so callers can skip the log line entirely.
+	/// </summary>
+	private string? DescribeGuestStackTrace(TryReadUInt64Delegate tryReadUInt64, ulong rbp)
+	{
+		var frames = WalkGuestStackReturnAddresses(tryReadUInt64, rbp);
+		if (frames.Count == 0)
+		{
+			return null;
+		}
+
+		var describedFrames = frames.Select(frameAddress =>
+		{
+			foreach (var entry in _importEntries)
+			{
+				if (entry.Address != frameAddress)
+				{
+					continue;
+				}
+
+				return _moduleManager.TryGetExport(entry.Nid, out var frameExport)
+					? $"0x{frameAddress:X16}({frameExport.LibraryName}:{frameExport.Name})"
+					: $"0x{frameAddress:X16}(nid={entry.Nid})";
+			}
+
+			return $"0x{frameAddress:X16}";
+		});
+		return string.Join(" <- ", describedFrames);
+	}
+
 	private static readonly ConcurrentDictionary<ulong, byte> _knownExecutablePages = new();
 
 	private static readonly bool _perfHleHistogram =
