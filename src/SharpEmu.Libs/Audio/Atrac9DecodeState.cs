@@ -90,7 +90,7 @@ internal sealed class Atrac9DecodeState
                 return true;
             }
             catch (Exception exception) when (
-                exception is ArgumentException or InvalidDataException or InvalidOperationException)
+                exception is ArgumentException or InvalidDataException or InvalidOperationException or IndexOutOfRangeException)
             {
                 Clear();
                 return false;
