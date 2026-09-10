@@ -10,6 +10,50 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ScalarSsaTests
 {
+    [Fact]
+    public void CachedQueriesKeepAnalysisInputsSeparate()
+    {
+        Gen5ShaderInstruction[] instructions = [Mov(0, 8, 42), Nop(4)];
+        var first = Gen5ScalarSsa.Build(instructions, [10u]);
+        var second = Gen5ScalarSsa.Build(instructions, [20u]);
+        for (var iteration = 0; iteration < 3; iteration++)
+        {
+            Assert.Equal(10u, first.GetScalarAt(4, 0).Constant);
+            Assert.Equal(20u, second.GetScalarAt(4, 0).Constant);
+            Assert.Equal(42u, first.GetScalarAt(4, 8).Constant);
+            Assert.Equal(IrReachingDefinition.At(0), first.GetReachingDefinitionAt(4, 8));
+            Assert.Equal(IrReachingDefinition.None, first.GetReachingDefinitionAt(0, 8));
+            Assert.Equal(IrScalarValue.Unknown, first.GetScalarAt(99, 8));
+            Assert.Equal(IrReachingDefinition.None, first.GetReachingDefinitionAt(4, 256));
+        }
+    }
+
+    [Fact]
+    public void CachedQueriesAreConcurrentAndDoNotAllocateOnHits()
+    {
+        var analysis = Gen5ScalarSsa.Build([Mov(0, 8, 42), Nop(4)], []);
+        Parallel.For(0, 64, _ =>
+        {
+            Assert.Equal(42u, analysis.GetScalarAt(4, 8).Constant);
+            Assert.Equal(IrReachingDefinition.At(0), analysis.GetReachingDefinitionAt(4, 8));
+        });
+        for (var warmup = 0; warmup < 256; warmup++)
+        {
+            analysis.GetScalarAt(4, 8);
+            analysis.GetReachingDefinitionAt(4, 8);
+        }
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var correct = true;
+        for (var query = 0; query < 1024; query++)
+        {
+            correct &= analysis.GetScalarAt(4, 8).Constant == 42;
+            correct &= analysis.GetReachingDefinitionAt(4, 8) == IrReachingDefinition.At(0);
+        }
+        var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        Assert.True(correct);
+        Assert.Equal(0, allocatedBytes);
+    }
+
     private static Gen5ShaderInstruction Mov(uint pc, uint destination, uint literal) =>
         new(
             pc,

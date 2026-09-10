@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Ir;
@@ -112,6 +113,8 @@ public sealed class Gen5ScalarSsa
     private readonly IReadOnlyList<IrScalarValue[]> _exitState;
     private readonly IReadOnlyDictionary<uint, int> _blockByPc;
     private readonly IReadOnlyList<Gen5ShaderInstruction> _instructions;
+    private readonly ConcurrentDictionary<(uint ProgramCounter, uint Register), IrScalarValue> _scalarQueryResults = new();
+    private readonly ConcurrentDictionary<(uint ProgramCounter, uint Register), IrReachingDefinition> _definitionQueryResults = new();
 
     public static Gen5ScalarSsa Build(
         IReadOnlyList<Gen5ShaderInstruction> instructions,
@@ -252,6 +255,14 @@ public sealed class Gen5ScalarSsa
 
     public IrScalarValue GetScalarAt(uint pc, uint register)
     {
+        if (register >= ScalarRegisterCount || !_blockByPc.ContainsKey(pc)) return IrScalarValue.Unknown;
+        // Results belong to this analysis and its original input state.
+        return _scalarQueryResults.GetOrAdd((pc, register), static (query, analysis) =>
+            analysis.FindScalarValue(query.ProgramCounter, query.Register), this);
+    }
+
+    private IrScalarValue FindScalarValue(uint pc, uint register)
+    {
         if (register >= ScalarRegisterCount || !_blockByPc.TryGetValue(pc, out var blockIndex))
         {
             return IrScalarValue.Unknown;
@@ -278,6 +289,13 @@ public sealed class Gen5ScalarSsa
     }
 
     public IrReachingDefinition GetReachingDefinitionAt(uint pc, uint register)
+    {
+        if (register >= ScalarRegisterCount || !_blockByPc.ContainsKey(pc)) return IrReachingDefinition.None;
+        return _definitionQueryResults.GetOrAdd((pc, register), static (query, analysis) =>
+            analysis.FindReachingDefinition(query.ProgramCounter, query.Register), this);
+    }
+
+    private IrReachingDefinition FindReachingDefinition(uint pc, uint register)
     {
         if (register >= ScalarRegisterCount || !_blockByPc.TryGetValue(pc, out var blockIndex))
         {
