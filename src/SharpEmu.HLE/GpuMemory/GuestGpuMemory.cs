@@ -221,6 +221,43 @@ public sealed class GuestGpuMemory : IDisposable
         }
     }
 
+    // Enter the GPU worker before the caller takes locks used by GPU memory reads.
+    public void RunMappingChange(Action change)
+    {
+        for (;;)
+        {
+            var attachment = Volatile.Read(ref _attachment);
+            if (attachment?.Scheduler?.InsideTickCallback == true)
+            {
+                PageGuard.OnFatal("Cannot change memory mappings from a GPU completion callback.");
+                return;
+            }
+
+            if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
+            {
+                if (gpu.TryRunAfterPendingWork(() => ApplyChange(attachment.Scheduler)))
+                    return;
+                WaitForDetach(attachment);
+                continue;
+            }
+
+            ApplyChange(attachment?.Scheduler);
+            return;
+        }
+
+        void ApplyChange(IGpuTickScheduler? scheduler)
+        {
+            // Finish callbacks before the mapping transaction takes its locks.
+            if (scheduler is { Active: true })
+            {
+                var tick = scheduler.CurrentTick;
+                scheduler.Finish();
+                scheduler.WaitForPriorityOperations(tick);
+            }
+            change();
+        }
+    }
+
     // Publish both references together so an unmap cannot use a mismatched pair.
     public void AttachGpuQueue(IGpuQueueRelay? gpu, IGpuTickScheduler? scheduler)
     {

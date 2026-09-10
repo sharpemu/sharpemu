@@ -14,6 +14,137 @@ namespace SharpEmu.Libs.Tests.Kernel;
 [Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class KernelBackedMemoryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReservationLetsPendingGpuReadsFinishBeforeTakingMappingLocks(bool replaceMapping)
+    {
+        using var test = new BackedKernelMemory();
+        const ulong address = 0x1026C00000;
+        test.Reserve(0x10000, address);
+        SetPrtAperture(test, address, 0x10000);
+        using var memory = new GuestGpuMemory(test.Memory);
+        GuestGpuMemoryHook.Attach(memory);
+        try
+        {
+            test.Allocate(0, 0x4000);
+            test.Map(0, 0x4000, address);
+            Assert.True(memory.Covers(address, 0x4000));
+            var relay = new PendingReadRelay(() =>
+            {
+                var bytes = new byte[0x10000];
+                Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, bytes));
+            });
+            memory.AttachGpuQueue(relay, null);
+            var reserved = test.Reserve(0x10000, replaceMapping ? address : 0);
+            Assert.Equal(1, relay.DispatchCount);
+            if (replaceMapping)
+                Assert.Equal(address, reserved);
+            else
+                Assert.NotEqual(address, reserved);
+            Assert.Equal(!replaceMapping, memory.Covers(address, 0x4000));
+            Assert.Equal((reserved, reserved + 0x10000), test.Query(reserved));
+        }
+        finally
+        {
+            memory.AttachGpuQueue(null, null);
+            GuestGpuMemoryHook.Attach(null);
+            SetPrtAperture(test, address, 0);
+        }
+    }
+
+    private sealed class PendingReadRelay(Action readPendingImage) : IGpuQueueRelay
+    {
+        public bool IsGpuQueueThread { get; private set; }
+        public int DispatchCount { get; private set; }
+        public void Post(Action work) => RunOnGpuQueue(work);
+        public void RunOnGpuQueue(Action work) => _ = TryRunOnGpuQueue(work);
+
+        public bool TryRunOnGpuQueue(Action work)
+        {
+            DispatchCount++;
+            // A blocked read must fail the test, not leave its host waiting forever.
+            Task.Run(readPendingImage).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            IsGpuQueueThread = true;
+            try { work(); }
+            finally { IsGpuQueueThread = false; }
+            return true;
+        }
+    }
+
+    [Theory]
+    [InlineData("direct")]
+    [InlineData("flexible")]
+    [InlineData("unmap")]
+    [InlineData("release")]
+    [InlineData("checked-release")]
+    [InlineData("reset")]
+    [InlineData("batch")]
+    public void MappingChangesLetPendingGpuReadsFinish(string operation)
+    {
+        using var test = new BackedKernelMemory();
+        var previousPool = KernelMemoryCompatExports.SetFlexibleBackingForTests(new FlexibleBackingPool(0x4000000, 0x4000000));
+        const ulong address = 0x1026C00000;
+        test.Reserve(0x10000, address);
+        SetPrtAperture(test, address, 0x10000);
+        using var memory = new GuestGpuMemory(test.Memory);
+        GuestGpuMemoryHook.Attach(memory);
+        try
+        {
+            test.Allocate(0, 0x8000);
+            test.Map(0, 0x4000, address);
+            var relay = new PendingReadRelay(() =>
+                Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, new byte[0x10000])));
+            memory.AttachGpuQueue(relay, null);
+            switch (operation)
+            {
+                case "direct":
+                    Assert.Equal(address, test.Map(0x4000, 0x4000, address));
+                    break;
+                case "flexible":
+                    Assert.Equal(address, test.Flexible(0x4000, address));
+                    break;
+                case "unmap":
+                    Assert.Equal(0, test.Unmap(address, 0x4000));
+                    break;
+                case "release":
+                    test.Context[CpuRegister.Rdi] = 0;
+                    test.Context[CpuRegister.Rsi] = 0x8000;
+                    Assert.Equal(0, KernelMemoryCompatExports.KernelReleaseDirectMemory(test.Context));
+                    break;
+                case "checked-release":
+                    Assert.Equal(0, test.Release(0, 0x8000));
+                    break;
+                case "reset":
+                    KernelMemoryCompatExports.ResetBackingMappings(test.Memory);
+                    break;
+                case "batch":
+                    var entryAddress = test.Output + 0x200;
+                    Assert.True(test.Context.TryWriteUInt64(entryAddress, address));
+                    Assert.True(test.Context.TryWriteUInt64(entryAddress + 8, 0x4000));
+                    Assert.True(test.Context.TryWriteUInt64(entryAddress + 16, 0x4000));
+                    Assert.True(test.Context.TryWriteUInt64(entryAddress + 24, 0x33));
+                    test.Context[CpuRegister.Rdi] = entryAddress;
+                    test.Context[CpuRegister.Rsi] = 1;
+                    test.Context[CpuRegister.Rdx] = test.Output + 0x240;
+                    Assert.Equal(0, KernelMemoryCompatExports.KernelBatchMap(test.Context));
+                    Assert.True(test.Context.TryReadUInt32(test.Output + 0x240, out var processed));
+                    Assert.Equal(1u, processed);
+                    break;
+            }
+            Assert.Equal(1, relay.DispatchCount);
+            Assert.Equal(operation is "direct" or "flexible" or "batch", memory.Covers(address, 0x4000));
+        }
+        finally
+        {
+            memory.AttachGpuQueue(null, null);
+            GuestGpuMemoryHook.Attach(null);
+            SetPrtAperture(test, address, 0);
+            KernelMemoryCompatExports.ResetBackingMappings(test.Memory);
+            KernelMemoryCompatExports.SetFlexibleBackingForTests(previousPool);
+        }
+    }
+
     [Fact]
     public void SparseImageReadCopiesResidentRangesAndClearsReservedGaps()
     {

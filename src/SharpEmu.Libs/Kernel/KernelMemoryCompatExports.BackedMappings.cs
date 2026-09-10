@@ -59,6 +59,15 @@ public static partial class KernelMemoryCompatExports
 
     public static void ResetBackingMappings(IGuestBackedSpace? owner)
     {
+        RunMappingTransaction(() =>
+        {
+            ResetBackingMappingsCore(owner);
+            return 0;
+        });
+    }
+
+    private static void ResetBackingMappingsCore(IGuestBackedSpace? owner)
+    {
         lock (_memoryGate)
         {
             if (owner is null || !ReferenceEquals(owner, _backingOwner))
@@ -240,6 +249,22 @@ public static partial class KernelMemoryCompatExports
     }
 
     internal static int ReserveBackingRange(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
+        => RunMappingTransaction(() => ReserveBackingRangeCore(ctx, pointer, length, flags, alignment));
+
+    private static int RunMappingTransaction(Func<int> transaction)
+    {
+        // GPU handoff must precede locks needed by image and buffer reads.
+        if (Monitor.IsEntered(_memoryGate))
+            throw new InvalidOperationException("Cannot start a mapping transaction while holding the mapping lock.");
+        if (GuestGpuMemoryHook.Current is not { } memory)
+            return transaction();
+
+        var result = MemoryFault;
+        memory.RunMappingChange(() => result = transaction());
+        return result;
+    }
+
+    private static int ReserveBackingRangeCore(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
     {
         if (pointer == 0 || !IsValidMapRange(length, alignment))
             return MemoryInvalidArgument;

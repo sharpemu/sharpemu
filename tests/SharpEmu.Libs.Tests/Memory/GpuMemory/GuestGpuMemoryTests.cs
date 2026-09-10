@@ -280,6 +280,64 @@ public sealed class GuestGpuMemoryTests
     }
 
     [Fact]
+    public void MappingChangeFinishesGpuWorkBeforeRunningTheTransaction()
+    {
+        var scheduler = new RecordingScheduler { Active = true };
+        var queue = new InlineQueue { IsGpuQueueThread = false };
+        _memory.AttachGpuQueue(queue, scheduler);
+        _memory.RunMappingChange(() => scheduler.Calls.Add("change"));
+        Assert.Equal(new[] { "finish", "wait_priority 7", "change" }, scheduler.Calls);
+        Assert.Equal(1, queue.Runs);
+        _memory.AttachGpuQueue(null, null);
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public async Task MappingChangeWaitsForDetachWhenTheRelayCloses()
+    {
+        var queue = new InlineQueue { IsGpuQueueThread = false, Accepting = false };
+        var scheduler = new RecordingScheduler { Active = true };
+        _memory.AttachGpuQueue(queue, scheduler);
+        var changes = 0;
+        var completion = Task.Run(() => _memory.RunMappingChange(() => Interlocked.Increment(ref changes)));
+        try
+        {
+            Assert.False(await SchedulingTestSupport.CompletesWithin(completion, 100));
+            Assert.Equal(0, Volatile.Read(ref changes));
+        }
+        finally
+        {
+            _memory.AttachGpuQueue(null, null);
+        }
+        Assert.True(await SchedulingTestSupport.CompletesWithin(completion, 5000));
+        Assert.Equal(1, changes);
+        Assert.Empty(scheduler.Calls);
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public void MappingChangeRejectsCompletionCallbacks()
+    {
+        var previous = PageGuard.OnFatal;
+        var fatals = new List<string>();
+        PageGuard.OnFatal = fatals.Add;
+        try
+        {
+            _memory.AttachGpuQueue(new InlineQueue(), new RecordingScheduler { InsideTickCallback = true });
+            var changed = false;
+            _memory.RunMappingChange(() => changed = true);
+            Assert.False(changed);
+            Assert.Single(fatals);
+        }
+        finally
+        {
+            PageGuard.OnFatal = previous;
+            _memory.AttachGpuQueue(null, null);
+            _memory.Dispose();
+        }
+    }
+
+    [Fact]
     public void Unregister_DrainsTheSchedulerThroughTheTickItCaptured()
     {
         var scheduler = new RecordingScheduler { Active = true };

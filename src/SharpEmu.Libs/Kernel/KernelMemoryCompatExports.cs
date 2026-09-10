@@ -3038,6 +3038,9 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelReleaseDirectMemory(CpuContext ctx)
+        => RunMappingTransaction(() => ReleaseDirectMemoryCore(ctx));
+
+    private static int ReleaseDirectMemoryCore(CpuContext ctx)
     {
         var start = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
@@ -3059,6 +3062,9 @@ public static partial class KernelMemoryCompatExports
     Target = Generation.Gen4 | Generation.Gen5,
     LibraryName = "libKernel")]
     public static int KernelCheckedReleaseDirectMemory(CpuContext ctx)
+        => RunMappingTransaction(() => CheckedReleaseDirectMemoryCore(ctx));
+
+    private static int CheckedReleaseDirectMemoryCore(CpuContext ctx)
     {
         var start = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
@@ -3117,6 +3123,11 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static int MapDirectMemoryCore(CpuContext ctx, ulong inOutAddressPointer, ulong length,
+        int protection, ulong flags, ulong directMemoryStart, ulong alignment)
+        => RunMappingTransaction(() => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length,
+            protection, flags, directMemoryStart, alignment));
+
+    private static int MapDirectMemoryTransaction(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
     {
         if (inOutAddressPointer == 0)
@@ -3185,6 +3196,9 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapNamedFlexibleMemory(CpuContext ctx)
+        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx));
+
+    private static int MapFlexibleMemoryCore(CpuContext ctx)
     {
         var pointer = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
@@ -3289,6 +3303,9 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMunmap(CpuContext ctx)
+        => RunMappingTransaction(() => UnmapMemoryCore(ctx));
+
+    private static int UnmapMemoryCore(CpuContext ctx)
     {
         var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
