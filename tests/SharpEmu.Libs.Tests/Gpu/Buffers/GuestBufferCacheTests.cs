@@ -316,6 +316,48 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    public void ManagedWrite_InvalidatesTrackedPagesAcrossUntrackedRegions(int trackedRegionIndex, bool gpuWritten)
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong regionBytes = TrackerLayout.BlockBytes;
+        var address = harness.MapBacked(3 * regionBytes, ReadWrite);
+        var trackedAddress = address + (ulong)trackedRegionIndex * regionBytes + 0x10000;
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(trackedAddress, 0x8000, isWritten: gpuWritten);
+            if (gpuWritten)
+                buffer.Fill(offset, 0x8000, 0x11223344);
+        });
+
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            var replacement = new byte[checked((int)(3 * regionBytes))];
+            Array.Fill(replacement, (byte)0x5A);
+            Assert.True(harness.Memory.TryWrite(address, replacement));
+            Assert.False(harness.Cache.HasGpuDirtyPages(trackedAddress, 0x8000));
+            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(trackedAddress));
+            Assert.True(harness.Store.DownloadToCpu(trackedAddress, 8));
+            Assert.Equal(0x5A5A5A5Au, BitConverter.ToUInt32(harness.Read(trackedAddress, 4)));
+            var (reuploaded, offset) = harness.Worker.Run(() =>
+                harness.Cache.ObtainBuffer(trackedAddress, 0x8000, isWritten: false));
+            Assert.Equal(0x5A5A5A5Au, BitConverter.ToUInt32(harness.ReadBack(reuploaded, offset, 4)));
+            harness.Shutdown();
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+    }
+
     [Fact]
     public void FillAndCopy_InvalidateImageBytesAndTexelObtainsReadTheImage()
     {

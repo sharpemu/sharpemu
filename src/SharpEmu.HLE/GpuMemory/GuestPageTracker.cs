@@ -84,11 +84,13 @@ public sealed class GuestPageTracker
     }
 
     // Removes protection from a range; a GPU-dirty region flushes through onFlush without the lock.
-    public void InvalidateRegion(ulong vaddr, ulong size, Action onFlush)
+    public bool InvalidateRegion(ulong vaddr, ulong size, Action onFlush)
     {
         RejectUploadCallbackReentry();
+        var tracked = false;
         VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
         {
+            tracked = true;
             bool shouldFlush;
             using (region.Lock.Hold())
             {
@@ -106,6 +108,7 @@ public sealed class GuestPageTracker
 
             return false;
         });
+        return tracked;
     }
 
     public void ForEachDownloadRange(ulong vaddr, ulong size, bool clear, Action<ulong, ulong>? preflight, Action<ulong, ulong> visit)
