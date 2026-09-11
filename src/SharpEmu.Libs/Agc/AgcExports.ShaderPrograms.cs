@@ -500,6 +500,7 @@ public static partial class AgcExports
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive)
         {
+            using var preparationProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexProgramSetup);
             var state = RequireState();
             var registers = state.ShRegisters;
             var exportAddress = vertex.ExportAddress;
@@ -527,6 +528,7 @@ public static partial class AgcExports
                 return Unavailable(exportAddress, pixel.Address, error);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.VertexProgramEvaluation);
             var retainedVertexInputs = state.CurrentVertexSnapshot is { } retainedSnapshot && retainedSnapshot.ExportShaderAddress == exportAddress
                 ? retainedSnapshot.Bindings
                 : null;
@@ -542,6 +544,7 @@ public static partial class AgcExports
                 return Unavailable(exportAddress, pixel.Address, error);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.VertexMetadataResolution);
             ApplySubmittedVertexSnapshot(state, exportAddress, ref exportEvaluation);
             if (exportEvaluation.VertexInputs is { Count: > 0 } discoveredInputs &&
                 AgcVertexMetadata.TryGetVertexTableRegisters(_context, exportAddress, exportHeader, out var vertexTables))
@@ -564,6 +567,7 @@ public static partial class AgcExports
                 return GetDepthOnlyPrograms(exportAddress, exportState, exportEvaluation);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.PixelProgramSetup);
             registers.TryGetValue(SpiShaderPgmChksumPs, out var pixelChecksum);
             if (!Gen5ShaderTranslator.TryCreateState(
                     _context,
@@ -579,6 +583,7 @@ public static partial class AgcExports
                 return Unavailable(exportAddress, pixel.Address, error);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.PixelProgramEvaluation);
             if (!Gen5ShaderScalarEvaluator.TryEvaluate(_context, pixelState, out var pixelEvaluation, out error, profileStage: Gen5ShaderEvaluationStage.Pixel))
             {
                 ReturnPooledEvaluationArrays(exportEvaluation);
@@ -592,6 +597,7 @@ public static partial class AgcExports
                 return Unavailable(exportAddress, pixel.Address, error);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.GraphicsProgramCache);
             var attributeCount = GetInterpolatedAttributeCount(pixelState);
             var boundTargets = ResolveBoundTargets(context, out var outputKinds, out var outputMappings, out var slotIndexes);
             var outputLayout = 0UL;
@@ -700,6 +706,7 @@ public static partial class AgcExports
                 solidClear = new SolidColorClear(color.Red, color.Green, color.Blue, color.Alpha);
             }
 
+            preparationProfile.SwitchPhase(RenderPhaseProfile.Phase.GraphicsBindingDescription);
             var pixelTextures = solidClear is null ? DecodeTextures(pixelEvaluation.ImageBindings, pixel.Address, exportAddress) : [];
             var vertexTextures = solidClear is null ? DecodeTextures(exportEvaluation.ImageBindings, pixel.Address, exportAddress) : [];
             var vertexInputs = solidClear is null ? exportEvaluation.VertexInputs ?? [] : [];
@@ -963,6 +970,7 @@ public static partial class AgcExports
             bool disableBlending,
             IReadOnlyList<Gen5GlobalMemoryBinding>? runtimeBindings = null)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.StageResourceDescription);
             var bindings = evaluation.GlobalMemoryBindings;
             var buffers = new BufferResourceInfo[bindings.Count];
             var instructionMetadata = GetStageInstructionMetadata(state.Program);
@@ -1048,6 +1056,7 @@ public static partial class AgcExports
         // The descriptor words of every resource: real when the scalars carry them, else formed from the binding.
         private static ResourceSnapshot CreateSnapshot(Gen5ShaderEvaluation evaluation, Gen5ShaderState state)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceSnapshotCreation);
             var scalars = evaluation.InitialScalarRegisters;
             var bindings = evaluation.GlobalMemoryBindings;
             var buffers = new uint[bindings.Count][];
@@ -1094,6 +1103,7 @@ public static partial class AgcExports
         // Vertex inputs group by buffer; the attributes of one buffer share its binding.
         private static VertexInputInfo CreateVertexInput(CompiledStageProgram vertexProgram, Gen5ShaderEvaluation evaluation)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputDescription);
             var inputs = vertexProgram.VertexInputs;
             var buffers = new List<VertexInputBuffer>(inputs.Count);
             var keys = new List<(ulong Address, uint Stride, bool PerInstance)>(inputs.Count);

@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -76,6 +77,7 @@ public sealed partial class RenderExecutor
 
     public void DrawIndexed(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         if (!_host.IsRecording)
         {
             throw _host.Fatal("An indexed draw has no recording command buffer.");
@@ -195,6 +197,7 @@ public sealed partial class RenderExecutor
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         if (!_host.IsRecording)
         {
             throw _host.Fatal("An automatic draw has no recording command buffer.");
@@ -538,6 +541,7 @@ public sealed partial class RenderExecutor
 
     private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution);
         var context = banks.Context;
         Span<ColorComponentMapArray> mappingStorage = stackalloc ColorComponentMapArray[1];
         Span<ColorComponentMap> targetExportMapping = mappingStorage[0];

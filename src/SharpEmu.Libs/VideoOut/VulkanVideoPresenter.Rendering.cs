@@ -229,6 +229,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // The part of the range that is mapped from its start; unmapped starts are fatal as the executor cannot bind them.
         public ulong ClampMappedSize(ulong address, ulong size)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferMappedRangeValidation);
             if (address == 0 || size == 0 || size > ulong.MaxValue - address || !_guestBacking.IsBackedView(address))
             {
                 throw SubmissionScheduler.Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.");
@@ -812,6 +813,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void SetDynamicState(in DynamicDrawState state)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStateRecording);
             var command = BeginBatchedGuestCommands();
             var viewport = new Viewport(state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight, state.ViewportMinDepth, state.ViewportMaxDepth);
             _vk.CmdSetViewport(command, 0, 1, &viewport);
@@ -1075,6 +1077,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
         public void BeginRendering(in RenderingState state)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRenderingSetup);
             if (_renderingActive && _renderingState == state)
             {
                 return;

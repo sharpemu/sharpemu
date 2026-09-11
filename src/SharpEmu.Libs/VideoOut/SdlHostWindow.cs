@@ -421,8 +421,9 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private void PumpEvents()
     {
         SDL_Event windowEvent;
-        while (SDL_PollEvent(&windowEvent))
+        while (PollWindowEvent(&windowEvent))
         {
+            using var eventProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEventHandling);
             switch (windowEvent.Type)
             {
                 case SDL_EventType.SDL_EVENT_QUIT:
@@ -488,6 +489,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     break;
             }
         }
+    }
+
+    private static bool PollWindowEvent(SDL_Event* windowEvent)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEventPolling);
+        return SDL_PollEvent(windowEvent);
     }
 
     private void HandleKey(SDL_KeyboardEvent keyEvent)

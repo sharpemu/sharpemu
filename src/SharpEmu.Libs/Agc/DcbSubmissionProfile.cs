@@ -59,9 +59,9 @@ internal static class DcbSubmissionProfile
 
     public static bool Enabled => _enabled;
 
-    internal enum SnapshotPhase { IndexCapture, ShaderState, IndexScan, Evaluation, RetainedCopy, PayloadCapture, Registers, Cleanup }
-    private static readonly long[] _snapshotPhaseTicks = new long[8];
-    private static readonly long[] _snapshotPhaseCalls = new long[8];
+    internal enum SnapshotPhase { IndexCapture, ShaderState, IndexScan, Evaluation, RetainedCopy, PayloadCapture, Registers, Cleanup, HeaderLookup, Count }
+    private static readonly long[] _snapshotPhaseTicks = new long[(int)SnapshotPhase.Count];
+    private static readonly long[] _snapshotPhaseCalls = new long[(int)SnapshotPhase.Count];
     private static long _retainedVertexBytes;
 
     internal readonly struct SnapshotScope(SnapshotPhase phase) : IDisposable
@@ -257,7 +257,8 @@ internal static class DcbSubmissionProfile
                 $"retained_copy_ms={ToMilliseconds(phaseTicks[4]):F2}/n{phaseCalls[4]} retained_bytes={retainedBytes} " +
                 $"payload_nested_ms={ToMilliseconds(phaseTicks[5]):F2}/n{phaseCalls[5]} " +
                 $"registers_ms={ToMilliseconds(phaseTicks[6]):F2}/n{phaseCalls[6]} " +
-                $"cleanup_ms={ToMilliseconds(phaseTicks[7]):F2}/n{phaseCalls[7]}");
+                $"cleanup_ms={ToMilliseconds(phaseTicks[7]):F2}/n{phaseCalls[7]} " +
+                $"header_lookup_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.HeaderLookup]):F2}/n{phaseCalls[(int)SnapshotPhase.HeaderLookup]}");
         }
         finally
         {

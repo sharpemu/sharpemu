@@ -577,11 +577,15 @@ public static partial class AgcExports
         }
 
         ulong exportShaderHeader;
-        lock (_submitTraceGate)
+        uint exportShaderChecksum;
+        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.HeaderLookup))
         {
-            _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
+            lock (_submitTraceGate)
+            {
+                _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
+            }
+            state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out exportShaderChecksum);
         }
-        state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out var exportShaderChecksum);
 
         Gen5ShaderState exportState;
         using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.ShaderState))

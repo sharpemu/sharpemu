@@ -6,6 +6,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
@@ -171,6 +172,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public ResourceSlotIdentifier FindBuffer(ulong guestAddress, ulong size)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferCacheLookup);
         if (guestAddress == 0)
         {
             return NullBufferId;
@@ -192,6 +194,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false, ResourceSlotIdentifier bufferIdentifier = default)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(guestAddress, size))
         {
@@ -203,6 +206,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             _tracker.HasCpuDirtyPages(guestAddress, size) &&
             (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
         {
+            using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
             if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
                 _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
             {
@@ -1048,6 +1052,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private bool SynchronizeBuffer(GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
         var copies = new List<BufferCopy>();
         var totalSize = 0UL;
         GpuBuffer? source = null;
@@ -1106,6 +1111,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     // Reads the CPU-dirty runs from guest memory into the staging ring, or a one-shot upload buffer.
     private GpuBuffer? UploadCopies(GpuBuffer buffer, List<BufferCopy> copies, ulong totalSize, ulong requestedAddress, ulong requestedSize)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStagingUpload);
         if (copies.Count == 0)
         {
             return null;

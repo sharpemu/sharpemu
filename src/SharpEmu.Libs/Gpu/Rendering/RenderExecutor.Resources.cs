@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -26,6 +27,7 @@ public sealed partial class RenderExecutor
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
     private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexBufferAcquisition);
         var buffers = vertexInput.Buffers;
         if (buffers.Length > VertexInputInfo.MaxBuffers)
         {
@@ -109,6 +111,7 @@ public sealed partial class RenderExecutor
 
     private PreparedIndexBuffer AcquireIndexBuffer(in IndexSource source)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawIndexBufferAcquisition);
         if (!source.Enabled)
         {
             return default;
@@ -175,6 +178,7 @@ public sealed partial class RenderExecutor
         bool setBindDebug,
         bool setAutoDebug)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;

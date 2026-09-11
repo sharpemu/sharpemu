@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -15,6 +16,7 @@ public sealed partial class RenderExecutor
     // Finds the color and depth targets; false when the draw has nothing to render into.
     private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawTargetResolution);
         var context = banks.Context;
         if (TryResolveMultisampleColor(context))
         {
@@ -113,6 +115,7 @@ public sealed partial class RenderExecutor
     // Acquires every attachment through the host and assembles the rendering scope.
     private RenderingState AcquireAttachments(ref DrawState state)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
         var rendering = new RenderingState
         {
             Width = uint.MaxValue,

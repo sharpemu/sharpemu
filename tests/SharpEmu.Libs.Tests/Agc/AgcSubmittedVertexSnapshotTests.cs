@@ -114,6 +114,7 @@ public sealed class AgcSubmittedVertexSnapshotTests
         Assert.Equal(50, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 0]));
         Assert.Equal(0, DcbSubmissionProfile.SnapshotRemainder(100, [10, 20, 30, 40, 50, 35]));
         Assert.Equal(20, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 35, 25, 5]));
+        Assert.Equal(13, DcbSubmissionProfile.SnapshotRemainder(200, [10, 20, 30, 40, 50, 35, 25, 5, 7]));
     }
 
     private static Gen5VertexInputBinding CreateBinding(

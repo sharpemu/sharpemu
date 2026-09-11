@@ -65,6 +65,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     waitMilliseconds = Math.Min(waitMilliseconds, retryWait);
                 }
 
+                var waitPhase = _commandStream.HasPending
+                    ? RenderPhaseProfile.Phase.IdleBlockedCommands
+                    : _pendingGuestImagePresentations.Count > 0 || _pendingVideoPresentations.Count > 0 ||
+                        (_latestPresentation is { } latest && latest.Sequence != _presentedSequence)
+                        ? RenderPhaseProfile.Phase.IdlePendingPresentation
+                        : RenderPhaseProfile.Phase.IdleNoQueuedWork;
+                using var waitProfile = RenderPhaseProfile.MeasureDetail(waitPhase);
                 System.Threading.Monitor.Wait(_gate, waitMilliseconds);
             }
         }

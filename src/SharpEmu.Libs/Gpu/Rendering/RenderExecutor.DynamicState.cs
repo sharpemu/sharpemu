@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -30,6 +31,7 @@ public sealed partial class RenderExecutor
     // The dynamic state of a draw from the context bank and the resolved targets.
     private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)
     {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStatePreparation);
         var viewportRegisters = context.ScreenViewport;
         var limits = _host.Limits;
         uint framebufferWidth;
