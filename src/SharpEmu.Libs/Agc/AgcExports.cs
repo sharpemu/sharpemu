@@ -72,8 +72,8 @@ public static partial class AgcExports
         ItNop, ItSetBase, ItIndexBufferSize, ItIndexBase, ItDrawIndirect,
         ItDrawIndexIndirect, ItDrawIndex2, ItIndexType, ItDrawIndexAuto,
         ItNumInstances, ItDrawIndexMultiAuto, ItDrawIndexOffset2, ItWriteData,
-        ItDispatchDirect, ItDispatchIndirect, ItCondExec, ItWaitRegMem,
-        ItIndirectBuffer, ItEventWrite, ItReleaseMem, ItDmaData,
+        ItDispatchDirect, ItDispatchIndirect, ItSetPredication, ItCondExec,
+        ItWaitRegMem, ItIndirectBuffer, ItEventWrite, ItReleaseMem, ItDmaData,
         ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
     ];
 
