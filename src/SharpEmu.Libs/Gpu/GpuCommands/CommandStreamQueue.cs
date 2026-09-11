@@ -350,8 +350,18 @@ public sealed class CommandStreamQueue
         {
             complete = RunSlice(submission);
         }
-        catch
+        catch (Exception exception)
         {
+            try
+            {
+                // Report the cause before another submitting thread observes the failed queue.
+                Console.Error.WriteLine($"[GPU][ERROR] Command stream slice failed: queue={submission.QueueId} address=0x{submission.Address:X16}. {exception}");
+            }
+            catch (Exception)
+            {
+                // An output failure must not prevent queue failure or replace the original exception.
+            }
+
             Fail();
             throw;
         }

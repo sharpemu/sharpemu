@@ -6,6 +6,13 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 
+[CollectionDefinition(CommandStreamQueueStateCollection.Name, DisableParallelization = true)]
+public sealed class CommandStreamQueueStateCollection
+{
+    public const string Name = "CommandStreamQueueState";
+}
+
+[Collection(CommandStreamQueueStateCollection.Name)]
 public sealed class CommandStreamQueueTests
 {
     private const ulong Label = StreamRunner.LabelAddress;
@@ -258,6 +265,56 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
         Assert.False(queue.HasPending);
         Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() => queue.EnqueueGraphics(Graphics, 2, 2, null)).Message);
+    }
+
+    [Fact]
+    public async Task ErrorWriterFailure_PreservesTheHostExceptionAndReleasesWaiters()
+    {
+        var (host, queue) = NewQueue();
+        var hostException = new CommandStreamFatalException("The command stream host failed.");
+        host.PendingCommands.Enqueue(() => throw hostException);
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
+        Enqueue(host, queue, Graphics + 0x100, 2, CreateInstanceCountPacket(2));
+        var waiter = Task.Run(queue.WaitForIdle);
+        var previousErrorWriter = Console.Error;
+        using var failingErrorWriter = new FailingErrorWriter();
+
+        try
+        {
+            Exception? actualException;
+            try
+            {
+                Console.SetError(failingErrorWriter);
+                actualException = Record.Exception(() => queue.ProcessOne());
+            }
+            finally
+            {
+                Console.SetError(previousErrorWriter);
+            }
+
+            Assert.True(failingErrorWriter.WriteAttempted);
+            Assert.Same(hostException, actualException);
+            Assert.Equal(IdleOutcome.Failed, await waiter.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.False(queue.HasPending);
+            Assert.Contains("no longer accepts", Assert.Throws<CommandStreamFatalException>(() =>
+                queue.EnqueueGraphics(Graphics, 2, 3, null)).Message);
+        }
+        finally
+        {
+            queue.Fail();
+            await waiter.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    private sealed class FailingErrorWriter : StringWriter
+    {
+        public bool WriteAttempted { get; private set; }
+
+        public override void WriteLine(string? value)
+        {
+            WriteAttempted = true;
+            throw new IOException("The error output is unavailable.");
+        }
     }
 
     [Fact]
