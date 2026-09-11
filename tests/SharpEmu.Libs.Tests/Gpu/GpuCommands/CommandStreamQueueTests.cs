@@ -184,21 +184,27 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
-    public async Task DrainForShutdown_WaitsTheRetryIntervalBeforeCancelling()
+    public void DrainForShutdown_WaitsTheRetryIntervalBeforeCancelling()
     {
         var (host, queue) = NewQueue();
         host.WriteDword(Label, 0);
         Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
         queue.StopAccepting();
-        var producer = Task.Run(async () =>
+        var outcome = IdleOutcome.Cancelled;
+        var drainThread = new Thread(() => outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true));
+        drainThread.Start();
+        try
         {
-            await Task.Delay(30);
+            Assert.True(SpinWait.SpinUntil(
+                () => (drainThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(2)));
             host.WriteDword(Label, 1);
-        });
+        }
+        finally
+        {
+            Assert.True(drainThread.Join(TimeSpan.FromSeconds(2)));
+        }
 
-        var outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true);
-
-        await producer;
         Assert.Equal(IdleOutcome.Completed, outcome);
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }

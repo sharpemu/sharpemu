@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -19,19 +20,17 @@ public sealed partial class GpuCommandInterpreter
         UserConfig,
     }
 
-    private void WriteContextRegister(uint offset, uint value)
+    private void ClearCompositeDepthExtent(uint offset)
     {
-        Registers.Context[offset] = value;
         if (offset is RegisterBankLayout.DepthZInfo or RegisterBankLayout.DepthSizeXy)
         {
             // A direct attachment or extent write supersedes a composite binding's extent.
-            Registers.CompositeDepthSizeXy = null;
+            TypedRegisters.CompositeDepthSizeXy = null;
         }
     }
 
     private void WriteUserConfigRegister(uint offset, uint value)
     {
-        Registers.UserConfig[offset] = value;
         if (offset == RegisterBankLayout.IndexTypeRegister)
         {
             SetIndexType(value);
@@ -59,7 +58,13 @@ public sealed partial class GpuCommandInterpreter
                 throw _host.Fatal($"The context register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
             }
 
-            WriteContextRegister(offset + index, payload[1 + (int)index]);
+            ClearCompositeDepthExtent(offset + index);
+        }
+
+        var consumed = RegisterWriteTable.WriteContextPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count));
+        if (offset == ContextRegisterOffset.PaScAaSampleLocations0 && count == SampleLocationRegisters.LocationCount)
+        {
+            RequireCentroidPriorityPacket(in packet);
         }
 
         if (offset == RegisterBankLayout.DepthZInfo && packet.Length == CompositeDepthBindingLeadLength)
@@ -67,7 +72,21 @@ public sealed partial class GpuCommandInterpreter
             DetectCompositeDepthExtent(packet);
         }
 
-        return count + 1;
+        return consumed + 1;
+    }
+
+    // The sixteen-location sample packet is valid only with the centroid priority packet behind it.
+    private void RequireCentroidPriorityPacket(in PacketContext packet)
+    {
+        const uint centroidPacketDwords = 4;
+        var next = packet.PacketAddress + (ulong)packet.Length * sizeof(uint);
+        var expectedHeader = PacketHeader.Make(centroidPacketDwords, PacketOpcode.SetContextRegister);
+        if (packet.Remaining < packet.Length + centroidPacketDwords ||
+            ReadDword(next) != expectedHeader ||
+            RegisterBankLayout.Normalize(ReadDword(next + sizeof(uint))) != ContextRegisterOffset.PaScCentroidPriority0)
+        {
+            throw _host.Fatal($"The sample location packet is not followed by the centroid priority packet: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16} next=0x{next:X16}.");
+        }
     }
 
     private const uint CompositeDepthBindingLeadLength = 10;
@@ -95,7 +114,7 @@ public sealed partial class GpuCommandInterpreter
         var sizeXy = ReadDword(address + 92);
         if (sizeXy != 0)
         {
-            Registers.CompositeDepthSizeXy = sizeXy;
+            TypedRegisters.CompositeDepthSizeXy = sizeXy;
         }
     }
 
@@ -123,7 +142,7 @@ public sealed partial class GpuCommandInterpreter
             Registers.Shader[offset + index] = payload[1 + (int)index];
         }
 
-        return count + 1;
+        return RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count)) + 1;
     }
 
     internal uint SetUserConfigRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
@@ -158,7 +177,7 @@ public sealed partial class GpuCommandInterpreter
             WriteUserConfigRegister(offset + index, payload[1 + (int)index]);
         }
 
-        return count + 1;
+        return RegisterWriteTable.WriteUserConfigPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count)) + 1;
     }
 
     // Native table form: 64-bit table address, then a count of (offset, value) pairs.
@@ -241,7 +260,8 @@ public sealed partial class GpuCommandInterpreter
                         continue;
                     }
 
-                    WriteContextRegister(offset, value);
+                    ClearCompositeDepthExtent(offset);
+                    RegisterWriteTable.WriteContextEntry(TypedRegisters, offset, value, tableAddress);
                     break;
                 case RegisterBank.Shader:
                     if (offset == RegisterBankLayout.ShaderRegisterNop || rawOffset == RegisterTableSentinel)
@@ -255,6 +275,7 @@ public sealed partial class GpuCommandInterpreter
                     }
 
                     Registers.Shader[offset] = value;
+                    RegisterWriteTable.WriteShaderEntry(TypedRegisters, offset, value, tableAddress);
                     break;
                 case RegisterBank.UserConfig:
                     if (offset == RegisterBankLayout.UserConfigNop)
@@ -270,11 +291,13 @@ public sealed partial class GpuCommandInterpreter
                     // A depth extent in a user-config table belongs to the context bank.
                     if (offset == RegisterBankLayout.DepthSizeXy)
                     {
-                        WriteContextRegister(offset, value);
+                        ClearCompositeDepthExtent(offset);
+                        RegisterWriteTable.WriteContextEntry(TypedRegisters, offset, value, tableAddress);
                         continue;
                     }
 
                     WriteUserConfigRegister(offset, value);
+                    RegisterWriteTable.WriteUserConfigEntry(TypedRegisters, offset, value, tableAddress);
                     break;
             }
         }

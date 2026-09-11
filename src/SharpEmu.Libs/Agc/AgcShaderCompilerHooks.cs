@@ -31,6 +31,8 @@ internal static class AgcShaderCompilerHooks
         Gen5ShaderScalarEvaluator.GlobalMemoryPool =
             GuestDataPool.Shared;
         Gen5ShaderScalarEvaluator.SnapshotGlobalMemory =
-            GuestGpu.Current.SnapshotsGuestBuffers;
+            GuestGpu.Current is IGuestImageSnapshotBackend;
+        Gen5ShaderScalarEvaluator.CaptureVertexInputData =
+            GuestGpu.Current is IGuestImageSnapshotBackend;
     }
 }

@@ -159,28 +159,23 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             stateType.GetProperty("DrawIndexOffset")!.SetValue(state, 7u);
             stateType.GetProperty("IndexSize")!.SetValue(state, indexType);
             var context = new CpuContext(harness.Memory, Generation.Gen5);
-            var create = typeof(AgcExports).GetMethod("CreateGuestIndexBuffer", BindingFlags.NonPublic | BindingFlags.Static)!;
-            var indices = Assert.IsType<GuestIndexBuffer>(create.Invoke(null, [context, state, 6u]));
-            Assert.Equal(address + 7UL * (ulong)stride, indices.GuestAddress);
-            Assert.Equal(6 * stride, indices.Length);
-            Assert.Equal(stride == 4, indices.Is32Bit);
-            Assert.Empty(indices.Data);
-            Assert.False(indices.Pooled);
 
             var bound = typeof(AgcExports).GetMethod("TryGetRequiredVertexRecordCount", BindingFlags.NonPublic | BindingFlags.Static)!;
             object?[] arguments = [context, state, 6u, true, 0u];
             Assert.False((bool)bound.Invoke(null, arguments)!);
             Assert.True(harness.Cache.HasGpuDirtyPages(address, 0x100));
 
-            var (resident, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(indices.GuestAddress, (ulong)indices.Length, false));
+            var indexAddress = address + 7UL * (ulong)stride;
+            var indexLength = 6UL * (ulong)stride;
+            var (resident, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(indexAddress, indexLength, false));
             Assert.Equal(7UL * (ulong)stride, offset);
-            Assert.Contains(harness.ReadBack(resident, offset, (ulong)indices.Length), value => value != 0);
+            var gpuBytes = harness.ReadBack(resident, offset, indexLength);
+            Assert.Contains(gpuBytes, value => value != 0);
 
             Assert.True(harness.Store.DownloadToCpu(address, 0x100));
-            var snapshot = Assert.IsType<GuestIndexBuffer>(create.Invoke(null, [context, state, 6u]));
-            Assert.Equal(0UL, snapshot.GuestAddress);
-            Assert.Contains(snapshot.Data.AsSpan(0, snapshot.Length).ToArray(), value => value != 0);
-            Assert.True(snapshot.TryReturnPooledData());
+            var cpuBytes = new byte[indexLength];
+            Assert.True(harness.Memory.TryRead(indexAddress, cpuBytes));
+            Assert.Equal(gpuBytes, cpuBytes);
         }
         finally
         {

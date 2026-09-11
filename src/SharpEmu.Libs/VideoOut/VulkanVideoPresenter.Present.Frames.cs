@@ -783,12 +783,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _completedTimeline = _frameTimelines[slot];
             }
 
-            if (_frameTranslatedResources[slot] is { } translated)
-            {
-                _frameTranslatedResources[slot] = null;
-                DestroyTranslatedDrawResources(translated);
-            }
-
             if (_frameGuestImageVersions[slot] is { } guestImageVersion)
             {
                 _frameGuestImageVersions[slot] = null;

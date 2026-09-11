@@ -9,6 +9,14 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanPresentEncodeFormatTests
 {
+    [Fact]
+    public void UnsignedByteTargetUsesUnsignedPixelOutput()
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(1, 4, 0, out var decoded));
+        Assert.Equal(Format.R8Uint, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint, decoded.OutputKind);
+    }
+
     [Theory]
     [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm)]
     [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]

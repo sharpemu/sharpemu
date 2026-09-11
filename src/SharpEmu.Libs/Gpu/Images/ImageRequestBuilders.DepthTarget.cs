@@ -34,7 +34,7 @@ public static partial class ImageRequestBuilders
         ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit | ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit;
 
     // The first host format of the rule the device supports at the sample count, or Undefined.
-    private static Format HostDepthAttachmentFormat(GpuDeviceInfo device, DepthFormatRule rule, bool hasStencil, uint samples)
+    private static Format HostDepthAttachmentFormat(IImageFormatSupport device, DepthFormatRule rule, bool hasStencil, uint samples)
     {
         var required = ImageDescription.VulkanSampleCount(samples);
         bool Supports(Format format) =>
@@ -61,7 +61,7 @@ public static partial class ImageRequestBuilders
     private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) => !hasStencil || !hasHtile || htileStencilDisabled;
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
-    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, GpuDeviceInfo device)
+    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device)
     {
         var hasStencil = depthWords.StencilFormat != GuestStencilFormat.Invalid;
         var depthActive = depthWords.DepthTestEnabled || depthWords.DepthWriteEnabled || depthWords.DepthBoundsEnabled || depthWords.DepthClearEnabled || depthWords.CopyDepthToColor;

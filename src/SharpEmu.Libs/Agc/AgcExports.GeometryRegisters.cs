@@ -116,11 +116,6 @@ public static partial class AgcExports
             RShRegsIndirect => state.ShRegisters,
             _ => state.UcRegisters,
         };
-        var interpolantPacketTraceSequence = BeginInterpolantPacketTrace(
-            ctx,
-            indirectRegister,
-            registersAddress,
-            registerCount);
         for (uint index = 0; index < registerCount; index++)
         {
             var entryAddress = registersAddress + ((ulong)index * 8);
@@ -135,10 +130,6 @@ public static partial class AgcExports
             // Offset zero is a valid context-register index, not a terminator.
             // Preserve it to prevent stale depth and render-control state.
             registerOffset &= ~0x7000_0000u;
-            TraceInterpolantPacketPair(
-                interpolantPacketTraceSequence,
-                registerOffset,
-                value);
             if (indirectRegister == RUcRegsIndirect && registerOffset == DbDepthSizeXy)
             {
                 // Apply recognized depth extents to the draw state.
@@ -266,24 +257,16 @@ public static partial class AgcExports
             $"effective={width}x{height}");
     }
 
-    /// <summary>
-    /// Test-only view of a parsed graphics context register. False when the
-    /// register was never written.
-    /// </summary>
-    internal static bool TryGetGraphicsContextRegisterForTests(
-        CpuContext ctx,
-        uint registerOffset,
-        out uint value)
+    internal static Gpu.GpuCommands.Registers.ContextRegisters? GetGraphicsContextForTests(CpuContext context)
     {
-        value = 0;
-        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        if (!_submittedGpuStates.TryGetValue(context.Memory, out var gpuState))
         {
-            return false;
+            return null;
         }
 
         lock (gpuState.Gate)
         {
-            return gpuState.Graphics.CxRegisters.TryGetValue(registerOffset, out value);
+            return gpuState.Graphics.TypedRegisters?.Context.Copy();
         }
     }
 
@@ -309,10 +292,7 @@ public static partial class AgcExports
         }
     }
 
-    /// <summary>
-    /// SH-register counterpart of <see cref="TryGetGraphicsContextRegisterForTests"/>;
-    /// the shader stage addresses live here.
-    /// </summary>
+    // Test access to the shader words used by compilation.
     internal static bool TryGetGraphicsShRegisterForTests(
         CpuContext ctx,
         uint registerOffset,

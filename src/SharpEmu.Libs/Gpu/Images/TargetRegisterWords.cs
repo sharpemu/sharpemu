@@ -84,6 +84,12 @@ public readonly record struct DepthTargetWords(
     public bool DepthWriteEnabled => ((DepthControl >> 2) & 0x1) != 0;
     public bool DepthBoundsEnabled => ((DepthControl >> 3) & 0x1) != 0;
     public uint DepthCompare => (DepthControl >> 4) & 0x7;
+    public bool BackFaceEnabled => ((DepthControl >> 7) & 0x1) != 0;
+    public uint StencilCompare => (DepthControl >> 8) & 0x7;
+    public uint StencilCompareBack => (DepthControl >> 20) & 0x7;
+    public bool ResummarizeEnabled => ((RenderControl >> 4) & 0x1) != 0;
+    public bool StencilCompressDisabled => ((RenderControl >> 5) & 0x1) != 0;
+    public bool DepthCompressDisabled => ((RenderControl >> 6) & 0x1) != 0;
 }
 
 // The video-out surface attributes of a display buffer, as the guest registered them.

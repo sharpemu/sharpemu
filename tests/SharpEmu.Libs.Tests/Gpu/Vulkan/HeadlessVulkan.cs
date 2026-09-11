@@ -24,7 +24,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     private ExtDebugUtils? _debugUtils;
     private DebugUtilsMessengerEXT _debugMessenger;
 
-    private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily, uint apiVersion, in PhysicalDeviceFeatures features)
+    private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily, uint apiVersion, in PhysicalDeviceFeatures features, bool dynamicRendering)
     {
         Vk = vk;
         Instance = instance;
@@ -35,7 +35,18 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         ApiVersion = apiVersion;
         SampleRateShading = features.SampleRateShading;
         SamplerAnisotropy = features.SamplerAnisotropy;
+        SupportsDynamicRendering = dynamicRendering;
     }
+
+    // Dynamic rendering with the two extended dynamic state extensions, as the presenter's render host needs.
+    public bool SupportsDynamicRendering { get; }
+
+    private static readonly string[] RenderingExtensionNames =
+    [
+        "VK_KHR_dynamic_rendering",
+        "VK_EXT_extended_dynamic_state",
+        "VK_EXT_extended_dynamic_state2",
+    ];
 
     public Vk Vk { get; }
 
@@ -254,9 +265,24 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             }
         }
 
+        var extendedDynamicState2Features = new PhysicalDeviceExtendedDynamicState2FeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceExtendedDynamicState2FeaturesExt,
+        };
+        var extendedDynamicStateFeatures = new PhysicalDeviceExtendedDynamicStateFeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
+            PNext = &extendedDynamicState2Features,
+        };
+        var dynamicRenderingFeatures = new PhysicalDeviceDynamicRenderingFeaturesKHR
+        {
+            SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+            PNext = &extendedDynamicStateFeatures,
+        };
         var addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
         {
             SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+            PNext = &dynamicRenderingFeatures,
         };
         var timelineFeatures = new PhysicalDeviceTimelineSemaphoreFeatures
         {
@@ -265,6 +291,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         };
         var features = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &timelineFeatures };
         vk.GetPhysicalDeviceFeatures2(physical, &features);
+        var dynamicRendering = dynamicRenderingFeatures.DynamicRendering && extendedDynamicStateFeatures.ExtendedDynamicState &&
+            extendedDynamicState2Features.ExtendedDynamicState2 && HasDeviceExtensions(vk, physical, RenderingExtensionNames);
         if (family == uint.MaxValue || !timelineFeatures.TimelineSemaphore || !addressFeatures.BufferDeviceAddress)
         {
             vk.DestroyInstance(instance, null);
@@ -286,12 +314,31 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             PQueuePriorities = &priority,
         };
         timelineFeatures.TimelineSemaphore = true;
+        extendedDynamicState2Features = new PhysicalDeviceExtendedDynamicState2FeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceExtendedDynamicState2FeaturesExt,
+            ExtendedDynamicState2 = true,
+        };
+        extendedDynamicStateFeatures = new PhysicalDeviceExtendedDynamicStateFeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
+            ExtendedDynamicState = true,
+            PNext = &extendedDynamicState2Features,
+        };
+        dynamicRenderingFeatures = new PhysicalDeviceDynamicRenderingFeaturesKHR
+        {
+            SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+            DynamicRendering = true,
+            PNext = &extendedDynamicStateFeatures,
+        };
         addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
         {
             SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
             BufferDeviceAddress = true,
+            PNext = dynamicRendering ? &dynamicRenderingFeatures : null,
         };
         timelineFeatures.PNext = &addressFeatures;
+        var deviceExtensions = dynamicRendering ? SilkMarshal.StringArrayToPtr(RenderingExtensionNames) : 0;
         var deviceInfo = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,
@@ -299,21 +346,56 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &queueInfo,
             PEnabledFeatures = &enabledFeatures,
+            EnabledExtensionCount = dynamicRendering ? (uint)RenderingExtensionNames.Length : 0u,
+            PpEnabledExtensionNames = (byte**)deviceExtensions,
         };
-        if (vk.CreateDevice(physical, &deviceInfo, null, out var device) != Result.Success)
+        var deviceCreated = vk.CreateDevice(physical, &deviceInfo, null, out var device);
+        if (dynamicRendering)
+        {
+            SilkMarshal.Free(deviceExtensions);
+        }
+
+        if (deviceCreated != Result.Success)
         {
             vk.DestroyInstance(instance, null);
             return null;
         }
 
         vk.GetDeviceQueue(device, family, 0, out var queue);
-        var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures);
+        var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering);
         if (validation)
         {
             result.RegisterDebugMessenger();
         }
 
         return result;
+    }
+
+    private static bool HasDeviceExtensions(Vk vk, PhysicalDevice physical, IReadOnlyList<string> names)
+    {
+        uint count = 0;
+        if (vk.EnumerateDeviceExtensionProperties(physical, (byte*)null, &count, null) != Result.Success || count == 0)
+        {
+            return false;
+        }
+
+        var properties = new ExtensionProperties[count];
+        fixed (ExtensionProperties* pointer = properties)
+        {
+            if (vk.EnumerateDeviceExtensionProperties(physical, (byte*)null, &count, pointer) != Result.Success)
+            {
+                return false;
+            }
+        }
+
+        var available = new HashSet<string>();
+        for (var index = 0; index < count; index++)
+        {
+            var property = properties[index];
+            available.Add(SilkMarshal.PtrToString((nint)property.ExtensionName) ?? string.Empty);
+        }
+
+        return names.All(available.Contains);
     }
 
     private static void Require(Result result, string operation)

@@ -19,7 +19,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
     public string BackendName => "Vulkan";
 
-    public bool SnapshotsGuestBuffers => false;
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
@@ -145,155 +144,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) =>
         VulkanVideoPresenter.SubmitGuestDraw(drawKind, width, height);
 
-    public void SubmitTranslatedDraw(
-        IGuestCompiledShader pixelShader,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint width,
-        uint height,
-        uint attributeCount,
-        IGuestCompiledShader? vertexShader = null,
-        uint vertexCount = 3,
-        uint instanceCount = 1,
-        uint primitiveType = 4,
-        GuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null) =>
-        VulkanVideoPresenter.SubmitTranslatedDraw(
-            Spirv(pixelShader),
-            textures,
-            globalMemoryBuffers,
-            width,
-            height,
-            attributeCount,
-            vertexShader is null ? null : Spirv(vertexShader),
-            vertexCount,
-            instanceCount,
-            primitiveType,
-            indexBuffer,
-            vertexBuffers,
-            renderState);
-
-    public void SubmitDepthOnlyTranslatedDraw(
-        IGuestCompiledShader pixelShader,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint attributeCount,
-        GuestDepthTarget depthTarget,
-        IGuestCompiledShader? vertexShader = null,
-        uint vertexCount = 3,
-        uint instanceCount = 1,
-        uint primitiveType = 4,
-        GuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null,
-        ulong shaderAddress = 0,
-        int baseVertex = 0) =>
-        VulkanVideoPresenter.SubmitDepthOnlyTranslatedDraw(
-            Spirv(pixelShader),
-            textures,
-            globalMemoryBuffers,
-            attributeCount,
-            depthTarget,
-            vertexShader is null ? null : Spirv(vertexShader),
-            vertexCount,
-            instanceCount,
-            primitiveType,
-            indexBuffer,
-            vertexBuffers,
-            renderState,
-            shaderAddress,
-            baseVertex);
-
-    public void SubmitOffscreenTranslatedDraw(
-        IGuestCompiledShader pixelShader,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint attributeCount,
-        IReadOnlyList<GuestRenderTarget> targets,
-        IGuestCompiledShader? vertexShader = null,
-        uint vertexCount = 3,
-        uint instanceCount = 1,
-        uint primitiveType = 4,
-        GuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null,
-        GuestDepthTarget? depthTarget = null,
-        ulong shaderAddress = 0,
-        int baseVertex = 0) =>
-        VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
-            Spirv(pixelShader),
-            textures,
-            globalMemoryBuffers,
-            attributeCount,
-            targets,
-            vertexShader is null ? null : Spirv(vertexShader),
-            vertexCount,
-            instanceCount,
-            primitiveType,
-            indexBuffer,
-            vertexBuffers,
-            renderState,
-            depthTarget,
-            shaderAddress,
-            baseVertex);
-
-    public void SubmitStorageTranslatedDraw(
-        IGuestCompiledShader pixelShader,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint attributeCount,
-        uint width,
-        uint height,
-        ulong shaderAddress = 0) =>
-        VulkanVideoPresenter.SubmitStorageTranslatedDraw(
-            Spirv(pixelShader),
-            textures,
-            globalMemoryBuffers,
-            attributeCount,
-            width,
-            height,
-            shaderAddress);
-
-    public long SubmitComputeDispatch(
-        ulong shaderAddress,
-        IGuestCompiledShader computeShader,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint groupCountX,
-        uint groupCountY,
-        uint groupCountZ,
-        uint baseGroupX,
-        uint baseGroupY,
-        uint baseGroupZ,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        bool isIndirect,
-        bool writesGlobalMemory,
-        uint threadCountX = uint.MaxValue,
-        uint threadCountY = uint.MaxValue,
-        uint threadCountZ = uint.MaxValue) =>
-        VulkanVideoPresenter.SubmitComputeDispatch(
-            shaderAddress,
-            Spirv(computeShader),
-            textures,
-            globalMemoryBuffers,
-            groupCountX,
-            groupCountY,
-            groupCountZ,
-            baseGroupX,
-            baseGroupY,
-            baseGroupZ,
-            localSizeX,
-            localSizeY,
-            localSizeZ,
-            isIndirect,
-            writesGlobalMemory,
-            threadCountX,
-            threadCountY,
-            threadCountZ);
-
     public bool TrySubmitGuestImage(
         int videoOutHandle,
         int displayBufferIndex,
@@ -315,32 +165,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         VulkanVideoPresenter.IsGpuGuestImageAvailable(address, format, numberType);
-
-    public bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination) =>
-        VulkanVideoPresenter.TrySubmitGuestImageBlit(source, destination);
-
-    public bool TryGetRenderTargetOutputInfo(
-        uint dataFormat,
-        uint numberType,
-        uint componentSwap,
-        out Gen5PixelOutputKind outputKind,
-        out Gen5ColorComponentMapping componentMapping)
-    {
-        if (VulkanVideoPresenter.TryDecodeRenderTargetFormat(
-                dataFormat,
-                numberType,
-                componentSwap,
-                out var format))
-        {
-            outputKind = format.OutputKind;
-            componentMapping = format.ExportMapping;
-            return true;
-        }
-
-        outputKind = default;
-        componentMapping = default;
-        return false;
-    }
 
     public ulong GuestStorageBufferOffsetAlignment =>
         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;

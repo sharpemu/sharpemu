@@ -23,9 +23,6 @@ internal interface IGuestGpuBackend
     /// the window title on macOS where either backend can run.</summary>
     string BackendName { get; }
 
-    /// <summary>True when draw records must carry a copy of each global buffer's bytes.</summary>
-    bool SnapshotsGuestBuffers { get; }
-
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 
@@ -85,6 +82,47 @@ internal interface IGuestGpuBackend
     /// <summary>Presents a recognized fixed-function guest draw (see GuestDrawKind).</summary>
     void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height);
 
+
+    // A video-out export flip: the presenter captures the buffer and marks the request presented.
+    bool TrySubmitGuestImage(
+        int videoOutHandle,
+        int displayBufferIndex,
+        ulong address,
+        uint width,
+        uint height,
+        uint pitchInPixel,
+        ulong flipRequestId);
+
+    // Enqueues a guest command stream; queue 0 is graphics, 0x20 to 0x57 are the compute owners.
+    void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots);
+
+    // Marks the frame boundary; off the worker it first waits for the accepted submissions.
+    IdleOutcome SubmitDone(ICpuMemory memory);
+
+    /// <summary>Registers a display buffer with its guest texture format tag.</summary>
+    void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
+
+    /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
+    bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
+
+    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
+    /// they cross the seam.</summary>
+    ulong GuestStorageBufferOffsetAlignment { get; }
+
+    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
+    void CountShaderCompilation();
+
+    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
+
+    /// <summary>Asks a running presenter to close its window.</summary>
+    void RequestClose();
+}
+
+// A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
+// mirrored writes. A backend with a guest image store reads guest memory itself.
+internal interface IGuestImageSnapshotBackend
+{
+    bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
     void SubmitTranslatedDraw(
         IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -161,60 +199,6 @@ internal interface IGuestGpuBackend
         uint threadCountX = uint.MaxValue,
         uint threadCountY = uint.MaxValue,
         uint threadCountZ = uint.MaxValue);
-
-    // A video-out export flip: the presenter captures the buffer and marks the request presented.
-    bool TrySubmitGuestImage(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel,
-        ulong flipRequestId);
-
-    // Enqueues a guest command stream; queue 0 is graphics, 0x20 to 0x57 are the compute owners.
-    void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots);
-
-    // Marks the frame boundary; off the worker it first waits for the accepted submissions.
-    IdleOutcome SubmitDone(ICpuMemory memory);
-
-    /// <summary>Registers a display buffer with its guest texture format tag.</summary>
-    void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
-
-    /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
-    bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
-
-    /// <summary>A hardware color resolve from one color target into another.</summary>
-    bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
-
-    /// <summary>
-    /// Gets the pixel-output type and component mapping for a guest render target.
-    /// This method does not expose a native backend format.
-    /// </summary>
-    bool TryGetRenderTargetOutputInfo(
-        uint dataFormat,
-        uint numberType,
-        uint componentSwap,
-        out Gen5PixelOutputKind outputKind,
-        out Gen5ColorComponentMapping componentMapping);
-
-    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
-    /// they cross the seam.</summary>
-    ulong GuestStorageBufferOffsetAlignment { get; }
-
-    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
-    void CountShaderCompilation();
-
-    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
-
-    /// <summary>Asks a running presenter to close its window.</summary>
-    void RequestClose();
-}
-
-// A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
-// mirrored writes. A backend with a guest image store reads guest memory itself.
-internal interface IGuestImageSnapshotBackend
-{
     /// <summary>Whether the image exists on the backend or an already-queued upload
     /// owns its initialization (a pending image may skip a duplicate upload but is
     /// not yet a valid flip source).</summary>

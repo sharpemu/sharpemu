@@ -287,14 +287,29 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
-        var modifier = (uint)ctx[CpuRegister.Rdx];
+        var modifier = ctx[CpuRegister.Rdx];
+        var modifierBits = (uint)modifier;
+        var shaderStage = modifierBits >> 29;
+        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
+        ulong registerLocations = (modifierBits & 1u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
+        var firstInstanceRegister = (modifierBits & 4u) != 0
+            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
+        registerLocations |= (ulong)firstInstanceRegister << 32;
+        if ((modifierBits & 2u) != 0)
+        {
+            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
+        }
+
+        // The API modifier selects register locations; it is not a packet initiator.
+        var drawInitiator = (modifier & (1UL << 32)) != 0
+            ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
         if (commandBufferAddress == 0 ||
             !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDrawIndexIndirect, 0)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, modifier))
+            !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, drawInitiator))
         {
             return ReturnPointer(ctx, 0);
         }

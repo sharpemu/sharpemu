@@ -106,97 +106,11 @@ public static partial class AgcExports
     /// fallback is not required when the game latches this register (GTA UI).
     /// </summary>
     private static int GetBaseVertex(SubmittedDcbState state) =>
-        state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
+        state.TypedRegisters is { } registers
+            ? unchecked((int)registers.UserConfig.IndexOffset)
+            : state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
             ? unchecked((int)indexOffset)
             : 0;
-
-    private static GuestIndexBuffer? CreateGuestIndexBuffer(
-        CpuContext ctx,
-        SubmittedDcbState state,
-        uint indexCount)
-    {
-        if (state.IndexBufferAddress == 0 || indexCount == 0)
-        {
-            return null;
-        }
-
-        var indexType = GetProsperoIndexType(state);
-        var guestBytesPerIndex = AgcIndexHelpers.GetGuestStrideBytes(indexType);
-        var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)guestBytesPerIndex);
-        var guestByteCount = checked((int)(indexCount * (uint)guestBytesPerIndex));
-        var address = state.IndexBufferAddress + byteOffset;
-        if (UsesCachedGpuIndices(state, indexCount))
-        {
-            return new GuestIndexBuffer([], guestByteCount,
-                indexType == AgcIndexHelpers.ProsperoIndexType.Index32, Pooled: false)
-            {
-                GuestAddress = address,
-            };
-        }
-
-        var retained = state.CurrentIndexSnapshot;
-        if (retained is not null &&
-            retained.SourceAddress == address &&
-            retained.IndexCount == indexCount &&
-            retained.IndexStride == guestBytesPerIndex &&
-            retained.Data.Length >= guestByteCount)
-        {
-            if (indexType == AgcIndexHelpers.ProsperoIndexType.Index8)
-            {
-                var expanded = new byte[checked((int)(indexCount * sizeof(ushort)))];
-                AgcIndexHelpers.ExpandIndex8ToU16(
-                    retained.Data.AsSpan(0, guestByteCount),
-                    expanded);
-                return new GuestIndexBuffer(
-                    expanded,
-                    expanded.Length,
-                    Is32Bit: false,
-                    Pooled: false);
-            }
-
-            return new GuestIndexBuffer(
-                retained.Data,
-                guestByteCount,
-                indexType == AgcIndexHelpers.ProsperoIndexType.Index32,
-                Pooled: false);
-        }
-
-        // Host backends only bind u16/u32. Expand kIndex8 -> u16.
-        if (indexType == AgcIndexHelpers.ProsperoIndexType.Index8)
-        {
-            var guestData = GuestDataPool.Shared.Rent(guestByteCount);
-            var guestSpan = guestData.AsSpan(0, guestByteCount);
-            if (!ctx.Memory.TryRead(address, guestSpan) &&
-                !KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, guestSpan))
-            {
-                GuestDataPool.Shared.Return(guestData);
-                return null;
-            }
-
-            var hostByteCount = checked((int)(indexCount * sizeof(ushort)));
-            var hostData = GuestDataPool.Shared.Rent(hostByteCount);
-            AgcIndexHelpers.ExpandIndex8ToU16(
-                guestSpan,
-                hostData.AsSpan(0, hostByteCount));
-            GuestDataPool.Shared.Return(guestData);
-            return CreatePooledGuestIndexBuffer(
-                hostData,
-                hostByteCount,
-                is32Bit: false);
-        }
-
-        var is32Bit = indexType == AgcIndexHelpers.ProsperoIndexType.Index32;
-        var data = GuestDataPool.Shared.Rent(guestByteCount);
-        var span = data.AsSpan(0, guestByteCount);
-        if (ctx.Memory.TryRead(address, span) ||
-            KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, span))
-        {
-            return CreatePooledGuestIndexBuffer(data, guestByteCount, is32Bit);
-        }
-
-        GuestDataPool.Shared.Return(data);
-        return null;
-    }
 
     private static bool UsesCachedGpuIndices(SubmittedDcbState state, uint count)
     {
@@ -211,17 +125,6 @@ public static partial class AgcExports
         return GuestGpuMemoryHook.Current?.Buffers is GuestBufferCache cache &&
             cache.HasGpuDirtyPages(address, (ulong)count * stride);
     }
-
-    private static GuestIndexBuffer CreatePooledGuestIndexBuffer(
-        byte[] data,
-        int length,
-        bool is32Bit) =>
-        new(
-            data,
-            length,
-            is32Bit,
-            Pooled: true,
-            new GuestIndexBufferLease(data));
 
     private static bool TryGetRequiredVertexRecordCount(
         CpuContext ctx,
@@ -378,54 +281,6 @@ public static partial class AgcExports
         return true;
     }
 
-    private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
-        IReadOnlyList<Gen5VertexInputBinding> bindings)
-    {
-        var buffers = new GuestVertexBuffer[bindings.Count];
-        for (var index = 0; index < bindings.Count; index++)
-        {
-            var binding = bindings[index];
-            buffers[index] = new GuestVertexBuffer(
-                binding.Location,
-                binding.ComponentCount,
-                binding.DataFormat,
-                binding.NumberFormat,
-                binding.BaseAddress,
-                binding.Stride,
-                binding.OffsetBytes,
-                binding.Data,
-                binding.DataLength,
-                binding.DataPooled,
-                binding.PerInstance);
-        }
-
-        return buffers;
-    }
-
-    private static IReadOnlyList<GuestVertexBuffer>
-        CreateVertexBufferOwnershipView(
-            IReadOnlyList<GuestVertexBuffer> buffers,
-            bool ownsPooledData)
-    {
-        var view = new GuestVertexBuffer[buffers.Count];
-        for (var index = 0; index < buffers.Count; index++)
-        {
-            var buffer = buffers[index];
-            view[index] = buffer with
-            {
-                Pooled = ownsPooledData && buffer.Pooled,
-            };
-        }
-
-        return view;
-    }
-
-    private static GuestIndexBuffer? CreateIndexBufferOwnershipView(
-        GuestIndexBuffer? buffer,
-        bool ownsPooledData) =>
-        buffer is null
-            ? null
-            : buffer with { Pooled = ownsPooledData && buffer.Pooled };
 
     private const long MaximumRetainedIndexBytesPerSubmission = 64L * 1024 * 1024;
     private const long MaximumRetainedVertexBytesPerSubmission = 64L * 1024 * 1024;
@@ -709,7 +564,8 @@ public static partial class AgcExports
         Dictionary<ulong, SubmittedVertexSnapshot>? snapshots,
         ref long retainedBytes)
     {
-        if (snapshots is null ||
+        if (!Gen5ShaderScalarEvaluator.CaptureVertexInputData ||
+            snapshots is null ||
             drawCount == 0 ||
             !TryGetShaderAddress(
                 state.ShRegisters,

@@ -16,35 +16,57 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     // The presenter whose render thread runs the command stream; null while no window runs.
     private static Presenter? _activePresenter;
+    private static Exception? _presenterStartupFailure;
+    internal static Func<ICpuMemory, AgcExports.HeadlessCommandStream>? TestCommandStreamFactory { get; set; }
 
     public static void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
     {
-        Presenter? presenter;
         lock (_gate)
         {
-            if (_closed || HostSessionControl.IsShutdownRequested)
+            if (_closed || HostSessionControl.IsShutdownRequested || Volatile.Read(ref _presenterCloseRequested))
             {
+                if (_presenterStartupFailure is { } failure)
+                    throw new InvalidOperationException("The graphics presenter could not start.", failure);
                 throw new OperationCanceledException("The graphics session is shutting down.");
             }
-
-            presenter = _activePresenter;
         }
-
-        if (presenter is not null)
+        if (TestCommandStreamFactory?.Invoke(memory) is { } testStream)
         {
-            presenter.EnqueueCommandStream(queue, address, dwordCount, submissionId, geometrySnapshots);
-            Presenter.WakeRenderThread();
+            testStream.Submit(queue, address, dwordCount, submissionId, geometrySnapshots);
             return;
         }
 
-        AgcExports.HeadlessCommandStream.For(memory).Submit(queue, address, dwordCount, submissionId, geometrySnapshots);
+        EnsureStarted(1280, 720);
+        // Queue publication precedes device initialization; only the render thread consumes it.
+        lock (_gate)
+        {
+            while (_activePresenter is null && !_closed && !HostSessionControl.IsShutdownRequested &&
+                   !Volatile.Read(ref _presenterCloseRequested))
+            {
+                System.Threading.Monitor.Wait(_gate);
+            }
+
+            if (_presenterStartupFailure is { } failure)
+            {
+                throw new InvalidOperationException("The graphics presenter could not start.", failure);
+            }
+            if (_closed || HostSessionControl.IsShutdownRequested || Volatile.Read(ref _presenterCloseRequested))
+            {
+                throw new OperationCanceledException("The graphics session is shutting down.");
+            }
+            _activePresenter!.EnqueueCommandStream(queue, address, dwordCount, submissionId, geometrySnapshots);
+            Presenter.WakeRenderThread();
+        }
     }
 
     public static IdleOutcome SubmitDone(ICpuMemory memory) =>
-        HostSessionControl.IsShutdownRequested ? IdleOutcome.Cancelled :
+        Volatile.Read(ref _presenterStartupFailure) is not null ? IdleOutcome.Failed :
+        HostSessionControl.IsShutdownRequested || Volatile.Read(ref _closed) || Volatile.Read(ref _presenterCloseRequested) ? IdleOutcome.Cancelled :
         TryGetActivePresenter(out var presenter)
             ? presenter.CommandStream.Done()
-            : AgcExports.HeadlessCommandStream.For(memory).Done();
+            : TestCommandStreamFactory?.Invoke(memory) is { } testStream
+                ? testStream.Done()
+                : IdleOutcome.Completed;
 
     // The blocked heads of the stream this memory submits to; null when no stream exists for it.
     internal static BlockedSnapshot? SnapshotBlockedCommandStream(ICpuMemory? memory)
@@ -54,7 +76,9 @@ internal static unsafe partial class VulkanVideoPresenter
             return presenter.CommandStream.SnapshotBlocked();
         }
 
-        return memory is null ? null : AgcExports.HeadlessCommandStream.For(memory).Queue.SnapshotBlocked();
+        return memory is not null && TestCommandStreamFactory?.Invoke(memory) is { } testStream
+            ? testStream.Queue.SnapshotBlocked()
+            : null;
     }
 
     private static bool TryGetActivePresenter([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Presenter? presenter)
@@ -280,7 +304,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void EmitGlobalBarrier()
         {
-            CloseOpenTranslatedRenderPass();
+            EndRendering();
+            EndRendering();
             var commandBuffer = BeginBatchedGuestCommands();
             var barrier = new MemoryBarrier
             {
@@ -304,7 +329,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            CloseOpenTranslatedRenderPass();
+            EndRendering();
             _ = BeginBatchedGuestCommands();
             _bufferCache.FillBuffer(address, size, value, isGds);
         }
@@ -312,7 +337,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            CloseOpenTranslatedRenderPass();
+            EndRendering();
             _ = BeginBatchedGuestCommands();
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
@@ -401,19 +426,43 @@ internal static unsafe partial class VulkanVideoPresenter
         public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
         {
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
-            _translation.DrawIndexed(submitId, in arguments);
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                _translation.DrawIndexed(submitId, in arguments);
+            }
+            finally
+            {
+                Interlocked.Add(ref _perfDrawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            }
         }
 
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
         {
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
-            _translation.DrawAuto(submitId, in arguments);
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                _translation.DrawAuto(submitId, in arguments);
+            }
+            finally
+            {
+                Interlocked.Add(ref _perfDrawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            }
         }
 
         public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
         {
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDispatchTranslation);
-            _translation.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator);
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                _translation.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator);
+            }
+            finally
+            {
+                Interlocked.Add(ref _perfDrawTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            }
         }
 
         public void OnQueueReset(int queueId) => _translation.QueueReset(queueId);
@@ -544,7 +593,6 @@ internal static unsafe partial class VulkanVideoPresenter
                         displayBuffer.Height,
                         sequence,
                         GuestDrawKind.None,
-                        TranslatedDraw: null,
                         IsSplash: false,
                         GuestImageAddress: displayBuffer.Address,
                         GuestImageVersion: version,

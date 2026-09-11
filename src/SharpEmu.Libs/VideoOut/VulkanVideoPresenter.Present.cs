@@ -90,7 +90,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     height,
                     1,
                     GuestDrawKind.None,
-                    TranslatedDraw: null,
                     IsSplash: false)
                 : hasSplash
                 ? new Presentation(
@@ -99,7 +98,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     splashHeight,
                     1,
                     GuestDrawKind.None,
-                    TranslatedDraw: null,
                     IsSplash: true)
                 : new Presentation(
                     null,
@@ -107,7 +105,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     height,
                     0,
                     GuestDrawKind.None,
-                    TranslatedDraw: null,
                     IsSplash: false);
             StartPresenterLocked();
         }
@@ -155,7 +152,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 latest.Height,
                 sequence,
                 GuestDrawKind.None,
-                TranslatedDraw: null,
                 IsSplash: false);
             Console.Error.WriteLine("[LOADER][INFO] Vulkan VideoOut hid splash");
         }
@@ -182,7 +178,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 height,
                 sequence,
                 GuestDrawKind.None,
-                TranslatedDraw: null,
                 IsSplash: false);
 
             // Also dual-written to _latestPresentation as a fallback once the queue drains.
@@ -229,65 +224,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 height,
                 sequence,
                 drawKind,
-                TranslatedDraw: null,
-                IsSplash: false);
-            if (_thread is not null)
-            {
-                return;
-            }
-
-            _windowWidth = width;
-            _windowHeight = height;
-            StartPresenterLocked();
-        }
-    }
-
-    public static void SubmitTranslatedDraw(
-        byte[] pixelSpirv,
-        IReadOnlyList<GuestDrawTexture> textures,
-        IReadOnlyList<GuestMemoryBuffer> globalMemoryBuffers,
-        uint width,
-        uint height,
-        uint attributeCount,
-        byte[]? vertexSpirv = null,
-        uint vertexCount = 3,
-        uint instanceCount = 1,
-        uint primitiveType = 4,
-        GuestIndexBuffer? indexBuffer = null,
-        IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
-        GuestRenderState? renderState = null)
-    {
-        if (pixelSpirv.Length == 0 || width == 0 || height == 0)
-        {
-            return;
-        }
-
-        lock (_gate)
-        {
-            if (_closed)
-            {
-                return;
-            }
-
-            var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(
-                null,
-                width,
-                height,
-                sequence,
-                GuestDrawKind.None,
-                new VulkanTranslatedGuestDraw(
-                    vertexSpirv ?? [],
-                    pixelSpirv,
-                    textures.ToArray(),
-                    globalMemoryBuffers.ToArray(),
-                    vertexBuffers?.ToArray() ?? [],
-                    attributeCount,
-                    vertexCount,
-                    instanceCount,
-                    primitiveType,
-                    indexBuffer,
-                    renderState ?? GuestRenderState.Default),
                 IsSplash: false);
             if (_thread is not null)
             {
@@ -379,6 +315,10 @@ internal static unsafe partial class VulkanVideoPresenter
     public static void RequestClose()
     {
         Volatile.Write(ref _presenterCloseRequested, true);
+        lock (_gate)
+        {
+            System.Threading.Monitor.PulseAll(_gate);
+        }
     }
 
     private static void Run()
@@ -397,12 +337,18 @@ internal static unsafe partial class VulkanVideoPresenter
             lock (_gate)
             {
                 _activePresenter = presenter;
+                System.Threading.Monitor.PulseAll(_gate);
             }
 
             presenter.Run();
         }
         catch (Exception exception)
         {
+            lock (_gate)
+            {
+                _presenterStartupFailure = exception;
+                _activePresenter?.CommandStream.Fail();
+            }
             Console.Error.WriteLine($"[LOADER][ERROR] Vulkan VideoOut presenter failed: {exception}");
         }
         finally
@@ -436,7 +382,6 @@ internal static unsafe partial class VulkanVideoPresenter
             height,
             presentation.Sequence,
             GuestDrawKind.None,
-            TranslatedDraw: null,
             IsSplash: false,
             RequiredTick: presentation.RequiredTick,
             FlipRequestId: presentation.FlipRequestId);
@@ -465,7 +410,6 @@ internal static unsafe partial class VulkanVideoPresenter
             height,
             presentedSequence,
             GuestDrawKind.None,
-            TranslatedDraw: null,
             IsSplash: false);
         return true;
     }
@@ -520,7 +464,6 @@ internal static unsafe partial class VulkanVideoPresenter
         uint Height,
         long Sequence,
         GuestDrawKind DrawKind,
-        VulkanTranslatedGuestDraw? TranslatedDraw,
         bool IsSplash,
         ulong GuestImageAddress = 0,
         long GuestImageVersion = 0,

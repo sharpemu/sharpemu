@@ -224,13 +224,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] vk.present_taken addr=0x{presentation.GuestImageAddress:X16} " +
                     $"version={presentation.GuestImageVersion} " +
-                    $"drawKind={presentation.DrawKind} hasPixels={presentation.Pixels is not null} " +
-                    $"hasTranslatedDraw={presentation.TranslatedDraw is not null}");
+                    $"drawKind={presentation.DrawKind} hasPixels={presentation.Pixels is not null}");
             }
 
             if (presentation.Pixels is null &&
                 presentation.DrawKind != GuestDrawKind.FullscreenBarycentric &&
-                presentation.TranslatedDraw is null &&
                 presentation.GuestImageAddress == 0)
             {
                 CompletePresentation(in presentation, presented: false);
@@ -256,7 +254,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             }
 
-            TranslatedDrawResources? translatedResources = null;
             GuestImageResource? presentedGuestImage = null;
             var ownsPresentedGuestImageVersion = false;
             if (presentation.GuestImageVersion != 0)
@@ -303,26 +300,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            if (presentation.TranslatedDraw is { } translatedDraw)
-            {
-                try
-                {
-                    translatedResources = CreateTranslatedDrawResources(
-                        translatedDraw,
-                        _renderPass,
-                        [PresentationTargetFormat],
-                        _extent);
-                }
-                catch (Exception exception)
-                {
-                    CompletePresentation(in presentation, presented: false);
-                    Console.Error.WriteLine(
-                        $"[LOADER][ERROR] Vulkan VideoOut translated draw setup failed: {exception.Message}");
-                    return;
-                }
-
-                FlushBatchedGuestCommands();
-            }
 
             uint imageIndex;
             Result acquireResult;
@@ -340,7 +317,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 ReleaseUnsubmittedPresentationResources(
                     frameSlot,
-                    translatedResources,
                     ownsPresentedGuestImageVersion,
                     presentedGuestImage);
                 return;
@@ -351,7 +327,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 RecreateSwapchainResources("vkAcquireNextImageKHR", acquireResult);
                 ReleaseUnsubmittedPresentationResources(
                     frameSlot,
-                    translatedResources,
                     ownsPresentedGuestImageVersion,
                     presentedGuestImage);
 
@@ -410,11 +385,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 RecordGuestImageBlit(imageIndex, presentedGuestImage);
                 waitStage = PipelineStageFlags.TransferBit;
             }
-            else if (translatedResources is not null)
-            {
-                RecordTranslatedDraw(imageIndex, translatedResources);
-                waitStage = PipelineStageFlags.AllCommandsBit;
-            }
             else
             {
                 throw new InvalidOperationException(
@@ -440,7 +410,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _commandBuffer = default;
             _frameTimelines[frameSlot] = _submitTimeline;
             _frameInFlight[frameSlot] = true;
-            _frameTranslatedResources[frameSlot] = translatedResources;
 
             var swapchain = _swapchain;
             var presentInfo = new PresentInfoKHR
@@ -509,9 +478,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     (presentedGuestImage is not null
                         ? $"image=0x{presentedGuestImage.Address:X16} " +
                           $"{presentedGuestImage.Width}x{presentedGuestImage.Height}"
-                        : presentation.TranslatedDraw is null
-                        ? $"{presentation.DrawKind}"
-                        : $"shader textures={presentation.TranslatedDraw.Textures.Count}"));
+                        : $"{presentation.DrawKind}"));
             }
 
             if (recreateAfterPresent)

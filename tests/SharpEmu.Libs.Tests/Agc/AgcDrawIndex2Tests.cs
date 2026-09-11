@@ -115,6 +115,47 @@ public sealed class AgcDrawIndex2Tests
     }
 
     [Theory]
+    [InlineData(0x40000000UL, 0x280u, 0x280u, 2u)]
+    [InlineData(0x40000100UL, 0x280u, 0x280u, 0x22u)]
+    [InlineData(0x140000100UL, 0x280u, 0x280u, 2u)]
+    [InlineData(0x60180707UL, 0x010C010Fu, 0x0800010Fu, 0x22u)]
+    public void IndexedIndirectDrawEncodesTheModifierBeforeInterpretation(
+        ulong modifier, uint vertexLocations, uint instanceLocation, uint initiator)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 20);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 0x1F4;
+        context[CpuRegister.Rdx] = modifier;
+        AgcExports.DcbDrawIndexIndirect(context);
+        Assert.Equal(CommandAddress, context[CpuRegister.Rax]);
+        Span<byte> packetBytes = stackalloc byte[20];
+        Assert.True(memory.TryRead(CommandAddress, packetBytes));
+        var packet = new uint[5];
+        for (var index = 0; index < packet.Length; index++)
+        {
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(packetBytes[(index * sizeof(uint))..]);
+        }
+
+        Assert.Equal(new uint[] { PacketHeader.Make(5, PacketOpcode.DrawIndexIndirect),
+            0x1F4, vertexLocations, instanceLocation, initiator }, packet);
+        var runner = new StreamRunner();
+        runner.Host.WriteWords(StreamRunner.DataAddress + 0x1F4, new uint[] { 7, 2, 3, 4, 5 });
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(
+            StreamRunner.Packet(PacketOpcode.SetBase, 1, StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)), packet));
+        var draw = Assert.Single(runner.Host.IndexedDraws);
+        Assert.Equal(7u, draw.IndexCount);
+        Assert.Equal(2u, draw.InstanceCount);
+        Assert.Equal(StreamRunner.DataAddress + 6, draw.IndexAddress);
+        Assert.Equal(4, draw.BaseVertex);
+        Assert.Equal(5u, draw.FirstInstance);
+    }
+
+    [Theory]
     [InlineData(0x40000000UL, 3u, 0u)]
     [InlineData(0x40000100UL, 3u, 0x20u)]
     [InlineData(0x140000100UL, 3u, 0u)]

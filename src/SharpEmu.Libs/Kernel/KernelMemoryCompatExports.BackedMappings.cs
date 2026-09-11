@@ -323,7 +323,6 @@ public static partial class KernelMemoryCompatExports
         foreach (var alias in aliases)
         {
             RemoveMappingLocked(alias.Address, alias.Length);
-            AgcExports.UnregisterHtileMetadataRange(ctx.Memory, alias.Address, alias.Length);
         }
         foreach (var allocation in _directAllocations.Values.Where(allocation =>
                      allocation.Start < end && start < allocation.Start + allocation.Length).ToArray())

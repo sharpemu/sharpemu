@@ -159,6 +159,37 @@ public sealed class Gen5ShaderScalarEvaluatorPoolTests
         Assert.Equal(0, pool.RentCount);
     }
 
+    [Fact]
+    public void UncapturedVertexRangesKeepTheirSizeWithoutReadingOrRenting()
+    {
+        var memory = new ReadableCpuMemory();
+        var pool = new TrackingArrayPool();
+        var previous = Gen5ShaderScalarEvaluator.CaptureVertexInputData;
+        try
+        {
+            Gen5ShaderScalarEvaluator.CaptureVertexInputData = false;
+            WithPool(pool, () =>
+            {
+                Assert.True(Gen5ShaderScalarEvaluator.TryCaptureVertexInputData(
+                    new CpuContext(memory, Generation.Gen5), CreatePendingVertexInputs(),
+                    out var captured, out var error, null, out _), error);
+                Assert.Equal(2, captured.Count);
+                Assert.All(captured, binding =>
+                {
+                    Assert.Empty(binding.Data);
+                    Assert.Equal(44, binding.DataLength);
+                    Assert.False(binding.DataPooled);
+                });
+            });
+            Assert.Equal(0, memory.ReadCount);
+            Assert.Equal(0, pool.RentCount);
+        }
+        finally
+        {
+            Gen5ShaderScalarEvaluator.CaptureVertexInputData = previous;
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]

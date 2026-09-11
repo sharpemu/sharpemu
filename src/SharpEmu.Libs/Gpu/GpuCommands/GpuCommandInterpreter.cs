@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -37,6 +38,7 @@ public sealed partial class GpuCommandInterpreter
         _host = host;
         QueueId = queueId;
         InterruptEventId = interruptEventId;
+        TypedRegisters = new RegisterBanks(host.Fatal);
     }
 
     public int QueueId { get; }
@@ -46,6 +48,9 @@ public sealed partial class GpuCommandInterpreter
     public bool IsComputeQueue => InterruptEventId >= ComputeQueueBase;
 
     public CommandRegisterBanks Registers { get; } = new();
+
+    // The typed banks the render executor reads; the dictionaries feed the translation they replace.
+    public RegisterBanks TypedRegisters { get; }
 
     public ulong SubmitId { get; set; }
 
@@ -93,6 +98,7 @@ public sealed partial class GpuCommandInterpreter
     public void Reset()
     {
         Registers.Reset();
+        TypedRegisters.Reset();
         IndexTypeAndSize = 0;
         IndexBufferSize = 0;
         UserDataMarker = 0;

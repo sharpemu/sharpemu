@@ -29,16 +29,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            foreach (var pipeline in _computePipelines.Values)
-            {
-                _vk.DestroyPipeline(_device, pipeline, null);
-            }
-            _computePipelines.Clear();
-            foreach (var pipeline in _graphicsPipelines.Values)
-            {
-                _vk.DestroyPipeline(_device, pipeline, null);
-            }
-            _graphicsPipelines.Clear();
+            DestroyRenderPipelines();
             foreach (var layout in _descriptorLayouts.Values)
             {
                 _vk.DestroyPipelineLayout(_device, layout.PipelineLayout, null);

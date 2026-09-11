@@ -21,6 +21,11 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
         _allocBump = baseAddress + (ulong)size;
     }
 
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void ConfigureCommandStreamTests() =>
+        SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TestCommandStreamFactory =
+            SharpEmu.Libs.Agc.AgcExports.GetHeadlessCommandStreamForTests;
+
     public bool TryRead(ulong virtualAddress, Span<byte> destination)
     {
         if (!TryResolve(virtualAddress, destination.Length, out var offset))

@@ -3333,7 +3333,6 @@ public static partial class KernelMemoryCompatExports
                 if (region.IsFlexible)
                     _flexibleBacking.Release(region.Address, region.Length);
                 RemoveMappingLocked(region.Address, region.Length);
-                AgcExports.UnregisterHtileMetadataRange(ctx.Memory, region.Address, region.Length);
             }
             return 0;
         }

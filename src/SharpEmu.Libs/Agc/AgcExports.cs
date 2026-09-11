@@ -6,6 +6,8 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -21,14 +23,6 @@ public static partial class AgcExports
     // hashing, buffer-offset alignment) read it in loops.
     private static readonly ulong _storageBufferOffsetAlignment =
         GuestGpu.Current.GuestStorageBufferOffsetAlignment;
-
-#if DEBUG
-    static AgcExports()
-    {
-        ValidateDispatchInitiators();
-        ValidateDepthTargetDecoder();
-    }
-#endif
 
     private const uint ItNop = 0x10;
     private const uint ItSetBase = 0x11;
@@ -199,13 +193,12 @@ public static partial class AgcExports
     private const uint NggUserDataScalarRegisterBase = 8;
     internal const uint Gen5TextureFormatR8G8B8A8Unorm = 10;
     internal const uint Gen5TextureFormatR16G16B16A16Float = 12;
-    private const uint Gen5TextureType1D = 8;
-    private const uint Gen5TextureType2D = 9;
-    private const uint Gen5TextureType3D = 10;
-    private const uint Gen5TextureTypeCube = 11;
-    private const uint Gen5TextureType1DArray = 12;
-    private const uint Gen5TextureType2DArray = 13;
-    private const ulong MaxPresentedTextureBytes = 128UL * 1024UL * 1024UL;
+    internal const uint Gen5TextureType1D = 8;
+    internal const uint Gen5TextureType2D = 9;
+    internal const uint Gen5TextureType3D = 10;
+    internal const uint Gen5TextureTypeCube = 11;
+    internal const uint Gen5TextureType1DArray = 12;
+    internal const uint Gen5TextureType2DArray = 13;
 
     private const ulong CommandBufferCursorUpOffset = 0x10;
     private const ulong CommandBufferCursorDownOffset = 0x18;
@@ -226,18 +219,6 @@ public static partial class AgcExports
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
             "1",
             StringComparison.Ordinal);
-    private static readonly bool _traceDraws = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
-        "1",
-        StringComparison.Ordinal);
-    private static readonly bool _traceDrawOracle = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAW_ORACLE"),
-        "1",
-        StringComparison.Ordinal);
-    private static readonly bool _traceVideoDrawChain = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VIDEO_DRAW_CHAIN"),
-        "1",
-        StringComparison.Ordinal);
     private static readonly object _softwarePresenterGate = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 
@@ -253,42 +234,10 @@ public static partial class AgcExports
         return memory;
     }
 
-    private sealed record TranslatedGuestDraw(
-        ulong ExportShaderAddress,
-        ulong PixelShaderAddress,
-        uint PrimitiveType,
-        IGuestCompiledShader VertexShader,
-        IGuestCompiledShader PixelShader,
-        uint AttributeCount,
-        uint VertexCount,
-        uint InstanceCount,
-        int BaseVertex,
-        int VertexBufferBaseVertex,
-        GuestIndexBuffer? IndexBuffer,
-        IReadOnlyList<TranslatedImageBinding> Textures,
-        IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
-        IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
-        IReadOnlyList<RenderTargetDescriptor> RenderTargets,
-        GuestDepthTarget? DepthTarget,
-        // Seam-shaped color targets are built once with the cached translation.
-        IReadOnlyList<GuestRenderTarget> GuestTargets,
-        GuestRenderState RenderState,
-        IReadOnlyList<uint> PixelUserData,
-        uint RawBlendControl,
-        uint RawColorInfo,
-        IReadOnlyList<uint> PixelInitialScalars,
-        IReadOnlyList<uint> VertexInitialScalars,
-        bool IsFullscreenColorClear = false,
-        float ClearRed = 0f,
-        float ClearGreen = 0f,
-        float ClearBlue = 0f,
-        float ClearAlpha = 1f,
-        bool IsDccFastClear = false);
-
     private sealed class SubmittedDcbState
     {
         private uint? _compositeDepthSizeXy;
-        private CommandRegisterBanks? _interpreterBanks;
+        private RegisterBanks? _interpreterBanks;
 
         public Dictionary<uint, uint> CxRegisters { get; private set; } = new();
         public Dictionary<uint, uint> ShRegisters { get; private set; } = new();
@@ -313,22 +262,24 @@ public static partial class AgcExports
 
         public void AttachInterpreter(GpuCommandInterpreter interpreter)
         {
-            if (ReferenceEquals(_interpreterBanks, interpreter.Registers))
+            if (ReferenceEquals(_interpreterBanks, interpreter.TypedRegisters))
             {
                 return;
             }
 
-            _interpreterBanks = interpreter.Registers;
-            CxRegisters = interpreter.Registers.Context;
+            _interpreterBanks = interpreter.TypedRegisters;
+            TypedRegisters = interpreter.TypedRegisters;
             ShRegisters = interpreter.Registers.Shader;
-            UcRegisters = interpreter.Registers.UserConfig;
         }
-        public TextureDescriptor? PresenterTexture { get; set; }
+        public RegisterBanks? TypedRegisters { get; private set; }
+
+        // The color target words last bound at each base address; the flip replay reads the display buffer's.
+        public Dictionary<ulong, ColorTargetWords> KnownColorTargets { get; } = new();
+
+        // A draw without targets kept for the next flip, with the banks it was issued under.
+        public RetainedTargetlessDraw? RetainedTargetlessDraw { get; set; }
+
         public GuestDrawKind GuestDrawKind { get; set; }
-        public TranslatedGuestDraw? TranslatedDraw { get; set; }
-        public TranslatedGuestDraw? PendingTargetlessDraw { get; set; }
-        public Dictionary<ulong, RenderTargetDescriptor> KnownRenderTargets { get; } = new();
-        public Dictionary<ulong, RenderTargetWriter> RenderTargetWriters { get; } = new();
         public ulong IndirectArgsAddress { get; set; }
         public bool SawIndexedDraw { get; set; }
         public ulong IndexBufferAddress { get; set; }
@@ -360,8 +311,6 @@ public static partial class AgcExports
         // The submit-time geometry prepass shadow; only the prepass reads or writes it.
         public SubmittedDcbState GeometryCapture { get; } = new();
         public Dictionary<uint, SubmittedDcbState> ComputeQueues { get; } = new();
-        public Dictionary<ulong, ComputeImageWriter> ComputeImageWriters { get; } = new();
-        public AgcHtileMetadataTracker HtileMetadata { get; } = new();
         public Dictionary<uint, string> ResourceOwners { get; } = new();
         public Dictionary<uint, RegisteredAgcResource> RegisteredResources { get; } = new();
         public bool ResourceRegistrationInitialized { get; set; }
@@ -545,14 +494,6 @@ public static partial class AgcExports
         return bytes;
     }
 
-    private static byte[] PackRuntimeScalarStateUnpooled(
-        IReadOnlyList<uint> registers,
-        IReadOnlyList<Gen5GlobalMemoryBinding> bindings)
-    {
-        var bytes = new byte[GetRuntimeScalarBufferLength(bindings.Count)];
-        PackRuntimeScalarStateInto(bytes, registers, bindings);
-        return bytes;
-    }
 
     private static void PackRuntimeScalarStateInto(
         byte[] bytes,
@@ -595,11 +536,7 @@ public static partial class AgcExports
         }
     }
 
-    /// <summary>
-    /// Returns the pooled buffer arrays an evaluation produced. Called only
-    /// on translation-failure paths, where no <see cref="TranslatedGuestDraw"/>
-    /// is built to take ownership; on success the draw's consumers return them.
-    /// </summary>
+    // Return arrays when an evaluation does not transfer them to a draw consumer.
     private static void ReturnPooledEvaluationArrays(Gen5ShaderEvaluation evaluation)
     {
         var returned = new HashSet<byte[]>(
@@ -621,49 +558,6 @@ public static partial class AgcExports
                     GuestDataPool.Shared.Return(binding.Data);
                 }
             }
-        }
-    }
-
-    /// <summary>
-    /// Returns pooled data arrays a translated draw owns but did not hand to
-    /// a presenter consumer. The offscreen path hands globals, vertex and
-    /// index buffers to the presenter (which returns them), so it passes all
-    /// three false; other draw sinks pass true for whatever they dropped.
-    /// </summary>
-    private static void ReturnPooledDrawArrays(
-        TranslatedGuestDraw draw,
-        bool globals,
-        bool vertex,
-        bool index)
-    {
-        var returned = new HashSet<byte[]>(
-            System.Collections.Generic.ReferenceEqualityComparer.Instance);
-        if (globals)
-        {
-            foreach (var binding in draw.GlobalMemoryBindings)
-            {
-                if (binding.DataPooled && returned.Add(binding.Data))
-                {
-                    GuestDataPool.Shared.Return(binding.Data);
-                }
-            }
-        }
-
-        if (vertex)
-        {
-            foreach (var binding in draw.VertexInputs)
-            {
-                if (binding.DataPooled && returned.Add(binding.Data))
-                {
-                    GuestDataPool.Shared.Return(binding.Data);
-                }
-            }
-        }
-
-        if (index && draw.IndexBuffer is { Pooled: true } indexBuffer &&
-            returned.Add(indexBuffer.Data))
-        {
-            indexBuffer.TryReturnPooledData();
         }
     }
 
@@ -1118,7 +1012,7 @@ public static partial class AgcExports
         Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
-    private static ulong? ParseOptionalHexAddress(string? value)
+    internal static ulong? ParseOptionalHexAddress(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {

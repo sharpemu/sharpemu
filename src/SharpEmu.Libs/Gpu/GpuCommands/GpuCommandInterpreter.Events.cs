@@ -223,7 +223,7 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The clear-state flags are not supported: flags=0x{payload[0]:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
-        Registers.ApplyContextState(ContextStateOperation.Clear, _host.Fatal);
+        TypedRegisters.ApplyContextState(ContextStateOperation.Clear);
         return 1;
     }
 
@@ -234,7 +234,7 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The context-state packet is not supported: length={packet.Length} operation={payload[0]} address=0x{packet.PacketAddress:X16}.");
         }
 
-        Registers.ApplyContextState((ContextStateOperation)payload[0], _host.Fatal);
+        TypedRegisters.ApplyContextState((ContextStateOperation)payload[0]);
         return packet.Length - 1;
     }
 

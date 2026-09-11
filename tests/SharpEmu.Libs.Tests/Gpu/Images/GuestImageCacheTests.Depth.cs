@@ -167,6 +167,70 @@ public sealed unsafe partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void PartialDepthWithHtile_PreservesTheLayeredBackingAndRefreshesEveryLayer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint layers = 6;
+        const ulong sliceSize = 0x10000;
+        const ulong totalSize = sliceSize * layers;
+        var address = harness.MapBacked(totalSize + 0x10000, ReadWrite);
+        var color = LinearRequest(address, totalSize, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(128, 128, 1), layers, 4, 1);
+        color.Description.TileMode = GuestTileMode.Depth;
+        var colorIdentifier = harness.Acquire(ref color);
+        harness.Worker.Run(() =>
+        {
+            var image = harness.Image(colorIdentifier);
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            for (uint layer = 0; layer < layers; layer++)
+            {
+                var clear = new ClearColorValue { Float32_0 = (layer + 1) / 8f };
+                var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
+                harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            }
+        });
+        harness.MarkGpuWritten(colorIdentifier);
+
+        var depth = AsDepthTarget(color, Format.D32Sfloat);
+        depth.Description.Data = new GuestSpan(address, sliceSize);
+        depth.Description.Resources = SubresourceCount.Single;
+        depth.Description.MipLayout[0].Size = sliceSize;
+        depth.Description.Metadata = new MetadataDescription
+        {
+            Kind = MetadataKind.Htile,
+            Range = new GuestSpan(address + totalSize, 0x10000),
+        };
+        depth.View = depth.View with { LayerCount = 1 };
+        var depthIdentifier = harness.Find(ref depth);
+        var owner = harness.Image(depthIdentifier);
+        Assert.Equal(layers, owner.Description.Resources.Layers);
+        Assert.Equal(totalSize, owner.Description.Data.Size);
+        Assert.Equal(totalSize, owner.Description.MipLayout[0].Size);
+        Assert.Equal(depth.Description.Metadata.Range, owner.Description.Metadata.Range);
+        Assert.False(harness.Images.Contains(colorIdentifier));
+        var localDepth = depth;
+        harness.Worker.Run(() => harness.Images.AcquireDepthTargetView(depthIdentifier, localDepth));
+        var copied = harness.ReadImageBytes(owner, ImageAspectFlags.DepthBit);
+        for (var layer = 0; layer < layers; layer++)
+            Assert.Equal((layer + 1) / 8f, BitConverter.ToSingle(copied, layer * (int)sliceSize));
+
+        // A buffer invalidation must reload the complete owner, not divide a partial view among its layers.
+        var replacement = Enumerable.Repeat(0.75f, (int)(totalSize / sizeof(float))).ToArray();
+        harness.Write(address, Bytes(replacement));
+        harness.Worker.Run(() =>
+        {
+            harness.Images.InvalidateMemoryFromGpu(address, totalSize);
+            harness.Images.AcquireDepthTargetView(depthIdentifier, localDepth);
+        });
+        var refreshed = harness.ReadImageBytes(owner, ImageAspectFlags.DepthBit);
+        for (var layer = 0; layer < layers; layer++)
+            Assert.Equal(0.75f, BitConverter.ToSingle(refreshed, layer * (int)sliceSize));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void UnequalSampleDepthOverlap_RunsTheColorToDepthBlit()
     {
         if (!GatePrerequisites.Ready(_vulkan, sampleRateShading: true)) return;

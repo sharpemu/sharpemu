@@ -5,6 +5,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 using System.Text;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
@@ -573,6 +574,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _maxComputeWorkGroupSizeY = properties.Limits.MaxComputeWorkGroupSize[1];
             _maxComputeWorkGroupSizeZ = properties.Limits.MaxComputeWorkGroupSize[2];
             _maxComputeWorkGroupInvocations = properties.Limits.MaxComputeWorkGroupInvocations;
+            _renderHostLimits = new RenderHostLimits(
+                properties.Limits.MaxFramebufferWidth,
+                properties.Limits.MaxFramebufferHeight,
+                properties.Limits.MaxViewportDimensions[0],
+                properties.Limits.MaxViewportDimensions[1]);
             _minStorageBufferOffsetAlignment = Math.Max(
                 properties.Limits.MinStorageBufferOffsetAlignment,
                 1UL);
@@ -627,8 +633,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
+            _supportsDepthBounds = supportedFeatures.DepthBounds;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
+                DepthBounds = supportedFeatures.DepthBounds,
                 IndependentBlend = supportedFeatures.IndependentBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
@@ -693,9 +701,39 @@ internal static unsafe partial class VulkanVideoPresenter
                     "guest BC1-BC7 textures cannot be sampled directly.");
             }
 
+            var depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceDepthClipEnableFeaturesExt,
+            };
+            var depthClipControlFeatures = new PhysicalDeviceDepthClipControlFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceDepthClipControlFeaturesExt,
+                PNext = &depthClipEnableFeatures,
+            };
+            var colorWriteEnableFeatures = new PhysicalDeviceColorWriteEnableFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceColorWriteEnableFeaturesExt,
+                PNext = &depthClipControlFeatures,
+            };
+            var extendedDynamicState2Features = new PhysicalDeviceExtendedDynamicState2FeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceExtendedDynamicState2FeaturesExt,
+                PNext = &colorWriteEnableFeatures,
+            };
+            var extendedDynamicStateFeatures = new PhysicalDeviceExtendedDynamicStateFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
+                PNext = &extendedDynamicState2Features,
+            };
+            var dynamicRenderingFeatures = new PhysicalDeviceDynamicRenderingFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+                PNext = &extendedDynamicStateFeatures,
+            };
             var maintenance8Features = new PhysicalDeviceMaintenance8FeaturesKHR
             {
                 SType = StructureType.PhysicalDeviceMaintenance8FeaturesKhr,
+                PNext = &dynamicRenderingFeatures,
             };
             var robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
             {
@@ -725,6 +763,15 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var deviceProperties);
+            var deviceName = SilkMarshal.PtrToString((nint)deviceProperties.DeviceName) ?? "unknown";
+            RequireRenderingFeature(dynamicRenderingFeatures.DynamicRendering, DynamicRenderingExtensionName, deviceName);
+            RequireRenderingFeature(extendedDynamicStateFeatures.ExtendedDynamicState, ExtendedDynamicStateExtensionName, deviceName);
+            RequireRenderingFeature(
+                extendedDynamicState2Features.ExtendedDynamicState2, ExtendedDynamicState2ExtensionName, deviceName);
+            var supportsColorWriteEnable = colorWriteEnableFeatures.ColorWriteEnable;
+            _supportsDepthClipControl = depthClipControlFeatures.DepthClipControl;
+            _supportsDepthClipEnable = depthClipEnableFeatures.DepthClipEnable;
             if (!supportsMaintenance8)
             {
                 Console.Error.WriteLine(
@@ -743,11 +790,35 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
             var robustness2Extension = (byte*)SilkMarshal.StringToPtr("VK_EXT_robustness2");
             var portabilitySubsetExtension = (byte*)SilkMarshal.StringToPtr(PortabilitySubsetExtensionName);
+            var dynamicRenderingExtension = (byte*)SilkMarshal.StringToPtr(DynamicRenderingExtensionName);
+            var extendedDynamicStateExtension = (byte*)SilkMarshal.StringToPtr(ExtendedDynamicStateExtensionName);
+            var extendedDynamicState2Extension = (byte*)SilkMarshal.StringToPtr(ExtendedDynamicState2ExtensionName);
+            var colorWriteEnableExtension = (byte*)SilkMarshal.StringToPtr(ColorWriteEnableExtensionName);
+            var depthClipControlExtension = (byte*)SilkMarshal.StringToPtr(DepthClipControlExtensionName);
+            var depthClipEnableExtension = (byte*)SilkMarshal.StringToPtr(DepthClipEnableExtensionName);
             try
             {
-                var extensions = stackalloc byte*[4];
+                var extensions = stackalloc byte*[10];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
+                extensions[extensionCount++] = dynamicRenderingExtension;
+                extensions[extensionCount++] = extendedDynamicStateExtension;
+                extensions[extensionCount++] = extendedDynamicState2Extension;
+                if (supportsColorWriteEnable)
+                {
+                    extensions[extensionCount++] = colorWriteEnableExtension;
+                }
+
+                if (_supportsDepthClipControl)
+                {
+                    extensions[extensionCount++] = depthClipControlExtension;
+                }
+
+                if (_supportsDepthClipEnable)
+                {
+                    extensions[extensionCount++] = depthClipEnableExtension;
+                }
+
                 if (supportsMaintenance8)
                 {
                     extensions[extensionCount++] = maintenance8Extension;
@@ -794,10 +865,62 @@ internal static unsafe partial class VulkanVideoPresenter
                     BufferDeviceAddress = true,
                     PNext = &timelineSemaphoreFeatures,
                 };
+                void* renderingChain = &addressFeatures;
+                if (_supportsDepthClipEnable)
+                {
+                    depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceDepthClipEnableFeaturesExt,
+                        DepthClipEnable = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &depthClipEnableFeatures;
+                }
+
+                if (_supportsDepthClipControl)
+                {
+                    depthClipControlFeatures = new PhysicalDeviceDepthClipControlFeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceDepthClipControlFeaturesExt,
+                        DepthClipControl = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &depthClipControlFeatures;
+                }
+
+                if (supportsColorWriteEnable)
+                {
+                    colorWriteEnableFeatures = new PhysicalDeviceColorWriteEnableFeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceColorWriteEnableFeaturesExt,
+                        ColorWriteEnable = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &colorWriteEnableFeatures;
+                }
+
+                extendedDynamicState2Features = new PhysicalDeviceExtendedDynamicState2FeaturesEXT
+                {
+                    SType = StructureType.PhysicalDeviceExtendedDynamicState2FeaturesExt,
+                    ExtendedDynamicState2 = true,
+                    PNext = renderingChain,
+                };
+                extendedDynamicStateFeatures = new PhysicalDeviceExtendedDynamicStateFeaturesEXT
+                {
+                    SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
+                    ExtendedDynamicState = true,
+                    PNext = &extendedDynamicState2Features,
+                };
+                dynamicRenderingFeatures = new PhysicalDeviceDynamicRenderingFeaturesKHR
+                {
+                    SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+                    DynamicRendering = true,
+                    PNext = &extendedDynamicStateFeatures,
+                };
                 var features2 = new PhysicalDeviceFeatures2
                 {
                     SType = StructureType.PhysicalDeviceFeatures2,
-                    PNext = &addressFeatures,
+                    PNext = &dynamicRenderingFeatures,
                     Features = enabledFeatures,
                 };
                 var createInfo = new DeviceCreateInfo
@@ -818,6 +941,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
+                SilkMarshal.Free((nint)dynamicRenderingExtension);
+                SilkMarshal.Free((nint)extendedDynamicStateExtension);
+                SilkMarshal.Free((nint)extendedDynamicState2Extension);
+                SilkMarshal.Free((nint)colorWriteEnableExtension);
+                SilkMarshal.Free((nint)depthClipControlExtension);
+                SilkMarshal.Free((nint)depthClipEnableExtension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
@@ -831,6 +960,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 throw new InvalidOperationException("VK_KHR_swapchain is unavailable.");
             }
+
+            LoadRenderingCommands(supportsColorWriteEnable, deviceName);
         }
 
         private void CreatePipelineCache()
@@ -1058,7 +1189,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _frameImageAvailable = new VkSemaphore[MaxFramesInFlight];
             _frameInFlight = new bool[MaxFramesInFlight];
             _frameTimelines = new ulong[MaxFramesInFlight];
-            _frameTranslatedResources = new TranslatedDrawResources?[MaxFramesInFlight];
             _frameGuestImageVersions = new GuestImageResource?[MaxFramesInFlight];
             for (var slot = 0; slot < MaxFramesInFlight; slot++)
             {

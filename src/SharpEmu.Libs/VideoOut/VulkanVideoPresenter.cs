@@ -43,27 +43,6 @@ internal static class VulkanGraphicsSubgroupPolicy
         };
 }
 
-internal sealed record VulkanTranslatedGuestDraw(
-    byte[] VertexSpirv,
-    byte[] PixelSpirv,
-    IReadOnlyList<GuestDrawTexture> Textures,
-    IReadOnlyList<GuestMemoryBuffer> GlobalMemoryBuffers,
-    IReadOnlyList<GuestVertexBuffer> VertexBuffers,
-    uint AttributeCount,
-    uint VertexCount,
-    uint InstanceCount,
-    uint PrimitiveType,
-    GuestIndexBuffer? IndexBuffer,
-    GuestRenderState RenderState,
-    int BaseVertex = 0);
-
-internal sealed record VulkanOffscreenGuestDraw(
-    VulkanTranslatedGuestDraw Draw,
-    IReadOnlyList<GuestRenderTarget> Targets,
-    GuestDepthTarget? DepthTarget,
-    bool PublishTarget,
-    ulong ShaderAddress);
-
 internal sealed record VulkanOffscreenColorClear(
     IReadOnlyList<GuestRenderTarget> Targets,
     float Red,
@@ -75,69 +54,6 @@ internal sealed record VulkanOffscreenColorClear(
 internal sealed record VulkanGuestImageResolve(
     GuestRenderTarget Source,
     GuestRenderTarget Destination);
-
-internal sealed record VulkanComputeGuestDispatch(
-    ulong ShaderAddress,
-    byte[] ComputeSpirv,
-    IReadOnlyList<GuestDrawTexture> Textures,
-    IReadOnlyList<GuestMemoryBuffer> GlobalMemoryBuffers,
-    uint GroupCountX,
-    uint GroupCountY,
-    uint GroupCountZ,
-    uint BaseGroupX,
-    uint BaseGroupY,
-    uint BaseGroupZ,
-    uint LocalSizeX,
-    uint LocalSizeY,
-    uint LocalSizeZ,
-    bool IsIndirect,
-    bool WritesGlobalMemory,
-    uint ThreadCountX = uint.MaxValue,
-    uint ThreadCountY = uint.MaxValue,
-    uint ThreadCountZ = uint.MaxValue);
-
-internal static class VulkanVertexBindingPlanner
-{
-    public static int BuildUniqueSourceIndices(
-        ReadOnlySpan<ulong> handles,
-        ReadOnlySpan<bool> perInstance,
-        Span<int> sourceIndices,
-        ReadOnlySpan<ulong> offsets = default,
-        ReadOnlySpan<uint> strides = default)
-    {
-        if (handles.Length != perInstance.Length || sourceIndices.Length < handles.Length ||
-            (!offsets.IsEmpty && offsets.Length != handles.Length) ||
-            (!strides.IsEmpty && strides.Length != handles.Length))
-        {
-            throw new ArgumentException("Vertex binding spans must have compatible lengths.");
-        }
-
-        var bindingCount = 0;
-        for (var sourceIndex = 0; sourceIndex < handles.Length; sourceIndex++)
-        {
-            var found = false;
-            for (var bindingIndex = 0; bindingIndex < bindingCount; bindingIndex++)
-            {
-                var previousSourceIndex = sourceIndices[bindingIndex];
-                if (handles[previousSourceIndex] == handles[sourceIndex] &&
-                    (offsets.IsEmpty || offsets[previousSourceIndex] == offsets[sourceIndex]) &&
-                    (strides.IsEmpty || strides[previousSourceIndex] == strides[sourceIndex]) &&
-                    perInstance[previousSourceIndex] == perInstance[sourceIndex])
-                {
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found)
-            {
-                sourceIndices[bindingCount++] = sourceIndex;
-            }
-        }
-
-        return bindingCount;
-    }
-}
 
 internal readonly record struct VulkanGuestQueueIdentity(
     string Name,
@@ -314,37 +230,12 @@ internal static unsafe partial class VulkanVideoPresenter
             public DescriptorPool DescriptorPool;
             public DescriptorSet DescriptorSet;
             public TextureResource[] Textures = [];
-            public SampleCountFlags Samples = SampleCountFlags.Count1Bit;
             public GlobalBufferResource[] GlobalMemoryBuffers = [];
-            public VertexBufferResource[] VertexBuffers = [];
-            public VkBuffer IndexBuffer;
-            public DeviceMemory IndexMemory;
-            public ulong IndexBufferOffset;
-            public bool OwnsIndexBuffer;
-            public bool Index32Bit;
-            public uint VertexCount = 3;
-            public uint InstanceCount = 1;
-            public int BaseVertex;
-            public PrimitiveTopology Topology = PrimitiveTopology.TriangleList;
-            public GuestBlendState[] Blends = [GuestBlendState.Default];
-            public GuestBlendConstant BlendConstant;
-            // Vulkan format of this draw's color target. Needed to suppress
-            // blending on formats Metal cannot blend (integer / 32-bit float),
-            // which otherwise makes vkCreateGraphicsPipelines fail and can
-            // trip a Metal validation assertion.
-            public Format[] TargetFormats = [Format.Undefined];
-            public GuestRect? Scissor;
-            public GuestViewport? Viewport;
-            public GuestRasterState Raster = GuestRasterState.Default;
-            public GuestDepthState Depth = GuestDepthState.Default;
-            public bool HasDepthAttachment;
-            public Format DepthAttachmentFormat = Format.Undefined;
             // Layout keys are needed twice per draw (pipeline lookup and
             // descriptor-layout lookup); cache the built strings.
             public string? ResourceLayoutKey;
-            public string? VertexLayoutKey;
-            public RenderPass TransientRenderPass;
-            public Framebuffer TransientFramebuffer;
+            // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
+            public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
         }
 
         private const ulong SwapchainAcquireTimeoutNs = 250_000_000;
@@ -524,15 +415,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void ReleaseUnsubmittedPresentationResources(
             int frameSlot,
-            TranslatedDrawResources? translatedResources,
             bool ownsPresentedGuestImageVersion,
             GuestImageResource? presentedGuestImage)
         {
-            if (translatedResources is not null)
-            {
-                DestroyTranslatedDrawResources(translatedResources);
-            }
-
             if (!ownsPresentedGuestImageVersion || presentedGuestImage is null ||
                 _frameGuestImageVersions.Length <= frameSlot ||
                 !ReferenceEquals(_frameGuestImageVersions[frameSlot], presentedGuestImage))

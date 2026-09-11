@@ -40,16 +40,6 @@ internal static unsafe partial class VulkanVideoPresenter
     // Check only for a nonzero address here; image lookup validates the request later.
     internal static bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) => address != 0;
 
-    // Targets whose metadata the command stream cleared before the store saw the fill; consumed at the next bind.
-    private static readonly ConcurrentDictionary<ulong, byte> _pendingGuestColorClears = new();
-
-    internal static void RequestGuestColorClear(ulong address)
-    {
-        if (address != 0)
-        {
-            _pendingGuestColorClears[address] = 0;
-        }
-    }
 
     // A presenter-owned copy of a display surface taken by an ordered flip.
     private sealed class GuestImageResource
@@ -170,7 +160,7 @@ internal static unsafe partial class VulkanVideoPresenter
             TrackImageBinding(imageIdentifier);
         }
 
-        private void BindRenderTarget(ResourceSlotIdentifier imageIdentifier)
+        public void BindRenderTarget(ResourceSlotIdentifier imageIdentifier)
         {
             _imageCache.GetImage(imageIdentifier).Binding.IsTarget = true;
             TrackImageBinding(imageIdentifier);
@@ -260,11 +250,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount),
                 command);
             target.Clear = ResolveDccAttachmentClear(target, out target.ClearValue);
-            if (_pendingGuestColorClears.TryRemove(target.Address, out _) && !target.Clear)
-            {
-                target.Clear = true;
-                target.ClearValue = default;
-            }
         }
 
         // A DCC fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
@@ -583,6 +568,25 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RecordTextureTransitions(TextureResource[] bindings) =>
             RecordDrawTextureTransitions(bindings, null, GuestDepthState.Default);
 
+        private void RecordSeparateDepthClear(DepthAttachment depth)
+        {
+            var aspects = (depth.ClearDepth ? ImageAspectFlags.DepthBit : 0) |
+                (depth.ClearStencil ? ImageAspectFlags.StencilBit : 0);
+            aspects &= ViewFormatRules.DepthAspects(depth.Format);
+            if (aspects == 0)
+                return;
+
+            // Finish rendering before the transfer clear changes the image layout.
+            EndRendering();
+            var command = BeginBatchedGuestCommands();
+            var view = depth.Request.View;
+            depth.Image!.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit,
+                new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
+            var range = new ImageSubresourceRange(aspects, view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
+            var value = new ClearDepthStencilValue(depth.ClearDepthValue, depth.ClearStencilValue);
+            _vk.CmdClearDepthStencilImage(command, depth.Image.Backing.Handle, ImageLayout.TransferDstOptimal, &value, 1, &range);
+        }
+
         private void RecordDrawTextureTransitions(TextureResource[] bindings, DepthAttachment? depth, GuestDepthState depthState)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTransitions);
@@ -759,7 +763,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Interlocked.Increment(ref _perfDrawCount);
             PerfOverlay.RecordDraw();
             EnsureGuestSubmissionCapacity();
-            CloseOpenTranslatedRenderPass();
+            EndRendering();
             var logicalClear = stackalloc float[4] { work.Red, work.Green, work.Blue, work.Alpha };
             try
             {
@@ -805,7 +809,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             EnsureGuestSubmissionCapacity();
-            CloseOpenTranslatedRenderPass();
+            EndRendering();
             try
             {
                 var source = DiscoverColorTarget(work.Source, ignoreTargetMask: true, exactFormat: true);

@@ -5,6 +5,8 @@ using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 
@@ -17,7 +19,8 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FRAME_PACKETS"),
         "1",
         StringComparison.Ordinal);
-    private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
+
+    internal sealed record RetainedTargetlessDraw(RegisterBanks Banks, TargetlessDrawArguments Arguments);
 
     // The snapshots the submit-time prepass captured for one submission.
     private sealed record SubmittedGeometrySnapshots(
@@ -142,12 +145,94 @@ public static partial class AgcExports
         private readonly SubmittedGpuState _gpuState;
         private SubmittedDcbState? _current;
         private int _currentQueueId;
+        private readonly ShaderProgramProvider? _programs;
+        private readonly RenderExecutor? _executor;
 
         internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host)
         {
             _host = host;
             _context = new CpuContext(memory, Generation.Gen5);
             _gpuState = _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState());
+            if (host is IRenderHost renderHost && host is IHostPipelineFactory pipelines)
+            {
+                _programs = new ShaderProgramProvider(_context, pipelines);
+                _executor = new RenderExecutor(renderHost, _programs);
+            }
+        }
+
+        // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
+        internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
+
+        private RegisterBanks RequireTypedRegisters(SubmittedDcbState state) =>
+            state.TypedRegisters ?? throw _host.Fatal($"The queue state has no typed register banks: queue={state.QueueName} submission={state.ActiveSubmissionId}.");
+
+        // The words of every bound color target, so a flip can replay a retained draw into the display buffer.
+        private static void RecordKnownColorTargets(SubmittedDcbState state, RegisterBanks banks)
+        {
+            var context = banks.Context;
+            for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+            {
+                var words = context.ColorTargets[slot];
+                if (words.BaseAddress != 0 && context.RenderTargetMaskForSlot(slot) != 0)
+                {
+                    state.KnownColorTargets[words.BaseAddress] = words;
+                }
+            }
+        }
+
+        private bool TryRunExecutorDraw(ulong submitId, SubmittedDcbState state, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
+        {
+            if (_executor is not { } executor)
+            {
+                return false;
+            }
+
+            var banks = RequireTypedRegisters(state);
+            RecordKnownColorTargets(state, banks);
+            state.FrameDrawCount++;
+            state.SawIndexedDraw |= indexed;
+            _programs!.CurrentState = state;
+            var drawStarted = DcbParseProfile.Begin();
+            try
+            {
+                if (indexed)
+                {
+                    executor.DrawIndexed(submitId, banks, in indexedArguments);
+                }
+                else
+                {
+                    executor.DrawAuto(submitId, banks, in autoArguments);
+                }
+            }
+            finally
+            {
+                DcbParseProfile.RecordDraw(drawStarted);
+                state.CurrentIndexSnapshot = null;
+                state.CurrentVertexSnapshot = null;
+            }
+
+            return true;
+        }
+
+        // Keeps the banks the draw was issued under; the flip replays it into the display buffer.
+        internal void RetainTargetlessDraw(RegisterBanks banks, in TargetlessDrawArguments arguments)
+        {
+            var state = RequireCurrent();
+            state.RetainedTargetlessDraw = new RetainedTargetlessDraw(banks.Clone(), arguments);
+        }
+
+        private static (uint X, uint Y, uint Z) ResolveDispatchGroups(ComputeStageRegisters compute, uint endX, uint endY, uint endZ, uint dispatchInitiator)
+        {
+            const uint useThreadDimensions = 1u << 5;
+            if ((dispatchInitiator & useThreadDimensions) == 0)
+            {
+                return (endX, endY, endZ);
+            }
+
+            return (
+                RenderExecutor.GroupsFromThreads(endX, compute.ThreadsX & 0xFFFFu),
+                RenderExecutor.GroupsFromThreads(endY, compute.ThreadsY & 0xFFFFu),
+                RenderExecutor.GroupsFromThreads(endZ, compute.ThreadsZ & 0xFFFFu));
         }
 
         public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots, GpuCommandInterpreter interpreter)
@@ -190,7 +275,13 @@ public static partial class AgcExports
 
         public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
         {
-            _ = submitId;
+            RecordIndexedDrawState(in arguments);
+            if (!TryRunExecutorDraw(submitId, RequireCurrent(), indexed: true, in arguments, default))
+                throw _host.Fatal("The command stream has no render executor.");
+        }
+
+        internal void RecordIndexedDrawState(in DrawIndexedArguments arguments)
+        {
             var state = RequireCurrent();
             state.IndexBufferAddress = arguments.IndexAddress;
             state.IndexBufferCount = arguments.IndexCount;
@@ -198,16 +289,20 @@ public static partial class AgcExports
             state.IndexSize = arguments.IndexTypeAndSize & 0x3u;
             state.InstanceCount = Math.Max(arguments.InstanceCount, 1);
             SelectSnapshots(state, arguments.PacketAddress, indexed: true, arguments.IndexAddress, arguments.IndexCount);
-            RunDraw(state, arguments.Opcode, arguments.IndexCount, indexed: true);
         }
 
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
         {
-            _ = submitId;
+            RecordAutoDrawState(in arguments);
+            if (!TryRunExecutorDraw(submitId, RequireCurrent(), indexed: false, default, in arguments))
+                throw _host.Fatal("The command stream has no render executor.");
+        }
+
+        internal void RecordAutoDrawState(in DrawAutoArguments arguments)
+        {
             var state = RequireCurrent();
             state.InstanceCount = Math.Max(arguments.InstanceCount, 1);
             SelectSnapshots(state, arguments.PacketAddress, indexed: false, 0, arguments.VertexCount);
-            RunDraw(state, arguments.Opcode, arguments.VertexCount, indexed: false);
         }
 
         // Candidates are found by packet address; each is validated against the execution-time state.
@@ -255,62 +350,71 @@ public static partial class AgcExports
             LastGeometrySnapshotDecisionForTests = decision;
         }
 
-        private void RunDraw(SubmittedDcbState state, uint opcode, uint count, bool indexed)
-        {
-            if (count == 0)
-            {
-                return;
-            }
-
-            state.FrameDrawCount++;
-            if (_traceAgcShader)
-            {
-                lock (_submitTraceGate)
-                {
-                    if (_tracedSubmittedDrawOpcodes.Add(opcode))
-                    {
-                        TraceAgcShader($"agc.draw_packet op=0x{opcode:X2} count={count}");
-                    }
-                }
-            }
-
-            state.SawIndexedDraw |= indexed;
-            var drawStarted = DcbParseProfile.Begin();
-            try
-            {
-                TryTranslateGuestDraw(_context, _gpuState, state, count, indexed);
-            }
-            finally
-            {
-                DcbParseProfile.RecordDraw(drawStarted);
-                state.CurrentIndexSnapshot = null;
-                state.CurrentVertexSnapshot = null;
-            }
-        }
 
         public void Dispatch(ulong submitId, uint endX, uint endY, uint endZ, uint dispatchInitiator)
         {
-            _ = submitId;
             var state = RequireCurrent();
-            if (!TryDecodeComputeDispatch(state, endX, endY, endZ, dispatchInitiator, out var dispatch))
+            if (_executor is { } executor)
+            {
+                var banks = RequireTypedRegisters(state);
+                state.FrameDispatchCount++;
+                _programs!.CurrentState = state;
+                _programs.PendingDispatchGroups = ResolveDispatchGroups(banks.Shader.Compute, endX, endY, endZ, dispatchInitiator);
+                var executorStarted = DcbParseProfile.Begin();
+                try
+                {
+                    executor.Dispatch(submitId, banks, endX, endY, endZ, dispatchInitiator);
+                }
+                finally
+                {
+                    DcbParseProfile.RecordDispatch(executorStarted);
+                }
+
+                return;
+            }
+
+            throw _host.Fatal("The command stream has no render executor.");
+        }
+
+            // The retained draw runs into the display buffer with the target words it was last bound with.
+        private void ReplayRetainedTargetlessDraw(RenderExecutor executor, SubmittedDcbState state, int handle, int displayBufferIndex)
+        {
+            if (state.RetainedTargetlessDraw is not { } retained)
             {
                 return;
             }
 
-            state.FrameDispatchCount++;
-            var dispatchStarted = DcbParseProfile.Begin();
-            ObserveComputeDispatch(_context, _gpuState, state, dispatch);
-            DcbParseProfile.RecordDispatch(dispatchStarted);
+            state.RetainedTargetlessDraw = null;
+            if (!VideoOutExports.TryGetDisplayBufferInfo(handle, displayBufferIndex, out var displayBuffer) ||
+                !state.KnownColorTargets.TryGetValue(displayBuffer.Address, out var words))
+            {
+                return;
+            }
+
+            var banks = retained.Banks;
+            _programs!.CurrentState = state;
+            banks.Context.ColorTargets[0] = words;
+            banks.Context.RenderTargetMask = 0xF;
+            var arguments = retained.Arguments;
+            if (arguments.Indexed)
+            {
+                executor.DrawIndexed(arguments.SubmitId, banks, arguments.Indexed_);
+            }
+            else
+            {
+                executor.DrawAuto(arguments.SubmitId, banks, arguments.Auto);
+            }
+
+            TraceAgcShader(
+                $"agc.deferred_composite dst=0x{displayBuffer.Address:X16} export=0x{banks.Shader.Vertex.ExportAddress:X16} " +
+                $"pixel=0x{banks.Shader.Pixel.Address:X16} size={displayBuffer.Width}x{displayBuffer.Height}");
         }
 
         // The interpreter cleared its banks; the translation state drops what it derived from them.
         public void QueueReset(int queueId)
         {
             var state = GetQueueState(queueId);
-            state.PresenterTexture = null;
             state.GuestDrawKind = GuestDrawKind.None;
-            state.TranslatedDraw = null;
-            state.RenderTargetWriters.Clear();
             state.IndirectArgsAddress = 0;
             state.SawIndexedDraw = false;
             state.IndexBufferAddress = 0;
@@ -327,49 +431,15 @@ public static partial class AgcExports
             var state = _gpuState.Graphics;
             TraceFramePacketSummary(state);
             SyncCpuWrittenGuestImages(_context);
-            if (state.PendingTargetlessDraw is { } pendingComposite &&
-                VideoOutExports.TryGetDisplayBufferInfo(handle, displayBufferIndex, out var pendingDisplayBuffer) &&
-                state.KnownRenderTargets.TryGetValue(pendingDisplayBuffer.Address, out var pendingDisplayTarget))
+            if (_executor is { } executor)
             {
-                var textures = CreateGuestDrawTextures(_context, pendingComposite.Textures, out _);
-                var globalMemoryBuffers = CreateTranslatedDrawGlobalBuffers(pendingComposite);
-                var vertexBuffers = CreateGuestVertexBuffers(pendingComposite.VertexInputs);
-                ProvideRenderTargetInitialData(_context, pendingDisplayTarget);
-                GuestGpu.Current.SubmitOffscreenTranslatedDraw(
-                    pendingComposite.PixelShader,
-                    textures,
-                    globalMemoryBuffers,
-                    pendingComposite.AttributeCount,
-                    [CreateGuestRenderTarget(pendingDisplayTarget)],
-                    pendingComposite.VertexShader,
-                    pendingComposite.VertexCount,
-                    pendingComposite.InstanceCount,
-                    pendingComposite.PrimitiveType,
-                    pendingComposite.IndexBuffer,
-                    vertexBuffers,
-                    pendingComposite.RenderState,
-                    pendingComposite.DepthTarget,
-                    pendingComposite.PixelShaderAddress,
-                    pendingComposite.BaseVertex);
-                TraceAgcShader(
-                    $"agc.deferred_composite ps=0x{pendingComposite.PixelShaderAddress:X16} " +
-                    $"src=0x{pendingComposite.Textures.FirstOrDefault()?.Descriptor.Address ?? 0:X16} " +
-                    $"dst=0x{pendingDisplayTarget.Address:X16} " +
-                    $"size={pendingDisplayTarget.Width}x{pendingDisplayTarget.Height}");
-                state.PendingTargetlessDraw = null;
-                state.TranslatedDraw = null;
+                ReplayRetainedTargetlessDraw(executor, state, handle, displayBufferIndex);
             }
 
-            ResetVideoDrawChainAtFlip();
+
             state.SawIndexedDraw = false;
             state.GuestDrawKind = GuestDrawKind.None;
-            if (state.PendingTargetlessDraw is { } unusedPendingDraw)
-            {
-                ReturnPooledDrawArrays(unusedPendingDraw, globals: true, vertex: true, index: true);
-                state.PendingTargetlessDraw = null;
-            }
 
-            state.TranslatedDraw = null;
         }
     }
 
@@ -412,7 +482,7 @@ public static partial class AgcExports
             _translation = CreateCommandStreamTranslation(Memory, this);
         }
 
-        private CommandStreamTranslation Translation => _translation ?? throw Fatal("The command stream translation is not attached.");
+        protected CommandStreamTranslation Translation => _translation ?? throw Fatal("The command stream translation is not attached.");
 
         public override void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots) =>
             Translation.BeginSubmission(queueId, submissionId, geometrySnapshots, Queue.GetInterpreter(queueId));
@@ -438,12 +508,28 @@ public static partial class AgcExports
     // The inline command stream of a backend without a presenter thread (test and startup path).
     internal sealed class HeadlessCommandStream
     {
+        // Command-state tests record packet state; render tests use the executor's recording host.
+        private sealed class CommandStateHost(ICpuMemory memory) : TranslatingCommandStreamHost(memory)
+        {
+            public override void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments) =>
+                Translation.RecordIndexedDrawState(in arguments);
+
+            public override void DrawAuto(ulong submitId, in DrawAutoArguments arguments) =>
+                Translation.RecordAutoDrawState(in arguments);
+
+            public override void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+            {
+                Dispatches.Add((submitId, groupsX, groupsY, groupsZ, dispatchInitiator));
+            }
+
+            internal List<(ulong Submission, uint GroupsX, uint GroupsY, uint GroupsZ, uint Initiator)> Dispatches { get; } = [];
+        }
         private static readonly ConditionalWeakTable<object, HeadlessCommandStream> _streams = new();
         private readonly object _gate = new();
 
         private HeadlessCommandStream(ICpuMemory memory)
         {
-            Host = new TranslatingCommandStreamHost(memory);
+            Host = new CommandStateHost(memory);
             Queue = new CommandStreamQueue(Host);
             Host.AttachQueue(Queue);
         }
@@ -454,6 +540,7 @@ public static partial class AgcExports
 
         public static HeadlessCommandStream For(ICpuMemory memory) =>
             _streams.GetValue(CanonicalMemory(memory), _ => new HeadlessCommandStream(memory));
+
 
         // Runs on the submitting thread until nothing runnable is left; blocked heads wait for the next submit.
         public void Submit(uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
@@ -547,29 +634,4 @@ public static partial class AgcExports
         return true;
     }
 
-    // Splits the dispatch decode that depends on registers from the packet reads.
-    private static bool TryDecodeComputeDispatch(
-        SubmittedDcbState state,
-        uint dispatchEndX,
-        uint dispatchEndY,
-        uint dispatchEndZ,
-        uint initiator,
-        out ComputeDispatch dispatch)
-    {
-        dispatch = default;
-        if ((initiator & 1) == 0 || dispatchEndX == 0 || dispatchEndY == 0 || dispatchEndZ == 0)
-        {
-            return false;
-        }
-
-        return TryDecodeComputeDispatchCore(
-            state,
-            dimensionsAddress: 0,
-            initiator,
-            "interpreter",
-            dispatchEndX,
-            dispatchEndY,
-            dispatchEndZ,
-            out dispatch);
-    }
 }

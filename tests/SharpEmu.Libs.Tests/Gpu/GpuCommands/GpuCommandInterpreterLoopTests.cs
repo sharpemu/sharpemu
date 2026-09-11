@@ -163,11 +163,11 @@ public sealed class GpuCommandInterpreterLoopTests
         uint[] State(uint operation) => StreamRunner.CustomPacket(Nop, PacketCustomCode.ContextState, operation, 0);
 
         runner.Run(setTargetMask, State(1), StreamRunner.Packet(PacketOpcode.SetContextRegister, 0x8E, 0x1), State(2));
-        Assert.Equal(0xFu, runner.Interpreter.Registers.Context[0x8E]);
+        Assert.Equal(0xFu, runner.Interpreter.TypedRegisters.Context.RenderTargetMask);
 
         runner.Run(State(3));
-        Assert.False(runner.Interpreter.Registers.Context.ContainsKey(0x8E));
-        Assert.Equal(0xFu, runner.Interpreter.Registers.SavedContext[0x8E]);
+        Assert.Equal(0u, runner.Interpreter.TypedRegisters.Context.RenderTargetMask);
+        Assert.True(runner.Interpreter.TypedRegisters.ContextPushed);
 
         var fatal = runner.RunExpectingFatal(State(1));
         Assert.Contains("already pushed", fatal.Message);

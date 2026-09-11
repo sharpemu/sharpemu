@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
@@ -29,9 +30,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private GuestImageCache _imageCache = null!;
         private SamplerStore _samplerStore = null!;
 
-        bool IRenderingState.IsRendering => _openPassActive;
+        bool IRenderingState.IsRendering => _renderingActive;
 
-        void IRenderingState.EndRendering() => CloseOpenTranslatedRenderPass();
+        void IRenderingState.EndRendering()
+        {
+            EndRendering();
+        }
 
         internal static void WakeRenderThread()
         {
@@ -63,6 +67,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CreateBufferCache()
         {
             var (memory, guest, backing) = RequireGuestMemory("buffer store");
+            _guestBacking = backing;
             _bufferCache = new GuestBufferCache(_deviceInfo, _scheduler, _relay, memory.Pages, guest, backing);
             _bufferCache.StreamOffsetAlignment = Math.Max(_bufferCache.StreamOffsetAlignment, GuestStorageBufferOffsetAlignment);
         }

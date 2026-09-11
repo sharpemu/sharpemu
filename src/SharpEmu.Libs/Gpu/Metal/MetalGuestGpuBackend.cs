@@ -21,7 +21,6 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
 
     public string BackendName => "Metal";
 
-    public bool SnapshotsGuestBuffers => true;
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new MetalCompiledGuestShader(new Gen5MslShader(
@@ -143,29 +142,6 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;
 
-    public bool TryGetRenderTargetOutputInfo(
-        uint dataFormat,
-        uint numberType,
-        uint componentSwap,
-        out Gen5PixelOutputKind outputKind,
-        out Gen5ColorComponentMapping componentMapping)
-    {
-        if (MetalGuestFormats.TryDecodeRenderTargetFormat(
-                dataFormat,
-                numberType,
-                componentSwap,
-                out var format))
-        {
-            outputKind = format.OutputKind;
-            componentMapping = format.ExportMapping;
-            return true;
-        }
-
-        outputKind = default;
-        componentMapping = default;
-        return false;
-    }
-
     public void EnsureStarted(uint width, uint height) =>
         MetalVideoPresenter.EnsureStarted(width, height);
 
@@ -219,7 +195,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
                 return existing;
             }
 
-            var host = new MetalCommandStreamHost(memory, this);
+            var host = new MetalCommandStreamHost(memory, this, this);
             var queue = new CommandStreamQueue(host);
             host.AttachQueue(queue);
             _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream");

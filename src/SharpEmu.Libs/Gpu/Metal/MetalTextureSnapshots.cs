@@ -4,185 +4,51 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
+using static SharpEmu.Libs.Agc.AgcExports;
 
-namespace SharpEmu.Libs.Agc;
+namespace SharpEmu.Libs.Gpu.Metal;
 
-// This partial transports guest texture descriptors into host draw resources.
-public static partial class AgcExports
+internal static class MetalTextureSnapshots
 {
+    private const ulong MaximumSnapshotBytes = 128UL * 1024UL * 1024UL;
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
 
-    // Escape hatch for the cached-texture copy skip (per-draw texel copies
-    // are re-enabled unconditionally when set), for A/B-ing rendering issues.
+    // Disable cache reuse to check snapshot freshness.
     private static readonly bool _textureCopySkipDisabled = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_NO_TEXTURE_SKIP"),
         "1",
         StringComparison.Ordinal);
-    // GPU deswizzle: ship raw tiled bytes + params to the backend instead of
-    // detiling on the CPU. On by default; SHARPEMU_GPU_DETILE=0 forces the CPU
-    // path. Backend-agnostic here (only inspects DetileParams); the Vulkan/Metal
-    // backends detile on the GPU, others fall back to the CPU path.
+
+    // Send supported tiled data to the GPU; decode other layouts on the CPU.
     private static readonly bool _gpuDetileEnabled = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_GPU_DETILE"),
         "0",
         StringComparison.Ordinal);
 
-    // Diagnostics (SHARPEMU_LOG_GPU_DETILE=1): one line per distinct texture tile
-    // mode and per-gate decision, so we can see which swizzle modes/formats a
-    // title uses and whether each takes the GPU or CPU path.
+    // Report each tile mode and decode decision once.
     private static readonly bool _gpuDetileLog = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_DETILE"),
         "1",
         StringComparison.Ordinal);
+
     private static readonly HashSet<uint> _seenTextureTileModes = new();
+
     private static readonly HashSet<uint> _gpuDetileGateDiag = new();
+
     private static readonly bool _reuseGuestTextureSnapshots = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_REUSE_GUEST_TEXTURE_SNAPSHOTS"),
         "0",
         StringComparison.Ordinal);
+
     private static int _guestTextureSnapshotReuseLogged;
 
     private static int _textureFallbackTraceCount;
-
-    private readonly record struct TextureDescriptor(
-        ulong Address,
-        uint Width,
-        uint Height,
-        uint Format,
-        uint NumberType,
-        uint TileMode,
-        uint Type,
-        uint BaseLevel,
-        uint LastLevel,
-        uint Pitch,
-        uint DstSelect,
-        uint Depth = 1,
-        uint BaseArray = 0,
-        uint ArrayPitch = 0,
-        uint MaxMip = 0,
-        uint MinLod = 0,
-        uint MinLodWarn = 0,
-        uint BcSwizzle = 0,
-        ulong MetadataAddress = 0,
-        uint DescriptorFlags = 0,
-        bool HasExtendedDescriptor = false)
-    {
-        public uint ResourceMipLevels
-        {
-            get
-            {
-                // RDNA2 table 45 explicitly distinguishes MAX_MIP (the
-                // resource allocation) from BASE_LEVEL/LAST_LEVEL (the
-                // resource view). Do not size a Vulkan image from a view:
-                // another descriptor for the same allocation may expose a
-                // different subset of its mip chain.
-                var maximumMipLevels = GetMaximumMipLevels();
-                var resourceMipLevels = HasExtendedDescriptor
-                    ? MaxMip + 1
-                    : maximumMipLevels;
-                return Math.Min(Math.Max(resourceMipLevels, 1u), maximumMipLevels);
-            }
-        }
-
-        public uint MipLevels
-        {
-            get
-            {
-                var descriptorMipLevels = LastLevel >= ViewBaseLevel
-                    ? LastLevel - ViewBaseLevel + 1
-                    : 1;
-                return Math.Min(
-                    descriptorMipLevels,
-                    ResourceMipLevels - ViewBaseLevel);
-            }
-        }
-
-        public uint ViewBaseLevel
-        {
-            get
-            {
-                // Some single-mip Gen5 descriptors use the reserved/inverted
-                // 15-0 range as a mip-disabled sentinel. The resource still
-                // has exactly one addressable level (MAX_MIP=0). Treating 15
-                // literally makes Vulkan reject an otherwise compatible GPU
-                // image and falls back to stale guest-memory pixels. For any
-                // malformed range, keep BASE_LEVEL's meaning and clamp it to
-                // the allocation's last addressable mip. In particular, the
-                // common 15-0/MAX_MIP=0 sentinel resolves to mip 0 without
-                // making LAST_LEVEL the base of unrelated inverted views.
-                return Math.Min(BaseLevel, ResourceMipLevels - 1);
-            }
-        }
-
-        private uint GetMaximumMipLevels()
-        {
-            var largestDimension = Type == 10
-                ? Math.Max(Math.Max(Width, Height), Depth)
-                : Math.Max(Width, Height);
-            uint maximumMipLevels = 1;
-            while (largestDimension > 1)
-            {
-                largestDimension >>= 1;
-                maximumMipLevels++;
-            }
-
-            return maximumMipLevels;
-        }
-    }
-
-    private sealed record TranslatedImageBinding(
-        TextureDescriptor Descriptor,
-        bool IsStorage,
-        uint MipLevel,
-        IReadOnlyList<uint> SamplerDescriptor,
-        bool IsArrayed = false,
-        IReadOnlyList<uint>? ResourceDescriptor = null,
-        bool DynamicMip = false,
-        uint Dimension = 1);
-
-    // A backend without CPU snapshots receives the raw descriptor and the compiled shape only.
-    private static GuestDrawTexture CreateDescriptorDrawTexture(TranslatedImageBinding binding)
-    {
-        var descriptor = binding.Descriptor;
-        // A rejected descriptor must remain a null binding when sent to the image cache.
-        var words = descriptor.Address == 0 ? [] : binding.ResourceDescriptor?.ToArray() ?? [];
-        Span<uint> padded = stackalloc uint[8];
-        words.AsSpan(0, Math.Min(words.Length, 8)).CopyTo(padded);
-        var numericClass = GuestPixelFormats.SampledNumericClass(new TextureDescriptorWords(padded).Format);
-        var shape = new ShaderImageShape(
-            Volume: binding.Dimension == 2,
-            Arrayed: binding.IsArrayed,
-            Storage: binding.IsStorage,
-            DynamicMip: binding.DynamicMip,
-            NumericClass: numericClass == TextureNumericClass.Unsupported ? TextureNumericClass.Float : numericClass);
-        return new GuestDrawTexture(
-            descriptor.Address,
-            descriptor.Width,
-            descriptor.Height,
-            descriptor.Format,
-            descriptor.NumberType,
-            [],
-            IsFallback: false,
-            IsStorage: binding.IsStorage,
-            MipLevels: descriptor.MipLevels,
-            MipLevel: binding.MipLevel,
-            BaseMipLevel: descriptor.ViewBaseLevel,
-            ResourceMipLevels: descriptor.ResourceMipLevels,
-            Pitch: descriptor.Pitch,
-            TileMode: descriptor.TileMode,
-            DstSelect: descriptor.DstSelect,
-            Sampler: ToGuestSampler(binding.SamplerDescriptor),
-            ArrayedView: binding.IsArrayed,
-            Type: descriptor.Type,
-            Depth: descriptor.Depth,
-            Descriptor: words,
-            Shape: shape);
-    }
 
     private readonly record struct GuestTextureSnapshotReuseKey(
         TextureDescriptor Descriptor,
@@ -190,23 +56,13 @@ public static partial class AgcExports
         uint MipLevel,
         bool IsArrayed);
 
-    private static IReadOnlyList<GuestDrawTexture> CreateGuestDrawTextures(
-        CpuContext ctx,
+    internal static IReadOnlyList<GuestDrawTexture> CreateTextureSnapshots(
+        CpuContext context,
         IReadOnlyList<TranslatedImageBinding> bindings,
         out int fallbackTextureCount)
     {
         var textures = new List<GuestDrawTexture>(bindings.Count);
         fallbackTextureCount = 0;
-        if (GuestGpu.Current is not IGuestImageSnapshotBackend)
-        {
-            foreach (var binding in bindings)
-            {
-                textures.Add(CreateDescriptorDrawTexture(binding));
-            }
-
-            return textures;
-        }
-
         Dictionary<GuestTextureSnapshotReuseKey, GuestDrawTexture>? snapshots = null;
         if (_reuseGuestTextureSnapshots)
         {
@@ -229,9 +85,7 @@ public static partial class AgcExports
             GuestDrawTexture texture;
             if (snapshots?.TryGetValue(reuseKey, out var snapshot) == true)
             {
-                // The sampling state is unique to each binding. Multiple bindings
-                // can share the decoded texture data. Keep one record for each binding.
-                // Share the unchanged snapshot only during this translation.
+                // Keep each binding's sampling state separate; share unchanged pixel data within this draw.
                 texture = snapshot with
                 {
                     Sampler = ToGuestSampler(binding.SamplerDescriptor),
@@ -241,7 +95,7 @@ public static partial class AgcExports
                     profileStart);
             }
             else if (TryCreateGuestDrawTexture(
-                    ctx,
+                    context,
                     binding.Descriptor,
                     binding.IsStorage,
                     binding.MipLevel,
@@ -249,10 +103,7 @@ public static partial class AgcExports
                     binding.IsArrayed,
                     out texture))
             {
-                // An empty non-fallback snapshot shows that this sampler-specific
-                // texture is in the presenter cache. Another sampler can require
-                // a different cache entry. Reuse only snapshots that contain
-                // decoded pixels.
+                // Reuse only decoded pixels; an empty snapshot can refer to a sampler-specific cache entry.
                 if (!texture.IsFallback && texture.RgbaPixels.Length != 0)
                 {
                     snapshots?.Add(reuseKey, texture);
@@ -286,19 +137,6 @@ public static partial class AgcExports
         return textures;
     }
 
-    // BCn block-compressed guest formats and the bytes per 4x4 block.
-    private static int GetBlockCompressedBlockBytes(uint format) => format switch
-    {
-        169 or 170 or 175 or 176 => 8,
-        171 or 172 or 173 or 174 or 177 or 178 or 179 or 180 or 181 or 182 => 16,
-        _ => 0,
-    };
-
-    /// <summary>
-    /// Deswizzles a tiled texture source into linear layout when tiling is
-    /// enabled and the format is understood; returns null to keep the raw
-    /// bytes (linear surfaces, unknown modes, or non-power-of-two elements).
-    /// </summary>
     // Keep equation support consistent with MetalDetilePass.Supports.
     // The GPU handles 4-, 8-, and 16-byte elements; the CPU handles smaller elements.
     private static bool IsGpuDetileEquation(DetileEquation equation) =>
@@ -393,11 +231,11 @@ public static partial class AgcExports
 
             var tailLinear = new byte[logicalByteCount];
             var rowBytes = elementsWide * bytesPerElement;
-            for (var y = 0; y < elementsHigh; y++)
+            for (var rowIndex = 0; rowIndex < elementsHigh; rowIndex++)
             {
-                var sourceOffset = (((long)tailElementY + y) * blockWidth + tailElementX) * bytesPerElement;
+                var sourceOffset = (((long)tailElementY + rowIndex) * blockWidth + tailElementX) * bytesPerElement;
                 blockLinear.AsSpan((int)sourceOffset, rowBytes)
-                    .CopyTo(tailLinear.AsSpan(y * rowBytes, rowBytes));
+                    .CopyTo(tailLinear.AsSpan(rowIndex * rowBytes, rowBytes));
             }
 
             return tailLinear;
@@ -452,7 +290,7 @@ public static partial class AgcExports
     }
 
     private static bool TryCreateGuestDrawTexture(
-        CpuContext ctx,
+        CpuContext context,
         TextureDescriptor descriptor,
         bool isStorage,
         uint mipLevel,
@@ -517,7 +355,7 @@ public static partial class AgcExports
             descriptor.Height,
             textureDepth);
         if (sourceByteCount == 0 ||
-            sourceByteCount > MaxPresentedTextureBytes ||
+            sourceByteCount > MaximumSnapshotBytes ||
             sourceByteCount > int.MaxValue)
         {
             TraceTextureFallback(
@@ -580,7 +418,7 @@ public static partial class AgcExports
         }
 
         physicalSourceByteCount = checked(physicalSourceByteCount * textureDepth);
-        if (physicalSourceByteCount > MaxPresentedTextureBytes ||
+        if (physicalSourceByteCount > MaximumSnapshotBytes ||
             physicalSourceByteCount > int.MaxValue)
         {
             texture = CreateFallbackGuestDrawTexture(
@@ -605,13 +443,7 @@ public static partial class AgcExports
             SharpEmu.Libs.AvPlayer.AvPlayerExports.IsVideoBufferAddress(
                 descriptor.Address);
 
-        // Upload-known (not plain availability): the presenter's answer goes
-        // generation-stale when the guest CPU rewrites a CPU-backed image
-        // (video planes, streamed font atlases), which routes this draw back
-        // through the texel copy below so the refresh path re-uploads.
-        // With the write tracker off (Windows default), IsGuestImageUploadKnown
-        // uses a cheap guest-memory probe so static UI can still skip (Dead
-        // Cells menus) while changing CPU content (GTA Bink) forces a copy.
+        // Check content freshness before reusing a cached upload.
         var sampledUploadKnown = false;
         if (!isStorage &&
             !wantsArrayUpload &&
@@ -629,7 +461,6 @@ public static partial class AgcExports
 
         if (sampledUploadKnown)
         {
-            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -669,18 +500,13 @@ public static partial class AgcExports
             var storageSnapshot = default(SharpEmu.HLE.GuestImageWriteTracker.ReadSnapshot);
             if (descriptor.Address != 0 && !uploadKnown)
             {
-                // Storage images can be pre-populated in tiled guest memory
-                // just like sampled images. Reading only the logical linear
-                // byte count both truncates 64 KiB swizzle blocks and uploads
-                // tiled bytes as scanlines. Read the full physical footprint
-                // and run the same AddrLib-derived detile path used below for
-                // sampled textures before seeding the Vulkan image.
+                // Read and decode the full tiled storage footprint before upload.
                 storageSnapshot = SharpEmu.HLE.GuestImageWriteTracker.BeginReadSnapshot(
                     descriptor.Address,
                     checked(baseMipByteOffset + physicalSourceByteCount),
                     source: "agc.storage-image-snapshot");
                 var storageSource = new byte[(int)physicalSourceByteCount];
-                if (ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
+                if (context.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
                     readSucceeded = true;
                     var linearStorage = TryDetileTextureSource(
@@ -706,7 +532,7 @@ public static partial class AgcExports
                     if (snapshotAttempt < 2)
                     {
                         return TryCreateGuestDrawTexture(
-                            ctx,
+                            context,
                             descriptor,
                             isStorage,
                             mipLevel,
@@ -736,7 +562,6 @@ public static partial class AgcExports
                     $"tile={descriptor.TileMode} mip={mipLevel}");
             }
 
-            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -764,25 +589,14 @@ public static partial class AgcExports
             return true;
         }
 
-        // When the presenter already holds this exact texture identity in
-        // its cache, the texel copy below would be discarded on arrival; for
-        // scenes that sample large textures every draw this copy dominated
-        // CPU time (Dead Cells menus). The cache records the write generation
-        // that supplied its pixels. A later native or managed CPU write bumps
-        // the tracker generation and makes IsTextureContentCached return false.
-        // CPU-updated guest Bink planes are handled by the upload-known gate
-        // above when the tracker cannot observe native writes.
+        // Reuse cached texels only while their tracked write generation is unchanged.
         var sampler = ToGuestSampler(samplerDescriptor);
-        // Capture the generation associated with these texels. The presenter
-        // records it after upload, and a later tracked write makes the cache
-        // generation differ so the next bind sends fresh texels.
+        // Keep the write generation with the pixels so later writes invalidate this upload.
         var hasWriteGeneration =
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
-        // Decoded video buffers rotate while older guest draws can still be
-        // queued. Keep the texels that belonged to this draw instead of using
-        // an address-only cache shortcut after the decoder reuses the buffer.
+        // Keep this draw's decoded pixels when a rotating video buffer can be reused.
         var contentCached = false;
         if (!_textureCopySkipDisabled &&
             !isVideoBuffer &&
@@ -812,7 +626,6 @@ public static partial class AgcExports
 
         if (contentCached)
         {
-            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -858,7 +671,7 @@ public static partial class AgcExports
 
             if (hasElementLayout && resourceMipLevels > 1 &&
                 TryCreateTiledArrayMipChain(
-                    ctx,
+                    context,
                     descriptor,
                     sampler,
                     arrayLayers,
@@ -868,9 +681,8 @@ public static partial class AgcExports
                     hasWriteGeneration ? writeGeneration : -1,
                     out texture))
             {
-                NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
                 return FinalizeGuestTextureSnapshot(
-                    ctx,
+                    context,
                     descriptor,
                     isStorage,
                     mipLevel,
@@ -882,12 +694,7 @@ public static partial class AgcExports
                     out texture);
             }
 
-            // GPU detile for arrayed exact-XOR/4bpp textures: pack the tiled array
-            // slices contiguously and hand them to the GPU pass (one dispatch-Z
-            // layer per slice), mirroring the single-layer gate above. The backend
-            // deswizzles every layer on the GPU; only unsupported cases fall to the
-            // CPU per-layer detile below. Font/text atlases uploaded as 2D arrays
-            // take this path.
+            // Pack tiled array slices for one GPU decode per layer; decode unsupported layouts on the CPU.
             if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
                 IsGpuDetileBytesPerElement(bytesPerElement) &&
                 IsGpuDetileTextureType(descriptor.Type) &&
@@ -903,7 +710,7 @@ public static partial class AgcExports
                     var readAllLayers = true;
                     for (var layer = 0u; layer < arrayLayers; layer++)
                     {
-                        if (!ctx.Memory.TryRead(
+                        if (!context.Memory.TryRead(
                                 descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
                                 tiledLayers.AsSpan(checked((int)(layer * (uint)sliceBytes)), sliceBytes)))
                         {
@@ -914,7 +721,6 @@ public static partial class AgcExports
 
                     if (readAllLayers)
                     {
-                        NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                             descriptor.Address,
                             descriptor.Width,
@@ -935,17 +741,14 @@ public static partial class AgcExports
                             WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
                             ArrayedView: true,
                             ArrayLayers: arrayLayers,
-                            // Must match the identity the CPU path below ships, or
-                            // the presenter caches this texture under a different
-                            // key than IsTextureContentCached queries above and the
-                            // texel-copy skip never hits for non-2D descriptors.
+                            // Use the same texture identity for cache lookup and upload.
                             Type: descriptor.Type,
                             Depth: textureDepth,
                             TiledSource: tiledLayers,
                             Detile: gpuArrayParams,
                             SourceByteCount: trackedSourceByteCount);
                         return FinalizeGuestTextureSnapshot(
-                            ctx,
+                            context,
                             descriptor,
                             isStorage,
                             mipLevel,
@@ -966,7 +769,7 @@ public static partial class AgcExports
                 for (var layer = 0u; layer < arrayLayers; layer++)
                 {
                     var sliceSource = new byte[(int)chainSliceBytes];
-                    if (!ctx.Memory.TryRead(
+                    if (!context.Memory.TryRead(
                             descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
                             sliceSource))
                     {
@@ -988,7 +791,6 @@ public static partial class AgcExports
 
                 if (uploadedLayers == arrayLayers)
                 {
-                    NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                         descriptor.Address,
                         descriptor.Width,
@@ -1013,7 +815,7 @@ public static partial class AgcExports
                         Depth: textureDepth,
                         SourceByteCount: checked(chainSliceBytes * arrayLayers));
                     return FinalizeGuestTextureSnapshot(
-                        ctx,
+                        context,
                         descriptor,
                         isStorage,
                         mipLevel,
@@ -1030,7 +832,7 @@ public static partial class AgcExports
         }
 
         var source = new byte[(int)physicalSourceByteCount];
-        if (!ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, source))
+        if (!context.Memory.TryRead(descriptor.Address + baseMipByteOffset, source))
         {
             TraceTextureFallback(
                 descriptor,
@@ -1045,28 +847,6 @@ public static partial class AgcExports
             return true;
         }
 
-        if (_traceAgcShader)
-        {
-            var nonZero = 0;
-            for (var i = 0; i < source.Length; i++)
-            {
-                if (source[i] != 0)
-                {
-                    nonZero++;
-                    if (nonZero >= 64)
-                    {
-                        break;
-                    }
-                }
-            }
-
-            TraceAgcShader(
-                $"agc.texture_source addr=0x{descriptor.Address:X16} " +
-                $"fmt={descriptor.Format} num={descriptor.NumberType} tile={descriptor.TileMode} " +
-                $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
-                $"dst=0x{descriptor.DstSelect:X3} " +
-                $"bytes={source.Length} logical_bytes={sourceByteCount} nonzero64={nonZero}");
-        }
         DumpTextureSourceIfRequested(descriptor, sourceWidth, source);
 
         if (_gpuDetileLog && descriptor.TileMode != 0)
@@ -1075,26 +855,20 @@ public static partial class AgcExports
             {
                 if (_gpuDetileGateDiag.Add(descriptor.TileMode))
                 {
-                    var eq = hasElementLayout
+                    var equation = hasElementLayout
                         ? GnmTiling.GetDetileParams(
                             descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh).Equation
                         : DetileEquation.None;
                     Console.Error.WriteLine(
                         $"[GPU-DETILE] gate mode={descriptor.TileMode} fmt={descriptor.Format} " +
                         $"bpp={bytesPerElement} hasLayout={hasElementLayout} mipTail={baseMipInTail} " +
-                        $"storage={isStorage} arrayed={isArrayed} eq={eq} -> " +
-                        $"{(hasElementLayout && !baseMipInTail && IsGpuDetileBytesPerElement(bytesPerElement) && IsGpuDetileEquation(eq) ? "GPU" : "CPU")}");
+                        $"storage={isStorage} arrayed={isArrayed} eq={equation} -> " +
+                        $"{(hasElementLayout && !baseMipInTail && IsGpuDetileBytesPerElement(bytesPerElement) && IsGpuDetileEquation(equation) ? "GPU" : "CPU")}");
                 }
             }
         }
 
-        // GPU detile: for the 4/8/16-bytes/element base-mip case the backend can
-        // deswizzle on the GPU (exact-XOR and block-table equations, including
-        // block-compressed formats), so ship the raw tiled bytes + params rather
-        // than paying the CPU detile. Everything else keeps the CPU path below.
-        //
-        // Arrayed textures are handled by the arrayed branch above (they package
-        // every layer's tiled slice); this branch is the single-layer case.
+        // Send supported single-layer base-mip layouts to the GPU; decode the rest on the CPU.
         if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
             IsGpuDetileBytesPerElement(bytesPerElement) && !isArrayed &&
             IsGpuDetileTextureType(descriptor.Type))
@@ -1104,7 +878,6 @@ public static partial class AgcExports
             if (IsGpuDetileEquation(gpuDetileParams.Equation) &&
                 (long)elementsWide * elementsHigh * bytesPerElement <= source.Length)
             {
-                NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                     descriptor.Address,
                     descriptor.Width,
@@ -1130,7 +903,7 @@ public static partial class AgcExports
                     Detile: gpuDetileParams,
                     SourceByteCount: (ulong)source.Length);
                 return FinalizeGuestTextureSnapshot(
-                    ctx,
+                    context,
                     descriptor,
                     isStorage,
                     mipLevel,
@@ -1175,7 +948,7 @@ public static partial class AgcExports
             Depth: textureDepth,
             SourceByteCount: physicalSourceByteCount);
         return FinalizeGuestTextureSnapshot(
-            ctx,
+            context,
             descriptor,
             isStorage,
             mipLevel,
@@ -1188,7 +961,7 @@ public static partial class AgcExports
     }
 
     private static bool FinalizeGuestTextureSnapshot(
-        CpuContext ctx,
+        CpuContext context,
         TextureDescriptor descriptor,
         bool isStorage,
         uint mipLevel,
@@ -1214,7 +987,7 @@ public static partial class AgcExports
         if (snapshotAttempt < 2)
         {
             return TryCreateGuestDrawTexture(
-                ctx,
+                context,
                 descriptor,
                 isStorage,
                 mipLevel,
@@ -1224,9 +997,7 @@ public static partial class AgcExports
                 snapshotAttempt + 1);
         }
 
-        // Keep the descriptor but withhold bytes that crossed a guest write.
-        // The backend can retain an older cached image and retry on a later
-        // bind without publishing a torn atlas or video plane.
+        // Withhold bytes read across a guest write to prevent a torn upload.
         texture = candidate with
         {
             RgbaPixels = [],
@@ -1239,7 +1010,7 @@ public static partial class AgcExports
     }
 
     private static bool TryCreateTiledArrayMipChain(
-        CpuContext ctx,
+        CpuContext context,
         TextureDescriptor descriptor,
         GuestSampler sampler,
         uint arrayLayers,
@@ -1320,7 +1091,7 @@ public static partial class AgcExports
 
         for (var layer = 0u; layer < arrayLayers; layer++)
         {
-            if (!ctx.Memory.TryRead(
+            if (!context.Memory.TryRead(
                     descriptor.Address + layer * chainSliceBytes,
                     tiledSlice))
             {
@@ -1363,13 +1134,13 @@ public static partial class AgcExports
                 }
 
                 var rowBytes = placement.ElementsWide * bytesPerElement;
-                for (var y = 0; y < placement.ElementsHigh; y++)
+                for (var rowIndex = 0; rowIndex < placement.ElementsHigh; rowIndex++)
                 {
                     var sourceOffset = checked(
-                        ((placement.TailElementY + y) * tailBlockWidth +
+                        ((placement.TailElementY + rowIndex) * tailBlockWidth +
                          placement.TailElementX) * bytesPerElement);
                     tailLinear.AsSpan(sourceOffset, rowBytes)
-                        .CopyTo(destination.Slice(y * rowBytes, rowBytes));
+                        .CopyTo(destination.Slice(rowIndex * rowBytes, rowBytes));
                 }
             }
         }
@@ -1401,57 +1172,10 @@ public static partial class AgcExports
         return true;
     }
 
-    /// <summary>
-    /// On PS5 render targets alias guest memory, so pixels the game wrote with
-    /// the CPU are visible before the first GPU draw (Chowdren pre-fills its
-    /// fog/overlay layers that way). Seed newly created Vulkan guest images
-    /// with the current guest memory contents to preserve that base layer.
-    /// </summary>
-    private static void ProvideRenderTargetInitialData(
-        CpuContext ctx,
-        RenderTargetDescriptor target)
-    {
-        if (GuestGpu.Current is not IGuestImageSnapshotBackend snapshots ||
-            !snapshots.GuestImageWantsInitialData(target.Address))
-        {
-            return;
-        }
-
-        var byteCount = VulkanVideoPresenter.GetGuestImageByteCount(
-            target.Format,
-            target.Width,
-            target.Height);
-        if (byteCount == 0 || byteCount > MaxPresentedTextureBytes)
-        {
-            return;
-        }
-
-        var initialData = new byte[byteCount];
-        var readOk = ctx.Memory.TryRead(target.Address, initialData);
-        var nonZero = readOk && initialData.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
-        if (_traceDraws && _rtSeedTraced.Add(target.Address))
-        {
-            Console.Error.WriteLine(
-                $"[RTSEED] addr=0x{target.Address:X} {target.Width}x{target.Height} " +
-                $"read={readOk} nonZero={nonZero}");
-        }
-
-        if (nonZero)
-        {
-            snapshots.ProvideGuestImageInitialData(target.Address, initialData);
-        }
-    }
-
-    private static readonly HashSet<ulong> _rtSeedTraced = new();
-
     private static int _textureDumpCount;
+
     private static readonly ConcurrentDictionary<string, int> _textureDumpKeys = new();
 
-    /// <summary>
-    /// Writes raw sampled-texture bytes (as read from guest memory) when
-    /// SHARPEMU_TEXTURE_DUMP_DIR is set, so upload-time content can be
-    /// inspected offline. File name records size and effective pitch.
-    /// </summary>
     private static void DumpTextureSourceIfRequested(
         in TextureDescriptor descriptor,
         uint sourcePitch,
@@ -1465,8 +1189,7 @@ public static partial class AgcExports
 
         var key = $"0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}";
         var occurrence = _textureDumpKeys.AddOrUpdate(key, 1, static (_, count) => count + 1);
-        // First uses plus periodic later snapshots (the game reuses the same
-        // allocation for successive full-screen images).
+        // Capture initial and later uses of recycled image storage.
         if ((occurrence > 3 && occurrence % 500 >= 3) ||
             Interlocked.Increment(ref _textureDumpCount) > 200)
         {
@@ -1489,11 +1212,6 @@ public static partial class AgcExports
         }
     }
 
-    /// <summary>
-    /// Writes the bytes after detiling when SHARPEMU_TEXTURE_LINEAR_DUMP_DIR is
-    /// set. Keeping this separate from the raw-source dump makes AddrLib
-    /// equation changes directly inspectable with ordinary image tools.
-    /// </summary>
     private static void DumpLinearTextureIfRequested(
         in TextureDescriptor descriptor,
         uint sourcePitch,
@@ -1554,36 +1272,6 @@ public static partial class AgcExports
             Depth: GetTextureVolumeDepth(type, depth));
     }
 
-    private static GuestSampler ToGuestSampler(IReadOnlyList<uint> descriptor) =>
-        descriptor.Count >= 4
-            ? new GuestSampler(
-                descriptor[0],
-                descriptor[1],
-                descriptor[2],
-                descriptor[3])
-            : default;
-
-    internal static IReadOnlyList<uint> NormalizeSamplerDescriptorForImageOperation(
-        IReadOnlyList<uint> descriptor)
-    {
-        const uint depthCompareMask = 0x7u << 12;
-        if (descriptor.Count < 4 ||
-            (descriptor[0] & depthCompareMask) == 0)
-        {
-            return descriptor;
-        }
-
-        // The shader translators perform guest depth comparisons after a
-        // normal sample. The native sampler must not compare the value first.
-        return
-        [
-            descriptor[0] & ~depthCompareMask,
-            descriptor[1],
-            descriptor[2],
-            descriptor[3],
-        ];
-    }
-
     private static byte[] ConvertRgba16FloatToRgba8(ReadOnlySpan<byte> source, uint width, uint height)
     {
         var destination = new byte[checked((int)((ulong)width * height * 4))];
@@ -1612,87 +1300,6 @@ public static partial class AgcExports
         return (byte)Math.Clamp((int)MathF.Round(value * 255.0f), 0, 255);
     }
 
-    private static ulong GetTextureBytesPerTexel(uint format) =>
-        format switch
-        {
-            1 => 1UL,
-            2 => 2UL,
-            3 => 2UL,
-            4 => 4UL,
-            5 => 4UL,
-            6 => 4UL,
-            7 => 4UL,
-            9 => 4UL,
-            10 => 4UL,
-            11 => 8UL,
-            12 => 8UL,
-            13 => 12UL,
-            14 => 16UL,
-            _ => 0UL,
-        };
-
-    internal static ulong GetTextureByteCount(
-        uint format,
-        uint width,
-        uint height,
-        uint depth = 1)
-    {
-        var bytesPerTexel = GetTextureBytesPerTexel(format);
-        if (bytesPerTexel != 0)
-        {
-            return checked(
-                (ulong)width *
-                height *
-                Math.Max(depth, 1u) *
-                bytesPerTexel);
-        }
-
-        var blockBytes = (ulong)GetBlockCompressedBlockBytes(format);
-        return blockBytes == 0
-            ? 0
-            : checked(
-                ((ulong)width + 3) / 4 *
-                (((ulong)height + 3) / 4) *
-                Math.Max(depth, 1u) *
-                blockBytes);
-    }
-
-    internal static ulong GetGuestSurfaceByteCount(
-        uint format,
-        uint width,
-        uint height,
-        uint tileMode)
-    {
-        var logicalByteCount = GetTextureByteCount(format, width, height);
-        if (logicalByteCount == 0 || tileMode == 0)
-        {
-            return logicalByteCount;
-        }
-
-        var bytesPerTexel = GetTextureBytesPerTexel(format);
-        if (bytesPerTexel == 0 ||
-            bytesPerTexel > int.MaxValue ||
-            width > int.MaxValue ||
-            height > int.MaxValue)
-        {
-            return 0;
-        }
-
-        return GnmTiling.TryGetPhysicalTiledByteCount(
-            tileMode,
-            (int)width,
-            (int)height,
-            (int)bytesPerTexel,
-            out var tiledByteCount)
-                ? tiledByteCount
-                : 0;
-    }
-
-    internal static uint GetTextureVolumeDepth(uint type, uint depth) =>
-        type == Gen5TextureType3D
-            ? Math.Max(depth, 1u)
-            : 1u;
-
     private static uint GetLinearTexturePitch(uint pitch, uint height, uint format)
     {
         var bytesPerTexel = GetTextureBytesPerTexel(format);
@@ -1701,11 +1308,7 @@ public static partial class AgcExports
             return pitch;
         }
 
-        // GNM linear surfaces align the row pitch to 256 bytes, so a 32px
-        // RGBA8 texture is stored with a 64px (256-byte) pitch and a 288px
-        // one with 320px. Reading at the unpadded width made every padded
-        // tail land on the next row, which showed as transparent gaps every
-        // other row on small tiles and diagonal dashes on wider surfaces.
+        // Use the padded row pitch so each row starts at its stored offset.
         var pitchBytes = AlignUp((ulong)pitch * bytesPerTexel, 256UL);
         return checked((uint)(pitchBytes / bytesPerTexel));
     }
@@ -1713,173 +1316,4 @@ public static partial class AgcExports
     private static ulong AlignUp(ulong value, ulong alignment) =>
         (value + alignment - 1) & ~(alignment - 1);
 
-    private static bool TryReadTextureDescriptor(
-        CpuContext ctx,
-        ulong packetAddress,
-        uint packetLength,
-        out TextureDescriptor descriptor)
-    {
-        descriptor = default;
-        if (packetLength < 10 ||
-            !TryReadUInt32(ctx, packetAddress + 4, out var startRegister))
-        {
-            return false;
-        }
-
-        var valueCount = packetLength - 2;
-        if (startRegister > PsTextureUserDataRegister ||
-            startRegister + valueCount < PsTextureUserDataRegister + 8)
-        {
-            return false;
-        }
-
-        var descriptorAddress =
-            packetAddress +
-            8 +
-            ((ulong)(PsTextureUserDataRegister - startRegister) * sizeof(uint));
-        Span<uint> fields = stackalloc uint[8];
-        for (var i = 0; i < fields.Length; i++)
-        {
-            if (!TryReadUInt32(ctx, descriptorAddress + ((ulong)i * sizeof(uint)), out fields[i]))
-            {
-                return false;
-            }
-        }
-
-        return TryDecodeTextureDescriptor(fields.ToArray(), out descriptor);
-    }
-
-    private static bool TryDecodeTextureDescriptor(
-        IReadOnlyList<uint> fields,
-        out TextureDescriptor descriptor)
-    {
-        descriptor = default;
-        if (fields.Count < 4)
-        {
-            return false;
-        }
-
-        // RDNA2 ISA table 45: BASE_ADDRESS is addr[47:8], WIDTH is the full
-        // 16-bit field split across word1/word2, and HEIGHT is word2[29:14].
-        // Keeping the high base byte is required for legal guest VAs above
-        // 1 TiB; it is not descriptor metadata.
-        var address = (((ulong)(fields[1] & 0xFFu) << 32) | fields[0]) << 8;
-        var width = (((fields[1] >> 30) & 0x3u) | ((fields[2] & 0x3FFFu) << 2)) + 1;
-        var height = ((fields[2] >> 14) & 0xFFFFu) + 1;
-        var unifiedFormat = (fields[1] >> 20) & 0x1FFu;
-        if (unifiedFormat == 0 ||
-            !Gfx10UnifiedFormat.TryDecode(
-                unifiedFormat,
-                out var format,
-                out var numberType))
-        {
-            return false;
-        }
-        var tileMode = (fields[3] >> 20) & 0x1Fu;
-        var type = (fields[3] >> 28) & 0xFu;
-        var baseLevel = (fields[3] >> 12) & 0xFu;
-        var lastLevel = (fields[3] >> 16) & 0xFu;
-        var bcSwizzle = (fields[3] >> 25) & 0x7u;
-        var hasExtendedDescriptor = fields.Count >= 8;
-        var word4 = fields.Count >= 5 ? fields[4] : 0u;
-        var depthOrLastSlice = (word4 & 0x1FFFu) + 1;
-        var baseArray = (word4 >> 16) & 0x1FFFu;
-        // In a 256-bit 1D/2D/2D-MSAA descriptor word4[13:0] is
-        // (pitch-1). A zeroed upper half denotes the common 128-bit resource,
-        // where pitch is implicit; use width rather than inventing pitch=1.
-        var pitch = type is 8u or 9u or 14u && word4 != 0
-            ? (word4 & 0x3FFFu) + 1
-            : width;
-        var depth = type is 10u or 11u or 12u or 13u or 15u
-            ? depthOrLastSlice
-            : 1u;
-        var word5 = fields.Count >= 6 ? fields[5] : 0u;
-        var arrayPitch = word5 & 0xFu;
-        var maxMip = (word5 >> 4) & 0xFu;
-        var minLod = (fields[1] >> 8) & 0xFFFu;
-        var minLodWarn = (word5 >> 8) & 0xFFFu;
-        var word6 = fields.Count >= 7 ? fields[6] : 0u;
-        var word7 = fields.Count >= 8 ? fields[7] : 0u;
-        var metadataAddress = ((((ulong)word7 << 8) | (word6 >> 24)) << 8);
-        var descriptorFlags = word6 & 0x00FF_FFFFu;
-        var dstSelect = fields[3] & 0xFFFu;
-        if (address == 0 || width == 0 || height == 0 || type < 8)
-        {
-            return false;
-        }
-
-        descriptor = new TextureDescriptor(
-            address,
-            width,
-            height,
-            format,
-            numberType,
-            tileMode,
-            type,
-            baseLevel,
-            lastLevel,
-            pitch,
-            dstSelect,
-            depth,
-            baseArray,
-            arrayPitch,
-            maxMip,
-            minLod,
-            minLodWarn,
-            bcSwizzle,
-            metadataAddress,
-            descriptorFlags,
-            hasExtendedDescriptor);
-        return true;
-    }
-
-    private static TextureDescriptor CreateFallbackTextureDescriptor(
-        IReadOnlyList<uint> fields,
-        uint instructionDimension)
-    {
-        var format = Gen5TextureFormatR8G8B8A8Unorm;
-        var numberType = 0u;
-        var tileMode = 0u;
-        if (fields.Count >= 4)
-        {
-            var unifiedFormat = (fields[1] >> 20) & 0x1FFu;
-            if (!Gfx10UnifiedFormat.TryDecode(
-                    unifiedFormat,
-                    out format,
-                    out numberType))
-            {
-                format = Gen5TextureFormatR8G8B8A8Unorm;
-                numberType = 0;
-            }
-            tileMode = (fields[3] >> 20) & 0x1Fu;
-            if (format == 0)
-            {
-                format = Gen5TextureFormatR8G8B8A8Unorm;
-            }
-        }
-
-        return new TextureDescriptor(
-            Address: 0,
-            Width: 1,
-            Height: 1,
-            Format: format,
-            NumberType: numberType,
-            TileMode: tileMode,
-            Type: GetFallbackTextureType(instructionDimension),
-            BaseLevel: 0,
-            LastLevel: 0,
-            Pitch: 1,
-            DstSelect: 0xFAC);
-    }
-
-    internal static uint GetFallbackTextureType(uint instructionDimension) =>
-        instructionDimension switch
-        {
-            0 => Gen5TextureType1D,
-            2 => Gen5TextureType3D,
-            3 => Gen5TextureTypeCube,
-            4 => Gen5TextureType1DArray,
-            5 or 7 => Gen5TextureType2DArray,
-            _ => Gen5TextureType2D,
-        };
 }

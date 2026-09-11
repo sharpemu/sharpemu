@@ -7,7 +7,7 @@ namespace SharpEmu.Libs.Gpu.Buffers;
 
 // The device facts the stores need: handles, memory types, limits, format support
 // and the count of live device-memory allocations made through this object.
-public sealed unsafe class GpuDeviceInfo
+public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
 {
     private PhysicalDeviceMemoryProperties _memoryProperties;
     private readonly Dictionary<Format, FormatProperties> _formatProperties = new();

@@ -29,7 +29,6 @@ internal static class RenderPhaseProfile
         FrameSlotWait,
         /// <summary>Reaping completed guest submissions (fence polls).</summary>
         Collect,
-        Evict,
         /// <summary>Selecting the presentation to show this iteration.</summary>
         TakePresentation,
         /// <summary>Running one slice of the guest command stream.</summary>
@@ -45,19 +44,8 @@ internal static class RenderPhaseProfile
         CommandDrawStateCreation,
         DrawVertexShaderSetup,
         DrawVertexEvaluation,
-        DrawPixelShaderSetup,
-        DrawPixelEvaluation,
-        DrawVertexMetadata,
-        DrawTargetLayout,
-        DrawShaderCache,
         DrawBindingAssembly,
-        DrawRenderState,
-        DrawDepthShaderPreparation,
         Draw,
-        Compute,
-        ColorClear,
-        ImageWrite,
-        Flip,
         /// <summary>Closing and submitting the batched guest command buffer.</summary>
         Flush,
         /// <summary>vkQueueSubmit itself.</summary>
@@ -84,11 +72,9 @@ internal static class RenderPhaseProfile
         ImageTiling,
         ImageTransitions,
         DrawResources,
-        ComputeResources,
         BufferResources,
         DescriptorSetup,
         PipelineSetup,
-        RenderPassSetup,
         DrawRecording,
         ResourceDestroy,
         ImageVersions,

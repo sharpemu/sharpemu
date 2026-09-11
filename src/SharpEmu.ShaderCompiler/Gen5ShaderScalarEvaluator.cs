@@ -183,6 +183,9 @@ public static partial class Gen5ShaderScalarEvaluator
     // False when the backend uploads from live guest memory; readability is then probed, not copied.
     public static bool SnapshotGlobalMemory { get; set; } = true;
 
+    // False when the backend binds vertex data from a guest buffer store; the ranges are then sized, not copied.
+    public static bool CaptureVertexInputData { get; set; } = true;
+
     public delegate bool Gen5FallbackMemoryReader(ulong baseAddress, Span<byte> destination);
 
     /// <summary>
@@ -1255,7 +1258,7 @@ public static partial class Gen5ShaderScalarEvaluator
             var dataLength = checked((int)byteCount);
             // With retained inputs, first resolve the same merged ranges without reading them.
             if (byteCount == 0 ||
-                (retained is null && !TryReadSizedGlobalMemoryCore(ctx, start, byteCount, true, out data, out dataLength, out _, out _)))
+                (retained is null && CaptureVertexInputData && !TryReadSizedGlobalMemoryCore(ctx, start, byteCount, true, out data, out dataLength, out _, out _)))
             {
                 foreach (var binding in captured)
                 {
@@ -1282,7 +1285,7 @@ public static partial class Gen5ShaderScalarEvaluator
                     OffsetBytes = checked((uint)(delta + binding.OffsetBytes)),
                     Data = data,
                     DataLength = dataLength,
-                    DataPooled = retained is null && index == first,
+                    DataPooled = retained is null && CaptureVertexInputData && index == first,
                 });
             }
 

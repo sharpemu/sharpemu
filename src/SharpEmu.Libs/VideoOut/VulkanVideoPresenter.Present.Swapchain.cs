@@ -56,7 +56,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private VkSemaphore[] _renderFinishedPerImage = [];
         private bool[] _frameInFlight = [];
         private ulong[] _frameTimelines = [];
-        private TranslatedDrawResources?[] _frameTranslatedResources = [];
         private GuestImageResource?[] _frameGuestImageVersions = [];
         private int _currentFrameSlot;
 
@@ -588,7 +587,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _overlayImageInitialized = false;
             _frameInFlight = [];
             _frameTimelines = [];
-            _frameTranslatedResources = [];
             _frameGuestImageVersions = [];
             if (_hdrPipeline.Handle != 0)
             {

@@ -267,6 +267,9 @@ public sealed partial class GuestImageCache
             requested.Data == cachedInfo.Data && SameExtent(requested.Extent, cachedInfo.Extent) && requested.Resources == cachedInfo.Resources &&
             requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
             !requested.HasStencil && !cachedInfo.HasStencil && !requested.HasMetadata && !cachedInfo.HasMetadata;
+        // HTile belongs to the attachment view; it does not change the shared depth slice stride.
+        var separateDepthMetadata = role == ImageRole.DepthTarget && requested.Metadata.Kind == MetadataKind.Htile &&
+            requested.Metadata.Compression == DisplayCompression.Uncompressed && !requested.Metadata.StencilCompressed;
         var retainCachedLayout =
             requested.Samples == 1 && cachedInfo.Samples == 1 && cached.Backing.Samples == 1 &&
             requested.BytesPerBlock == cachedInfo.BytesPerBlock && requested.Data.Address == cachedInfo.Data.Address &&
@@ -279,7 +282,7 @@ public sealed partial class GuestImageCache
             requested.MipLayout[0].Size == requested.Data.Size && cachedInfo.MipLayout[0].Size == cachedInfo.Data.Size &&
             requested.Data.Size % requested.Resources.Layers == 0 && cachedInfo.Data.Size % cachedInfo.Resources.Layers == 0 &&
             requested.Data.Size / requested.Resources.Layers == cachedInfo.Data.Size / cachedInfo.Resources.Layers &&
-            !requested.HasStencil && !cachedInfo.HasStencil && !requested.HasMetadata && !cachedInfo.HasMetadata;
+            !requested.HasStencil && !cachedInfo.HasStencil && (!requested.HasMetadata || separateDepthMetadata) && !cachedInfo.HasMetadata;
         var recreate = cachedInfo.Resources < requested.Resources;
         switch (role)
         {

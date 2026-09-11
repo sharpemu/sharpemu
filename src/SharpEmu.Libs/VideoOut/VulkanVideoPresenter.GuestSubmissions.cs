@@ -34,72 +34,12 @@ internal static unsafe partial class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> Resources,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers);
 
-        /// <summary>
-        /// Returns a skipped draw's pooled data arrays: draws dropped before
-        /// resource creation would otherwise strand their rented buffers.
-        /// </summary>
-        private static void ReturnPooledGuestData(VulkanTranslatedGuestDraw draw)
-        {
-            var returned = new HashSet<byte[]>(
-                System.Collections.Generic.ReferenceEqualityComparer.Instance);
-            foreach (var buffer in draw.GlobalMemoryBuffers)
-            {
-                if (buffer.Pooled && returned.Add(buffer.Data))
-                {
-                    GuestDataPool.Shared.Return(buffer.Data);
-                }
-            }
-
-            foreach (var buffer in draw.VertexBuffers)
-            {
-                if (buffer.Pooled && returned.Add(buffer.Data))
-                {
-                    GuestDataPool.Shared.Return(buffer.Data);
-                }
-            }
-
-            if (draw.IndexBuffer is { Pooled: true } indexBuffer &&
-                returned.Add(indexBuffer.Data))
-            {
-                indexBuffer.TryReturnPooledData();
-            }
-        }
-
-        private static void ReturnPooledGuestData(VulkanComputeGuestDispatch dispatch)
-        {
-            var returned = new HashSet<byte[]>(
-                System.Collections.Generic.ReferenceEqualityComparer.Instance);
-            foreach (var buffer in dispatch.GlobalMemoryBuffers)
-            {
-                if (buffer.Pooled && returned.Add(buffer.Data))
-                {
-                    GuestDataPool.Shared.Return(buffer.Data);
-                }
-            }
-        }
-
         // Translated draws are recorded into the scheduler's current buffer and
         // submitted once per drained work batch (one vkQueueSubmit per batch).
         private bool _batchOpen;
         private int _batchDrawCount;
         private readonly List<TranslatedDrawResources> _batchResources = new();
 
-        // The optional reuse path keeps compatible draws in one render pass.
-        // The pass closes before transfer, storage, depth, or barrier work.
-        private bool _openPassActive;
-
-        private void CloseOpenTranslatedRenderPass()
-        {
-            if (!_openPassActive)
-            {
-                return;
-            }
-
-            // The store tracks the attachment layouts; the pass only has to end.
-            _openPassActive = false;
-            _openPassKey = null;
-            _vk.CmdEndRenderPass(new CommandBuffer(_scheduler.Current.Handle));
-        }
 
         private CommandBuffer BeginBatchedGuestCommands()
         {
@@ -137,6 +77,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void PrepareGuestSubmission(SubmitBundle bundle)
         {
             _ = bundle;
+            EndRendering();
             if (!_batchOpen)
             {
                 return;

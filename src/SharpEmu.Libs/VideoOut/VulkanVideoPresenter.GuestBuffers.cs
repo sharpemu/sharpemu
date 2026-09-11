@@ -77,7 +77,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // A buffer that arrives with bytes is host-owned; guest memory is obtained from the store.
-        private GlobalBufferResource CreateGlobalBufferResource(GuestMemoryBuffer guestBuffer)
+        private GlobalBufferResource CreateGlobalBufferResource(GuestMemoryBuffer guestBuffer, bool formatted = false)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferResources);
             if (guestBuffer.BaseAddress == 0 || !guestBuffer.WriteBackToGuest || guestBuffer.Length != 0)
@@ -86,7 +86,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var (start, size) = GlobalBufferRange(guestBuffer);
-            var (buffer, offset) = _bufferCache.ObtainBuffer(start, size, guestBuffer.Writable);
+            var (buffer, offset) = _bufferCache.ObtainBuffer(start, size, guestBuffer.Writable, isTexelBuffer: formatted);
+            if (formatted && guestBuffer.Writable)
+            {
+                _imageCache.InvalidateMemoryFromGpu(guestBuffer.BaseAddress, guestBuffer.Size);
+            }
             if (offset % _minStorageBufferOffsetAlignment != 0)
             {
                 throw SubmissionScheduler.Fatal(

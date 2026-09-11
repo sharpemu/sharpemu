@@ -10,14 +10,16 @@ namespace SharpEmu.Libs.Gpu.Metal;
 
 // The command interpreter host of the Metal backend: managed transfers mirrored into the
 // snapshot images, draws and completions posted to the presenter's ordered queue in stream order.
-internal sealed class MetalCommandStreamHost : AgcExports.TranslatingCommandStreamHost
+internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCommandStreamHost
 {
     private readonly IGuestImageSnapshotBackend _snapshots;
+    private readonly IGuestGpuBackend _backend;
     private IDisposable? _queueScope;
 
-    public MetalCommandStreamHost(ICpuMemory memory, IGuestImageSnapshotBackend snapshots)
+    public MetalCommandStreamHost(ICpuMemory memory, IGuestGpuBackend backend, IGuestImageSnapshotBackend snapshots)
         : base(memory)
     {
+        _backend = backend;
         _snapshots = snapshots;
     }
 

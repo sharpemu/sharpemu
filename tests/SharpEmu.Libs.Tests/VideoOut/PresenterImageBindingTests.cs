@@ -10,6 +10,7 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -34,19 +35,6 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     private readonly HeadlessVulkan? _vulkan;
 
     public PresenterImageBindingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
-
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public void OffscreenFailureDescription_AcceptsMissingColorTargets(bool hasColor, bool hasDepth)
-    {
-        var targets = hasColor ? new[] { ColorTarget(0x10000) } : Array.Empty<GuestRenderTarget>();
-        var depth = hasDepth ? new GuestDepthTarget(0x20000, 0x20000, 32, 16, 3, 0, 1f, false) : null;
-        var description = (string)PresenterType.GetMethod("DescribeOffscreenTarget", InstanceMembers | BindingFlags.Static)!
-            .Invoke(null, new object?[] { targets, depth })!;
-        Assert.Contains(hasColor ? "size=64x64" : hasDepth ? "depth_only=true" : "targets=none", description);
-    }
 
     [Theory]
     [InlineData(false, false, false)]
@@ -109,13 +97,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
                 Assert.False((bool)GetFieldValue(depth, "ClearDepth"));
                 Assert.False((bool)GetFieldValue(depth, "ClearStencil"));
                 Assert.Equal(GetFieldValue(depth, "Layout"), GetFieldValue(binding, "Layout"));
-                var targets = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(ColorAttachmentType))!;
-                var pass = ((RenderPass, Framebuffer))presenter.InvokeMethod("CreateRenderPassAndFramebuffer", targets, depth, new Extent2D(64, 64), 1u, 1u)!;
-                presenter.SetField("_commandBuffer", presenter.Command);
-                presenter.InvokeMethod("BeginTranslatedRenderPass", pass.Item1, pass.Item2, new Extent2D(64, 64), 0, true, 1f, (byte)0, Array.Empty<ClearColorValue>());
-                harness.Vulkan.Vk.CmdEndRenderPass(presenter.Command);
                 harness.Scheduler.Finish();
-                DestroyTransientPass(presenter, pass);
                 if (pendingClear)
                     clearedImage = image;
             }
@@ -166,12 +148,8 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             color.GetType().GetField("Clear")!.SetValue(color, true);
             colorImage = (CachedImage)GetFieldValue(color, "Image");
             var extent = new Extent2D(128, 128);
-            var pass = ((RenderPass, Framebuffer))presenter.InvokeMethod("CreateRenderPassAndFramebuffer", ColorTargets(color), null, extent, 1u, 1u)!;
-            presenter.SetField("_commandBuffer", presenter.Command);
-            presenter.InvokeMethod("BeginTranslatedRenderPass", pass.Item1, pass.Item2, extent, 1, false, 1f, (byte)0, new[] { new ClearColorValue(1f, 0f, 0f, 1f) });
-            harness.Vulkan.Vk.CmdEndRenderPass(presenter.Command);
+            ClearColorAttachment(presenter, color, extent, 1, new ClearColorValue(1f, 0f, 0f, 1f));
             harness.Scheduler.Finish();
-            DestroyTransientPass(presenter, pass);
             presenter.InvokeMethod("ResetImageBindings");
         });
         var depthBytes = harness.ReadImageBytes(depthImage, ImageAspectFlags.DepthBit);
@@ -186,90 +164,25 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         harness.Shutdown();
     }
 
-    // The scheduler drives the presenter's submission bookkeeping and render-pass state, as in production.
-    private sealed class SchedulerForwarder : IRenderingState
+    private static void ClearColorAttachment(PresenterUnderTest presenter, object attachment, Extent2D extent, uint layers, ClearColorValue clear)
     {
-        public PresenterUnderTest? Target { get; set; }
-
-        public bool IsRendering => Target is { } target && ((IRenderingState)target.Instance).IsRendering;
-
-        public void EndRendering()
+        presenter.LoadRenderingCommands();
+        var state = new RenderingState
         {
-            if (Target is { } target)
-            {
-                ((IRenderingState)target.Instance).EndRendering();
-            }
-        }
-
-        public void Prepare(SubmitBundle bundle) => Target?.InvokeMethod("PrepareGuestSubmission", bundle);
-
-        public void Complete(ulong tick) => Target?.InvokeMethod("CompleteGuestSubmission", tick);
-    }
-
-    // A presenter over the harness caches without a window, a swapchain or a render thread.
-    private sealed class PresenterUnderTest : IDisposable
-    {
-        public PresenterUnderTest(HeadlessVulkan vulkan, bool startScheduler = true)
-        {
-            var forwarder = new SchedulerForwarder();
-            Harness = new CacheHarness(vulkan, hooks: new SchedulerHooks(forwarder, forwarder.Prepare, forwarder.Complete), startScheduler: startScheduler);
-            Samplers = new SamplerStore(vulkan.DeviceInfo);
-            Instance = RuntimeHelpers.GetUninitializedObject(PresenterType);
-            SetField("_vk", vulkan.Vk);
-            SetField("_device", vulkan.Device);
-            SetField("_deviceInfo", vulkan.DeviceInfo);
-            SetField("_scheduler", Harness.Scheduler);
-            SetField("_relay", Harness.Worker.Relay);
-            SetField("_bufferCache", Harness.Cache);
-            SetField("_imageCache", Harness.Images);
-            SetField("_samplerStore", Samplers);
-            SetField("_trackedImageBindings", new List<ResourceSlotIdentifier>());
-            SetField("_submissionContext", new SubmissionContext { QueueName = "presenter.test", SubmissionId = 1 });
-            SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
-            foreach (var name in new[]
-            {
-                "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions", "_recycledDescriptorPools",
-                "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys",
-            })
-            {
-                var field = PresenterType.GetField(name, InstanceMembers)!;
-                field.SetValue(Instance, Activator.CreateInstance(field.FieldType, nonPublic: true));
-            }
-
-            forwarder.Target = this;
-        }
-
-        public CacheHarness Harness { get; }
-
-        public SamplerStore Samplers { get; }
-
-        public object Instance { get; }
-
-        public CommandBuffer Command => new(Harness.Scheduler.Current.Handle);
-
-        public void SetField(string name, object value) => PresenterType.GetField(name, InstanceMembers)!.SetValue(Instance, value);
-
-        public object? InvokeMethod(string name, params object?[] arguments)
-        {
-            try
-            {
-                return PresenterType.GetMethod(name, InstanceMembers | BindingFlags.Static)!.Invoke(Instance, arguments);
-            }
-            catch (TargetInvocationException exception) when (exception.InnerException is not null)
-            {
-                throw exception.InnerException;
-            }
-        }
-
-        public T Run<T>(Func<T> work) => Harness.Worker.Run(work);
-
-        public void Run(Action work) => Harness.Worker.Run(work);
-
-        public void Dispose()
-        {
-            Run(Samplers.Dispose);
-            Harness.Dispose();
-        }
+            Width = extent.Width,
+            Height = extent.Height,
+            Layers = layers,
+            Samples = 1,
+            ColorAttachmentCount = 1,
+        };
+        state.ColorAttachments[0] = new RenderingAttachment(
+            (ImageView)GetFieldValue(attachment, "View"),
+            (ImageLayout)GetFieldValue(attachment, "Layout"),
+            ((ImageRequest)GetFieldValue(attachment, "Request")).View.Format,
+            clear.Uint32_0, clear.Uint32_1, clear.Uint32_2, clear.Uint32_3,
+            true, false, false, false, false);
+        presenter.RenderHost.BeginRendering(in state);
+        presenter.RenderHost.EndRendering();
     }
 
     private static object GetFieldValue(object target, string name) => target.GetType().GetField(name, InstanceMembers)!.GetValue(target)!;
@@ -280,13 +193,6 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     private static GuestDrawTexture Texture(ulong address) =>
         new(address, 64, 64, 0, 0, [], false, false, Descriptor: RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, 64, 64), Shape: Sampled2D);
 
-    private static IList ColorTargets(object attachment)
-    {
-        var targets = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(ColorAttachmentType))!;
-        targets.Add(attachment);
-        return targets;
-    }
-
     // Binds one shader image the way a draw does and returns the bound resource.
     private static object AcquireTexture(PresenterUnderTest presenter, GuestDrawTexture texture)
     {
@@ -295,14 +201,6 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         bindings.SetValue(resource, 0);
         presenter.InvokeMethod("AcquireTextureViews", bindings, new List<GuestDrawTexture> { texture });
         return bindings.GetValue(0)!;
-    }
-
-    private static void DestroyTransientPass(PresenterUnderTest presenter, (RenderPass RenderPass, Framebuffer Framebuffer) pass)
-    {
-        var resources = Activator.CreateInstance(PresenterType.GetNestedType("TranslatedDrawResources", BindingFlags.NonPublic)!, nonPublic: true)!;
-        resources.GetType().GetField("TransientRenderPass")!.SetValue(resources, pass.RenderPass);
-        resources.GetType().GetField("TransientFramebuffer")!.SetValue(resources, pass.Framebuffer);
-        presenter.InvokeMethod("DestroyTranslatedDrawResources", resources);
     }
 
     [Theory]
@@ -539,34 +437,6 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     }
 
     [Fact]
-    public void TransientRenderPassAndFramebuffer_AreCreatedPerDrawAndRetiredWithIt()
-    {
-        if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var presenter = new PresenterUnderTest(_vulkan);
-        var harness = presenter.Harness;
-        var address = harness.MapBacked(0x10000, ReadWrite);
-
-        presenter.Run(() =>
-        {
-            var attachment = presenter.InvokeMethod("DiscoverColorTarget", ColorTarget(address), false, false)!;
-            presenter.InvokeMethod("AcquireColorAttachment", attachment);
-            var targets = ColorTargets(attachment);
-
-            var first = ((RenderPass, Framebuffer))presenter.InvokeMethod("CreateRenderPassAndFramebuffer", targets, null, new Extent2D(64, 64), 1u, 1u)!;
-            var second = ((RenderPass, Framebuffer))presenter.InvokeMethod("CreateRenderPassAndFramebuffer", targets, null, new Extent2D(64, 64), 1u, 1u)!;
-            Assert.NotEqual(0UL, first.Item1.Handle);
-            Assert.NotEqual(0UL, first.Item2.Handle);
-            Assert.NotEqual(first.Item2.Handle, second.Item2.Handle);
-
-            DestroyTransientPass(presenter, first);
-            DestroyTransientPass(presenter, second);
-            presenter.InvokeMethod("ResetImageBindings");
-        });
-        harness.Finish();
-        harness.Shutdown();
-    }
-
-    [Fact]
     public void LayeredAttachmentClear_ClearsEveryLayer()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -577,26 +447,19 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         var pattern = new byte[2 * sliceBytes];
         Array.Fill(pattern, (byte)0xAB);
         harness.Write(address, pattern);
-        VulkanVideoPresenter.RequestGuestColorClear(address);
         CachedImage image = null!;
 
         presenter.Run(() =>
         {
             var attachment = presenter.InvokeMethod("DiscoverColorTarget", ColorTarget(address, sliceMax: 1), false, false)!;
             presenter.InvokeMethod("AcquireColorAttachment", attachment);
-            Assert.True((bool)GetFieldValue(attachment, "Clear"));
             image = harness.Image((ResourceSlotIdentifier)GetFieldValue(attachment, "ImageIdentifier"));
             Assert.Equal(2u, image.Backing.Layers);
 
             var extent = new Extent2D(64, 64);
-            var pass = ((RenderPass, Framebuffer))presenter.InvokeMethod("CreateRenderPassAndFramebuffer", ColorTargets(attachment), null, extent, 1u, 2u)!;
-            var command = presenter.Command;
-            presenter.SetField("_commandBuffer", command);
-            presenter.InvokeMethod("BeginTranslatedRenderPass", pass.Item1, pass.Item2, extent, 1, false, 1f, (byte)0, new[] { (ClearColorValue)GetFieldValue(attachment, "ClearValue") });
-            harness.Vulkan.Vk.CmdEndRenderPass(command);
+            ClearColorAttachment(presenter, attachment, extent, 2, default);
             presenter.InvokeMethod("ResetImageBindings");
             harness.Scheduler.Finish();
-            DestroyTransientPass(presenter, pass);
         });
 
         var bytes = harness.ReadImageBytes(image);
@@ -647,7 +510,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     }
 
     [Fact]
-    public void ConsecutiveLayerViews_DoNotContinueTheOpenPass()
+    public void ConsecutiveLayerViews_UseDistinctAttachmentViews()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var presenter = new PresenterUnderTest(_vulkan);
@@ -656,22 +519,20 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
         presenter.Run(() =>
         {
-            VulkanRenderPassReuseKey Bind(uint layer)
+            ImageView Bind(uint layer)
             {
                 var attachment = presenter.InvokeMethod("DiscoverColorTarget", ColorTarget(address, sliceMax: layer, sliceStart: layer), false, false)!;
                 presenter.InvokeMethod("AcquireColorAttachment", attachment);
-                var key = (VulkanRenderPassReuseKey)presenter.InvokeMethod("CreateRenderPassReuseCandidate", ColorTargets(attachment), null, 64u, 64u, 1u)!;
+                var view = (ImageView)GetFieldValue(attachment, "View");
                 presenter.InvokeMethod("ResetImageBindings");
-                return key;
+                return view;
             }
 
             var layer1 = Bind(1);
             var layer0 = Bind(0);
             var layer0Again = Bind(0);
-            Assert.Equal(layer1.Image, layer0.Image);
-            Assert.NotEqual(layer1.AttachmentViews[0], layer0.AttachmentViews[0]);
-            Assert.False(VulkanRenderPassReusePolicy.CanContinue(layer1, layer0, VulkanRenderPassReuseHazard.None));
-            Assert.True(VulkanRenderPassReusePolicy.CanContinue(layer0, layer0Again, VulkanRenderPassReuseHazard.None));
+            Assert.NotEqual(layer1.Handle, layer0.Handle);
+            Assert.Equal(layer0.Handle, layer0Again.Handle);
         });
         harness.Finish();
         harness.Shutdown();
