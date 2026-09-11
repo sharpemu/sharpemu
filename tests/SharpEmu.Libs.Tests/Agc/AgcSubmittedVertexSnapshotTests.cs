@@ -9,6 +9,23 @@ namespace SharpEmu.Libs.Tests.Agc;
 
 public sealed class AgcSubmittedVertexSnapshotTests
 {
+    [Fact]
+    public void StageInstructionMetadataReusesOnlyTheSameDecodedProgram()
+    {
+        var instruction = new Gen5ShaderInstruction(4, default, "SXorB32", [], [], [], null);
+        var program = new Gen5ShaderProgram(0x1000, [instruction]);
+        var metadata = AgcExports.GetStageInstructionMetadata(program);
+        Assert.Same(metadata, AgcExports.GetStageInstructionMetadata(program));
+        Assert.Same(instruction, metadata.InstructionsByAddress[4]);
+        Assert.True(metadata.HasBitwiseExclusiveOr);
+
+        var replacement = new Gen5ShaderProgram(0x1000, []);
+        var replacementMetadata = AgcExports.GetStageInstructionMetadata(replacement);
+        Assert.NotSame(metadata, replacementMetadata);
+        Assert.Empty(replacementMetadata.InstructionsByAddress);
+        Assert.False(replacementMetadata.HasBitwiseExclusiveOr);
+    }
+
     [Theory]
     [InlineData(0x69u, 0u, false)]
     [InlineData(0x9fu, 0u, false)]

@@ -20,6 +20,28 @@ namespace SharpEmu.Libs.Agc;
 // This partial decodes, evaluates and compiles the shader programs behind the pipeline provider.
 public static partial class AgcExports
 {
+    private static readonly ConditionalWeakTable<Gen5ShaderProgram, StageInstructionMetadata> _stageInstructionMetadata = new();
+
+    internal static StageInstructionMetadata GetStageInstructionMetadata(Gen5ShaderProgram program) =>
+        _stageInstructionMetadata.GetValue(program, static decodedProgram => new StageInstructionMetadata(decodedProgram));
+
+    internal sealed class StageInstructionMetadata
+    {
+        internal IReadOnlyDictionary<uint, Gen5ShaderInstruction> InstructionsByAddress { get; }
+        internal bool HasBitwiseExclusiveOr { get; }
+
+        internal StageInstructionMetadata(Gen5ShaderProgram program)
+        {
+            var instructions = new Dictionary<uint, Gen5ShaderInstruction>(program.Instructions.Count);
+            foreach (var instruction in program.Instructions)
+            {
+                instructions[instruction.Pc] = instruction;
+                HasBitwiseExclusiveOr |= instruction.Opcode.Contains("Xor", StringComparison.Ordinal);
+            }
+
+            InstructionsByAddress = instructions;
+        }
+    }
 
     // BCn block-compressed guest formats and the bytes per 4x4 block.
     internal static int GetBlockCompressedBlockBytes(uint format) => format switch
@@ -943,15 +965,11 @@ public static partial class AgcExports
         {
             var bindings = evaluation.GlobalMemoryBindings;
             var buffers = new BufferResourceInfo[bindings.Count];
-            var opcodesByPc = new Dictionary<uint, Gen5ShaderInstruction>();
-            foreach (var instruction in state.Program.Instructions)
-            {
-                opcodesByPc[instruction.Pc] = instruction;
-            }
+            var instructionMetadata = GetStageInstructionMetadata(state.Program);
 
             for (var index = 0; index < bindings.Count; index++)
             {
-                buffers[index] = DescribeBuffer(bindings[index], opcodesByPc);
+                buffers[index] = DescribeBuffer(bindings[index], instructionMetadata.InstructionsByAddress);
             }
 
             var images = new ImageResourceInfo[evaluation.ImageBindings.Count];
@@ -978,7 +996,7 @@ public static partial class AgcExports
                 Buffers = buffers,
                 Images = images,
                 SamplerCount = samplerCount,
-                HasBitwiseExclusiveOr = state.Program.Instructions.Any(static instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)),
+                HasBitwiseExclusiveOr = instructionMetadata.HasBitwiseExclusiveOr,
                 Textures = textures,
                 GlobalBuffers = CreateGuestMemoryBuffers(bindings),
                 ScalarBuffer = scalarBufferIndex < 0
