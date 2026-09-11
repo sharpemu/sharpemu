@@ -198,7 +198,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("A buffer request requires a command buffer that is recording.");
         }
 
-        if (!isWritten && size <= CachingPageSize && !_tracker.HasGpuDirtyPages(guestAddress, size) && _tracker.HasCpuDirtyPages(guestAddress, size))
+        if (!isWritten &&
+            !_tracker.HasGpuDirtyPages(guestAddress, size) &&
+            _tracker.HasCpuDirtyPages(guestAddress, size) &&
+            (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
         {
             if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
                 _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))

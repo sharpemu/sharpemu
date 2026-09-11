@@ -39,6 +39,16 @@ public sealed class GuestPageTracker
         });
     }
 
+    public bool IsCpuWriteHotRange(ulong vaddr, ulong size)
+    {
+        RejectUploadCallbackReentry();
+        return !VisitRegions(vaddr, size, create: true, (region, offset, bytes) =>
+        {
+            using var _ = region.Lock.Hold();
+            return !region.IsCpuWriteHot(offset, bytes);
+        });
+    }
+
     public void MarkCpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Cpu, enable: true, create: true);
 
     public void MarkGpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Gpu, enable: true, create: true);
@@ -74,6 +84,7 @@ public sealed class GuestPageTracker
             VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
             {
                 region.ChangeState(WriteOrigin.Cpu, enable: true, region.BaseAddress + offset, bytes);
+                region.ResetCpuWriteHeat(region.BaseAddress + offset, bytes);
                 return false;
             });
         }
@@ -97,7 +108,7 @@ public sealed class GuestPageTracker
                 shouldFlush = region.IsModified(WriteOrigin.Gpu, offset, bytes);
                 if (!shouldFlush)
                 {
-                    region.ChangeState(WriteOrigin.Cpu, enable: true, region.BaseAddress + offset, bytes);
+                    region.MarkCpuWrite(region.BaseAddress + offset, bytes);
                 }
             }
 
@@ -150,8 +161,12 @@ public sealed class GuestPageTracker
                 region.Lock.Enter();
                 held.Add(region);
                 var address = region.BaseAddress + offset;
-                region.ForEachModifiedRange(WriteOrigin.Cpu, clear: false, address, bytes, (runAddress, runSize) => cleared.Add((region, runAddress, runSize)));
-                region.ForEachModifiedRange(WriteOrigin.Cpu, clear: true, address, bytes, rangeFunc);
+                region.ForEachCpuUploadRange(
+                    preserveHotPages: !isWritten,
+                    address,
+                    bytes,
+                    (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
+                    rangeFunc);
                 if (!isWritten)
                 {
                     region.Lock.Exit();
@@ -184,6 +199,8 @@ public sealed class GuestPageTracker
                     region.Lock.Enter();
                     held.Add(region);
                 }
+
+                region.CancelCpuUpload(address, bytes);
 
                 if (!lockedThroughout.Contains(region))
                 {
@@ -256,7 +273,14 @@ public sealed class GuestPageTracker
         VisitRegions(vaddr, size, create, (region, offset, bytes) =>
         {
             using var _ = region.Lock.Hold();
-            region.ChangeState(side, enable, region.BaseAddress + offset, bytes);
+            if (side == WriteOrigin.Cpu && enable)
+            {
+                region.MarkCpuWrite(region.BaseAddress + offset, bytes);
+            }
+            else
+            {
+                region.ChangeState(side, enable, region.BaseAddress + offset, bytes);
+            }
             return false;
         });
     }

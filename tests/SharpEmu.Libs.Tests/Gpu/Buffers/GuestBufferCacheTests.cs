@@ -236,11 +236,41 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
 
         var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x80, isWritten: false));
 
-        Assert.Same(harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream), buffer);
+        Assert.Equal(harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream).Handle.Handle, buffer.Handle.Handle);
         Assert.Equal(Pattern(0x80, 3), buffer.Mapped.Slice((int)offset, 0x80).ToArray());
         Assert.Equal(0, harness.Cache.BufferCount);
         Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
         harness.Shutdown();
+    }
+
+    [Fact]
+    public void ObtainBuffer_RewrittenLargeReadUsesCurrentBytesFromTheStreamRing()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int size = 0x4100;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Pattern(size, 1));
+        _ = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, size, isWritten: false));
+
+        MarkRangeWritten();
+        harness.Write(address, Pattern(size, 2));
+        _ = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, size, isWritten: false));
+
+        MarkRangeWritten();
+        var latest = Pattern(size, 3);
+        harness.Write(address, latest);
+        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, size, isWritten: false));
+        Assert.Equal(harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream).Handle.Handle, buffer.Handle.Handle);
+        Assert.Equal(latest, buffer.Mapped.Slice((int)offset, size).ToArray());
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + Page));
+        harness.Shutdown();
+
+        void MarkRangeWritten()
+        {
+            Assert.True(harness.Store.MarkCpuWrite(address, size));
+        }
     }
 
     [Fact]

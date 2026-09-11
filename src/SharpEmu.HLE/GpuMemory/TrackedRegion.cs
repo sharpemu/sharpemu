@@ -14,6 +14,9 @@ public sealed class TrackedRegion
     private PageMask _gpuDirty;
     private PageMask _writable;
     private PageMask _readable;
+    private PageMask _recentCpuUploads;
+    private PageMask _repeatedCpuWrites;
+    private PageMask _hotCpuWrites;
 
     public TrackedRegion(PageGuard pages, ulong baseAddress)
     {
@@ -39,6 +42,53 @@ public sealed class TrackedRegion
         return new PageMask(GetDirtyMask(side), start, end).Any;
     }
 
+    public bool IsCpuWriteHot(ulong offset, ulong size)
+    {
+        var (start, end) = GetPageRange(BaseAddress + offset, size);
+        for (var page = start; page < end; page++)
+        {
+            if (!_hotCpuWrites.Get(page))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Count only clean-to-dirty transitions. Repeated reads cannot make a page hot.
+    public void MarkCpuWrite(ulong address, ulong size)
+    {
+        var (start, end) = GetPageRange(address, size);
+        for (var page = start; page < end; page++)
+        {
+            if (_cpuDirty.Get(page))
+            {
+                continue;
+            }
+
+            if (_recentCpuUploads.Get(page))
+            {
+                if (_repeatedCpuWrites.Get(page))
+                {
+                    _hotCpuWrites.Set(page);
+                }
+                else
+                {
+                    _repeatedCpuWrites.Set(page);
+                }
+
+                _recentCpuUploads.Unset(page);
+            }
+            else
+            {
+                _repeatedCpuWrites.Unset(page);
+            }
+        }
+
+        ChangeState(WriteOrigin.Cpu, enable: true, address, size);
+    }
+
     public void ChangeState(WriteOrigin side, bool enable, ulong address, ulong size)
     {
         var (start, end) = GetPageRange(address, size);
@@ -62,6 +112,13 @@ public sealed class TrackedRegion
             bits.UnsetRange(start, end);
         }
 
+        if (enable && side == WriteOrigin.Gpu)
+        {
+            _recentCpuUploads.UnsetRange(start, end);
+            _repeatedCpuWrites.UnsetRange(start, end);
+            _hotCpuWrites.UnsetRange(start, end);
+        }
+
         if (side == WriteOrigin.Cpu)
         {
             UpdateCpuProtection(track: !enable);
@@ -70,6 +127,45 @@ public sealed class TrackedRegion
         {
             UpdateGpuProtection(track: enable);
         }
+    }
+
+    // Hot read-only pages stay writable and dirty, so each obtain observes current CPU bytes.
+    public void ForEachCpuUploadRange(
+        bool preserveHotPages,
+        ulong address,
+        ulong size,
+        Action<ulong, ulong> visitCleared,
+        Action<ulong, ulong> visitUpload)
+    {
+        var (start, end) = GetPageRange(address, size);
+        var upload = new PageMask(_cpuDirty, start, end);
+        var cleared = preserveHotPages ? upload & ~_hotCpuWrites : upload;
+        foreach (var (runStart, runEnd) in cleared)
+        {
+            visitCleared(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+            _cpuDirty.UnsetRange(runStart, runEnd);
+            _recentCpuUploads.SetRange(runStart, runEnd);
+        }
+
+        UpdateCpuProtection(track: true);
+        foreach (var (runStart, runEnd) in upload)
+        {
+            visitUpload(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+        }
+    }
+
+    public void ResetCpuWriteHeat(ulong address, ulong size)
+    {
+        var (start, end) = GetPageRange(address, size);
+        _recentCpuUploads.UnsetRange(start, end);
+        _repeatedCpuWrites.UnsetRange(start, end);
+        _hotCpuWrites.UnsetRange(start, end);
+    }
+
+    public void CancelCpuUpload(ulong address, ulong size)
+    {
+        var (start, end) = GetPageRange(address, size);
+        _recentCpuUploads.UnsetRange(start, end);
     }
 
     // Visits maximal dirty runs after the bits were cleared and the protection updated.

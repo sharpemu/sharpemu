@@ -51,6 +51,8 @@ public struct PageMask
 
     public void Set(int index) => _words[index / WordBits] |= 1UL << (index % WordBits);
 
+    public void Unset(int index) => _words[index / WordBits] &= ~(1UL << (index % WordBits));
+
     public void Fill()
     {
         for (var word = 0; word < WordCount; word++)
@@ -81,6 +83,17 @@ public struct PageMask
         for (var word = 0; word < WordCount; word++)
         {
             result._words[word] = left._words[word] ^ right._words[word];
+        }
+
+        return result;
+    }
+
+    public static PageMask operator &(in PageMask left, in PageMask right)
+    {
+        var result = default(PageMask);
+        for (var word = 0; word < WordCount; word++)
+        {
+            result._words[word] = left._words[word] & right._words[word];
         }
 
         return result;
