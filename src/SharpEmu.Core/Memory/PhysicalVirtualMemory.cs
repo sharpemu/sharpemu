@@ -1202,11 +1202,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var start = Math.Max(searchStart, GuestMemoryLayout.GuestPage);
-            address = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
-            if (address != 0)
-            {
-                return true;
-            }
+            var reservedCandidate = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
 
             while (start < limit && size <= limit - start)
             {
@@ -1217,6 +1213,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 var candidate = start + padding;
+                if (reservedCandidate != 0 && candidate >= reservedCandidate)
+                {
+                    address = reservedCandidate;
+                    return true;
+                }
+                var occupiedRegion = FindRegion(candidate, 1);
+                if (occupiedRegion is not null)
+                {
+                    start = occupiedRegion.VirtualAddress + occupiedRegion.Size;
+                    continue;
+                }
                 if (TryReserveBackingRange(candidate, size))
                 {
                     address = candidate;
@@ -1225,13 +1232,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
                 start = candidate + GuestMemoryLayout.GuestPage;
                 if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
-                    info.State != HostRegionState.Free && info.RegionSize <= limit - info.BaseAddress)
+                    info.BaseAddress <= candidate && info.BaseAddress < limit &&
+                    info.RegionSize <= limit - info.BaseAddress)
                 {
-                    start = Math.Max(start, info.BaseAddress + info.RegionSize);
+                    var regionEnd = info.BaseAddress + info.RegionSize;
+                    if (regionEnd > candidate &&
+                        (info.State != HostRegionState.Free || size > regionEnd - candidate))
+                    {
+                        start = Math.Max(start, regionEnd);
+                    }
                 }
             }
 
-            return false;
+            address = reservedCandidate;
+            return address != 0;
         }
         finally
         {

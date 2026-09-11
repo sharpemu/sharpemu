@@ -13,6 +13,69 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class PhysicalVirtualMemoryBackedTests
 {
+    private sealed class QueryCountingHostMemory(IHostMemory inner) : IHostMemory
+    {
+        public int QueryCount { get; set; }
+        public ulong Allocate(ulong address, ulong size, HostPageProtection protection) => inner.Allocate(address, size, protection);
+        public ulong Reserve(ulong address, ulong size, HostPageProtection protection) => inner.Reserve(address, size, protection);
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => inner.Commit(address, size, protection);
+        public bool Free(ulong address) => inner.Free(address);
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint previous) => inner.Protect(address, size, protection, out previous);
+        public bool ProtectRaw(ulong address, ulong size, uint protection, out uint previous) => inner.ProtectRaw(address, size, protection, out previous);
+        public void FlushInstructionCache(ulong address, ulong size) => inner.FlushInstructionCache(address, size);
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            QueryCount++;
+            return inner.Query(address, out info);
+        }
+    }
+
+    [Fact]
+    public void SearchSkipsAFreeGapThatCannotFitTheAllocation()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory);
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        const ulong gapSize = 0x100000;
+        var start = 0UL;
+        for (var candidate = 0x3_0000_0000UL; candidate < 0x4_0000_0000UL; candidate += 0x1000000)
+        {
+            if (host.ReserveHole(candidate, 4 * gapSize) != candidate) continue;
+            Assert.True(host.FreeHole(candidate, 4 * gapSize));
+            start = candidate;
+            break;
+        }
+        Assert.NotEqual(0UL, start);
+        Assert.Equal(start + gapSize, host.ReserveHole(start + gapSize, gapSize));
+        try
+        {
+            memoryHost.QueryCount = 0;
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, 2 * gapSize, host.Granularity, out var address));
+            Assert.Equal(start + 2 * gapSize, address);
+            Assert.InRange(memoryHost.QueryCount, 1, 3);
+        }
+        finally
+        {
+            Assert.True(host.FreeHole(start + gapSize, gapSize));
+        }
+    }
+
+    [Fact]
+    public void SearchSkipsKnownMappingsWithoutHostQueries()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory);
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        Assert.True(memory.TryHoldRangeAtOrAbove(0x3_0000_0000, 2 * Segment, Segment, out var address));
+        Assert.True(memory.TryMapBacked(address, Segment, 0, GuestPageProtection.Read, out _));
+        memoryHost.QueryCount = 0;
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, Segment, Segment, out var selected));
+        Assert.Equal(address + Segment, selected);
+        Assert.Equal(0, memoryHost.QueryCount);
+    }
+
     private static ulong Hold(PhysicalVirtualMemory memory, IHostViewMemory host)
     {
         for (var attempt = 0; attempt < 8; attempt++)
@@ -186,6 +249,28 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         {
             Assert.True(address + Segment <= bound);
         }
+    }
+
+    [Fact]
+    public void SearchChecksLowerAddressesBeforeReusingAHigherHole()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var lowerAddress = 0UL;
+        for (var candidate = 0x2_0000_0000UL; candidate < 0x3_0000_0000UL; candidate += 0x100_0000)
+        {
+            if (host.ReserveHole(candidate, 3 * size) != candidate) continue;
+            Assert.True(host.FreeHole(candidate, 3 * size));
+            lowerAddress = candidate;
+            break;
+        }
+        Assert.NotEqual(0UL, lowerAddress);
+        var higherAddress = lowerAddress + 2 * size;
+        Assert.True(memory.TryHoldRange(higherAddress, size));
+        Assert.True(memory.TryHoldRangeAtOrAbove(lowerAddress, size, size, out var selectedAddress));
+        Assert.Equal(lowerAddress, selectedAddress);
     }
 
     [Fact]
