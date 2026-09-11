@@ -1053,7 +1053,6 @@ public static partial class Gen5SpirvTranslator
                     ? SpirvImageDim.Dim3D
                     : SpirvImageDim.Dim2D;
                 var isArrayed = dimension != SpirvImageDim.Dim3D &&
-                    !isStorage &&
                     Gen5ShaderTranslator.IsArrayedImageBinding(binding);
                 var imageType = _module.TypeImage(
                     componentType,

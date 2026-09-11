@@ -2116,9 +2116,7 @@ public static class Gen5ShaderTranslator
     }
 
     public static bool IsArrayedImageBinding(Gen5ImageBinding binding) =>
-        binding.Control.IsArray &&
-        (binding.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
-         binding.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal));
+        binding.Control.IsArray && !IsVolumeImageBinding(binding);
 
     public static bool IsDataShareAtomic(string name) => name switch
     {

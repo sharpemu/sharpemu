@@ -27,6 +27,18 @@ public sealed class Gen5ImageTests
     private const ulong ShaderAddress = 0x1_0000_C000;
 
     [Theory]
+    [InlineData("ImageStore", SpirvOp.ImageWrite, 1)]
+    [InlineData("ImageLoad", SpirvOp.ImageFetch, 3)]
+    public void ArrayImageAccess_PreservesTheLayerCoordinate(string opcode, SpirvOp operation, int coordinateOperand)
+    {
+        var instructions = ReadSpirvInstructions(CompileImageOperation(opcode, 5,
+            descriptorType: 13, arrayed: true));
+        var imageType = Assert.Single(instructions, item => item.Opcode == SpirvOp.TypeImage);
+        Assert.Equal(1u, imageType.Operands[4]);
+        AssertCoordinateVectorWidth(instructions, operation, coordinateOperand, 3);
+    }
+
+    [Theory]
     [InlineData("ImageSampleLz", 2u, 9u, SpirvImageDim.Dim2D)]
     [InlineData("ImageStore", 2u, 9u, SpirvImageDim.Dim2D)]
     [InlineData("ImageSampleLz", 1u, 10u, SpirvImageDim.Dim3D)]
@@ -203,9 +215,10 @@ public sealed class Gen5ImageTests
         uint unifiedFormat = 71u,
         uint samplerWord0 = 0u,
         uint samplerWord2 = 0u,
-        uint? descriptorType = null)
+        uint? descriptorType = null,
+        bool arrayed = false)
     {
-        var coordinateCount = dimension == 2 ? 3 : 2;
+        var coordinateCount = dimension == 2 || arrayed ? 3 : 2;
         var addressCount = coordinateCount +
             (opcode.Contains("SampleC", StringComparison.Ordinal) ? 1 : 0);
         var addressRegisters = Enumerable.Range(0, addressCount)
@@ -219,7 +232,7 @@ public sealed class Gen5ImageTests
             ScalarResource: 8,
             ScalarSampler: 16,
             Dimension: dimension,
-            IsArray: false,
+            IsArray: arrayed,
             Glc: false,
             Slc: false,
             A16: false,
