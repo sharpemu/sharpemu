@@ -1723,6 +1723,8 @@ public static partial class Gen5SpirvTranslator
             StoreS(register.Value, value);
         }
 
+        private enum SharedMemoryPhase { None, Read, Write }
+
         private bool TryEmitBlock(
             IReadOnlyList<ShaderBlock> blocks,
             int blockIndex,
@@ -1730,12 +1732,30 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var block = blocks[blockIndex];
+            // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
+            // Restrict added barriers to a single block, where all invocations follow the same path.
+            var synchronizeSharedMemory = _emulateWave64 && blocks.Count == 1;
+            var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _state.Program.Instructions[index];
                 if (IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm")
                 {
                     continue;
+                }
+
+                if (synchronizeSharedMemory)
+                {
+                    var nextPhase = instruction.Control is Gen5DataShareControl { Gds: false }
+                        ? instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal) ? SharedMemoryPhase.Read
+                        : instruction.Opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? SharedMemoryPhase.Write : SharedMemoryPhase.None
+                        : SharedMemoryPhase.None;
+                    if (instruction.Opcode == "SBarrier") sharedMemoryPhase = SharedMemoryPhase.None;
+                    if (nextPhase != SharedMemoryPhase.None)
+                    {
+                        if (sharedMemoryPhase != SharedMemoryPhase.None && sharedMemoryPhase != nextPhase) EmitWave64Barrier();
+                        sharedMemoryPhase = nextPhase;
+                    }
                 }
 
                 if (!TryEmitInstruction(instruction, out error))
@@ -1750,6 +1770,7 @@ public static partial class Gen5SpirvTranslator
                 CapturePixelExec(instruction);
             }
 
+            if (synchronizeSharedMemory && sharedMemoryPhase != SharedMemoryPhase.None) EmitWave64Barrier();
             var terminator = _state.Program.Instructions[block.EndIndex - 1];
             if (terminator.Opcode == "SEndpgm")
             {
@@ -2304,14 +2325,8 @@ public static partial class Gen5SpirvTranslator
         private void StoreLds(uint pointer, uint value)
         {
             var active = Load(_boolType, _exec);
-            var oldValue = Load(_uintType, pointer);
-            var selected = _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                active,
-                value,
-                oldValue);
-            Store(pointer, selected);
+            // Inactive lanes must not read and write back another lane's shared value.
+            EmitConditional(active, () => Store(pointer, value));
         }
 
         private bool TryEmitDataShareAtomic(
