@@ -265,6 +265,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         $"deviceLost={_deviceLost}");
                     VideoOutExports.NotifyPresentationWindowClosed();
                     DisposeVulkan();
+                    RenderPhaseProfile.WriteFrameTrace();
                 },
                 WaitForRenderWork);
         }

@@ -168,6 +168,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void EnqueueCommandStream(uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
         {
+            RenderPhaseProfile.RecordSubmissionArrival();
             if (queue == 0)
             {
                 _commandStream.EnqueueGraphics(address, dwordCount, submissionId, geometrySnapshots);

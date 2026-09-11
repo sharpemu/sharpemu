@@ -131,6 +131,13 @@ internal static class RenderPhaseProfile
             "1",
             StringComparison.Ordinal);
 
+    private static readonly bool FrameTraceEnabled =
+        Enabled &&
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"),
+            "1",
+            StringComparison.Ordinal);
+
     private static readonly double _reportSeconds =
         double.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER_REPORT_S"),
@@ -142,6 +149,47 @@ internal static class RenderPhaseProfile
     private static readonly long[] _ticks = new long[(int)Phase.Count];
     private static readonly long[] _entries = new long[(int)Phase.Count];
     private static long _frames;
+    private const int FrameTraceCapacity = 4096;
+    private static long[] _framePhaseTicks => FrameTraceStorage.PhaseTicks;
+    private static long[] _frameTrace => FrameTraceStorage.Records;
+    private static class FrameTraceStorage
+    {
+        internal static readonly long[] PhaseTicks = new long[(int)Phase.Count];
+        internal static readonly long[] Records = new long[FrameTraceCapacity * ((int)Phase.Count + 4)];
+    }
+    private static long _frameTraceCount;
+    private static long _previousFrameTimestamp;
+    private static long _lastSubmissionTimestamp;
+    private static long _submissionCount;
+
+    internal static void RecordSubmissionArrival()
+    {
+        if (!FrameTraceEnabled) return;
+        Interlocked.Exchange(ref _lastSubmissionTimestamp, Stopwatch.GetTimestamp());
+        Interlocked.Increment(ref _submissionCount);
+    }
+
+    // Keep recent presentation intervals in memory; format them only after the window stops.
+    internal static void WriteFrameTrace()
+    {
+        if (!FrameTraceEnabled) return;
+        var stride = (int)Phase.Count + 4;
+        var first = Math.Max(0, _frameTraceCount - FrameTraceCapacity);
+        Console.Error.WriteLine($"[PERF][FRAME_TRACE] frequency={Stopwatch.Frequency} retained={_frameTraceCount - first} overwritten={first}");
+        for (var sequence = first; sequence < _frameTraceCount; sequence++)
+        {
+            var offset = (int)(sequence % FrameTraceCapacity) * stride;
+            var parts = new List<string>();
+            for (var phase = 0; phase < (int)Phase.Count; phase++)
+            {
+                var ticks = _frameTrace[offset + 4 + phase];
+                if (ticks != 0) parts.Add($"{(Phase)phase}={ticks * 1000.0 / Stopwatch.Frequency:F3}");
+            }
+            Console.Error.WriteLine($"[PERF][FRAME] sequence={sequence} timestamp={_frameTrace[offset]} gap_ms={_frameTrace[offset + 1] * 1000.0 / Stopwatch.Frequency:F3} last_submission={_frameTrace[offset + 2]} submissions_total={_frameTrace[offset + 3]} {string.Join(" ", parts)}");
+        }
+        _frameTraceCount = 0;
+        _previousFrameTimestamp = 0;
+    }
     internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
     private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
     private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
@@ -317,6 +365,10 @@ internal static class RenderPhaseProfile
         if (_lastTimestamp != 0)
         {
             _ticks[(int)previous] += now - _lastTimestamp;
+            if (FrameTraceEnabled)
+            {
+                _framePhaseTicks[(int)previous] += now - _lastTimestamp;
+            }
         }
 
         _lastTimestamp = now;
@@ -333,7 +385,21 @@ internal static class RenderPhaseProfile
         }
 
         _frames++;
+        Charge(_current);
         var now = Stopwatch.GetTimestamp();
+        if (FrameTraceEnabled)
+        {
+            var traceOffset = (int)(_frameTraceCount % FrameTraceCapacity) * ((int)Phase.Count + 4);
+            _frameTrace[traceOffset] = now;
+            _frameTrace[traceOffset + 1] = _previousFrameTimestamp == 0 ? 0 : now - _previousFrameTimestamp;
+            _frameTrace[traceOffset + 2] = Interlocked.Read(ref _lastSubmissionTimestamp);
+            _frameTrace[traceOffset + 3] = Interlocked.Read(ref _submissionCount);
+            Array.Copy(_framePhaseTicks, 0, _frameTrace, traceOffset + 4, (int)Phase.Count);
+            Array.Clear(_framePhaseTicks);
+            _previousFrameTimestamp = now;
+            _frameTraceCount++;
+        }
+
         var elapsedTicks = now - _windowStart;
         if (elapsedTicks < _reportSeconds * Stopwatch.Frequency)
         {
