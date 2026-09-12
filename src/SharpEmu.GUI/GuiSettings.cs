@@ -42,6 +42,13 @@ public sealed class GuiSettings
 
     public string LibraryLayout { get; set; } = "Carousel";
 
+    public double EmbeddedConsoleHeight { get; set; } = 240;
+    public double ConsoleWindowWidth { get; set; } = 980;
+    public double ConsoleWindowHeight { get; set; } = 620;
+    public int? ConsoleWindowLeft { get; set; }
+    public int? ConsoleWindowTop { get; set; }
+    public bool ConsoleWindowMaximized { get; set; }
+
     public string? EmulatorPath { get; set; }
 
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
@@ -140,6 +147,14 @@ public sealed class GuiSettings
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Host", "Guest", "Skip");
         settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
         settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
+        settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
+        settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
+        settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);
+        if (!settings.ConsoleWindowLeft.HasValue || !settings.ConsoleWindowTop.HasValue)
+        {
+            settings.ConsoleWindowLeft = null;
+            settings.ConsoleWindowTop = null;
+        }
 
         return settings;
     }
@@ -158,6 +173,9 @@ public sealed class GuiSettings
     private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
         choices.Prepend(fallback).FirstOrDefault(
             choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase)) ?? fallback;
+
+    private static double NormalizeConsoleSize(double value, double fallback, double minimum) =>
+        double.IsFinite(value) && value >= minimum ? Math.Min(value, 16384) : fallback;
 
     private static string NormalizeResolution(string? value)
     {

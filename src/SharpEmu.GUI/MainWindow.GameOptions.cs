@@ -141,6 +141,7 @@ public partial class MainWindow
             !string.IsNullOrWhiteSpace(game.TitleId);
 
         _isGameSettingsOpen = true;
+        UpdateEmbeddedConsoleVisibility();
         SetGameOptionsPagesSpan(coversConsoleRow: true);
         SetGameOptionsOpenClass(BackdropLayer, active: true);
         SetGameOptionsOpenClass(CarouselHost, active: true);
@@ -160,6 +161,7 @@ public partial class MainWindow
         }
 
         _isGameSettingsOpen = false;
+        UpdateEmbeddedConsoleVisibility();
         SetGameOptionsPagesSpan(coversConsoleRow: false);
         SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;

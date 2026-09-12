@@ -9,6 +9,41 @@ namespace SharpEmu.Libs.Tests.GUI;
 public sealed class GuiSettingsTests
 {
     [Fact]
+    public void ConsoleGeometrySurvivesSettingsSerialization()
+    {
+        var original = new GuiSettings
+        {
+            EmbeddedConsoleHeight = 360,
+            ConsoleWindowWidth = 1100,
+            ConsoleWindowHeight = 740,
+            ConsoleWindowLeft = -1800,
+            ConsoleWindowTop = 120,
+            ConsoleWindowMaximized = true
+        };
+        var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(original));
+        Assert.Equal(original.EmbeddedConsoleHeight, restored.EmbeddedConsoleHeight);
+        Assert.Equal(original.ConsoleWindowWidth, restored.ConsoleWindowWidth);
+        Assert.Equal(original.ConsoleWindowHeight, restored.ConsoleWindowHeight);
+        Assert.Equal(original.ConsoleWindowLeft, restored.ConsoleWindowLeft);
+        Assert.Equal(original.ConsoleWindowTop, restored.ConsoleWindowTop);
+        Assert.True(restored.ConsoleWindowMaximized);
+    }
+
+    [Fact]
+    public void InvalidConsoleGeometryUsesDefaults()
+    {
+        var settings = GuiSettings.NormalizeFromJson("""
+            { "EmbeddedConsoleHeight": -1, "ConsoleWindowWidth": 0,
+              "ConsoleWindowHeight": 10, "ConsoleWindowLeft": 100 }
+            """);
+        Assert.Equal(240, settings.EmbeddedConsoleHeight);
+        Assert.Equal(980, settings.ConsoleWindowWidth);
+        Assert.Equal(620, settings.ConsoleWindowHeight);
+        Assert.Null(settings.ConsoleWindowLeft);
+        Assert.Null(settings.ConsoleWindowTop);
+    }
+
+    [Fact]
     public void NormalizeFromJson_AllPropertiesNull_FallsBackToDefaults()
     {
         const string json = """
