@@ -158,7 +158,7 @@
   "Options.Env.LogNp.Desc": "NP（PlayStation Network）ライブラリの呼び出しをコンソールに記録します。",
   "Options.Env.Group.Debug": "デバッグ",
   "Options.Env.Group.General": "一般",
-  "Options.Env.RenderDoc.Desc": "RenderDoc のアプリ内 API を読み込み、エミュレーター内からフレームをキャプチャできるようにします。\nゲーム実行中に F10 を押すと 1 フレームをキャプチャします。保存先は user/logs/capture_logs/<TITLE_ID> です。\nRenderDoc のインストールが必要です。GPU が遅くなり一部のタイトルはハングするため、デバッグ時以外はオフのままにしてください。",
+  "Options.Env.RenderDoc.Desc": "RenderDoc のアプリ内 API を読み込み、エミュレーター内からフレームをキャプチャできるようにします。\nゲーム実行中に F12 を押すと 1 フレームをキャプチャします。保存先は user/logs/capture_logs/<TITLE_ID> です。\nRenderDoc のインストールが必要です。GPU が遅くなり一部のタイトルはハングするため、デバッグ時以外はオフのままにしてください。",
   "Common.Save": "保存",
   "Common.Cancel": "キャンセル",
   "Options.About": "情報",

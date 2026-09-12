@@ -168,7 +168,7 @@
   "Options.Env.LogNp.Desc": "Registrar en la consola las llamadas a la biblioteca NP (PlayStation Network).",
   "Options.Env.Group.Debug": "Depuración",
   "Options.Env.Group.General": "General",
-  "Options.Env.RenderDoc.Desc": "Carga la API in-application de RenderDoc para poder capturar fotogramas desde el emulador.\nPulsa F10 mientras el juego se ejecuta para capturar un fotograma; las capturas se guardan en user/logs/capture_logs/<TITLE_ID>.\nRequiere tener RenderDoc instalado. Ralentiza la GPU y bloquea algunos títulos, así que déjalo desactivado salvo que estés depurando.",
+  "Options.Env.RenderDoc.Desc": "Carga la API in-application de RenderDoc para poder capturar fotogramas desde el emulador.\nPulsa F12 mientras el juego se ejecuta para capturar un fotograma; las capturas se guardan en user/logs/capture_logs/<TITLE_ID>.\nRequiere tener RenderDoc instalado. Ralentiza la GPU y bloquea algunos títulos, así que déjalo desactivado salvo que estés depurando.",
   "Common.Save": "Guardar",
   "Common.Cancel": "Cancelar",
   "Updater.Auto.Label": "Buscar actualizaciones al iniciar",

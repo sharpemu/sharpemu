@@ -70,7 +70,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     SDL_WindowFlags.SDL_WINDOW_RESIZABLE |
                     SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY |
                     SDL_WindowFlags.SDL_WINDOW_HIDDEN;
-        _window = CreateWindow(title, _options.Width, _options.Height, flags);
+        _window = CreateWindow(
+            FormatWindowTitle(title, RenderDocCapture.IsAvailable), _options.Width, _options.Height, flags);
         if (_window is null)
         {
             SDL_QuitSubSystem(InitFlags);
@@ -214,7 +215,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             return;
         }
 
-        var utf8 = Marshal.StringToCoTaskMemUTF8(title);
+        var utf8 = Marshal.StringToCoTaskMemUTF8(FormatWindowTitle(title, RenderDocCapture.IsAvailable));
         try
         {
             SDL_SetWindowTitle(_window, (byte*)utf8);
@@ -512,7 +513,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             {
                 PerfOverlay.Toggle();
             }
-            else if (keyEvent.key is SDL_Keycode.SDLK_F10 or SDL_Keycode.SDLK_F12)
+            else if (IsCaptureKey(keyEvent.key))
             {
                 RenderDocCapture.RequestCapture();
             }
@@ -527,6 +528,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             HostWindowInput.SetKey(virtualKey, down);
         }
     }
+
+    internal static bool IsCaptureKey(SDL_Keycode key) => key == SDL_Keycode.SDLK_F12;
+
+    internal static string FormatWindowTitle(string title, bool captureAvailable) =>
+        captureAvailable ? $"{title} · Press F12 for capture" : title;
 
     private void ToggleFullscreen()
     {

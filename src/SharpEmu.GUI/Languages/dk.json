@@ -158,7 +158,7 @@
   "Options.Env.LogNp.Desc": "Log NP-bibliotekskald (PlayStation Network) til konsollen.",
   "Options.Env.Group.Debug": "Fejlfinding",
   "Options.Env.Group.General": "Generelt",
-  "Options.Env.RenderDoc.Desc": "Indlæser RenderDocs in-application-API, så frames kan optages inde fra emulatoren.\nTryk på F10 mens spillet kører for at optage ét frame; optagelser havner i user/logs/capture_logs/<TITLE_ID>.\nKræver at RenderDoc er installeret. Gør GPU'en langsommere og får nogle titler til at hænge, så lad den være slået fra, medmindre du fejlfinder.",
+  "Options.Env.RenderDoc.Desc": "Indlæser RenderDocs in-application-API, så frames kan optages inde fra emulatoren.\nTryk på F12 mens spillet kører for at optage ét frame; optagelser havner i user/logs/capture_logs/<TITLE_ID>.\nKræver at RenderDoc er installeret. Gør GPU'en langsommere og får nogle titler til at hænge, så lad den være slået fra, medmindre du fejlfinder.",
   "Common.Save": "Gem",
   "Common.Cancel": "Annuller",
   "Options.About": "Om",

@@ -158,7 +158,7 @@
   "Options.Env.LogNp.Desc": "Log NP-bibliotheekaanroepen (PlayStation Network) naar de console.",
   "Options.Env.Group.Debug": "Debuggen",
   "Options.Env.Group.General": "Algemeen",
-  "Options.Env.RenderDoc.Desc": "Laadt de RenderDoc in-application-API zodat frames vanuit de emulator kunnen worden vastgelegd.\nDruk op F10 terwijl het spel draait om één frame vast te leggen; opnamen komen in user/logs/capture_logs/<TITLE_ID>.\nVereist een geïnstalleerde RenderDoc. Vertraagt de GPU en laat sommige games vastlopen, dus laat dit uit tenzij je aan het debuggen bent.",
+  "Options.Env.RenderDoc.Desc": "Laadt de RenderDoc in-application-API zodat frames vanuit de emulator kunnen worden vastgelegd.\nDruk op F12 terwijl het spel draait om één frame vast te leggen; opnamen komen in user/logs/capture_logs/<TITLE_ID>.\nVereist een geïnstalleerde RenderDoc. Vertraagt de GPU en laat sommige games vastlopen, dus laat dit uit tenzij je aan het debuggen bent.",
   "Common.Save": "Opslaan",
   "Common.Cancel": "Annuleren",
   "Options.About": "Over",

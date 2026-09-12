@@ -192,7 +192,7 @@
   "Options.Env.LogNp.Desc": "NP (PlayStation Network) kütüphane çağrılarını konsola günlükle.",
   "Options.Env.Group.Debug": "Hata Ayıklama",
   "Options.Env.Group.General": "Genel",
-  "Options.Env.RenderDoc.Desc": "RenderDoc uygulama içi API'sini yükler, böylece kareler emülatörün içinden yakalanabilir.\nOyun çalışırken F10'a basınca bir kare yakalanır; kayıtlar user/logs/capture_logs/<TITLE_ID> altına düşer.\nRenderDoc'un kurulu olmasını gerektirir. GPU'yu yavaşlatır ve bazı oyunları kilitler, hata ayıklamıyorsanız kapalı bırakın.",
+  "Options.Env.RenderDoc.Desc": "RenderDoc uygulama içi API'sini yükler, böylece kareler emülatörün içinden yakalanabilir.\nOyun çalışırken F12'a basınca bir kare yakalanır; kayıtlar user/logs/capture_logs/<TITLE_ID> altına düşer.\nRenderDoc'un kurulu olmasını gerektirir. GPU'yu yavaşlatır ve bazı oyunları kilitler, hata ayıklamıyorsanız kapalı bırakın.",
   "Options.DefaultProfile.Label": "Varsayilan profil adi",
   "Options.DefaultProfile.Desc": "Oyun metin girisi istediginde kullanilacak ad. Varsayilan deger Sharp'tir.",
   "Common.Save": "Kaydet",

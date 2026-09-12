@@ -163,7 +163,7 @@
   "Options.Env.LogNp.Desc": "Registra in console le chiamate alla libreria NP (PlayStation Network).",
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "Generale",
-  "Options.Env.RenderDoc.Desc": "Carica l'API in-application di RenderDoc per catturare i frame dall'interno dell'emulatore.\nPremi F10 mentre il gioco è in esecuzione per catturare un frame; le catture finiscono in user/logs/capture_logs/<TITLE_ID>.\nRichiede RenderDoc installato. Rallenta la GPU e blocca alcuni titoli, quindi lascialo disattivato se non stai facendo debug.",
+  "Options.Env.RenderDoc.Desc": "Carica l'API in-application di RenderDoc per catturare i frame dall'interno dell'emulatore.\nPremi F12 mentre il gioco è in esecuzione per catturare un frame; le catture finiscono in user/logs/capture_logs/<TITLE_ID>.\nRichiede RenderDoc installato. Rallenta la GPU e blocca alcuni titoli, quindi lascialo disattivato se non stai facendo debug.",
   "Common.Save": "Salva",
   "Common.Cancel": "Annulla",
   "Options.About": "Informazioni",

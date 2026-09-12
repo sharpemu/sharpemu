@@ -88,7 +88,7 @@ public static unsafe class RenderDocCapture
         ((delegate* unmanaged[Cdecl]<void>)_api[IndexUnloadCrashHandler])();
 
         Console.Error.WriteLine(
-            "[LOADER][INFO] renderdoc: in-app capture ready. Press F10 or F12 to capture the next complete guest frame.");
+            "[LOADER][INFO] renderdoc: in-app capture ready. Press F12 to capture the next complete guest frame.");
     }
 
     public static void SetCaptureDirectory(string titleId)
