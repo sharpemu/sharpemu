@@ -298,7 +298,7 @@ public static class AvPlayerExports
 
     private sealed class VideoFrameQueue : IDisposable
     {
-        private readonly FfmpegMediaStream _stream;
+        private readonly Stream _stream;
         private readonly int _frameByteCount;
         private readonly Channel<byte[]> _frames;
         private readonly CancellationTokenSource _stop = new();
@@ -307,7 +307,7 @@ public static class AvPlayerExports
         private int _disposed;
 
         public VideoFrameQueue(
-            FfmpegMediaStream stream,
+            Stream stream,
             int frameByteCount,
             int capacity)
         {
@@ -432,7 +432,6 @@ public static class AvPlayerExports
         public VideoFrameQueue? VideoDecoder { get; set; }
         public Stream? AudioDecoderOutput { get; set; }
         public Stopwatch PlaybackClock { get; } = new();
-        public long SkippedFrameDebt { get; set; }
         public byte[]? RawFrame { get; set; }
         public byte[]? RawAudioFrame { get; set; }
         public byte[]? PaddedFrame { get; set; }
@@ -491,7 +490,6 @@ public static class AvPlayerExports
             SeekVideoFramePending = false;
             StartTimeMilliseconds = 0;
             NextAudioFrameIndex = 0;
-            SkippedFrameDebt = 0;
             EndOfStream = false;
             FallbackPresentationPixels = null;
             FallbackPresentationWidth = 0;
@@ -1653,7 +1651,7 @@ public static class AvPlayerExports
                     player.HasAudio,
                     player.NextAudioFrameIndex,
                     player.PlaybackClock.Elapsed.TotalSeconds,
-                    fps) - player.SkippedFrameDebt;
+                    fps);
                 if (player.NextFrameIndex > expectedFrame)
                 {
                     return SetReturn(ctx, 0);
@@ -1662,7 +1660,7 @@ public static class AvPlayerExports
                 var behind = expectedFrame - player.NextFrameIndex;
                 if (behind > MaxCatchUpFrames)
                 {
-                    player.SkippedFrameDebt += behind - MaxCatchUpFrames;
+                    // Limit this call's work without changing the shared playback clock.
                     expectedFrame = player.NextFrameIndex + MaxCatchUpFrames;
                     TraceOnce(
                         "catch_up_capped",
@@ -1718,6 +1716,10 @@ public static class AvPlayerExports
 
     private static int FinishStream(CpuContext ctx, PlayerState player)
     {
+        TraceOnce(
+            "video_end",
+            $"video_end handle=0x{player.Handle:X16} next_frame={player.NextFrameIndex} " +
+            $"audio_blocks={player.NextAudioFrameIndex} looping={player.Looping}");
         if (player.Looping)
         {
             player.ResetPlayback();
