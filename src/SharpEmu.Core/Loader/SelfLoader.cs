@@ -296,7 +296,7 @@ public sealed class SelfLoader : ISelfLoader
 
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
-            _ = WindowsGuestRedZonePatcher.Patch(
+            _ = GuestRedZonePatcher.Patch(
                 virtualMemory,
                 patchableMemory,
                 programHeaders,

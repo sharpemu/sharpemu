@@ -9,21 +9,9 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Loader;
 
-/// <summary>
-/// Protects the System V AMD64 red zone when guest code runs on Windows.
-/// </summary>
-/// <remarks>
-/// Windows can use memory below RSP while it dispatches an exception. Guest code
-/// follows the System V ABI and can keep live values in the 128 bytes below RSP.
-/// A guest-memory access that faults for write tracking can therefore corrupt a
-/// live guest value before the vectored exception handler resumes the instruction.
-///
-/// This pass finds functions that use the red zone and moves their ordinary
-/// memory instructions into small trampolines. Each trampoline shifts RSP by 128
-/// bytes only while the memory instruction runs. Windows then uses the temporary
-/// area if that instruction faults, while the guest red zone remains intact.
-/// </remarks>
-internal static class WindowsGuestRedZonePatcher
+// Protect the guest red zone from host exception writes on Windows and macOS.
+// Split unaligned vector stores when Rosetta requires smaller memory accesses.
+internal static class GuestRedZonePatcher
 {
     private const int GuestRedZoneBytes = 128;
     private const int MinimumJumpBytes = 5;
@@ -43,29 +31,37 @@ internal static class WindowsGuestRedZonePatcher
         ArgumentNullException.ThrowIfNull(physicalMemory);
         ArgumentNullException.ThrowIfNull(programHeaders);
 
-        if (!OperatingSystem.IsWindows() ||
-            RuntimeInformation.ProcessArchitecture != Architecture.X64 ||
-            string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal))
+        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+            RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return default;
         }
+
+        var protectRedZone = !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal);
+        var splitVectorStores = RosettaVectorStorePatch.IsRequired;
+        if (!protectRedZone && !splitVectorStores)
+        {
+            return default;
+        }
+
+        var hostName = OperatingSystem.IsWindows() ? "Windows" : "macOS";
 
         if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
         {
-            Console.Error.WriteLine("[LOADER][WARN] Windows red-zone patch skipped: no usable .eh_frame_hdr table.");
+            Console.Error.WriteLine($"[LOADER][WARN] {hostName} red-zone patch skipped: no usable .eh_frame_hdr table.");
             return default;
         }
 
-        var sites = CollectPatchSites(memory, programHeaders, imageBase, functionStarts, out var scan);
+        var sites = CollectPatchSites(memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, out var scan);
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
-                $"[LOADER] Windows red-zone scan: functions={scan.Functions} red_zone={scan.RedZoneFunctions} sites=0.");
+                $"[LOADER] {hostName} red-zone scan: functions={scan.Functions} red_zone={scan.RedZoneFunctions} sites=0.");
             return scan;
         }
 
         var requiredBytes = AlignUp(
-            checked((ulong)sites.Count * EstimatedTrampolineBytesPerSite + PageSize),
+            checked((ulong)sites.Count * (splitVectorStores ? 80UL : EstimatedTrampolineBytesPerSite) + PageSize),
             PageSize);
         if (!TryAllocateTrampolines(
                 physicalMemory,
@@ -76,7 +72,7 @@ internal static class WindowsGuestRedZonePatcher
                 out var trampolineBase))
         {
             Console.Error.WriteLine(
-                $"[LOADER][WARN] Windows red-zone patch skipped: no nearby trampoline range for {sites.Count} sites.");
+                $"[LOADER][WARN] {hostName} red-zone patch skipped: no nearby trampoline range for {sites.Count} sites.");
             return scan with { FailedSites = sites.Count };
         }
 
@@ -86,7 +82,7 @@ internal static class WindowsGuestRedZonePatcher
         var failed = 0;
         foreach (var site in sites)
         {
-            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd))
+            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, splitVectorStores))
             {
                 failed++;
                 continue;
@@ -103,8 +99,9 @@ internal static class WindowsGuestRedZonePatcher
             TrampolineBytes = trampolineCursor - trampolineBase,
         };
         Console.Error.WriteLine(
-            $"[LOADER] Windows red-zone patch: functions={result.Functions} red_zone={result.RedZoneFunctions} " +
+            $"[LOADER] {hostName} red-zone patch: functions={result.Functions} red_zone={result.RedZoneFunctions} " +
             $"sites={result.PatchedSites}/{result.CandidateSites} failed={result.FailedSites} " +
+            $"rosetta_vector_stores={result.VectorStoreCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
         return result;
     }
@@ -114,12 +111,15 @@ internal static class WindowsGuestRedZonePatcher
         IReadOnlyList<ProgramHeader> programHeaders,
         ulong imageBase,
         IReadOnlyList<ulong> functionStarts,
+        bool protectRedZone,
+        bool splitVectorStores,
         out PatchResult result)
     {
         var sites = new List<PatchSite>();
         var functionCount = 0;
         var redZoneFunctionCount = 0;
         var instructionCount = 0;
+        var vectorStoreCount = 0;
 
         foreach (var header in programHeaders)
         {
@@ -168,22 +168,32 @@ internal static class WindowsGuestRedZonePatcher
 
                 functionCount++;
                 instructionCount += decoded.Count;
-                if (!decoded.Any(static entry => UsesRedZone(entry.Instruction)))
+                var usesRedZone = protectRedZone && decoded.Any(static entry => UsesRedZone(entry.Instruction));
+                if (!usesRedZone && !splitVectorStores)
                 {
                     continue;
                 }
 
-                redZoneFunctionCount++;
+                if (usesRedZone)
+                {
+                    redZoneFunctionCount++;
+                }
                 var branchTargets = CollectBranchTargets(decoded);
                 for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
                 {
-                    if (!IsFaultableGuestMemoryInstruction(decoded[instructionIndex].Instruction) ||
+                    var instruction = decoded[instructionIndex].Instruction;
+                    if ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
+                        !IsFaultableGuestMemoryInstruction(instruction) ||
                         !TryBuildPatchSpan(decoded, instructionIndex, branchTargets, out var span))
                     {
                         continue;
                     }
 
                     sites.Add(span);
+                    if (splitVectorStores)
+                    {
+                        vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
+                    }
                     instructionIndex += span.Instructions.Count - 1;
                 }
             }
@@ -195,6 +205,7 @@ internal static class WindowsGuestRedZonePatcher
             RedZoneFunctions = redZoneFunctionCount,
             Instructions = instructionCount,
             CandidateSites = sites.Count,
+            VectorStoreCount = vectorStoreCount,
         };
         return sites;
     }
@@ -366,11 +377,13 @@ internal static class WindowsGuestRedZonePatcher
         IVirtualMemory memory,
         PatchSite site,
         ref ulong trampolineCursor,
-        ulong trampolineEnd)
+        ulong trampolineEnd,
+        bool splitVectorStores)
     {
         var writer = new ListCodeWriter();
         var relocatedAddress = trampolineCursor + 5;
-        var block = new InstructionBlock(writer, site.Instructions, relocatedAddress);
+        var instructions = splitVectorStores ? RosettaVectorStorePatch.SplitVectorStores(site.Instructions) : site.Instructions;
+        var block = new InstructionBlock(writer, instructions, relocatedAddress);
         if (!BlockEncoder.TryEncode(64, block, out _, out _, BlockEncoderOptions.None))
         {
             return false;
@@ -541,6 +554,8 @@ internal static class WindowsGuestRedZonePatcher
         public int Instructions { get; init; }
 
         public int CandidateSites { get; init; }
+
+        public int VectorStoreCount { get; init; }
 
         public int PatchedSites { get; init; }
 
