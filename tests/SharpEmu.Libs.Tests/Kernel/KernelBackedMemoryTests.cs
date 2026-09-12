@@ -14,6 +14,39 @@ namespace SharpEmu.Libs.Tests.Kernel;
 [Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class KernelBackedMemoryTests
 {
+    [Fact]
+    public void MacOsFlexibleMappingExcludesReservedGraphicsMemory()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+
+        using var test = new BackedKernelMemory();
+        var previousPool = KernelMemoryCompatExports.SetFlexibleBackingForTests(
+            new FlexibleBackingPool(0x4000000, 0x4000000));
+        try
+        {
+            // Fail on the first search in the reserved graphics memory region.
+            test.Host.BeforeReserveHole = (address, size) =>
+                Assert.True(address >= 0x70_0000_0000 || address + size <= 0x10_0000_0000,
+                    "The allocation search entered macOS's reserved GPU window.");
+            Assert.True(test.Context.TryWriteUInt64(test.Output, 0));
+            test.Context[CpuRegister.Rdi] = test.Output;
+            test.Context[CpuRegister.Rsi] = 20 * 1024 * 1024;
+            test.Context[CpuRegister.Rdx] = 3;
+            test.Context[CpuRegister.Rcx] = 0x8000;
+
+            Assert.Equal(0, KernelMemoryCompatExports.KernelMapFlexibleMemoryInternal(test.Context));
+            Assert.True(test.Context.TryReadUInt64(test.Output, out var mapped));
+            Assert.True(test.Context.TryWriteUInt64(mapped, 0x123456789ABCDEF0));
+            Assert.True(test.Context.TryReadUInt64(mapped, out var value));
+            Assert.Equal(0x123456789ABCDEF0UL, value);
+        }
+        finally
+        {
+            KernelMemoryCompatExports.ResetBackingMappings(test.Memory);
+            KernelMemoryCompatExports.SetFlexibleBackingForTests(previousPool);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

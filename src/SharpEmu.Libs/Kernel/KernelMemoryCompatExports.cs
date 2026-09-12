@@ -152,13 +152,11 @@ public static partial class KernelMemoryCompatExports
 
     private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
-    // First guest virtual address handed out for direct/flexible mappings
-    // when the game does not request one. 4GB is free on Windows, but on
-    // POSIX hosts it belongs to the host image / runtime (the Mach-O image
-    // base is 0x100000000 on macOS), so search from a guest-owned window
-    // well clear of host mappings instead.
+    // Start the address search outside the host memory regions.
+    // On macOS, also exclude the graphics memory region below 0x7000000000.
     private static readonly ulong DefaultMapSearchBase =
-        OperatingSystem.IsWindows() ? 0x1_0000_0000UL : 0x20_0000_0000UL;
+        OperatingSystem.IsWindows() ? 0x1_0000_0000UL :
+        OperatingSystem.IsMacOS() ? 0x70_0000_0000UL : 0x20_0000_0000UL;
     private static ulong _threadAtexitCountCallback;
     private static ulong _threadAtexitReportCallback;
     private static ulong _threadDtorsCallback;

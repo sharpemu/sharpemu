@@ -37,6 +37,8 @@ internal sealed class FailingHostViews : IHostViewMemory
 
     public Action? AfterMapView { get; set; }
 
+    public Action<ulong, ulong>? BeforeReserveHole { get; set; }
+
     public ulong PageSize => _inner.PageSize;
 
     public ulong Granularity => _inner.Granularity;
@@ -60,8 +62,11 @@ internal sealed class FailingHostViews : IHostViewMemory
         return _inner.TryCreateBacking(size, out backing, out failure);
     }
 
-    public ulong ReserveHole(ulong address, ulong size) =>
-        ShouldFail(Op.ReserveHole) ? 0 : _inner.ReserveHole(address, size);
+    public ulong ReserveHole(ulong address, ulong size)
+    {
+        BeforeReserveHole?.Invoke(address, size);
+        return ShouldFail(Op.ReserveHole) ? 0 : _inner.ReserveHole(address, size);
+    }
 
     public bool SplitHole(ulong address, ulong size) =>
         !ShouldFail(Op.SplitHole) && _inner.SplitHole(address, size);
