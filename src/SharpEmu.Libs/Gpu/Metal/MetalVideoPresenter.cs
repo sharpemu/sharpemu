@@ -49,7 +49,7 @@ internal static partial class MetalVideoPresenter
     // presenter does; the panel texture lives for the window's lifetime.
     private static nint _overlayTexture;
     private static readonly byte[] _overlayPixels =
-        new byte[PerfOverlay.PanelWidth * PerfOverlay.PanelHeight * 4];
+        new byte[PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4];
 
     // Presenter objects and per-frame present state, all used on the SDL host thread.
     private static nint _device;
@@ -284,6 +284,12 @@ internal static partial class MetalVideoPresenter
         {
             Volatile.Write(ref _hostWindow, null);
             _metalLayer = 0;
+            if (_overlayTexture != 0)
+            {
+                // Submitted command buffers retain the texture until their GPU work completes.
+                MetalNative.SendVoid(_overlayTexture, MetalNative.Selector("release"));
+                _overlayTexture = 0;
+            }
         }
 
         if (hostWindow.ClosedByUser)
@@ -534,7 +540,7 @@ internal static partial class MetalVideoPresenter
                     _drawableHeight);
             }
 
-            if (PerfOverlay.Enabled)
+            if (PerfOverlay.DrawOnScreen)
             {
                 EncodeOverlay(encoder);
             }
@@ -550,8 +556,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Draws the CPU-rasterized perf panel over the frame's top-left
-    /// corner, reusing the present pipeline with a panel-sized viewport.</summary>
+    // Uses the present pipeline with a viewport at the selected corner.
     private static void EncodeOverlay(nint encoder)
     {
         if (_overlayTexture == 0)
@@ -560,8 +565,8 @@ internal static partial class MetalVideoPresenter
                 MetalNative.Class("MTLTextureDescriptor"),
                 MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
                 PixelFormatBgra8Unorm,
-                PerfOverlay.PanelWidth,
-                PerfOverlay.PanelHeight,
+                (nuint)PerfOverlay.DisplayWidth,
+                (nuint)PerfOverlay.DisplayHeight,
                 mipmapped: false);
             _overlayTexture = MetalNative.Send(
                 _device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
@@ -580,15 +585,15 @@ internal static partial class MetalVideoPresenter
         PerfOverlay.Fill(_overlayPixels, pendingWork, 0);
         ReplaceTextureContents(
             _overlayTexture,
-            PerfOverlay.PanelWidth,
-            PerfOverlay.PanelHeight,
+            (uint)PerfOverlay.DisplayWidth,
+            (uint)PerfOverlay.DisplayHeight,
             _overlayPixels,
-            PerfOverlay.PanelWidth,
+            PerfOverlay.PixelBufferWidth,
             bytesPerPixel: 4);
 
-        const double margin = 16;
-        var panelWidth = Math.Min(PerfOverlay.PanelWidth, _drawableWidth - margin);
-        var panelHeight = Math.Min(PerfOverlay.PanelHeight, _drawableHeight - margin);
+        var rectangle = PerfOverlay.GetRectangle((int)_drawableWidth, (int)_drawableHeight);
+        var panelWidth = rectangle.Width;
+        var panelHeight = rectangle.Height;
         if (panelWidth <= 0 || panelHeight <= 0)
         {
             return;
@@ -600,8 +605,8 @@ internal static partial class MetalVideoPresenter
             MetalNative.Selector("setViewport:"),
             new MtlViewport
             {
-                OriginX = _drawableWidth - margin - panelWidth,
-                OriginY = margin,
+                OriginX = rectangle.Left,
+                OriginY = rectangle.Top,
                 Width = panelWidth,
                 Height = panelHeight,
                 ZNear = 0,

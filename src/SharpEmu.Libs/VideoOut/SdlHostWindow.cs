@@ -47,6 +47,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private bool _surfaceRestorePending;
     private bool _hdrStateChangePending;
     private bool _disposed;
+    private string _baseTitle = string.Empty;
+    private string _titleSummary = string.Empty;
 
     public SdlHostWindow(
         string title,
@@ -78,6 +80,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             throw new InvalidOperationException($"SDL window creation failed: {GetError()}");
         }
 
+        _baseTitle = title;
+        PerfOverlay.Configure(_options);
         MoveToConfiguredDisplay();
         ApplyConfiguredMode(_options.WindowMode);
         SetIcon();
@@ -210,12 +214,28 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     public void SetTitle(string title)
     {
+        _baseTitle = title;
+        ApplyWindowTitle();
+    }
+
+    private void RefreshOverlayTitle()
+    {
+        var summary = PerfOverlay.GetTitleBarSummary();
+        if (_titleSummary != summary)
+        {
+            _titleSummary = summary;
+            ApplyWindowTitle();
+        }
+    }
+
+    private void ApplyWindowTitle()
+    {
         if (_window is null)
         {
             return;
         }
 
-        var utf8 = Marshal.StringToCoTaskMemUTF8(FormatWindowTitle(title, RenderDocCapture.IsAvailable));
+        var utf8 = Marshal.StringToCoTaskMemUTF8(FormatWindowTitle(_baseTitle, RenderDocCapture.IsAvailable, _titleSummary));
         try
         {
             SDL_SetWindowTitle(_window, (byte*)utf8);
@@ -354,6 +374,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEvents))
                 {
                     PumpEvents();
+                    RefreshOverlayTitle();
                 }
                 if (Volatile.Read(ref _closeRequested) != 0)
                 {
@@ -401,6 +422,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         }
 
         _disposed = true;
+        PerfOverlay.Shutdown();
         SDL_ShowCursor();
         HostWindowInput.Disconnect();
         CloseGamepad();
@@ -513,6 +535,10 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             {
                 PerfOverlay.Toggle();
             }
+            else if (keyEvent.key == SDL_Keycode.SDLK_F2)
+            {
+                PerfOverlay.CycleCorner();
+            }
             else if (IsCaptureKey(keyEvent.key))
             {
                 RenderDocCapture.RequestCapture();
@@ -531,8 +557,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     internal static bool IsCaptureKey(SDL_Keycode key) => key == SDL_Keycode.SDLK_F12;
 
-    internal static string FormatWindowTitle(string title, bool captureAvailable) =>
-        captureAvailable ? $"{title} · Press F12 for capture" : title;
+    internal static string FormatWindowTitle(string title, bool captureAvailable, string summary = "")
+    {
+        var result = string.IsNullOrEmpty(summary) ? title : $"{title} · {summary}";
+        return captureAvailable ? $"{result} · Press F12 for capture" : result;
+    }
 
     private void ToggleFullscreen()
     {

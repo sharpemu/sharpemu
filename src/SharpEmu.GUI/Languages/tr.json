@@ -1,5 +1,18 @@
 {
   "_languageName": "Türkçe",
+  "Options.OverlayEnabled.Label": "Performans göstergesi",
+  "Options.OverlayEnabled.Desc": "Performans istatistiklerini gösterir. F1 göstergeyi bu oturum için açar veya kapatır. SHARPEMU_OVERLAY=0 başlangıçta gizler.",
+  "Options.OverlayMode.Label": "Görüntüleme modu",
+  "Options.OverlayMode.Desc": "Tam tüm sayaçları gösterir. Asgari ve Başlık çubuğu FPS, CPU, GPU kullanımı ve geçen süreyi gösterir. GPU kullanımı Windows’ta işlem bazındadır; diğer sistemlerde N/A gösterilir.",
+  "Options.OverlayCorner.Label": "Ekran köşesi",
+  "Options.OverlayCorner.Desc": "Kaydedilecek köşeyi seçin. F2 köşeyi yalnızca bu oturum için değiştirir. Başlık çubuğundaki istatistikleri taşımaz.",
+  "Options.OverlayMode.Full": "Tam",
+  "Options.OverlayMode.Minimal": "Asgari",
+  "Options.OverlayMode.TitleBar": "Başlık çubuğu (asgari)",
+  "Options.OverlayCorner.TopLeft": "Sol üst",
+  "Options.OverlayCorner.TopRight": "Sağ üst",
+  "Options.OverlayCorner.BottomRight": "Sağ alt",
+  "Options.OverlayCorner.BottomLeft": "Sol alt",
 
   "Page.Library": "Kütüphane",
   "Page.Options": "Ayarlar",

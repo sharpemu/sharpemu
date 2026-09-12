@@ -1,5 +1,18 @@
 {
   "_languageName": "Italiano",
+  "Options.OverlayEnabled.Label": "Statistiche prestazioni",
+  "Options.OverlayEnabled.Desc": "Mostra le statistiche. F1 attiva o nasconde la visualizzazione per questa sessione. SHARPEMU_OVERLAY=0 la nasconde all’avvio.",
+  "Options.OverlayMode.Label": "Modalità di visualizzazione",
+  "Options.OverlayMode.Desc": "Completa mostra tutti i contatori. Minima e Barra del titolo mostrano FPS, CPU, uso GPU e tempo. La GPU è misurata per processo su Windows; altrimenti N/A.",
+  "Options.OverlayCorner.Label": "Angolo dello schermo",
+  "Options.OverlayCorner.Desc": "Scegli l’angolo salvato. F2 cambia angolo solo per questa sessione. Non sposta le statistiche nella barra del titolo.",
+  "Options.OverlayMode.Full": "Completa",
+  "Options.OverlayMode.Minimal": "Minima",
+  "Options.OverlayMode.TitleBar": "Barra del titolo (minima)",
+  "Options.OverlayCorner.TopLeft": "In alto a sinistra",
+  "Options.OverlayCorner.TopRight": "In alto a destra",
+  "Options.OverlayCorner.BottomRight": "In basso a destra",
+  "Options.OverlayCorner.BottomLeft": "In basso a sinistra",
 
   "Page.Library": "Libreria",
   "Page.Options": "Opzioni",

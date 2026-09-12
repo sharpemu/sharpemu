@@ -27,6 +27,21 @@ public enum HostHdrMode
     Off,
 }
 
+public enum PerformanceOverlayCorner
+{
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+}
+
+public enum PerformanceOverlayMode
+{
+    Full,
+    Minimal,
+    TitleBar,
+}
+
 public sealed record HostVideoOptions
 {
     public static HostVideoOptions Default { get; } = new();
@@ -47,6 +62,10 @@ public sealed record HostVideoOptions
 
     public HostHdrMode HdrMode { get; init; } = HostHdrMode.Auto;
 
+    public bool OverlayEnabled { get; init; } = true;
+    public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
+    public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.Full;
+
     public HostVideoOptions Normalize() => this with
     {
         Width = Math.Clamp(Width, 640, 16384),
@@ -54,6 +73,8 @@ public sealed record HostVideoOptions
         DisplayIndex = Math.Max(0, DisplayIndex),
         RefreshRate = Math.Clamp(RefreshRate, 0, 1000),
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
+        OverlayCorner = Enum.IsDefined(OverlayCorner) ? OverlayCorner : PerformanceOverlayCorner.TopRight,
+        OverlayMode = Enum.IsDefined(OverlayMode) ? OverlayMode : PerformanceOverlayMode.Full,
     };
 }
 

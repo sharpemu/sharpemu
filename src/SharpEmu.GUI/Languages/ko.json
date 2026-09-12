@@ -1,5 +1,18 @@
 {
   "_languageName": "한국어",
+  "Options.OverlayEnabled.Label": "성능 표시",
+  "Options.OverlayEnabled.Desc": "성능 통계를 표시합니다. F1은 이번 실행에서만 표시를 켜거나 끕니다. SHARPEMU_OVERLAY=0이면 숨긴 상태로 시작합니다.",
+  "Options.OverlayMode.Label": "표시 모드",
+  "Options.OverlayMode.Desc": "전체는 모든 카운터를 표시합니다. 최소와 제목 표시줄은 FPS, CPU, GPU 사용률, 경과 시간을 표시합니다. GPU 사용률은 Windows에서 프로세스별로 측정하며 다른 환경에서는 N/A입니다.",
+  "Options.OverlayCorner.Label": "화면 모서리",
+  "Options.OverlayCorner.Desc": "저장할 모서리를 선택합니다. F2는 이번 실행에서만 모서리를 바꿉니다. 제목 표시줄의 통계는 이동하지 않습니다.",
+  "Options.OverlayMode.Full": "전체",
+  "Options.OverlayMode.Minimal": "최소",
+  "Options.OverlayMode.TitleBar": "제목 표시줄 (최소)",
+  "Options.OverlayCorner.TopLeft": "왼쪽 위",
+  "Options.OverlayCorner.TopRight": "오른쪽 위",
+  "Options.OverlayCorner.BottomRight": "오른쪽 아래",
+  "Options.OverlayCorner.BottomLeft": "왼쪽 아래",
 
   "Page.Library": "라이브러리",
   "Page.Options": "옵션",

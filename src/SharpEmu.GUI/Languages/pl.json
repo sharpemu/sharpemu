@@ -1,5 +1,18 @@
 {
   "_languageName": "Polski",
+  "Options.OverlayEnabled.Label": "Statystyki wydajności",
+  "Options.OverlayEnabled.Desc": "Pokaż statystyki. F1 włącza lub wyłącza widok tylko w tej sesji. SHARPEMU_OVERLAY=0 ukrywa go przy uruchomieniu.",
+  "Options.OverlayMode.Label": "Tryb wyświetlania",
+  "Options.OverlayMode.Desc": "Pełny pokazuje wszystkie liczniki. Minimalny i Pasek tytułu pokazują FPS, CPU, użycie GPU i czas. GPU jest mierzone dla procesu w Windows; w innych systemach N/A.",
+  "Options.OverlayCorner.Label": "Róg ekranu",
+  "Options.OverlayCorner.Desc": "Wybierz zapisany róg. F2 zmienia róg tylko w tej sesji. Nie przenosi statystyk z paska tytułu.",
+  "Options.OverlayMode.Full": "Pełny",
+  "Options.OverlayMode.Minimal": "Minimalny",
+  "Options.OverlayMode.TitleBar": "Pasek tytułu (minimalny)",
+  "Options.OverlayCorner.TopLeft": "Lewy górny",
+  "Options.OverlayCorner.TopRight": "Prawy górny",
+  "Options.OverlayCorner.BottomRight": "Prawy dolny",
+  "Options.OverlayCorner.BottomLeft": "Lewy dolny",
 
   "Page.Library": "Biblioteka",
   "Page.Options": "Opcje",

@@ -23,13 +23,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CreateOverlayResources()
         {
-            const ulong overlayBytes = PerfOverlay.PanelWidth * PerfOverlay.PanelHeight * 4;
+            const ulong overlayBytes = PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4;
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
                 ImageType = ImageType.Type2D,
                 Format = Format.B8G8R8A8Unorm,
-                Extent = new Extent3D(PerfOverlay.PanelWidth, PerfOverlay.PanelHeight, 1),
+                Extent = new Extent3D(PerfOverlay.PixelBufferWidth, PerfOverlay.PixelBufferHeight, 1),
                 MipLevels = 1,
                 ArrayLayers = 1,
                 Samples = SampleCountFlags.Count1Bit,
@@ -76,9 +76,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RecordOverlayBlit(uint imageIndex, int frameSlot)
         {
-            const int margin = 12;
+            var rectangle = PerfOverlay.GetRectangle((int)_extent.Width, (int)_extent.Height);
             if (_overlayImage.Handle == 0 || _overlayStagingMapped.Length <= frameSlot ||
-                _extent.Width <= margin || _extent.Height <= margin)
+                rectangle.Width == 0 || rectangle.Height == 0)
             {
                 return;
             }
@@ -87,7 +87,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var pixels = new Span<byte>(
                 (void*)_overlayStagingMapped[frameSlot],
-                PerfOverlay.PanelWidth * PerfOverlay.PanelHeight * 4);
+                PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4);
             PerfOverlay.Fill(pixels, pendingWork, _pendingGuestSubmissions.Count);
             var presentationTarget = PresentationTargetImage(imageIndex);
 
@@ -114,7 +114,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var copyRegion = new BufferImageCopy
             {
                 ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
-                ImageExtent = new Extent3D(PerfOverlay.PanelWidth, PerfOverlay.PanelHeight, 1),
+                ImageExtent = new Extent3D(PerfOverlay.PixelBufferWidth, PerfOverlay.PixelBufferHeight, 1),
             };
             _vk.CmdCopyBufferToImage(
                 _commandBuffer,
@@ -155,8 +155,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PipelineStageFlags.TransferBit,
                 0, 0, null, 0, null, 2, preBlitBarriers);
 
-            var panelWidth = (int)Math.Min(PerfOverlay.PanelWidth, _extent.Width - margin);
-            var panelHeight = (int)Math.Min(PerfOverlay.PanelHeight, _extent.Height - margin);
+            var panelWidth = rectangle.Width;
+            var panelHeight = rectangle.Height;
             // Source and destination are both B8G8R8A8 and the panel is not
             // scaled. MoltenVK has corrupted pixels outside the blit region
             // for this transfer-on-swapchain path (horizontal red/yellow
@@ -168,7 +168,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
                 DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
                 SrcOffset = new Offset3D(0, 0, 0),
-                DstOffset = new Offset3D((int)_extent.Width - margin - panelWidth, margin, 0),
+                DstOffset = new Offset3D(rectangle.Left, rectangle.Top, 0),
                 Extent = new Extent3D((uint)panelWidth, (uint)panelHeight, 1),
             };
             _vk.CmdCopyImage(

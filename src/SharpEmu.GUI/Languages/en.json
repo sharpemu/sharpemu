@@ -1,5 +1,18 @@
 {
   "_languageName": "English",
+  "Options.OverlayEnabled.Label": "Performance display",
+  "Options.OverlayEnabled.Desc": "Show performance statistics. F1 toggles the display for this run. SHARPEMU_OVERLAY=0 starts it hidden.",
+  "Options.OverlayMode.Label": "Display mode",
+  "Options.OverlayMode.Desc": "Full shows all counters. Minimal and Title bar show FPS, CPU, GPU usage, and elapsed time. GPU usage is per-process on Windows; otherwise N/A.",
+  "Options.OverlayCorner.Label": "Screen corner",
+  "Options.OverlayCorner.Desc": "Select the saved corner. F2 cycles corners for this run only. This does not move title-bar statistics.",
+  "Options.OverlayMode.Full": "Full",
+  "Options.OverlayMode.Minimal": "Minimal",
+  "Options.OverlayMode.TitleBar": "Title bar (minimal)",
+  "Options.OverlayCorner.TopLeft": "Top left",
+  "Options.OverlayCorner.TopRight": "Top right",
+  "Options.OverlayCorner.BottomRight": "Bottom right",
+  "Options.OverlayCorner.BottomLeft": "Bottom left",
 
   "Page.Library": "Library",
   "Page.Options": "Options",

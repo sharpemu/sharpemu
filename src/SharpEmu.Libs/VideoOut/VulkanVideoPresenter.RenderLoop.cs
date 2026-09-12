@@ -398,7 +398,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"Unsupported translated guest draw: {presentation.DrawKind}.");
             }
 
-            if (PerfOverlay.Enabled)
+            if (PerfOverlay.DrawOnScreen)
             {
                 RecordOverlayBlit(imageIndex, frameSlot);
             }

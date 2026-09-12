@@ -1,5 +1,18 @@
 {
   "_languageName": "Deutsch",
+  "Options.OverlayEnabled.Label": "Leistungsanzeige",
+  "Options.OverlayEnabled.Desc": "Leistungsdaten anzeigen. F1 schaltet die Anzeige nur für diesen Lauf um. SHARPEMU_OVERLAY=0 blendet sie beim Start aus.",
+  "Options.OverlayMode.Label": "Anzeigemodus",
+  "Options.OverlayMode.Desc": "Vollständig zeigt alle Zähler. Minimal und Titelleiste zeigen FPS, CPU, GPU-Auslastung und Laufzeit. GPU-Auslastung gilt unter Windows pro Prozess; sonst N/A.",
+  "Options.OverlayCorner.Label": "Bildschirmecke",
+  "Options.OverlayCorner.Desc": "Gespeicherte Ecke wählen. F2 wechselt die Ecke nur für diesen Lauf. Die Titelleistenanzeige bleibt unverändert.",
+  "Options.OverlayMode.Full": "Vollständig",
+  "Options.OverlayMode.Minimal": "Minimal",
+  "Options.OverlayMode.TitleBar": "Titelleiste (minimal)",
+  "Options.OverlayCorner.TopLeft": "Oben links",
+  "Options.OverlayCorner.TopRight": "Oben rechts",
+  "Options.OverlayCorner.BottomRight": "Unten rechts",
+  "Options.OverlayCorner.BottomLeft": "Unten links",
 
   "Page.Library": "Bibliothek",
   "Page.Options": "Optionen",

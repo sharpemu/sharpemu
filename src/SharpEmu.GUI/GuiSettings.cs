@@ -76,6 +76,10 @@ public sealed class GuiSettings
 
     public string HdrMode { get; set; } = "Auto";
 
+    public bool OverlayEnabled { get; set; } = true;
+    public string OverlayCorner { get; set; } = "TopRight";
+    public string OverlayMode { get; set; } = "Full";
+
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
     public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0"];
 
@@ -145,6 +149,8 @@ public sealed class GuiSettings
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Host", "Guest", "Skip");
+        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
+        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "Full", "Minimal", "TitleBar");
         settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
         settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);

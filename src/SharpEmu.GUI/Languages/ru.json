@@ -1,5 +1,18 @@
 ﻿{
   "_languageName": "Русский",
+  "Options.OverlayEnabled.Label": "Показатели производительности",
+  "Options.OverlayEnabled.Desc": "Показывать статистику. F1 переключает показ только в текущем сеансе. SHARPEMU_OVERLAY=0 скрывает его при запуске.",
+  "Options.OverlayMode.Label": "Режим отображения",
+  "Options.OverlayMode.Desc": "Полный режим показывает все счётчики. Минимальный и Строка заголовка показывают FPS, CPU, загрузку GPU и время. GPU измеряется для процесса в Windows; иначе N/A.",
+  "Options.OverlayCorner.Label": "Угол экрана",
+  "Options.OverlayCorner.Desc": "Выберите сохраняемый угол. F2 меняет угол только в текущем сеансе. Статистика в строке заголовка не перемещается.",
+  "Options.OverlayMode.Full": "Полный",
+  "Options.OverlayMode.Minimal": "Минимальный",
+  "Options.OverlayMode.TitleBar": "Строка заголовка (минимум)",
+  "Options.OverlayCorner.TopLeft": "Слева вверху",
+  "Options.OverlayCorner.TopRight": "Справа вверху",
+  "Options.OverlayCorner.BottomRight": "Справа внизу",
+  "Options.OverlayCorner.BottomLeft": "Слева внизу",
 
   "Page.Library": "Библиотека",
   "Page.Options": "Настройки",

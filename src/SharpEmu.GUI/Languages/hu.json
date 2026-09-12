@@ -1,5 +1,18 @@
 {
   "_languageName": "Hungarian",
+  "Options.OverlayEnabled.Label": "Teljesítménykijelzés",
+  "Options.OverlayEnabled.Desc": "Teljesítményadatok megjelenítése. Az F1 csak erre a futásra kapcsolja a kijelzést. SHARPEMU_OVERLAY=0 esetén rejtve indul.",
+  "Options.OverlayMode.Label": "Kijelzési mód",
+  "Options.OverlayMode.Desc": "A Teljes minden számlálót mutat. A Minimális és Címsor az FPS-t, CPU-, GPU-használatot és eltelt időt mutatja. A GPU-adat Windows alatt folyamatonkénti; máshol N/A.",
+  "Options.OverlayCorner.Label": "Képernyősarok",
+  "Options.OverlayCorner.Desc": "Válassza ki a mentett sarkot. Az F2 csak erre a futásra vált sarkot. A címsor adatait nem helyezi át.",
+  "Options.OverlayMode.Full": "Teljes",
+  "Options.OverlayMode.Minimal": "Minimális",
+  "Options.OverlayMode.TitleBar": "Címsor (minimális)",
+  "Options.OverlayCorner.TopLeft": "Bal felső",
+  "Options.OverlayCorner.TopRight": "Jobb felső",
+  "Options.OverlayCorner.BottomRight": "Jobb alsó",
+  "Options.OverlayCorner.BottomLeft": "Bal alsó",
 
   "Page.Library": "Könyvtár",
   "Page.Options": "Beállítások",

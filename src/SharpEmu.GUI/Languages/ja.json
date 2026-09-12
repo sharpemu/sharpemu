@@ -1,5 +1,18 @@
 {
   "_languageName": "日本語",
+  "Options.OverlayEnabled.Label": "パフォーマンス表示",
+  "Options.OverlayEnabled.Desc": "統計を表示します。F1で今回の実行中のみ表示を切り替えます。SHARPEMU_OVERLAY=0では非表示で開始します。",
+  "Options.OverlayMode.Label": "表示モード",
+  "Options.OverlayMode.Desc": "詳細はすべてのカウンターを表示します。最小とタイトルバーはFPS、CPU、GPU使用率、経過時間を表示します。GPU使用率はWindowsのプロセス単位の値です。他の環境ではN/Aを表示します。",
+  "Options.OverlayCorner.Label": "画面の隅",
+  "Options.OverlayCorner.Desc": "保存する位置を選びます。F2は今回の実行中のみ位置を切り替えます。タイトルバーの統計は移動しません。",
+  "Options.OverlayMode.Full": "詳細",
+  "Options.OverlayMode.Minimal": "最小",
+  "Options.OverlayMode.TitleBar": "タイトルバー（最小）",
+  "Options.OverlayCorner.TopLeft": "左上",
+  "Options.OverlayCorner.TopRight": "右上",
+  "Options.OverlayCorner.BottomRight": "右下",
+  "Options.OverlayCorner.BottomLeft": "左下",
 
   "Page.Library": "ライブラリ",
   "Page.Options": "オプション",

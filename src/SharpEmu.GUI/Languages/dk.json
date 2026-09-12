@@ -1,5 +1,18 @@
 {
   "_languageName": "Dansk",
+  "Options.OverlayEnabled.Label": "Ydelsesvisning",
+  "Options.OverlayEnabled.Desc": "Vis ydelsesdata. F1 slår visningen til eller fra i denne session. SHARPEMU_OVERLAY=0 skjuler den ved start.",
+  "Options.OverlayMode.Label": "Visningstilstand",
+  "Options.OverlayMode.Desc": "Fuld viser alle tællere. Minimal og Titellinje viser FPS, CPU, GPU-forbrug og forløbet tid. GPU-forbrug måles pr. proces i Windows; ellers N/A.",
+  "Options.OverlayCorner.Label": "Skærmhjørne",
+  "Options.OverlayCorner.Desc": "Vælg det gemte hjørne. F2 skifter hjørne kun i denne session. Statistik i titellinjen flyttes ikke.",
+  "Options.OverlayMode.Full": "Fuld",
+  "Options.OverlayMode.Minimal": "Minimal",
+  "Options.OverlayMode.TitleBar": "Titellinje (minimal)",
+  "Options.OverlayCorner.TopLeft": "Øverst til venstre",
+  "Options.OverlayCorner.TopRight": "Øverst til højre",
+  "Options.OverlayCorner.BottomRight": "Nederst til højre",
+  "Options.OverlayCorner.BottomLeft": "Nederst til venstre",
 
   "Page.Library": "Bibliotek",
   "Page.Options": "Indstillinger",

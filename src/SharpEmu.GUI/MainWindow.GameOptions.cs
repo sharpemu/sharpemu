@@ -42,6 +42,8 @@ public partial class MainWindow
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
+        GameOverlayModeBox.ItemsSource = _overlayModeChoices;
+        GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
 
         var navigationButtons = GameOptionsNavigationButtons();
         for (var index = 0; index < navigationButtons.Length; index++)
@@ -110,6 +112,9 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
             toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
@@ -208,6 +213,9 @@ public partial class MainWindow
                 effective.ScalingMode,
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
+            GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
+            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "Full");
+            GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
                 effective.HdrMode,
@@ -272,6 +280,9 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
+            OverlayMode = SelectedComboText(GameOverlayModeBox, "Full"),
+            OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
             CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };

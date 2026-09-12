@@ -924,6 +924,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     HorizontalContentAlignment="Left"
                                     VerticalAlignment="Center" />
                         </local:SettingRow>
+                        <local:SettingRow x:Name="GameOverlayEnabledRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.OverlayEnabled.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameOverlayEnabledToggle"
+                                    Classes="optionToggle"
+                                    ToolTip.Tip="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                        </local:SettingRow>
+                        <local:SettingRow x:Name="GameOverlayModeRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.OverlayMode.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ComboBox x:Name="GameOverlayModeBox"
+                                    Classes="optionValue"
+                                    ToolTip.Tip="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
+                        </local:SettingRow>
+                        <local:SettingRow x:Name="GameOverlayCornerRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.OverlayCorner.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                          Description="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ComboBox x:Name="GameOverlayCornerBox"
+                                    Classes="optionValue"
+                                    ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
+                        </local:SettingRow>
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1455,6 +1481,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
                                   VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayEnabledRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.OverlayEnabled.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ToggleSwitch x:Name="OverlayEnabledToggle"
+                                  Classes="optionToggle"
+                                  ToolTip.Tip="{Binding [Options.OverlayEnabled.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayModeRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.OverlayMode.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayModeBox"
+                                  Classes="optionValue"
+                                  ToolTip.Tip="{Binding [Options.OverlayMode.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="OverlayCornerRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.OverlayCorner.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <ComboBox x:Name="OverlayCornerBox"
+                                  Classes="optionValue"
+                                  ToolTip.Tip="{Binding [Options.OverlayCorner.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>

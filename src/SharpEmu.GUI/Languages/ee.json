@@ -1,5 +1,18 @@
 {
   "_languageName": "Eesti",
+  "Options.OverlayEnabled.Label": "Jõudlusnäidik",
+  "Options.OverlayEnabled.Desc": "Kuva jõudlusandmed. F1 lülitab näidiku selleks seansiks sisse või välja. SHARPEMU_OVERLAY=0 peidab selle käivitamisel.",
+  "Options.OverlayMode.Label": "Kuvarežiim",
+  "Options.OverlayMode.Desc": "Täielik kuvab kõik loendurid. Minimaalne ja Tiitliriba kuvavad FPS-i, CPU, GPU kasutuse ja kestuse. GPU kasutus on Windowsis protsessipõhine; mujal N/A.",
+  "Options.OverlayCorner.Label": "Ekraaninurk",
+  "Options.OverlayCorner.Desc": "Vali salvestatav nurk. F2 vahetab nurka ainult selleks seansiks. Tiitliriba näitu see ei liiguta.",
+  "Options.OverlayMode.Full": "Täielik",
+  "Options.OverlayMode.Minimal": "Minimaalne",
+  "Options.OverlayMode.TitleBar": "Tiitliriba (minimaalne)",
+  "Options.OverlayCorner.TopLeft": "Ülal vasakul",
+  "Options.OverlayCorner.TopRight": "Ülal paremal",
+  "Options.OverlayCorner.BottomRight": "All paremal",
+  "Options.OverlayCorner.BottomLeft": "All vasakul",
 
   "Page.Library": "Teek",
   "Page.Options": "Seaded",

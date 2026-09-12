@@ -1004,7 +1004,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1074,6 +1074,9 @@ internal static partial class Program
         int? refreshRateOverride = null;
         bool? vsyncOverride = null;
         HostHdrMode? hdrModeOverride = null;
+        bool? overlayEnabledOverride = null;
+        PerformanceOverlayMode? overlayModeOverride = null;
+        PerformanceOverlayCorner? overlayCornerOverride = null;
         videoOptions = HostVideoOptions.Default;
         logFilePath = null;
         logLevel = SharpEmuLog.MinimumLevel;
@@ -1146,6 +1149,41 @@ internal static partial class Program
                     return false;
                 }
                 vsyncOverride = vsync;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay", out var overlayText))
+            {
+                if (!TryParseSwitch(overlayText, out var overlayEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayEnabledOverride = overlayEnabled;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay-mode", out var overlayModeText))
+            {
+                if (!Enum.TryParse<PerformanceOverlayMode>(overlayModeText, true, out var overlayMode) ||
+                    !Enum.IsDefined(overlayMode))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayModeOverride = overlayMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--overlay-corner", out var overlayCornerText))
+            {
+                if (!Enum.TryParse<PerformanceOverlayCorner>(overlayCornerText, true, out var overlayCorner) ||
+                    !Enum.IsDefined(overlayCorner))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                overlayCornerOverride = overlayCorner;
                 continue;
             }
             if (TrySplitOption(argument, "--hdr", out var hdrText))
@@ -1331,6 +1369,9 @@ internal static partial class Program
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+            OverlayEnabled = overlayEnabledOverride ?? configuredVideoOptions.OverlayEnabled,
+            OverlayMode = overlayModeOverride ?? configuredVideoOptions.OverlayMode,
+            OverlayCorner = overlayCornerOverride ?? configuredVideoOptions.OverlayCorner,
         }).Normalize();
         return true;
     }
@@ -1368,6 +1409,11 @@ internal static partial class Program
                 RefreshRate = effective.RefreshRate,
                 VSync = effective.VSync,
                 HdrMode = hdrMode,
+                OverlayEnabled = effective.OverlayEnabled,
+                OverlayCorner = Enum.TryParse<PerformanceOverlayCorner>(effective.OverlayCorner, true, out var corner)
+                    ? corner : defaults.OverlayCorner,
+                OverlayMode = Enum.TryParse<PerformanceOverlayMode>(effective.OverlayMode, true, out var mode)
+                    ? mode : defaults.OverlayMode,
             }.Normalize();
         }
         catch (Exception exception)

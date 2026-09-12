@@ -1,5 +1,18 @@
 {
   "_languageName": "العربية",
+  "Options.OverlayEnabled.Label": "عرض الأداء",
+  "Options.OverlayEnabled.Desc": "عرض إحصاءات الأداء. يبدّل F1 العرض لهذه الجلسة فقط. يبدأ العرض مخفيًا عند ضبط SHARPEMU_OVERLAY=0.",
+  "Options.OverlayMode.Label": "نمط العرض",
+  "Options.OverlayMode.Desc": "يعرض الكامل جميع العدادات. يعرض المختصر وشريط العنوان FPS واستخدام CPU وGPU والوقت المنقضي. يُقاس GPU لكل عملية في Windows؛ وإلا يظهر N/A.",
+  "Options.OverlayCorner.Label": "زاوية الشاشة",
+  "Options.OverlayCorner.Desc": "اختر الزاوية المحفوظة. يغيّر F2 الزاوية لهذه الجلسة فقط. لا ينقل إحصاءات شريط العنوان.",
+  "Options.OverlayMode.Full": "كامل",
+  "Options.OverlayMode.Minimal": "مختصر",
+  "Options.OverlayMode.TitleBar": "شريط العنوان (مختصر)",
+  "Options.OverlayCorner.TopLeft": "أعلى اليسار",
+  "Options.OverlayCorner.TopRight": "أعلى اليمين",
+  "Options.OverlayCorner.BottomRight": "أسفل اليمين",
+  "Options.OverlayCorner.BottomLeft": "أسفل اليسار",
 
   "Page.Library": "المكتبة",
   "Page.Options": "الخيارات",

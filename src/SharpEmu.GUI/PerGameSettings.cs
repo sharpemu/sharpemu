@@ -36,6 +36,10 @@ public sealed class PerGameSettings
 
     public string? HdrMode { get; set; }
 
+    public bool? OverlayEnabled { get; set; }
+    public string? OverlayCorner { get; set; }
+    public string? OverlayMode { get; set; }
+
     public List<string>? EnvironmentToggles { get; set; }
 
     public List<string>? CustomEnvironmentVariables { get; set; }
@@ -53,6 +57,9 @@ public sealed class PerGameSettings
         ScalingMode is null &&
         VSync is null &&
         HdrMode is null &&
+        OverlayEnabled is null &&
+        OverlayCorner is null &&
+        OverlayMode is null &&
         EnvironmentToggles is null &&
         CustomEnvironmentVariables is null;
 
@@ -163,6 +170,21 @@ public sealed class PerGameSettings
             HdrMode = null;
         }
 
+        if (OverlayEnabled == global.OverlayEnabled)
+        {
+            OverlayEnabled = null;
+        }
+
+        if (string.Equals(OverlayCorner, global.OverlayCorner, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayCorner = null;
+        }
+
+        if (string.Equals(OverlayMode, global.OverlayMode, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayMode = null;
+        }
+
         if (EnvironmentToggles is { } environmentToggles &&
             EnvironmentEntriesEqual(environmentToggles, global.EnvironmentToggles))
         {
@@ -252,6 +274,9 @@ public sealed record EffectiveLaunchSettings(
     string ScalingMode,
     bool VSync,
     string HdrMode,
+    bool OverlayEnabled,
+    string OverlayCorner,
+    string OverlayMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
@@ -266,5 +291,8 @@ public sealed record EffectiveLaunchSettings(
         perGame?.ScalingMode ?? global.ScalingMode,
         perGame?.VSync ?? global.VSync,
         perGame?.HdrMode ?? global.HdrMode,
+        perGame?.OverlayEnabled ?? global.OverlayEnabled,
+        perGame?.OverlayCorner ?? global.OverlayCorner,
+        perGame?.OverlayMode ?? global.OverlayMode,
         perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
 }
