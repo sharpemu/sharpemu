@@ -169,20 +169,31 @@ public sealed class KernelRuntimeCompatExportsTests
         Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(dstSeconds));
     }
 
-    [Fact]
-    public void ConvertLocaltimeToUtc_WritesTimezoneAndDstOutputs()
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void ConvertLocaltimeToUtc_WritesCompleteTimeResult(Generation generation)
     {
         const long localSeconds = 1_786_240_800;
         const ulong utcAddress = MemoryBase + 0x100;
-        const ulong timezoneAddress = MemoryBase + 0x200;
+        const ulong timeResultAddress = MemoryBase + 0x200;
         const ulong dstSecondsAddress = MemoryBase + 0x300;
         var memory = new FakeCpuMemory(MemoryBase, 0x1000);
-        var context = new CpuContext(memory, Generation.Gen5);
+        var context = new CpuContext(memory, generation);
+        var timeResult = new byte[17];
+        var utc = new byte[9];
+        var daylightSavingSeconds = new byte[5];
+        Array.Fill(timeResult, (byte)0xCC);
+        Array.Fill(utc, (byte)0xCC);
+        Array.Fill(daylightSavingSeconds, (byte)0xCC);
+        Assert.True(memory.TryWrite(timeResultAddress, timeResult));
+        Assert.True(memory.TryWrite(utcAddress, utc));
+        Assert.True(memory.TryWrite(dstSecondsAddress, daylightSavingSeconds));
 
         context[CpuRegister.Rdi] = unchecked((ulong)localSeconds);
-        context[CpuRegister.Rsi] = 0xDEAD_BEEF;
+        context[CpuRegister.Rsi] = 0;
         context[CpuRegister.Rdx] = utcAddress;
-        context[CpuRegister.Rcx] = timezoneAddress;
+        context[CpuRegister.Rcx] = timeResultAddress;
         context[CpuRegister.R8] = dstSecondsAddress;
 
         var result = KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context);
@@ -190,20 +201,133 @@ public sealed class KernelRuntimeCompatExportsTests
         Assert.Equal(0, result);
         Assert.Equal(0UL, context[CpuRegister.Rax]);
 
-        Span<byte> utc = stackalloc byte[sizeof(ulong)];
         Assert.True(memory.TryRead(utcAddress, utc));
+        var expectedUtcSeconds = localSeconds - GetStandardOffsetSeconds();
+        Assert.Equal(expectedUtcSeconds, BinaryPrimitives.ReadInt64LittleEndian(utc));
+        Assert.Equal(0xCC, utc[8]);
+
+        Assert.True(memory.TryRead(timeResultAddress, timeResult));
+        Assert.Equal(expectedUtcSeconds, BinaryPrimitives.ReadInt64LittleEndian(timeResult));
+        Assert.Equal(GetStandardOffsetSeconds(), BinaryPrimitives.ReadInt32LittleEndian(timeResult.AsSpan(8)));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(timeResult.AsSpan(12)));
+        Assert.Equal(0xCC, timeResult[16]);
+
+        Assert.True(memory.TryRead(dstSecondsAddress, daylightSavingSeconds));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(daylightSavingSeconds));
+        Assert.Equal(0xCC, daylightSavingSeconds[4]);
+    }
+
+    [Theory]
+    [InlineData(0x00, -1)]
+    [InlineData(0x01, 0)]
+    [InlineData(0xCC, 1)]
+    [InlineData(0xFF, -1)]
+    public void TimeConversionRoundTrip_OverwritesStaleOffsetAndDaylightSavingFields(
+        byte initialValue,
+        int daylightSavingHint)
+    {
+        const ulong utcAddress = MemoryBase + 0x100;
+        const ulong localAddress = MemoryBase + 0x200;
+        const ulong forwardResultAddress = MemoryBase + 0x300;
+        const ulong reverseResultAddress = MemoryBase + 0x400;
+        var memory = new FakeCpuMemory(MemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var forwardResult = new byte[16];
+        var reverseResult = new byte[16];
+
+        foreach (var localSeconds in new[] { 1_767_225_600L, 1_767_312_000L })
+        {
+            Array.Fill(forwardResult, initialValue);
+            Array.Fill(reverseResult, (byte)~initialValue);
+            Assert.True(memory.TryWrite(forwardResultAddress, forwardResult));
+            Assert.True(memory.TryWrite(reverseResultAddress, reverseResult));
+            context[CpuRegister.Rdi] = unchecked((ulong)localSeconds);
+            context[CpuRegister.Rsi] = unchecked((ulong)daylightSavingHint);
+            context[CpuRegister.Rdx] = utcAddress;
+            context[CpuRegister.Rcx] = forwardResultAddress;
+            context[CpuRegister.R8] = 0;
+
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context));
+            Assert.True(context.TryReadUInt64(utcAddress, out var utcSeconds));
+            context[CpuRegister.Rdi] = utcSeconds;
+            context[CpuRegister.Rsi] = localAddress;
+            context[CpuRegister.Rdx] = reverseResultAddress;
+            context[CpuRegister.Rcx] = 0;
+
+            Assert.Equal(0, KernelRuntimeCompatExports.KernelConvertUtcToLocaltime(context));
+            Assert.True(context.TryReadUInt64(localAddress, out var returnedLocalSeconds));
+            Assert.Equal(unchecked((ulong)localSeconds), returnedLocalSeconds);
+            Assert.True(memory.TryRead(forwardResultAddress, forwardResult));
+            Assert.True(memory.TryRead(reverseResultAddress, reverseResult));
+            // Calendar conversion compares both offsets before it selects the daylight-saving state.
+            Assert.Equal(reverseResult.AsSpan(8, 8).ToArray(), forwardResult.AsSpan(8, 8).ToArray());
+            Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(forwardResult.AsSpan(12)));
+            Assert.Equal(reverseResult, forwardResult);
+        }
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(15)]
+    public void ConvertLocaltimeToUtc_RejectsTruncatedTimeResult(int availableBytes)
+    {
+        var memory = new FakeCpuMemory(MemoryBase, availableBytes);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var initialBytes = new byte[availableBytes];
+        Array.Fill(initialBytes, (byte)0xCC);
+        Assert.True(memory.TryWrite(MemoryBase, initialBytes));
+        context[CpuRegister.Rdi] = 1_767_225_600;
+        context[CpuRegister.Rcx] = MemoryBase;
+
+        var result = KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, result);
+        var remainingBytes = new byte[availableBytes];
+        Assert.True(memory.TryRead(MemoryBase, remainingBytes));
+        Assert.Equal(initialBytes, remainingBytes);
+    }
+
+    [Fact]
+    public void ConvertLocaltimeToUtc_AllowsNullOptionalOutputs()
+    {
+        const long localSeconds = 1_767_225_600;
+        var memory = new FakeCpuMemory(MemoryBase, 16);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = unchecked((ulong)localSeconds);
+        context[CpuRegister.Rcx] = MemoryBase;
+
+        Assert.Equal(0, KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context));
+        var timeResult = new byte[16];
+        Assert.True(memory.TryRead(MemoryBase, timeResult));
+        Assert.Equal(localSeconds - GetStandardOffsetSeconds(), BinaryPrimitives.ReadInt64LittleEndian(timeResult));
+        Assert.Equal(GetStandardOffsetSeconds(), BinaryPrimitives.ReadInt32LittleEndian(timeResult.AsSpan(8)));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(timeResult.AsSpan(12)));
+    }
+
+    [Fact]
+    public void ConvertLocaltimeToUtc_RequiresTimeResult()
+    {
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x1000), Generation.Gen5);
+        context[CpuRegister.Rdi] = 1_767_225_600;
+
         Assert.Equal(
-            localSeconds - GetStandardOffsetSeconds(),
-            BinaryPrimitives.ReadInt64LittleEndian(utc));
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+            KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context));
+    }
 
-        Span<byte> timezone = stackalloc byte[sizeof(int) * 2];
-        Assert.True(memory.TryRead(timezoneAddress, timezone));
-        Assert.Equal(GetMinutesWest(), BinaryPrimitives.ReadInt32LittleEndian(timezone));
-        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(timezone[sizeof(int)..]));
+    [Theory]
+    [InlineData(CpuRegister.Rdx)]
+    [InlineData(CpuRegister.R8)]
+    public void ConvertLocaltimeToUtc_ReportsInvalidOptionalOutput(CpuRegister outputRegister)
+    {
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x1000), Generation.Gen5);
+        context[CpuRegister.Rdi] = 1_767_225_600;
+        context[CpuRegister.Rcx] = MemoryBase;
+        context[outputRegister] = MemoryBase + 0x1000;
 
-        Span<byte> dstSeconds = stackalloc byte[sizeof(int)];
-        Assert.True(memory.TryRead(dstSecondsAddress, dstSeconds));
-        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(dstSeconds));
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+            KernelRuntimeCompatExports.KernelConvertLocaltimeToUtc(context));
     }
 
     [Theory]

@@ -1318,10 +1318,10 @@ public static class KernelRuntimeCompatExports
     {
         var localSeconds = unchecked((long)ctx[CpuRegister.Rdi]);
         var utcTimeAddress = ctx[CpuRegister.Rdx];
-        var timezoneAddress = ctx[CpuRegister.Rcx];
+        var timeResultAddress = ctx[CpuRegister.Rcx];
         var dstSecondsAddress = ctx[CpuRegister.R8];
 
-        if (timezoneAddress == 0)
+        if (timeResultAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
@@ -1331,8 +1331,14 @@ public static class KernelRuntimeCompatExports
             localSeconds,
             timezone.MinutesWest,
             timezone.DstSeconds);
-        if (!TryWriteInt32(ctx, timezoneAddress, timezone.MinutesWest) ||
-            !TryWriteInt32(ctx, timezoneAddress + sizeof(int), timezone.DstMode))
+        // Both conversion directions return seconds and UTC offsets in the same layout.
+        Span<byte> timeResult = stackalloc byte[OrbisTimesecSize];
+        BinaryPrimitives.WriteInt64LittleEndian(timeResult, utcSeconds);
+        BinaryPrimitives.WriteInt32LittleEndian(timeResult.Slice(sizeof(long), sizeof(int)), -timezone.MinutesWest * 60);
+        BinaryPrimitives.WriteInt32LittleEndian(
+            timeResult.Slice(sizeof(long) + sizeof(int), sizeof(int)),
+            timezone.DstSeconds);
+        if (!ctx.Memory.TryWrite(timeResultAddress, timeResult))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1357,13 +1363,12 @@ public static class KernelRuntimeCompatExports
     internal static long ConvertUtcToLocaltimeSeconds(long utcSeconds, int minutesWest, int dstSeconds) =>
         unchecked(utcSeconds - (long)minutesWest * 60 + dstSeconds);
 
-    private static (int MinutesWest, int DstSeconds, int DstMode) GetStandardTimezone()
+    private static (int MinutesWest, int DstSeconds) GetStandardTimezone()
     {
-        // Use standard time until SharpEmu has console DST settings.
-        // Host DST rule IDs do not match Orbis DST rule IDs.
+        // Use the standard UTC offset; daylight-saving settings are not modeled.
         var timezone = TimeZoneInfo.Local;
         var baseOffset = timezone.BaseUtcOffset;
-        return (unchecked((int)-baseOffset.TotalMinutes), 0, 0);
+        return (unchecked((int)-baseOffset.TotalMinutes), 0);
     }
 
     [SysAbiExport(
