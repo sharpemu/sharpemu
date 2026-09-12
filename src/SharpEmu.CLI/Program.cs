@@ -47,6 +47,9 @@ internal static partial class Program
     {
         ConfigureManagedPluginResolution();
 
+        if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
+            return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
+
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
         try
@@ -302,6 +305,8 @@ internal static partial class Program
         }
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
+
+        SharpEmu.Core.Diagnostics.WindowsCrashCapture.StartIfEnabled(logFilePath);
 
         try
         {
