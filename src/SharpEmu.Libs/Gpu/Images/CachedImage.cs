@@ -120,12 +120,14 @@ public sealed unsafe partial class CachedImage : IDisposable
             SharingMode = SharingMode.Exclusive,
             Samples = ImageDescription.VulkanSampleCount(Backing.Samples),
         };
-        if (!device.TryGetImageFormatProperties(create.Format, create.ImageType, create.Tiling, create.Usage, create.Flags, out var properties) ||
-            (properties.SampleCounts & create.Samples) == 0)
+        if (!TrySelectSupportedImageConfiguration(device, ref create, allowCompressedImageFallback: OperatingSystem.IsMacOS()))
         {
             throw SubmissionScheduler.Fatal(
                 $"The image format does not support the required usage: format={(int)create.Format} type={(int)create.ImageType} usage=0x{(uint)create.Usage:x} flags=0x{(uint)create.Flags:x} samples={Backing.Samples}.");
         }
+
+        Backing.Flags = create.Flags;
+        Backing.Usage = create.Usage;
 
         var vk = device.Vk;
         if (vk.CreateImage(device.Device, &create, null, out Backing.Handle) != Result.Success)
@@ -171,6 +173,36 @@ public sealed unsafe partial class CachedImage : IDisposable
     private static Exception CreateFailure(in ImageCreateInfo create) =>
         SubmissionScheduler.Fatal(
             $"The image could not be created: extent={create.Extent.Width}x{create.Extent.Height}x{create.Extent.Depth} format={(int)create.Format} layers={create.ArrayLayers} levels={create.MipLevels}.");
+
+    internal static bool TrySelectSupportedImageConfiguration(IImageFormatSupport device, ref ImageCreateInfo configuration, bool allowCompressedImageFallback)
+    {
+        static bool SupportsImageConfiguration(IImageFormatSupport device, in ImageCreateInfo configuration) =>
+            device.TryGetImageFormatProperties(configuration.Format, configuration.ImageType, configuration.Tiling, configuration.Usage, configuration.Flags, out var properties) &&
+            (properties.SampleCounts & configuration.Samples) != 0;
+
+        if (SupportsImageConfiguration(device, configuration))
+        {
+            return true;
+        }
+
+        if (!allowCompressedImageFallback || (configuration.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
+        {
+            return false;
+        }
+
+        // Remove block views and their storage usage when MoltenVK rejects them.
+        // Use the new configuration only if the device supports it.
+        var fallbackConfiguration = configuration;
+        fallbackConfiguration.Flags &= ~ImageCreateFlags.CreateBlockTexelViewCompatibleBit;
+        fallbackConfiguration.Usage &= ~ImageUsageFlags.StorageBit;
+        if (!SupportsImageConfiguration(device, fallbackConfiguration))
+        {
+            return false;
+        }
+
+        configuration = fallbackConfiguration;
+        return true;
+    }
 
     private static ImageType HostImageType(GuestImageType type) => type switch
     {
@@ -413,7 +445,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
-        var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreCompatible(image.Format, normalized.Format);
+        var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format, normalized.Format, image.Flags);
         var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
         var levelsValid = normalized.LevelCount != 0 && normalized.BaseLevel < image.MipLevels && normalized.LevelCount <= image.MipLevels - normalized.BaseLevel;

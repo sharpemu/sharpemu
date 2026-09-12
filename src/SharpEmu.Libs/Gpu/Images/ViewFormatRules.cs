@@ -174,6 +174,16 @@ public static class ViewFormatRules
         return viewClass != None && (baseClass & viewClass) == viewClass;
     }
 
+    // The image must permit block views before a view can use an uncompressed format.
+    internal static bool AreImageViewFormatsCompatible(Format baseFormat, Format viewFormat, ImageCreateFlags flags)
+    {
+        const uint compressedClasses = Bc1Rgb | Bc1Rgba | Bc2 | Bc3 | Bc4 | Bc5 | Bc6h | Bc7;
+        var reinterpretsBlocks = (FormatClass(baseFormat) & compressedClasses) != 0 &&
+                                (FormatClass(viewFormat) & compressedClasses) == 0;
+        return (!reinterpretsBlocks || (flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) != 0) &&
+               AreCompatible(baseFormat, viewFormat);
+    }
+
     public static ImageAspectFlags DepthAspects(Format format) => format switch
     {
         Format.D16Unorm or Format.D32Sfloat => ImageAspectFlags.DepthBit,
