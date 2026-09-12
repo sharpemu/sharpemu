@@ -858,9 +858,14 @@ public static class KernelPthreadCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                 }
 
-                state.IncrementRecursion();
-                TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                // Matches the SyncRoot-protected check below: NORMAL self-relock
+                // is a real EDEADLK (#748), not silent compatibility recursion.
+                // This fast-uncontended-path copy of the same check was missed
+                // when #748 reverted the SyncRoot-protected one, leaving self-
+                // relock's outcome depend on which of the two checks a given
+                // call happened to take.
+                TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
             }
 
             var ownedResult = tryOnly
