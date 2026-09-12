@@ -34,12 +34,16 @@ internal readonly record struct VulkanRenderTargetFormat(
 
 internal static class VulkanGraphicsSubgroupPolicy
 {
-    internal static bool Resolve(uint nativeSubgroupSize, string? overrideValue) =>
+    internal static bool ShouldUseNativeGraphicsSubgroups(uint nativeSubgroupSize, ShaderStageFlags supportedShaderStages, string? overrideValue) =>
         overrideValue switch
         {
             "0" => false,
             "1" => true,
-            _ => nativeSubgroupSize == 32,
+            // Both graphics translators need vertex and fragment subgroup support.
+            // A subgroup size of 32 does not guarantee support in both stages.
+            _ => nativeSubgroupSize == 32 &&
+                (supportedShaderStages & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) ==
+                (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
         };
 }
 
@@ -74,14 +78,19 @@ internal static unsafe partial class VulkanVideoPresenter
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
 
     private static int _nativeSubgroupSize;
+    private static int _nativeSubgroupShaderStages;
 
     internal static bool GraphicsSubgroupOperationsEnabled =>
-        VulkanGraphicsSubgroupPolicy.Resolve(
+        VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(
             unchecked((uint)Volatile.Read(ref _nativeSubgroupSize)),
+            (ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages),
             Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS"));
 
-    private static void SetNativeSubgroupSize(uint subgroupSize) =>
+    private static void SetNativeSubgroupCapabilities(uint subgroupSize, ShaderStageFlags supportedStages)
+    {
+        Volatile.Write(ref _nativeSubgroupShaderStages, (int)supportedStages);
         Volatile.Write(ref _nativeSubgroupSize, checked((int)subgroupSize));
+    }
 
     // Standalone launches use a desktop-sized SDL surface unless configured.
     internal const uint Gen5DepthTileMode = 24;

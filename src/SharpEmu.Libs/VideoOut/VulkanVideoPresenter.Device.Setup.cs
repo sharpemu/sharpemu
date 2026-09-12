@@ -566,7 +566,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &subgroup,
             };
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
-            SetNativeSubgroupSize(subgroup.SubgroupSize);
+            SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];
             _maxComputeWorkGroupCountZ = properties.Limits.MaxComputeWorkGroupCount[2];
@@ -611,7 +611,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 "0" => "forced-off",
                 "1" => "forced-on",
-                _ when subgroup.SubgroupSize == 32 => "auto-native-wave32",
+                _ when GraphicsSubgroupOperationsEnabled => "auto-native-wave32",
                 _ => "auto-fallback",
             };
             Console.Error.WriteLine(
