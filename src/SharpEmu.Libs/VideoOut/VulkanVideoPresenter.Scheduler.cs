@@ -25,6 +25,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal GpuWorkerRelay Relay => _relay;
         private readonly SubmissionContext _submissionContext = new();
         private SubmissionScheduler _scheduler = null!;
+        private VulkanCommandProfile? _gpuCommandProfile;
         private GpuDeviceInfo _deviceInfo = null!;
         private GuestBufferCache _bufferCache = null!;
         private GuestImageCache _imageCache = null!;
@@ -45,13 +46,18 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void CreateScheduler() =>
+        private void CreateScheduler()
+        {
+            var tickDevice = new VulkanTickDevice(_vk, _device, _queue, _queueFamilyIndex, _queueGate,
+                RenderPhaseProfile.Enabled ? _physicalDevice : default);
+            _gpuCommandProfile = tickDevice.CommandProfile;
             _scheduler = new SubmissionScheduler(
-                new VulkanTickDevice(_vk, _device, _queue, _queueFamilyIndex, _queueGate),
+                tickDevice,
                 this,
                 PrepareGuestSubmission,
                 CompleteGuestSubmission,
                 _ => WakeRenderThread());
+        }
 
         // Both stores share the manager's page guard and read guest memory through its address space.
         private static (GuestGpuMemory Memory, ICpuMemory Guest, IGuestBackedSpace Backing) RequireGuestMemory(string store)

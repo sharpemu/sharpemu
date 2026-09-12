@@ -17,7 +17,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     private readonly CommandPool _pool;
     private readonly VkSemaphore _timeline;
 
-    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate)
+    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default)
     {
         _vk = vk;
         _device = device;
@@ -42,7 +42,11 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
             PNext = &typeInfo,
         };
         RequireSuccess(_vk.CreateSemaphore(_device, &createInfo, null, out _timeline), "vkCreateSemaphore(scheduler timeline)");
+        if (profilePhysicalDevice.Handle != 0)
+            CommandProfile = new VulkanCommandProfile(vk, profilePhysicalDevice, device, queueFamilyIndex);
     }
+
+    public VulkanCommandProfile? CommandProfile { get; }
 
     public object QueueGate { get; }
 
@@ -106,10 +110,14 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
             Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
         };
         RequireSuccess(_vk.BeginCommandBuffer(new CommandBuffer(buffer), &beginInfo), "vkBeginCommandBuffer(scheduler)");
+        CommandProfile?.BeginBuffer(new CommandBuffer(buffer));
     }
 
-    public void EndBuffer(nint buffer) =>
+    public void EndBuffer(nint buffer)
+    {
+        CommandProfile?.WriteMarker(new CommandBuffer(buffer), VulkanCommandProfile.IntervalKind.Tail);
         RequireSuccess(_vk.EndCommandBuffer(new CommandBuffer(buffer)), "vkEndCommandBuffer(scheduler)");
+    }
 
     public bool TrySubmit(nint buffer, SubmitBundle bundle, out string failure)
     {
@@ -141,6 +149,8 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
                 PSignalSemaphores = (VkSemaphore*)signalSemaphores,
             };
             var result = _vk.QueueSubmit(_queue, 1, &submitInfo, default);
+            if (result == Result.Success)
+                CommandProfile?.MarkSubmitted(buffer);
             failure = result.ToString();
             return result == Result.Success;
         }
@@ -148,6 +158,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
     public void Dispose()
     {
+        CommandProfile?.Dispose();
         _vk.DestroySemaphore(_device, _timeline, null);
         _vk.DestroyCommandPool(_device, _pool, null);
     }

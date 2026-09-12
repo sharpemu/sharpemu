@@ -13,6 +13,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -54,6 +55,9 @@ internal static unsafe partial class VulkanVideoPresenter
             public RenderPipelineDescription? Description;
             public Pipeline StripVariant;
             public Pipeline ListVariant;
+            public ulong ProfileVertexHash;
+            public ulong ProfilePixelHash;
+            public ulong ProfileComputeHash;
 
             public bool RectangleList => Description is { Topology: PrimitiveTopology.PatchList };
         }
@@ -177,6 +181,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _nextPipelineId;
         private RenderPreparation? _preparation;
         private RenderPipelineEntry? _boundGraphicsPipeline;
+        private ulong _profileComputePipeline;
         private readonly uint[] _computeThreadLimits = new uint[3];
         private GlobalBufferResource? _nullBufferResource;
 
@@ -1221,6 +1226,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.CmdBindPipeline(command, bindPoint, entry.Pipeline);
+            _profileComputePipeline = entry.Id;
             fixed (uint* limits = _computeThreadLimits)
             {
                 _vk.CmdPushConstants(command, entry.Layout, ShaderStageFlags.ComputeBit, 0, ComputeThreadLimitBytes, limits);
@@ -1266,7 +1272,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _vk.CmdDraw(command, count, instanceCount, firstVertex, firstInstance);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
+                _boundGraphicsPipeline?.Id ?? 0, count, instanceCount);
             CountDraw();
         }
 
@@ -1279,14 +1288,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 BindRectangleListVariant(entry, strip: false, command);
             }
 
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _vk.CmdDrawIndexed(command, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
+                _boundGraphicsPipeline?.Id ?? 0, indexCount, instanceCount);
             CountDraw();
         }
 
         public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
-            _vk.CmdDispatch(BeginBatchedGuestCommands(), groupsX, groupsY, groupsZ);
+            var command = BeginBatchedGuestCommands();
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
+            _vk.CmdDispatch(command, groupsX, groupsY, groupsZ);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Dispatch,
+                _profileComputePipeline, groupsX, groupsY, groupsZ);
             CountDraw();
         }
 
@@ -1420,6 +1436,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             entry.Id = ++_nextPipelineId;
             _pipelineEntries.Add(entry.Id, entry);
+            if (_gpuCommandProfile is not null)
+                Console.Error.WriteLine($"[PERF][GPU_PIPELINE] pipeline={entry.Id} vertex=0x{entry.ProfileVertexHash:X16} pixel=0x{entry.ProfilePixelHash:X16} compute=0x{entry.ProfileComputeHash:X16}");
             return new PipelineHandle(entry.Id, entry.Layout.Handle, UsesPushDescriptors: false);
         }
 
@@ -1562,6 +1580,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 Layout = layout.PipelineLayout,
                 SetLayout = layout.DescriptorSetLayout,
                 Description = description,
+                ProfileVertexHash = vertexInput.Stage.Program?.Hash ?? 0,
+                ProfilePixelHash = pixelInput?.Stage.Program?.Hash ?? 0,
             };
             if (!rectangleList)
             {
@@ -1848,6 +1868,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SetLayout = layout.DescriptorSetLayout,
             };
             _computeEntries.Add(key, entry);
+            entry.ProfileComputeHash = input.Stage.Program?.Hash ?? 0;
             return RegisterPipeline(entry);
         }
 
