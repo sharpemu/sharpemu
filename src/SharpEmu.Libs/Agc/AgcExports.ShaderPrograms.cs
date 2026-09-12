@@ -1520,7 +1520,9 @@ public static partial class AgcExports
             }
         }
 
-        var directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
+        var directory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
+        if (string.IsNullOrWhiteSpace(directory))
+            directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
         Directory.CreateDirectory(directory);
         var name = $"{shaderAddress:X16}-{stateFingerprint:X16}.{stage}";
         File.WriteAllBytes(
