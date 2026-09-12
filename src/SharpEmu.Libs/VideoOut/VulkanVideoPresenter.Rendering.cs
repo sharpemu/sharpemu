@@ -113,7 +113,11 @@ internal static unsafe partial class VulkanVideoPresenter
             // Host buffers that took an upload the ring could not hold; the committed draw owns them.
             public List<(VkBuffer Buffer, DeviceMemory Memory)> OverflowBuffers { get; } = new();
 
+            public Dictionary<CachedImage, CachedImage>? StencilStorageImages { get; set; }
+
             public bool Committed { get; set; }
+
+            public bool CommandsRecorded { get; set; }
 
             public void Dispose()
             {
@@ -124,6 +128,22 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 owner._preparation = null;
                 streamRetention.Dispose();
+                if (StencilStorageImages is { } stencilImages)
+                {
+                    foreach (var (attachment, storage) in stencilImages)
+                    {
+                        try
+                        {
+                            if (CommandsRecorded)
+                                attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+                        }
+                        finally
+                        {
+                            owner._scheduler.QueueCompletionAction(storage.Dispose);
+                        }
+                    }
+                }
+
                 if (Committed)
                 {
                     return;
@@ -504,6 +524,24 @@ internal static unsafe partial class VulkanVideoPresenter
             _commandBuffer = command;
             var totalGlobals = 0;
             var totalTextures = 0;
+            // All stages that read the same stencil bytes share the shader's working image.
+            if (preparation.StencilStorageImages is { } stencilImages)
+            {
+                foreach (var prepared in stages)
+                {
+                    foreach (var texture in ((PreparedStageBindings)prepared).Textures)
+                    {
+                        if (texture.CachedImage is { } attachment && ViewFormatRules.IsStencilViewFormat(texture.Request.View.Format) &&
+                            stencilImages.TryGetValue(attachment, out var storage))
+                        {
+                            texture.CachedImage = storage;
+                            texture.Image = storage.Backing.Handle;
+                            texture.View = storage.GetOrCreateView(texture.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                        }
+                    }
+                }
+            }
+
             foreach (var prepared in stages)
             {
                 var stage = (PreparedStageBindings)prepared;
@@ -737,7 +775,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (ImageDescription.IsEmptyRange(image.Description.Data))
                 {
                     binding.Layout = ImageLayout.General;
-                    image.Transition(binding.Layout, storage ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
+                    image.Transition(binding.Layout, storage || image.Binding.ShaderWrite ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
                 }
                 else if (depthImage is not null && ReferenceEquals(image, depthImage))
                 {
@@ -1191,6 +1229,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CountDraw()
         {
+            if (_preparation is { } preparation)
+                preparation.CommandsRecorded = true;
             Interlocked.Increment(ref _perfDrawCount);
             PerfOverlay.RecordDraw();
             _batchDrawCount++;

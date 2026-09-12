@@ -16,6 +16,10 @@ using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
@@ -35,6 +39,146 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     private readonly HeadlessVulkan? _vulkan;
 
     public PresenterImageBindingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
+
+    [Theory]
+    [InlineData(true, 1u, false)]
+    [InlineData(true, 2u, true)]
+    [InlineData(false, 1u, false)]
+    public unsafe void StencilStorage_PublishesRecordedWritesWithoutChangingDepth(bool recordDispatch, uint layers, bool sampledAlias)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        if (!_vulkan.StorageImageExtendedFormats || !_vulkan.SupportsDynamicRendering)
+        {
+            Assert.False(ReferenceShaders.Required, "Stencil storage tests need extended storage formats and dynamic rendering.");
+            return;
+        }
+        using var fatal = new FatalScope();
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var region = harness.MapBacked(0x100000, ReadWrite);
+        var stencilAddress = region + 0x80000;
+        CachedImage attachment = null!;
+        var workingImages = new List<CachedImage>();
+        presenter.Run(() =>
+        {
+            var shape = new ShaderImageShape(Volume: false, Arrayed: true, Storage: true, DynamicMip: false, TextureNumericClass.Uint);
+            var texture = new GuestDrawTexture(stencilAddress, 64, 64, 0, 0, [], false, true,
+                Descriptor: RegisterWords.Texture(stencilAddress, GuestPixelFormat.Bits8UInt, 64, 64,
+                    type: GuestImageType.Color2DArray, tile: GuestTileMode.Depth, layers: layers, baseArray: layers - 1), Shape: shape);
+            // The stencil range was a color image before the depth target took ownership.
+            presenter.InvokeMethod("ResolveTexture", texture);
+            var target = new GuestDepthTarget(region, region, 64, 64, 3, 0, 1f, false,
+                Registers: RegisterWords.Depth(region, 64, 64, stencilBase: stencilAddress) with { DepthView = (layers - 1) << 13 });
+            var depth = presenter.InvokeMethod("DiscoverDepthTarget", target)!;
+            presenter.InvokeMethod("AcquireDepthAttachment", depth, GuestDepthState.Default);
+            attachment = (CachedImage)GetFieldValue(depth, "Image");
+            var range = new ImageSubresourceRange(ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit, 0, 1, 0, layers);
+            var initial = new ClearDepthStencilValue(0.25f, 0x37);
+            attachment.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, presenter.Command);
+            _vulkan.Vk.CmdClearDepthStencilImage(presenter.Command, attachment.Backing.Handle, ImageLayout.TransferDstOptimal, &initial, 1, &range);
+            presenter.RenderHost.ResetBindings();
+
+            var program = new AgcExports.CompiledStageProgram
+            {
+                Shader = new VulkanCompiledGuestShader(CreateStencilIncrementShader(sampledAlias ? 2u : 1u)),
+                Stage = ShaderStageKind.Compute,
+                Images = sampledAlias
+                    ? [new ImageResourceInfo(ImageResourceClass.Sampled, false), new ImageResourceInfo(ImageResourceClass.Storage, true)]
+                    : [new ImageResourceInfo(ImageResourceClass.Storage, true)],
+                Textures = sampledAlias ? [texture with { IsStorage = false, Shape = shape with { Storage = false } }, texture] : [texture],
+            };
+            var stage = new ShaderStageResources(program, new ResourceSnapshot());
+            var input = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1, Stage = stage };
+            for (var dispatchIndex = 0; dispatchIndex < 2; dispatchIndex++)
+            {
+                using (presenter.RenderHost.BeginPreparation())
+                {
+                    var bindings = presenter.RenderHost.PrepareBindings(stage);
+                    presenter.RenderHost.BindResources(bindings);
+                    var textures = (Array)bindings.GetType().GetProperty("Textures")!.GetValue(bindings)!;
+                    var working = (CachedImage)GetFieldValue(textures.GetValue(textures.Length - 1)!, "CachedImage");
+                    workingImages.Add(working);
+                    Assert.NotSame(attachment, working);
+                    Assert.Equal(Format.R8Uint, working.Backing.Format);
+                    Assert.NotEqual(0, (int)(working.Backing.Usage & ImageUsageFlags.StorageBit));
+                    Assert.Equal(0, (int)(attachment.Backing.Usage & ImageUsageFlags.StorageBit));
+                    var invalidStorage = ImageViewDescription.Default with
+                    {
+                        Format = Format.R8Uint, Aspect = ImageAspectFlags.StencilBit, Usage = ImageUsageFlags.StorageBit,
+                    };
+                    Assert.Throws<SchedulerFatalException>(() => attachment.GetOrCreateView(invalidStorage));
+
+                    if (recordDispatch)
+                    {
+                        var pipeline = ((AgcExports.IHostPipelineFactory)presenter.Instance).CreateComputePipeline(input, new ShaderProgram(1));
+                        presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]);
+                        if (sampledAlias)
+                            Assert.Same(working, GetFieldValue(textures.GetValue(0)!, "CachedImage"));
+                        presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, pipeline);
+                        presenter.RenderHost.Dispatch(32, 64, 1);
+                        presenter.RenderHost.ShaderAccessBarrier();
+                    }
+                    else
+                    {
+                        // An abandoned preparation must not publish even if its working image changed.
+                        working.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, presenter.Command);
+                        var discarded = new ClearColorValue(0x55u, 0u, 0u, 0u);
+                        var colorRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, layers);
+                        _vulkan.Vk.CmdClearColorImage(presenter.Command, working.Backing.Handle, ImageLayout.TransferDstOptimal, &discarded, 1, &colorRange);
+                    }
+                }
+                Assert.NotEqual(0UL, workingImages[^1].Backing.Handle.Handle);
+                presenter.RenderHost.ResetBindings();
+            }
+        });
+
+        harness.Finish();
+        Assert.All(workingImages, image => Assert.False(image.Backing.Exists));
+        var stencil = harness.ReadImageBytes(attachment, ImageAspectFlags.StencilBit);
+        for (var layer = 0; layer < layers; layer++)
+            for (var row = 0; row < 64; row++)
+                for (var column = 0; column < 64; column++)
+                    Assert.Equal((byte)(recordDispatch && layer == layers - 1 && column < 32 ? 0x39 : 0x37), stencil[layer * 64 * 64 + row * 64 + column]);
+        var depthBytes = harness.ReadImageBytes(attachment, ImageAspectFlags.DepthBit);
+        for (var offset = 0; offset < depthBytes.Length; offset += sizeof(float))
+            Assert.Equal(0.25f, BitConverter.ToSingle(depthBytes, offset));
+        Assert.True(attachment.IsGpuModified);
+        Assert.True(harness.ProxyAt(stencilAddress, attachment.Description.Stencil.Size).IsValid);
+        harness.Shutdown();
+    }
+
+    private static byte[] CreateStencilIncrementShader(uint imageBinding)
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+        module.AddCapability(SpirvCapability.StorageImageExtendedFormats);
+        var voidType = module.TypeVoid();
+        var unsignedType = module.TypeInt(32, false);
+        var coordinateType = module.TypeVector(unsignedType, 3);
+        var pixelType = module.TypeVector(unsignedType, 4);
+        var imageType = module.TypeImage(unsignedType, SpirvImageDim.Dim2D, false, true, false, 2, SpirvImageFormat.R8ui);
+        var image = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.UniformConstant, imageType), SpirvStorageClass.UniformConstant);
+        module.AddDecoration(image, SpirvDecoration.DescriptorSet, 0);
+        module.AddDecoration(image, SpirvDecoration.Binding, imageBinding);
+        var position = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.Input, coordinateType), SpirvStorageClass.Input);
+        module.AddDecoration(position, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
+        var zero = module.Constant(unsignedType, 0);
+        var main = module.BeginFunction(voidType, module.TypeFunction(voidType));
+        module.AddLabel();
+        var coordinates = module.AddInstruction(SpirvOp.Load, coordinateType, position);
+        var loadedImage = module.AddInstruction(SpirvOp.Load, imageType, image);
+        var pixel = module.AddInstruction(SpirvOp.ImageRead, pixelType, loadedImage, coordinates);
+        var previous = module.AddInstruction(SpirvOp.CompositeExtract, unsignedType, pixel, 0);
+        var incremented = module.AddInstruction(SpirvOp.IAdd, unsignedType, previous, module.Constant(unsignedType, 1));
+        var result = module.AddInstruction(SpirvOp.CompositeConstruct, pixelType, incremented, zero, zero, zero);
+        module.AddStatement(SpirvOp.ImageWrite, loadedImage, coordinates, result);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+        module.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [image, position]);
+        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 1, 1, 1);
+        return module.Build();
+    }
 
     [Theory]
     [InlineData(false, false, false)]

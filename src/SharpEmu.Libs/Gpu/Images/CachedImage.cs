@@ -414,13 +414,14 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
         var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreCompatible(image.Format, normalized.Format);
+        var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
         var levelsValid = normalized.LevelCount != 0 && normalized.BaseLevel < image.MipLevels && normalized.LevelCount <= image.MipLevels - normalized.BaseLevel;
         var viewLayers = sliceView && levelsValid ? Math.Max(image.Extent.Depth >> (int)normalized.BaseLevel, 1) : image.Layers;
         var rangesValid = levelsValid && normalized.LayerCount != 0 && normalized.BaseLayer < viewLayers && normalized.LayerCount <= viewLayers - normalized.BaseLayer;
         var mappingValid = ViewFormatRules.IsComponentSwizzle(normalized.Mapping.R) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.G) &&
                            ViewFormatRules.IsComponentSwizzle(normalized.Mapping.B) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.A);
-        if (!image.Exists || !formatCompatible || !rangesValid || !mappingValid || !IsValidViewType(image, normalized) || !IsValidAspect(image, normalized.Aspect))
+        if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !mappingValid || !IsValidViewType(image, normalized) || !IsValidAspect(image, normalized.Aspect))
         {
             throw SubmissionScheduler.Fatal(
                 $"The image view is invalid: imageFormat={(int)image.Format} viewFormat={(int)normalized.Format} type={(int)normalized.Type} aspect=0x{(uint)normalized.Aspect:x} " +

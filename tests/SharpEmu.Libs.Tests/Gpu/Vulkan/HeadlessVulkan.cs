@@ -35,6 +35,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         ApiVersion = apiVersion;
         SampleRateShading = features.SampleRateShading;
         SamplerAnisotropy = features.SamplerAnisotropy;
+        StorageImageExtendedFormats = features.ShaderStorageImageExtendedFormats;
         SupportsDynamicRendering = dynamicRendering;
     }
 
@@ -72,6 +73,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SampleRateShading { get; }
 
     public bool SamplerAnisotropy { get; }
+
+    public bool StorageImageExtendedFormats { get; }
 
     public bool ValidationEnabled => _debugUtils is not null;
 
@@ -304,6 +307,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         {
             SampleRateShading = baseFeatures.SampleRateShading,
             SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
+            ShaderStorageImageExtendedFormats = baseFeatures.ShaderStorageImageExtendedFormats,
         };
         var priority = 1f;
         var queueInfo = new DeviceQueueCreateInfo

@@ -551,8 +551,17 @@ internal static unsafe partial class VulkanVideoPresenter
                     binding.Request = binding.Request with { View = view with { BaseLevel = view.BaseLevel + binding.MipLevel, LevelCount = 1 } };
                 }
 
-                binding.View = _imageCache.AcquireTextureView(binding.ImageIdentifier, binding.Request);
                 var image = _imageCache.GetImage(binding.ImageIdentifier);
+                if (binding.IsStorage && image.Description.HasStencil && ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format))
+                {
+                    image = AcquireStencilStorage(binding, image);
+                    binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                }
+                else
+                {
+                    binding.View = _imageCache.AcquireTextureView(binding.ImageIdentifier, binding.Request);
+                }
+
                 image.Uses.Storage |= binding.IsStorage;
                 image.Uses.Texture |= !binding.IsStorage;
                 binding.CachedImage = image;
@@ -562,6 +571,49 @@ internal static unsafe partial class VulkanVideoPresenter
                     binding.Sampler = ResolveSampler(binding.SamplerState);
                 }
             }
+        }
+
+        private CachedImage AcquireStencilStorage(TextureResource binding, CachedImage attachment)
+        {
+            var description = binding.Request.Description;
+            if (description.Data.Address != attachment.Description.Stencil.Address || description.Data.Size > attachment.Description.Stencil.Size ||
+                description.Extent.Width != attachment.Backing.Extent.Width || description.Extent.Height != attachment.Backing.Extent.Height ||
+                description.Resources.Levels != 1 || description.Resources.Layers != attachment.Backing.Layers)
+            {
+                throw SubmissionScheduler.Fatal("The stencil storage request does not cover its attachment's stencil layout.");
+            }
+
+            if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier &&
+                (_boundDepthLoadState.StencilTestEnabled || _boundDepthLoadState.StencilClearEnabled))
+            {
+                throw SubmissionScheduler.Fatal("A stencil storage write cannot share an active stencil attachment.");
+            }
+
+            var preparation = RequirePreparation();
+            var stencilImages = preparation.StencilStorageImages ??= new();
+            if (stencilImages.TryGetValue(attachment, out var storage))
+                return storage;
+
+            var sampledRequest = binding.Request with
+            {
+                Role = ImageRole.Texture,
+                View = binding.Request.View with { Usage = ImageUsageFlags.SampledBit },
+            };
+            _imageCache.AcquireTextureView(binding.ImageIdentifier, sampledRequest);
+            _imageCache.MarkGpuWritten(binding.ImageIdentifier);
+            storage = attachment.CreateStencilStorageImage();
+            stencilImages.Add(attachment, storage);
+            storage.Binding.ShaderWrite = true;
+            attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
+            if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier)
+            {
+                var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format);
+                attachment.Transition(_boundDepthLayout,
+                    AccessFlags.DepthStencilAttachmentReadBit | (writes != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0),
+                    null, BeginBatchedGuestCommands());
+            }
+
+            return storage;
         }
 
         // The layout each binding reads through; a target read by its own draw uses the general layout.

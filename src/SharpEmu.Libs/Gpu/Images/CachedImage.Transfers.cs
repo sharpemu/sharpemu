@@ -341,8 +341,48 @@ public sealed unsafe partial class CachedImage
         return (uint)Math.Min(rows, capacity / rowSize);
     }
 
+    // A storage image holds the stencil bytes while the shader runs; the attachment stays the owner.
+    public CachedImage CreateStencilStorageImage()
+    {
+        if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
+            Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1)
+        {
+            throw SubmissionScheduler.Fatal("Stencil storage needs a single-sample, single-level 2D stencil image.");
+        }
+
+        var description = ImageDescription.Create();
+        description.PixelFormat = Format.R8Uint;
+        description.GuestFormat = GuestPixelFormat.Bits8UInt;
+        description.Extent = Backing.Extent;
+        description.Resources = new SubresourceCount(1, Backing.Layers);
+        description.Pitch = Backing.Extent.Width;
+        description.BytesPerBlock = 1;
+        return new CachedImage(_device, _scheduler, _guestBacking, description);
+    }
+
+    public void CopyStencilStorage(CachedImage storage, GpuBuffer buffer, bool writeBack)
+    {
+        if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
+            Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1 ||
+            storage.Backing.Format != Format.R8Uint || storage.Backing.ImageType != ImageType.Type2D ||
+            storage.Backing.Samples != 1 || storage.Backing.MipLevels != 1 || storage.Backing.Layers != Backing.Layers ||
+            storage.Backing.Extent.Width != Backing.Extent.Width || storage.Backing.Extent.Height != Backing.Extent.Height)
+        {
+            throw SubmissionScheduler.Fatal("The stencil storage image does not match its attachment.");
+        }
+
+        if (writeBack)
+            CopyThroughBuffer(storage, buffer, ImageAspectFlags.ColorBit, ImageAspectFlags.StencilBit);
+        else
+            storage.CopyThroughBuffer(this, buffer, ImageAspectFlags.StencilBit, ImageAspectFlags.ColorBit);
+    }
+
     // Reinterprets the source through a staging buffer, one row band at a time.
-    public void CopyThroughBuffer(CachedImage source, GpuBuffer buffer)
+    public void CopyThroughBuffer(CachedImage source, GpuBuffer buffer) =>
+        CopyThroughBuffer(source, buffer, ViewFormatRules.FullAspects(source.Backing.Format) & ~ImageAspectFlags.StencilBit,
+            ViewFormatRules.FullAspects(Backing.Format) & ~ImageAspectFlags.StencilBit);
+
+    private void CopyThroughBuffer(CachedImage source, GpuBuffer buffer, ImageAspectFlags sourceAspect, ImageAspectFlags destinationAspect)
     {
         if (buffer.Handle.Handle == 0 || source.Backing.Samples != 1 || Backing.Samples != 1)
         {
@@ -351,10 +391,10 @@ public sealed unsafe partial class CachedImage
 
         _scheduler.EndRendering();
         var levels = Math.Min(source.Backing.MipLevels, Backing.MipLevels);
-        var sourceAspect = ViewFormatRules.FullAspects(source.Backing.Format) & ~ImageAspectFlags.StencilBit;
-        var destinationAspect = ViewFormatRules.FullAspects(Backing.Format) & ~ImageAspectFlags.StencilBit;
-        var sourceBytes = DepthFormatRule.AspectTransferBytes(source.Backing.Format) is var sourceTransfer && sourceTransfer != 0 ? sourceTransfer : source.Description.BytesPerBlock;
-        var destinationBytes = DepthFormatRule.AspectTransferBytes(Backing.Format) is var destinationTransfer && destinationTransfer != 0 ? destinationTransfer : Description.BytesPerBlock;
+        var sourceBytes = sourceAspect == ImageAspectFlags.StencilBit ? 1u :
+            DepthFormatRule.AspectTransferBytes(source.Backing.Format) is var sourceTransfer && sourceTransfer != 0 ? sourceTransfer : source.Description.BytesPerBlock;
+        var destinationBytes = destinationAspect == ImageAspectFlags.StencilBit ? 1u :
+            DepthFormatRule.AspectTransferBytes(Backing.Format) is var destinationTransfer && destinationTransfer != 0 ? destinationTransfer : Description.BytesPerBlock;
         var sourceBlock = source.Description.IsBlock ? 4u : 1u;
         var destinationBlock = Description.IsBlock ? 4u : 1u;
         if (levels == 0 || sourceBytes == 0 || sourceBytes != destinationBytes || sourceBlock != destinationBlock)
