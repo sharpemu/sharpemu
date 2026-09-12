@@ -5262,6 +5262,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
+		// Keep the signal in the queue until the executor saves the pending wait.
+		// This prevents the signal callback from using the interrupted thread's wait.
+		if (GuestThreadExecution.HasPendingCurrentThreadBlock)
+		{
+			return;
+		}
+
 		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
 		if (threadHandle == 0)
 		{

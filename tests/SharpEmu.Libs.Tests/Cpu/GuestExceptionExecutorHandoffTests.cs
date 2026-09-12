@@ -11,8 +11,10 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class GuestExceptionExecutorHandoffTests
 {
-    [Fact]
-    public void BlockedThreadTakesPendingExceptionWhenExecutorReleasesIt()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BlockedThreadTakesPendingExceptionWhenExecutorReleasesIt(bool signalArrivesBeforeYield)
     {
         var moduleManager = new ModuleManager();
         moduleManager.Freeze();
@@ -56,7 +58,44 @@ public sealed class GuestExceptionExecutorHandoffTests
             backendType.GetField(
                 "_pendingGuestExceptions",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(backend));
-        pendingDictionary.Add(threadHandle, pending);
+        backendType.GetMethod(
+            "QueuePendingGuestExceptionLocked",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(backend, [threadHandle, pending]);
+
+        if (signalArrivesBeforeYield)
+        {
+            // The import requested a wait that the executor has not saved.
+            // Keep the signal callback separate from this wait.
+            var context = new CpuContext(new FakeCpuMemory(0x10000, 0x1000), Generation.Gen5);
+            var previousThread = GuestThreadExecution.EnterGuestThread(threadHandle);
+            var previousFrame = GuestThreadExecution.EnterImportCallFrame(0x10000, 0x20000, 0x30000);
+            try
+            {
+                Assert.True(GuestThreadExecution.RequestCurrentThreadBlock(
+                    context, "job_wait", "event:3", blockDeadlineTimestamp: 123));
+
+                backendType.GetMethod(
+                    "DeliverPendingGuestExceptionAtSafePoint",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
+                        backend, [context, default(GuestCpuContinuation)]);
+
+                Assert.True(pendingDictionary.Contains(threadHandle));
+                Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                    out var reason, out var continuation, out var hasContinuation,
+                    out var wakeKey, out _, out var deadline));
+                Assert.Equal("job_wait", reason);
+                Assert.True(hasContinuation);
+                Assert.Equal(0x10000UL, continuation.Rip);
+                Assert.Equal(0x20000UL, continuation.Rsp);
+                Assert.Equal("event:3", wakeKey);
+                Assert.Equal(123, deadline);
+            }
+            finally
+            {
+                GuestThreadExecution.RestoreImportCallFrame(previousFrame);
+                GuestThreadExecution.RestoreGuestThread(previousThread);
+            }
+        }
 
         var handoff = backendType.GetMethod(
             "TryReleaseGuestThreadExecutorLocked",

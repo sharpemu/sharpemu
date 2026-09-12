@@ -269,6 +269,8 @@ public static class GuestThreadExecution
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
 
+    public static bool HasPendingCurrentThreadBlock => _pendingBlockReason is not null;
+
     public static ulong CurrentFiberAddress => _currentFiberAddress;
 
     public static ulong EnterGuestThread(ulong threadHandle)
