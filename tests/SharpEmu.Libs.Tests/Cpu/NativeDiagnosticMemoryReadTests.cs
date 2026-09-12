@@ -4,6 +4,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Native;
+using SharpEmu.HLE.Host;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
@@ -30,6 +31,35 @@ public sealed class NativeDiagnosticMemoryReadTests
         Assert.False((bool)TryReadHostBytes.Invoke(
             null,
             [0x3120_2C30_202C_3120UL, destination])!);
+    }
+
+    [Fact]
+    public void MacOsDiagnosticReadsRespectNativePageProtection()
+    {
+        if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+
+        var memory = HostPlatform.Current.Memory;
+        var size = (ulong)Environment.SystemPageSize;
+        var address = memory.Allocate(0, size, HostPageProtection.ReadWrite);
+        Assert.NotEqual(0UL, address);
+        try
+        {
+            const long expected = 0x1122334455667788;
+            Marshal.WriteInt64((nint)address, expected);
+            var bytes = new byte[8];
+            Assert.True((bool)TryReadHostBytes.Invoke(null, [address, bytes])!);
+            Assert.Equal(BitConverter.GetBytes(expected), bytes);
+
+            Assert.True(memory.Protect(address, size, HostPageProtection.NoAccess, out _));
+            Assert.False((bool)TryReadHostBytes.Invoke(null, [address, bytes])!, "byte read accepted a protected page");
+            object?[] arguments = [address, 0UL];
+            Assert.False((bool)TryReadDiagnosticHostQword.Invoke(null, arguments)!, "qword read accepted a protected page");
+            Assert.Equal(0UL, arguments[1]);
+        }
+        finally
+        {
+            Assert.True(memory.Free(address));
+        }
     }
 
     [Fact]

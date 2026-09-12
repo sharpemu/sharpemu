@@ -1274,6 +1274,14 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
+		if (OperatingSystem.IsMacOS())
+		{
+			ulong result = 0;
+			bool success = TryReadMacOsMemory(address, (byte*)&result, sizeof(ulong));
+			value = success ? result : 0;
+			return success;
+		}
+
 		if (!OperatingSystem.IsWindows())
 		{
 			return TryReadStackU64(address, out value);
@@ -1303,6 +1311,14 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
+		if (OperatingSystem.IsMacOS())
+		{
+			fixed (byte* destination = buffer)
+			{
+				return TryReadMacOsMemory(address, destination, buffer.Length);
+			}
+		}
+
 		if (!IsReadableHostRange(address, buffer.Length))
 		{
 			return false;
@@ -1337,6 +1353,32 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 	}
+
+	private unsafe static bool TryReadMacOsMemory(ulong address, byte* destination, int byteCount)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
+			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
+		{
+			return false;
+		}
+
+		if (byteCount == 0)
+		{
+			return true;
+		}
+
+		// The host memory table does not contain all guest code mappings.
+		// Use Mach to read the memory and report access errors without another fault.
+		return ReadMachVirtualMemory(GetCurrentMachTask(), address, (ulong)byteCount,
+			(ulong)destination, out var bytesRead) == 0 && bytesRead == (ulong)byteCount;
+	}
+
+	[DllImport("libSystem.B.dylib", EntryPoint = "mach_task_self")]
+	private static extern uint GetCurrentMachTask();
+
+	[DllImport("libSystem.B.dylib", EntryPoint = "mach_vm_read_overwrite")]
+	private static extern int ReadMachVirtualMemory(
+		uint taskHandle, ulong sourceAddress, ulong byteCount, ulong destinationAddress, out ulong bytesRead);
 
 	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
 	{

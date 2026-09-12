@@ -47,16 +47,8 @@ public sealed partial class DirectExecutionBackend
             return true;
         }
 
-        // MONITORX/MWAITX above only ever reads guest code memory and rewrites RIP, both of
-        // which the POSIX signal bridge (DirectExecutionBackend.PosixSignals.cs) faithfully
-        // round-trips through the real ucontext, so it works on every supported OS. EXTRQ/
-        // INSERTQ additionally read and write an XMM register: on Windows contextRecord is the
-        // live CONTEXT the OS resumes the thread from, so touching the Xmm0.. slots is visible
-        // to the guest, and on Linux the bridge copies the mcontext's FXSAVE image into the
-        // Xmm0.. slots and writes them back through sigreturn (_posixXmmContextBridged). On
-        // Darwin the XMM area is still a zeroed scratch buffer - running this there would
-        // silently compute a result from stale bytes and then discard whatever it "wrote", so
-        // the recovery declines until that bridge exists.
+        // EXTRQ and INSERTQ need the current vector register values.
+        // Use recovery only when the signal context contains these values.
         return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
             TryRecoverSse4aExtractInsert(contextRecord, rip);
     }
