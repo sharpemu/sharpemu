@@ -65,6 +65,8 @@
   "Options.TraceImports.Label": "Import trace limit",
   "Options.TraceImports.Desc": "Az első N darab import nyomon követése modulonként (0 = ki).",
 
+  "Options.CrashDump.Label": "Összeomlási memóriaképek",
+  "Options.CrashDump.Desc": "Az összeomlási memóriaképeket a futási napló mellé menti (csak Windows x64). A fájlok nagyok lehetnek, és személyes adatokat tartalmazhatnak.",
   "Options.LogToFile.Label": "Naplozás fájlba",
   "Options.LogToFile.Desc": "Az emulátor kimenetének tükrözése egy log fájlba.",
 

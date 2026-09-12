@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "Tracelimiet voor imports",
   "Options.TraceImports.Desc": "Traceer de eerste N imports per module (0 = uit).",
 
+  "Options.CrashDump.Label": "Crashdumps",
+  "Options.CrashDump.Desc": "Sla crashdumps naast het uitvoeringslog op (alleen Windows x64). Dumps kunnen groot zijn en privégegevens bevatten.",
   "Options.LogToFile.Label": "Loggen naar bestand",
   "Options.LogToFile.Desc": "Stuur de uitvoer van de emulator ook naar een logbestand.",
 

@@ -54,6 +54,8 @@
   "Options.TraceImports.Desc": "Traccia i primi N import per modulo (0 = disattivato).",
 
 
+  "Options.CrashDump.Label": "Dump degli arresti anomali",
+  "Options.CrashDump.Desc": "Salva i dump accanto al registro di esecuzione (solo Windows x64). I file possono essere grandi e contenere dati privati.",
   "Options.LogToFile.Label": "Salva log su file",
   "Options.LogToFile.Desc": "Duplica l'output dell'emulatore in un file di log.",
 

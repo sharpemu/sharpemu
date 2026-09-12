@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "가져오기 트레이스 한도",
   "Options.TraceImports.Desc": "각 모듈의 처음 N개 가져오기를 트레이스합니다 (0 = 비활성화).",
 
+  "Options.CrashDump.Label": "크래시 덤프",
+  "Options.CrashDump.Desc": "실행 로그 옆에 크래시 덤프를 저장합니다(Windows x64 전용). 덤프는 크기가 클 수 있으며 개인 데이터를 포함할 수 있습니다.",
   "Options.LogToFile.Label": "파일로 저장",
   "Options.LogToFile.Desc": "에뮬레이터 출력을 로그 파일에 복사합니다.",
 

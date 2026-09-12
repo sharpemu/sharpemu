@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "Límite de trazado de importaciones",
   "Options.TraceImports.Desc": "Trazar las primeras N importaciones por módulo (0 = off).",
 
+  "Options.CrashDump.Label": "Volcados de fallos",
+  "Options.CrashDump.Desc": "Guarda los volcados de fallos junto al registro de ejecución (solo Windows x64). Los archivos pueden ser grandes y contener datos privados.",
   "Options.LogToFile.Label": "Registrar log en archivo",
   "Options.LogToFile.Desc": "Duplicar la salida del emulador en un archivo de logs.",
 

@@ -9,6 +9,38 @@ namespace SharpEmu.Libs.Tests.GUI;
 public sealed class GuiSettingsTests
 {
     [Fact]
+    public void NewSettingsEnableWritableApp0WithoutCrashCapture()
+    {
+        var settings = new GuiSettings();
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
+        settings.EnvironmentToggles.Clear();
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], new GuiSettings().EnvironmentToggles);
+    }
+
+    [Theory]
+    [InlineData("{ \"EnvironmentToggles\": [] }")]
+    [InlineData("{ \"EnvironmentToggles\": [\"SHARPEMU_WRITABLE_APP0=0\"] }")]
+    public void SavedWritableApp0OptOutSurvivesReload(string json)
+    {
+        var settings = GuiSettings.NormalizeFromJson(json);
+        Assert.DoesNotContain("SHARPEMU_WRITABLE_APP0", settings.EnvironmentToggles);
+        var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
+        Assert.Equal(settings.EnvironmentToggles, restored.EnvironmentToggles);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CrashDumpChoiceSurvivesReload(bool enabled)
+    {
+        var settings = new GuiSettings();
+        if (enabled)
+            settings.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
+        Assert.Equal(enabled, restored.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE"));
+    }
+
+    [Fact]
     public void ConsoleGeometrySurvivesSettingsSerialization()
     {
         var original = new GuiSettings
@@ -64,7 +96,7 @@ public sealed class GuiSettingsTests
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Empty(settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
         Assert.Equal("Windowed", settings.WindowMode);
         Assert.Equal("1920x1080", settings.Resolution);
         Assert.Equal("Fit", settings.ScalingMode);
@@ -241,7 +273,7 @@ public sealed class GuiSettingsTests
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Empty(settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
     }
 
     [Fact]

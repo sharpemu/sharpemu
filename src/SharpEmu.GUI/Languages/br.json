@@ -65,6 +65,8 @@
   "Options.TraceImports.Label": "Limite de rastreamento de importações",
   "Options.TraceImports.Desc": "Rastreia as primeiras N importações de cada módulo (0 = desativado).",
 
+  "Options.CrashDump.Label": "Despejos de falha",
+  "Options.CrashDump.Desc": "Salva despejos de falha ao lado do log da execução (somente Windows x64). Os arquivos podem ser grandes e conter dados privados.",
   "Options.LogToFile.Label": "Salvar log em arquivo",
   "Options.LogToFile.Desc": "Copia a saída do emulador para um arquivo de log.",
 

@@ -806,6 +806,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ToggleSwitch x:Name="GameLogToFileToggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameCrashDumpRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.CrashDump.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.CrashDump.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameCrashDumpToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1160,6 +1172,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.LogToFile.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.LogToFile.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="LogToFileToggle"
+                                      Classes="optionToggle" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="CrashDumpRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.CrashDump.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.CrashDump.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="CrashDumpToggle"
                                       Classes="optionToggle" />
                       </local:SettingRow>
 

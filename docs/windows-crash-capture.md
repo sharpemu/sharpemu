@@ -5,7 +5,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Windows crash capture
 
-Use this option for a diagnostic run on Windows x64:
+In the launcher, open **Options > Logging** and enable **Crash dumps** before
+you start a game. The same toggle is available in each game's Logging settings.
+It sets `SHARPEMU_CRASH_CAPTURE` and is off by default.
+
+For a diagnostic run on Windows x64, you can also set it from PowerShell:
 
 ```powershell
 $env:SHARPEMU_CRASH_CAPTURE = '1'
@@ -36,7 +40,8 @@ the same time. Capture failures are recorded when possible; no capture method
 can cover every process termination. A failed write can leave an incomplete dump.
 
 This is separate from the `DOTNET_Dbg*` settings. It does not change them.
-To disable the option, close the launcher and run:
+To disable a GUI selection, turn off **Crash dumps** before the next game launch.
+If you set the option in PowerShell, close the launcher and run:
 
 ```powershell
 Remove-Item Env:SHARPEMU_CRASH_CAPTURE -ErrorAction SilentlyContinue

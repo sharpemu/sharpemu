@@ -104,6 +104,8 @@
   "Options.TraceImports.Label": "Impordi jälituse piir",
   "Options.TraceImports.Desc": "Jälita iga mooduli esimesi N importi (0 = väljas).",
 
+  "Options.CrashDump.Label": "Krahhitõmmised",
+  "Options.CrashDump.Desc": "Salvesta krahhitõmmised käivituslogi kõrvale (ainult Windows x64). Failid võivad olla suured ja sisaldada privaatseid andmeid.",
   "Options.LogToFile.Label": "Logi faili",
   "Options.LogToFile.Desc": "Kopeeri emulaatori väljund logifaili.",
 

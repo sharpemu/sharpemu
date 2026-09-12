@@ -100,6 +100,8 @@
   "Options.TraceImports.Label": "Лимит трассировки импортов",
   "Options.TraceImports.Desc": "Трассировать первые N импортов в каждом модуле (0 - выключено).",
 
+  "Options.CrashDump.Label": "Дампы сбоев",
+  "Options.CrashDump.Desc": "Сохранять дампы сбоев рядом с журналом запуска (только Windows x64). Файлы могут быть большими и содержать личные данные.",
   "Options.LogToFile.Label": "Запись лога в файл",
   "Options.LogToFile.Desc": "Дублировать вывод эмулятора в файл лога.",
 

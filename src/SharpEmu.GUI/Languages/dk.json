@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "Grænse for import-trace",
   "Options.TraceImports.Desc": "Spor de første N imports pr. modul (0 = fra).",
 
+  "Options.CrashDump.Label": "Nedbrudsdumps",
+  "Options.CrashDump.Desc": "Gem nedbrudsdumps ved siden af kørselsloggen (kun Windows x64). Filerne kan være store og indeholde private data.",
   "Options.LogToFile.Label": "Log til fil",
   "Options.LogToFile.Desc": "Spejl emulatorens output til en logfil.",
 

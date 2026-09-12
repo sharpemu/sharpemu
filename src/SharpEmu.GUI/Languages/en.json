@@ -104,6 +104,8 @@
   "Options.TraceImports.Label": "Import trace limit",
   "Options.TraceImports.Desc": "Trace the first N imports per module (0 = off).",
 
+  "Options.CrashDump.Label": "Crash dumps",
+  "Options.CrashDump.Desc": "Save crash dumps beside the run log (Windows x64 only). Dumps can be large and contain private data.",
   "Options.LogToFile.Label": "Log to file",
   "Options.LogToFile.Desc": "Mirror emulator output to a log file.",
 

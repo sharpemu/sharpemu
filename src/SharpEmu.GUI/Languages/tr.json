@@ -73,6 +73,8 @@
   "Options.TraceImports.Label": "Import izleme sınırı",
   "Options.TraceImports.Desc": "Modül başına ilk N import'u izle (0 = kapalı).",
 
+  "Options.CrashDump.Label": "Çökme dökümleri",
+  "Options.CrashDump.Desc": "Çökme dökümlerini çalıştırma günlüğünün yanına kaydeder (yalnızca Windows x64). Dökümler büyük olabilir ve özel veriler içerebilir.",
   "Options.LogToFile.Label": "Dosyaya günlükle",
   "Options.LogToFile.Desc": "Emülatör çıktısını bir günlük dosyasına yansıt.",
 

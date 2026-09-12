@@ -104,6 +104,8 @@
   "Options.TraceImports.Label": "Limit śledzenia importów",
   "Options.TraceImports.Desc": "Śledź pierwszych N importów na moduł (0 = wyłączone).",
 
+  "Options.CrashDump.Label": "Zrzuty pamięci po awarii",
+  "Options.CrashDump.Desc": "Zapisuj zrzuty pamięci obok dziennika uruchomienia (tylko Windows x64). Pliki mogą być duże i zawierać prywatne dane.",
   "Options.LogToFile.Label": "Loguj do pliku",
   "Options.LogToFile.Desc": "Kopiuj wyjście emulatora do pliku logu.",
 

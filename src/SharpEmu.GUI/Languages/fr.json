@@ -65,6 +65,8 @@
   "Options.TraceImports.Label": "Limite de traçage des imports",
   "Options.TraceImports.Desc": "Tracer les N premiers imports de chaque module (0 = désactivé).",
 
+  "Options.CrashDump.Label": "Fichiers de vidage après plantage",
+  "Options.CrashDump.Desc": "Enregistre les fichiers de vidage à côté du journal d’exécution (Windows x64 uniquement). Ces fichiers peuvent être volumineux et contenir des données privées.",
   "Options.LogToFile.Label": "Enregistrer dans un fichier",
   "Options.LogToFile.Desc": "Copier la sortie de l’émulateur dans un fichier journal.",
 

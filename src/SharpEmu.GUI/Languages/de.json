@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "Import-Trace-Limit",
   "Options.TraceImports.Desc": "Die ersten N Imports pro Modul verfolgen (0 = aus).",
 
+  "Options.CrashDump.Label": "Absturzabbilder",
+  "Options.CrashDump.Desc": "Speichert Absturzabbilder neben dem Laufprotokoll (nur Windows x64). Die Dateien können groß sein und private Daten enthalten.",
   "Options.LogToFile.Label": "In Datei protokollieren",
   "Options.LogToFile.Desc": "Emulator-Ausgabe zusätzlich in eine Log-Datei schreiben.",
 

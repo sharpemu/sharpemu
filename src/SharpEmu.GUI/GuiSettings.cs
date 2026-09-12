@@ -77,7 +77,7 @@ public sealed class GuiSettings
     public string HdrMode { get; set; } = "Auto";
 
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
-    public List<string> EnvironmentToggles { get; set; } = new();
+    public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0"];
 
     public string BinkPlaybackMode { get; set; } = "Host";
 
@@ -123,7 +123,7 @@ public sealed class GuiSettings
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
-        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles);
+        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0"]);
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
         var legacyProfile = settings.EnvironmentToggles

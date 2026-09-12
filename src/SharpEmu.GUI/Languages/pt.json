@@ -65,6 +65,8 @@
   "Options.TraceImports.Label": "Limite de rastreio de importações",
   "Options.TraceImports.Desc": "Rastreia as primeiras N importações por módulo (0 = desativado).",
 
+  "Options.CrashDump.Label": "Ficheiros de memória de falhas",
+  "Options.CrashDump.Desc": "Guarda os ficheiros de memória de falhas junto ao registo de execução (apenas Windows x64). Os ficheiros podem ser grandes e conter dados privados.",
   "Options.LogToFile.Label": "Registar para ficheiro",
   "Options.LogToFile.Desc": "Duplicar a saída do emulador para um ficheiro de registo.",
 

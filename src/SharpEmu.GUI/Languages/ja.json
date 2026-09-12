@@ -53,6 +53,8 @@
   "Options.TraceImports.Label": "インポートトレース制限",
   "Options.TraceImports.Desc": "各モジュールの最初のN個のインポートをトレースします（0 = 無効）。",
 
+  "Options.CrashDump.Label": "クラッシュダンプ",
+  "Options.CrashDump.Desc": "実行ログと同じ場所にクラッシュダンプを保存します（Windows x64 のみ）。ダンプは大きくなることがあり、個人情報を含む場合があります。",
   "Options.LogToFile.Label": "ファイルに保存",
   "Options.LogToFile.Desc": "エミュレータの出力をログファイルにコピーします。",
 

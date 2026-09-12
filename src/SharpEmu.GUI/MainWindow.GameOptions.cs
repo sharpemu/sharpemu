@@ -22,6 +22,7 @@ public partial class MainWindow
         "SHARPEMU_LOG_IO",
         "SHARPEMU_LOG_NP",
         "SHARPEMU_RENDERDOC",
+        "SHARPEMU_CRASH_CAPTURE",
     ];
 
     private readonly List<string> _gameEnvironmentPassthrough = new();
@@ -481,6 +482,7 @@ public partial class MainWindow
         ("SHARPEMU_LOG_IO", GameEnvLogIoToggle),
         ("SHARPEMU_LOG_NP", GameEnvLogNpToggle),
         ("SHARPEMU_RENDERDOC", GameEnvRenderDocToggle),
+        ("SHARPEMU_CRASH_CAPTURE", GameCrashDumpToggle),
     ];
 
     private static void SetGameOptionsOpenClass(Control control, bool active) =>
