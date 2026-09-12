@@ -321,6 +321,10 @@ public sealed class PresenterSubmissionTests
             RenderPhaseProfile.Phase.CommandDispatchTranslation,
             RenderPhaseProfile.Phase.GeometrySnapshotValidation,
             RenderPhaseProfile.Phase.CommandDrawStateCreation,
+            RenderPhaseProfile.Phase.GpuCompletionWait,
+            RenderPhaseProfile.Phase.SubmissionCapacity,
+            RenderPhaseProfile.Phase.CompletedSubmissionCleanup,
+            RenderPhaseProfile.Phase.MovieFramePolling,
         };
         var initialEntries = phases.Select(phase => entries[(int)phase]).ToArray();
         Assert.Equal(0, (int)depth.GetValue(null)!);

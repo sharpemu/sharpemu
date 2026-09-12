@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
@@ -64,7 +65,11 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
             PSemaphores = &semaphore,
             PValues = &tick,
         };
-        var result = _vk.WaitSemaphores(_device, &waitInfo, ulong.MaxValue);
+        Result result;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GpuCompletionWait))
+        {
+            result = _vk.WaitSemaphores(_device, &waitInfo, ulong.MaxValue);
+        }
         failure = result.ToString();
         return result == Result.Success;
     }

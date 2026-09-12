@@ -118,6 +118,10 @@ internal static class RenderPhaseProfile
         WindowDelay,
         QueueContext,
         PresentationPreparation,
+        GpuCompletionWait,
+        SubmissionCapacity,
+        CompletedSubmissionCleanup,
+        MovieFramePolling,
         Count,
     }
 

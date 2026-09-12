@@ -111,6 +111,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void EnsureGuestSubmissionCapacity()
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.SubmissionCapacity);
             CollectCompletedGuestSubmissions(waitForOldest: false);
             if (_pendingGuestSubmissions.Count >= MaxInFlightGuestSubmissions)
             {
@@ -128,6 +129,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CollectCompletedGuestSubmissions(bool waitForOldest)
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CompletedSubmissionCleanup);
             if (waitForOldest && _pendingGuestSubmissions.TryPeek(out var oldest))
             {
                 _scheduler.Wait(oldest.Tick);

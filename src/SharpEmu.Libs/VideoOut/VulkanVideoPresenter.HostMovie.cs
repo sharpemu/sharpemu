@@ -135,6 +135,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void PumpHostMovieFrame()
         {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.MovieFramePolling);
             if (!HostMovieBridge.TryDecodeNextFrame(
                     advanceClock: _hostMovieLumaTextureAddress != 0 &&
                                   _hostMovieChromaTextureAddress != 0,
