@@ -1,5 +1,7 @@
 {
   "_languageName": "Eesti",
+  "Options.Env.PerformanceProfile.Desc": "Logi jõudlusajad ja FPS alates järgmisest mängu käivitamisest.\nSee võib jõudlust vähendada.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Säilita viimased 4096 esitamisintervalli ja kirjuta need sulgemisel logisse.\nVajab jõudluse profileerimist. Jälje salvestamiseks sulge mäng tavapäraselt.",
   "Options.OverlayEnabled.Label": "Jõudlusnäidik",
   "Options.OverlayEnabled.Desc": "Kuva jõudlusandmed. F1 lülitab näidiku selleks seansiks sisse või välja. SHARPEMU_OVERLAY=0 peidab selle käivitamisel.",
   "Options.OverlayMode.Label": "Kuvarežiim",

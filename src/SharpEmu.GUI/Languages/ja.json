@@ -1,5 +1,7 @@
 {
   "_languageName": "日本語",
+  "Options.Env.PerformanceProfile.Desc": "次回のゲーム起動から処理時間とFPSを記録します。\nパフォーマンスが低下する場合があります。",
+  "Options.Env.PerformanceFrameTrace.Desc": "直近4,096件の表示間隔を保持し、終了時にログへ書き込みます。\nパフォーマンス計測が必要です。記録を保存するにはゲームを通常の手順で終了してください。",
   "Options.OverlayEnabled.Label": "パフォーマンス表示",
   "Options.OverlayEnabled.Desc": "統計を表示します。F1で今回の実行中のみ表示を切り替えます。SHARPEMU_OVERLAY=0では非表示で開始します。",
   "Options.OverlayMode.Label": "表示モード",

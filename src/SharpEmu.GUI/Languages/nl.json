@@ -1,5 +1,7 @@
 {
   "_languageName": "Nederlands",
+  "Options.Env.PerformanceProfile.Desc": "Log prestatietijden en FPS vanaf de volgende start van het spel.\nDit kan de prestaties verminderen.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Bewaar de laatste 4.096 presentatie-intervallen en schrijf ze bij afsluiten naar het logboek.\nVereist prestatieprofilering. Sluit het spel normaal af om de trace op te slaan.",
   "Options.OverlayEnabled.Label": "Prestatiegegevens",
   "Options.OverlayEnabled.Desc": "Toon prestatiegegevens. F1 schakelt de weergave voor deze sessie in of uit. SHARPEMU_OVERLAY=0 verbergt deze bij het starten.",
   "Options.OverlayMode.Label": "Weergavemodus",

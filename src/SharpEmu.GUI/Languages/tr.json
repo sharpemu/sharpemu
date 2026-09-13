@@ -1,5 +1,7 @@
 {
   "_languageName": "Türkçe",
+  "Options.Env.PerformanceProfile.Desc": "Sonraki oyun başlangıcından itibaren performans sürelerini ve FPS değerlerini kaydet.\nBu, performansı düşürebilir.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Son 4.096 sunum aralığını sakla ve kapanışta günlüğe yaz.\nPerformans profillemesi gerektirir. İzi kaydetmek için oyunu normal şekilde kapat.",
   "Options.OverlayEnabled.Label": "Performans göstergesi",
   "Options.OverlayEnabled.Desc": "Performans istatistiklerini gösterir. F1 göstergeyi bu oturum için açar veya kapatır. SHARPEMU_OVERLAY=0 başlangıçta gizler.",
   "Options.OverlayMode.Label": "Görüntüleme modu",

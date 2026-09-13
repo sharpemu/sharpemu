@@ -1,5 +1,7 @@
 {
   "_languageName": "العربية",
+  "Options.Env.PerformanceProfile.Desc": "سجّل أزمنة الأداء ومعدل FPS من التشغيل التالي للعبة.\nقد يقلل هذا من الأداء.",
+  "Options.Env.PerformanceFrameTrace.Desc": "احتفظ بآخر 4,096 فاصل عرض واكتبها في السجل عند الإغلاق.\nيتطلب تسجيل الأداء. أغلق اللعبة بشكل طبيعي لحفظ التتبع.",
   "Options.OverlayEnabled.Label": "عرض الأداء",
   "Options.OverlayEnabled.Desc": "عرض إحصاءات الأداء. يبدّل F1 العرض لهذه الجلسة فقط. يبدأ العرض مخفيًا عند ضبط SHARPEMU_OVERLAY=0.",
   "Options.OverlayMode.Label": "نمط العرض",

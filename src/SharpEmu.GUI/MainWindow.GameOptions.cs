@@ -13,6 +13,8 @@ public partial class MainWindow
 {
     private static readonly string[] GameEnvironmentToggleNames =
     [
+        "SHARPEMU_PROFILE_PERFORMANCE",
+        "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",
         "SHARPEMU_BTHID_UNAVAILABLE",
         "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
         "SHARPEMU_WRITABLE_APP0",
@@ -484,6 +486,8 @@ public partial class MainWindow
 
     private (string Name, ToggleSwitch Toggle)[] GameEnvironmentToggles() =>
     [
+        ("SHARPEMU_PROFILE_PERFORMANCE", GamePerformanceProfileToggle),
+        ("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", GamePerformanceFrameTraceToggle),
         ("SHARPEMU_BTHID_UNAVAILABLE", GameEnvBthidToggle),
         ("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", GameEnvLoopGuardToggle),
         ("SHARPEMU_WRITABLE_APP0", GameEnvWritableApp0Toggle),

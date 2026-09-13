@@ -1,5 +1,7 @@
 {
   "_languageName": "English",
+  "Options.Env.PerformanceProfile.Desc": "Log performance timings and FPS from the next game launch.\nThis can reduce performance.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Keep the last 4,096 presentation intervals and write them to the log at shutdown.\nRequires performance profiling. Close the game normally to save the trace.",
   "Options.OverlayEnabled.Label": "Performance display",
   "Options.OverlayEnabled.Desc": "Show performance statistics. F1 toggles the display for this run. SHARPEMU_OVERLAY=0 starts it hidden.",
   "Options.OverlayMode.Label": "Display mode",

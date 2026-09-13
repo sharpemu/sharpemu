@@ -287,6 +287,10 @@ public partial class MainWindow : Window
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
+        PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
+        PerformanceFrameTraceToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", PerformanceFrameTraceToggle.IsChecked == true);
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
@@ -1241,6 +1245,8 @@ public partial class MainWindow : Window
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        PerformanceProfileToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE");
+        PerformanceFrameTraceToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE");
         EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
         EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
         EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");

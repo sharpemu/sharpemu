@@ -1,5 +1,7 @@
 {
   "_languageName": "한국어",
+  "Options.Env.PerformanceProfile.Desc": "다음 게임 실행부터 성능 시간과 FPS를 기록합니다.\n성능이 저하될 수 있습니다.",
+  "Options.Env.PerformanceFrameTrace.Desc": "최근 4,096개의 화면 표시 간격을 보관하고 종료 시 로그에 기록합니다.\n성능 프로파일링이 필요합니다. 추적을 저장하려면 게임을 정상적으로 종료하세요.",
   "Options.OverlayEnabled.Label": "성능 표시",
   "Options.OverlayEnabled.Desc": "성능 통계를 표시합니다. F1은 이번 실행에서만 표시를 켜거나 끕니다. SHARPEMU_OVERLAY=0이면 숨긴 상태로 시작합니다.",
   "Options.OverlayMode.Label": "표시 모드",

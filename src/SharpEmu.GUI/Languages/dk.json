@@ -1,5 +1,7 @@
 {
   "_languageName": "Dansk",
+  "Options.Env.PerformanceProfile.Desc": "Log ydelsestider og FPS fra næste spilstart.\nDette kan reducere ydelsen.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Gem de sidste 4.096 præsentationsintervaller, og skriv dem til loggen ved afslutning.\nKræver ydelsesprofilering. Luk spillet normalt for at gemme sporingen.",
   "Options.OverlayEnabled.Label": "Ydelsesvisning",
   "Options.OverlayEnabled.Desc": "Vis ydelsesdata. F1 slår visningen til eller fra i denne session. SHARPEMU_OVERLAY=0 skjuler den ved start.",
   "Options.OverlayMode.Label": "Visningstilstand",

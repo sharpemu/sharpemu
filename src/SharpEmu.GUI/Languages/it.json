@@ -1,5 +1,7 @@
 {
   "_languageName": "Italiano",
+  "Options.Env.PerformanceProfile.Desc": "Registra tempi di prestazione e FPS dal prossimo avvio del gioco.\nQuesto può ridurre le prestazioni.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Conserva gli ultimi 4096 intervalli di presentazione e scrivili nel registro alla chiusura.\nRichiede la profilazione delle prestazioni. Chiudi il gioco normalmente per salvare la traccia.",
   "Options.OverlayEnabled.Label": "Statistiche prestazioni",
   "Options.OverlayEnabled.Desc": "Mostra le statistiche. F1 attiva o nasconde la visualizzazione per questa sessione. SHARPEMU_OVERLAY=0 la nasconde all’avvio.",
   "Options.OverlayMode.Label": "Modalità di visualizzazione",

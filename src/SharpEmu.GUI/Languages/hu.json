@@ -1,5 +1,7 @@
 {
   "_languageName": "Hungarian",
+  "Options.Env.PerformanceProfile.Desc": "Teljesítményidők és FPS naplózása a játék következő indításától.\nEz csökkentheti a teljesítményt.",
+  "Options.Env.PerformanceFrameTrace.Desc": "Az utolsó 4096 megjelenítési intervallum megőrzése és naplóba írása kilépéskor.\nTeljesítményprofilozást igényel. A nyomkövetés mentéséhez zárd be a játékot szabályosan.",
   "Options.OverlayEnabled.Label": "Teljesítménykijelzés",
   "Options.OverlayEnabled.Desc": "Teljesítményadatok megjelenítése. Az F1 csak erre a futásra kapcsolja a kijelzést. SHARPEMU_OVERLAY=0 esetén rejtve indul.",
   "Options.OverlayMode.Label": "Kijelzési mód",
