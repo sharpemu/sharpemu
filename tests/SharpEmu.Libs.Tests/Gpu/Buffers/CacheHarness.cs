@@ -136,7 +136,7 @@ internal sealed class CacheHarness : IDisposable
     private const ulong BackingBytes = 32UL * 1024 * 1024;
 
     private readonly IHostMemory _host = HostViewTestSupport.PlatformMemory;
-    private readonly IHostViewMemory _views = HostViewMemory.Create();
+    private readonly IHostViewMemory _views;
     private readonly HeadlessVulkan _vulkan;
     private readonly Action<string> _previousPageFatal = PageGuard.OnFatal;
     private ulong _nextBackingOffset;
@@ -149,9 +149,11 @@ internal sealed class CacheHarness : IDisposable
         bool readbackLinearImages = false,
         ulong backingBytes = BackingBytes,
         SchedulerHooks? hooks = null,
-        bool startScheduler = true)
+        bool startScheduler = true,
+        IHostViewMemory? viewHost = null)
     {
         _vulkan = vulkan;
+        _views = viewHost ?? HostViewMemory.Create();
         PageGuard.OnFatal = message => throw new SchedulerFatalException(message);
         Memory = new PhysicalVirtualMemory(viewHost: _views, backingBytes: backingBytes);
         Gpu = new GuestGpuMemory(Memory);

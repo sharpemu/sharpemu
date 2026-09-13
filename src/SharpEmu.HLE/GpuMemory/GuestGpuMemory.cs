@@ -51,7 +51,7 @@ public sealed class GuestGpuMemory : IDisposable
         Volatile.Write(ref _images, images);
     }
 
-    // Claims a fault only when the guest permits it and a store completed recovery.
+    // Retry only after store recovery or confirmation that a replaced view is accessible.
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         const ulong faultSize = 8;
@@ -76,6 +76,14 @@ public sealed class GuestGpuMemory : IDisposable
         else
         {
             handled = buffers?.DownloadToCpu(address, faultSize) ?? false;
+        }
+
+        if (!handled && kind != FaultKind.Unknown && AddressSpace is IGuestBackedSpace backing &&
+            backing.CanRetryRestoredViewAccess(address, RequiredAccess(kind)) &&
+            Covers(address, faultSize) && GuestPermits(kind, address) && _pages.Allows(address, kind))
+        {
+            TraceFault("view-restored");
+            return true;
         }
 
         // A new watch can follow recovery. Let the retried access fault again if necessary.
@@ -270,14 +278,16 @@ public sealed class GuestGpuMemory : IDisposable
 
     private bool GuestPermits(FaultKind kind, ulong address)
     {
-        var needed = kind switch
-        {
-            FaultKind.Write => GuestPageProtection.Write,
-            FaultKind.Execute => GuestPageProtection.Execute,
-            _ => GuestPageProtection.Read,
-        };
+        var needed = RequiredAccess(kind);
         return (_pages.Permissions.Lookup(address) & needed) != 0;
     }
+
+    private static GuestPageProtection RequiredAccess(FaultKind kind) => kind switch
+    {
+        FaultKind.Write => GuestPageProtection.Write,
+        FaultKind.Execute => GuestPageProtection.Execute,
+        _ => GuestPageProtection.Read,
+    };
 
     private void WaitForDetach(GpuAttachment attachment)
     {

@@ -6,7 +6,10 @@ using SharpEmu.HLE.Host;
 
 namespace SharpEmu.HLE.GuestMemory;
 
-public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset, HostPageProtection Protection);
+public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset, HostPageProtection Protection)
+{
+    public bool WasRestored { get; init; }
+}
 
 public sealed unsafe class SharedBackingViews : IDisposable
 {
@@ -130,6 +133,10 @@ public sealed unsafe class SharedBackingViews : IDisposable
     }
 
     public bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection, out HostViewFailure failure)
+        => TryMapReservedRange(address, size, offset, protection, false, out failure);
+
+    private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
+        bool wasRestored, out HostViewFailure failure)
     {
         if (!IsAvailable || !IsWithinBacking(offset, size))
         {
@@ -157,7 +164,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
                 OnFatal($"A backing view record already exists at 0x{address:X16}.");
             }
 
-            _views[address] = new ViewRecord(address, size, offset, protection);
+            _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
         }
 
         failure = HostViewFailure.None;
@@ -269,12 +276,12 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
         if (leftSize != 0)
         {
-            ok = TryMapReservedRange(old.Address, leftSize, old.Offset, old.Protection, out _) && ok;
+            ok = TryMapReservedRange(old.Address, leftSize, old.Offset, old.Protection, true, out _) && ok;
         }
 
         if (rightSize != 0)
         {
-            ok = TryMapReservedRange(rightAddress, rightSize, old.Offset + (rightAddress - old.Address), old.Protection, out _) && ok;
+            ok = TryMapReservedRange(rightAddress, rightSize, old.Offset + (rightAddress - old.Address), old.Protection, true, out _) && ok;
         }
 
         if (ok)
@@ -300,6 +307,14 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
         RestoreViewMapping(old);
         return false;
+    }
+
+    internal bool IsRestoredView(ulong address)
+    {
+        lock (_lock)
+        {
+            return IsAvailable && TryFindRecord(address, 1, out var record) && record.WasRestored;
+        }
     }
 
     public bool Contains(ulong address, ulong size)
@@ -464,7 +479,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
     private void RestoreViewMapping(ViewRecord record)
     {
-        if (!TryMapReservedRange(record.Address, record.Size, record.Offset, record.Protection, out _))
+        if (!TryMapReservedRange(record.Address, record.Size, record.Offset, record.Protection, true, out _))
         {
             OnFatal($"Could not restore the backing view at 0x{record.Address:X16}.");
         }

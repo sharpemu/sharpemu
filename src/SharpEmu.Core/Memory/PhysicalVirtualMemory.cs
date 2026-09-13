@@ -126,6 +126,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
     private const uint PAGE_READWRITE = 0x04;
     private const uint PAGE_READONLY = 0x02;
+    private const uint PAGE_GUARD = 0x100;
 
     private readonly IHostMemory _hostMemory;
 
@@ -1050,6 +1051,37 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         try
         {
             return _backedSpace?.IsBacked(address, size) == true;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    public bool CanRetryRestoredViewAccess(ulong address, GuestPageProtection access)
+    {
+        // The unmap holds the write lock until all surviving views are restored.
+        _gate.EnterReadLock();
+        try
+        {
+            if (_disposed || _backedSpace?.IsRestoredView(address) != true ||
+                !_hostMemory.Query(address, out var region) || region.State != HostRegionState.Committed ||
+                (OperatingSystem.IsWindows() && (region.RawProtection & PAGE_GUARD) != 0))
+            {
+                return false;
+            }
+
+            return access switch
+            {
+                GuestPageProtection.Read => region.Protection is HostPageProtection.ReadOnly or
+                    HostPageProtection.ReadWrite or HostPageProtection.ReadExecute or
+                    HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+                GuestPageProtection.Write => region.Protection is HostPageProtection.ReadWrite or
+                    HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+                GuestPageProtection.Execute => region.Protection is HostPageProtection.Execute or
+                    HostPageProtection.ReadExecute or HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+                _ => false,
+            };
         }
         finally
         {

@@ -37,6 +37,8 @@ internal sealed class FailingHostViews : IHostViewMemory
 
     public Action? AfterMapView { get; set; }
 
+    public Action<ulong, ulong>? AfterUnmapView { get; set; }
+
     public Action<ulong, ulong>? BeforeReserveHole { get; set; }
 
     public ulong PageSize => _inner.PageSize;
@@ -90,8 +92,12 @@ internal sealed class FailingHostViews : IHostViewMemory
         return mapped;
     }
 
-    public bool UnmapView(ulong address, ulong size) =>
-        !ShouldFail(Op.UnmapView) && _inner.UnmapView(address, size);
+    public bool UnmapView(ulong address, ulong size)
+    {
+        if (ShouldFail(Op.UnmapView) || !_inner.UnmapView(address, size)) return false;
+        AfterUnmapView?.Invoke(address, size);
+        return true;
+    }
 
     public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection) =>
         !ShouldFail(Op.CommitPrivate) && _inner.CommitPrivate(address, size, protection);

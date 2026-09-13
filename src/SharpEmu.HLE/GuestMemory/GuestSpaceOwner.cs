@@ -57,6 +57,8 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool IsBacked(ulong address, ulong size) => _views.Contains(address, size);
 
+    public bool IsRestoredView(ulong address) => _views.IsRestoredView(address);
+
     public bool TryReserveAddressRange(ulong address, ulong size)
     {
         if (!IsValidRange(address, size) || address % Granularity != 0 || size % Granularity != 0)

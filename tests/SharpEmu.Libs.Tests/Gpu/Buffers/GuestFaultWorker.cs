@@ -115,7 +115,13 @@ internal static class GuestFaultWorker
         const int programHeaderSize = 0x38;
         const int fileOffset = 0x1000;
         const ulong entryPoint = 0x1000;
-        ReadOnlySpan<byte> payload = [0x31, 0xC0, 0xC3, 0x48, 0x8B, 0x07, 0xC3, 0x48, 0x89, 0x37, 0xC3];
+        ReadOnlySpan<byte> payload =
+        [
+            0x31, 0xC0, 0xC3, 0x48, 0x8B, 0x07, 0xC3, 0x48, 0x89, 0x37, 0xC3,
+            // Signal readiness, wait for release, then read or write the target.
+            0xC7, 0x02, 1, 0, 0, 0, 0x83, 0x39, 0, 0x74, 0xFB, 0x48, 0x8B, 0x07, 0xC3,
+            0xC7, 0x02, 1, 0, 0, 0, 0x83, 0x39, 0, 0x74, 0xFB, 0x48, 0x89, 0x37, 0xC3,
+        ];
         var image = new byte[fileOffset + payload.Length];
 
         image[0] = 0x7F;
@@ -159,6 +165,8 @@ internal sealed class SyntheticGuest : IDisposable
     private readonly CpuContext _context;
     private readonly ulong _readRoutine;
     private readonly ulong _writeRoutine;
+    private readonly ulong _delayedReadRoutine;
+    private readonly ulong _delayedWriteRoutine;
 
     public SyntheticGuest(CacheHarness harness, string name)
     {
@@ -186,6 +194,8 @@ internal sealed class SyntheticGuest : IDisposable
         _context = new CpuContext(new TrackedCpuMemory(harness.Memory), Generation.Gen5);
         _readRoutine = image.EntryPoint + 3;
         _writeRoutine = image.EntryPoint + 7;
+        _delayedReadRoutine = image.EntryPoint + 11;
+        _delayedWriteRoutine = image.EntryPoint + 26;
     }
 
     public ulong Read(ulong address)
@@ -196,6 +206,14 @@ internal sealed class SyntheticGuest : IDisposable
 
     public void Write(ulong address, ulong value) =>
         Assert.True(_backend.TryCallGuestFunction(_context, _writeRoutine, address, value, 0, 0, 0, "guest-write", out _, out var error), error);
+
+    public ulong AccessAfterSignal(bool write, ulong address, ulong value, ulong readyAddress, ulong releaseAddress)
+    {
+        var routine = write ? _delayedWriteRoutine : _delayedReadRoutine;
+        Assert.True(_backend.TryCallGuestFunction(_context, routine, address, value, readyAddress, releaseAddress, 0, 0,
+            "guest-delayed-access", out var result, out var error), error);
+        return result;
+    }
 
     // Runs one guest access per thread on private guest stacks, all released by one barrier.
     public (bool Ok, ulong Value, string? Error)[] Race(int threads, bool write, ulong address, Func<int, ulong> valueOf)
