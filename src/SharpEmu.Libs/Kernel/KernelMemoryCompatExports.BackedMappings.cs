@@ -121,10 +121,34 @@ public static partial class KernelMemoryCompatExports
         BackingOffset = region.IsDirect || region.IsFlexible ? region.BackingOffset + start - region.Address : 0,
     };
 
-    private static MappedRegion[] GetMappingSlices(ulong address, ulong size, bool clip = true) => _mappedRegions.Values
-        .Where(region => region.Address < address + size && address < region.Address + region.Length)
-        .Select(region => clip ? SliceMapping(region, Math.Max(address, region.Address),
-            Math.Min(address + size, region.Address + region.Length)) : region).ToArray();
+    private static MappedRegion[] GetMappingSlices(ulong address, ulong size, bool clip = true)
+    {
+        var lowerIndex = 0;
+        var upperIndex = _mappedRegions.Count;
+        while (lowerIndex < upperIndex)
+        {
+            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
+            if (_mappedRegions.Keys[middleIndex] <= address)
+                lowerIndex = middleIndex + 1;
+            else
+                upperIndex = middleIndex;
+        }
+
+        // Mappings do not overlap. Only the preceding entry can extend across the start.
+        var end = address + size;
+        List<MappedRegion>? slices = null;
+        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        {
+            var region = _mappedRegions.Values[index];
+            if (region.Address >= end)
+                break;
+            if (address >= region.Address + region.Length)
+                continue;
+            (slices ??= []).Add(clip ? SliceMapping(region, Math.Max(address, region.Address),
+                Math.Min(end, region.Address + region.Length)) : region);
+        }
+        return slices?.ToArray() ?? [];
+    }
 
     private static bool MappingsCoverRange(MappedRegion[] regions, ulong address, ulong size)
     {

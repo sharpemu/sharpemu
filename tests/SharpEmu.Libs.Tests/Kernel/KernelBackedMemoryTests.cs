@@ -313,6 +313,55 @@ public sealed class KernelBackedMemoryTests
         Assert.True(test.Map(0, 0x10000) >= start + size);
     }
 
+    [Theory]
+    [InlineData(0UL, 0UL)]
+    [InlineData(0x4000UL, 0UL)]
+    [InlineData(0UL, 0x8000UL)]
+    public void NonFixedDirectMappingReusesAReservedHint(ulong hintOffset, ulong splitOffset)
+    {
+        using var test = new BackedKernelMemory();
+        var start = test.Reserve(0x40000);
+        if (splitOffset != 0)
+            test.Reserve(splitOffset, start);
+        test.Allocate(0, 0x10000);
+        Assert.True(test.Context.TryWriteUInt64(test.Output, start + hintOffset));
+        test.Context[CpuRegister.Rdi] = test.Output;
+        test.Context[CpuRegister.Rsi] = 0x10000;
+        test.Context[CpuRegister.Rdx] = 0x33;
+        test.Context[CpuRegister.Rcx] = 0;
+        test.Context[CpuRegister.R8] = 0;
+        test.Context[CpuRegister.R9] = 0;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(test.Context));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+        Assert.Equal(start + hintOffset, address);
+        Assert.True(test.Memory.IsBackedRange(address, 0x10000));
+    }
+
+    [Fact]
+    public void NonFixedDirectMappingSkipsAllReservationsTouchedByACandidate()
+    {
+        using var test = new BackedKernelMemory();
+        var start = test.Reserve(0x40000);
+        Assert.Equal(0, test.Unmap(start, 0x40000));
+        test.Reserve(0x4000, start);
+        test.Reserve(0x4000, start + 0x8000);
+        test.Allocate(0, 0x10000);
+        Assert.True(test.Context.TryWriteUInt64(test.Output, start));
+        test.Context[CpuRegister.Rdi] = test.Output;
+        test.Context[CpuRegister.Rsi] = 0x10000;
+        test.Context[CpuRegister.Rdx] = 0x33;
+        test.Context[CpuRegister.Rcx] = 0;
+        test.Context[CpuRegister.R8] = 0;
+        test.Context[CpuRegister.R9] = 0;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(test.Context));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+        Assert.Equal(start + 0xC000, address);
+        Assert.Equal((start, start + 0x4000), test.Query(start));
+        Assert.Equal((start + 0x8000, start + 0xC000), test.Query(start + 0x8000));
+    }
+
     [Fact]
     public void ReadRangeDiagnosticsReportViewsAndReservedGaps()
     {
