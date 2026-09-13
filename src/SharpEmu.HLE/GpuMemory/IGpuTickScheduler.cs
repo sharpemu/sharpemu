@@ -15,4 +15,7 @@ public interface IGpuTickScheduler
     void Finish();
 
     void WaitForPriorityOperations(ulong tick);
+
+    // Complete GPU memory use and its callbacks before mappings change.
+    void FinishMemoryAccess();
 }

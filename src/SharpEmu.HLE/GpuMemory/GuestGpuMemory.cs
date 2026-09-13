@@ -207,9 +207,7 @@ public sealed class GuestGpuMemory : IDisposable
         {
             if (scheduler is { Active: true })
             {
-                var tick = scheduler.CurrentTick;
-                scheduler.Finish();
-                scheduler.WaitForPriorityOperations(tick);
+                scheduler.FinishMemoryAccess();
             }
 
             _ = Buffers?.MarkCpuWrite(address, size);
@@ -258,9 +256,7 @@ public sealed class GuestGpuMemory : IDisposable
             // Finish callbacks before the mapping transaction takes its locks.
             if (scheduler is { Active: true })
             {
-                var tick = scheduler.CurrentTick;
-                scheduler.Finish();
-                scheduler.WaitForPriorityOperations(tick);
+                scheduler.FinishMemoryAccess();
             }
             change();
         }

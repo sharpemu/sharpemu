@@ -91,6 +91,13 @@ public sealed class GuestGpuMemoryTests
         }
 
         public void WaitForPriorityOperations(ulong tick) => Calls.Add($"wait_priority {tick}");
+
+        public void FinishMemoryAccess()
+        {
+            var tick = CurrentTick;
+            Finish();
+            WaitForPriorityOperations(tick);
+        }
     }
 
     private readonly RecordingStores _stores = new();

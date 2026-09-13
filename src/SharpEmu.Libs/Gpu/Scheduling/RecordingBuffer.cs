@@ -22,6 +22,7 @@ public sealed class RecordingBuffer
     private readonly IGpuTickDevice _device;
     private readonly IRenderingState _rendering;
     private SubmissionContext? _context;
+    private bool _handleWasRequested;
 
     internal nint Buffer;
 
@@ -50,7 +51,23 @@ public sealed class RecordingBuffer
 
     public bool IsInvalid => Buffer == 0;
 
-    public nint Handle => IsInvalid ? throw SubmissionScheduler.Fatal("The command buffer is not recording.") : Buffer;
+    internal bool HasPendingCommands => _handleWasRequested || _rendering.IsRendering;
+
+    // The native handle stays valid only until the next submission.
+    public nint Handle
+    {
+        get
+        {
+            if (IsInvalid)
+            {
+                throw SubmissionScheduler.Fatal("The command buffer is not recording.");
+            }
+
+            // A caller can record native commands after it obtains the handle.
+            _handleWasRequested = true;
+            return Buffer;
+        }
+    }
 
     public SubmissionContext Context => _context ?? throw SubmissionScheduler.Fatal("The command buffer has no submission context.");
 
@@ -83,6 +100,7 @@ public sealed class RecordingBuffer
         }
 
         _device.BeginBuffer(Buffer);
+        _handleWasRequested = false;
         SetDebugInfo((uint)RecordedOperation.Unknown, 0);
     }
 

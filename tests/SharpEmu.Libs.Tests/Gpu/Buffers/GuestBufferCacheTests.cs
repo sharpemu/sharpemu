@@ -691,6 +691,41 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MappingChangeDrainsRecordedBufferWorkAndPublishesBeforeUnmapping(bool recordInsideChange)
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        ulong writeTick = 0;
+        var published = false;
+        void RecordWrite()
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);
+            buffer.Fill(offset, 0x100, 0x55555555);
+            writeTick = harness.Scheduler.CurrentTick;
+            harness.Scheduler.QueuePriorityCompletionAction(() => published = true);
+        }
+
+        if (!recordInsideChange)
+            harness.Worker.Run(RecordWrite);
+        harness.Gpu.RunMappingChange(() =>
+        {
+            if (recordInsideChange)
+                RecordWrite();
+            harness.Gpu.Unregister(address, 0x10000);
+            Assert.True(published);
+            Assert.True(harness.Scheduler.IsTickComplete(writeTick));
+        });
+
+        Assert.False(harness.Gpu.Covers(address, 0x10000));
+        Assert.Equal(0x55555555u, BitConverter.ToUInt32(harness.Read(address + 0xFC, 4)));
+        Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address));
+        harness.Shutdown();
+    }
+
     // Draw 1 reads version 1, the label completes only after its tick retired, the guest writes
     // version 2 after the label, draw 2 reads version 2; the earlier draw stays live until obtained.
     [Fact]

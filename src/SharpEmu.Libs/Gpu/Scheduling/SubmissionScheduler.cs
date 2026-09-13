@@ -44,6 +44,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     private bool _disposeRequested;
     private bool _deviceDisposed;
     private SubmissionContext? _context;
+    private ulong _lastMemoryDrainTick;
 
     public SubmissionScheduler(
         IGpuTickDevice device,
@@ -236,6 +237,32 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         _timeline.Wait(CurrentTick - 1);
         BeginNextCommandBuffer();
         RunCompletedOperations();
+    }
+
+    public void FinishMemoryAccess()
+    {
+        RequireActiveScheduler();
+        if (InsideTickCallback)
+        {
+            throw Fatal("Cannot finish memory access from a GPU completion callback.");
+        }
+
+        lock (_operationLock)
+        {
+            // Reuse a completed drain only while its next command buffer and callback queues stay unused.
+            if (_lastMemoryDrainTick == CurrentTick && !_command.IsInvalid && !_command.HasPendingCommands &&
+                _pending.Count == 0 && _priority.Count == 0 && !_priorityActive)
+            {
+                return;
+            }
+        }
+
+        var tick = CurrentTick;
+        var nextTick = tick + (_command.IsInvalid ? 0UL : 1UL);
+        Finish();
+        WaitForPriorityOperations(tick);
+        // A callback can record or submit more work. It must not count as part of this drain.
+        _lastMemoryDrainTick = nextTick;
     }
 
     public void Wait(ulong tick)
