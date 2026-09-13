@@ -556,6 +556,60 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
+    public void PartialPhysicalReleaseRemovesBothAliasesAndReusesOnlyTheReleasedRange()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0xC000);
+        var first = test.Map(0, 0xC000);
+        var second = test.Map(0, 0xC000);
+        Assert.True(test.Context.TryWriteUInt64(first, 123));
+        Assert.True(test.Context.TryWriteUInt64(first + 0x8000, 456));
+        Assert.Equal(0, test.Release(0x4000, 0x4000));
+        foreach (var address in new[] { first, second })
+        {
+            Assert.True(test.Memory.IsBackedView(address));
+            Assert.False(test.Memory.IsBackedView(address + 0x4000));
+            Assert.True(test.Memory.IsBackedView(address + 0x8000));
+        }
+        Assert.Equal(unchecked((int)0x8002000C), test.MapResult(0x4000, 0x4000));
+        test.Allocate(0x4000, 0x4000);
+        Assert.Equal(first + 0x4000, test.Map(0x4000, 0x4000, first + 0x4000));
+        Assert.False(test.Memory.IsBackedView(second + 0x4000));
+        Assert.True(test.Context.TryReadUInt64(second, out var left));
+        Assert.True(test.Context.TryReadUInt64(second + 0x8000, out var right));
+        Assert.Equal(123UL, left);
+        Assert.Equal(456UL, right);
+    }
+
+    [Fact]
+    public void PhysicalQueryKeepsContainingAndNextRulesAfterPartialRelease()
+    {
+        using var test = new BackedKernelMemory();
+        test.Allocate(0, 0xC000);
+        Assert.Equal(0, test.Release(0x4000, 0x4000));
+
+        int Query(ulong offset, ulong flags)
+        {
+            test.Context[CpuRegister.Rdi] = offset;
+            test.Context[CpuRegister.Rsi] = flags;
+            test.Context[CpuRegister.Rdx] = test.Output;
+            test.Context[CpuRegister.Rcx] = 24;
+            return KernelMemoryCompatExports.KernelDirectMemoryQuery(test.Context);
+        }
+
+        Assert.Equal(unchecked((int)0x8002000D), Query(0x4000, 0));
+        Assert.Equal(0, Query(0x4000, 1));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var start));
+        Assert.True(test.Context.TryReadUInt64(test.Output + 8, out var end));
+        Assert.Equal((0x8000UL, 0xC000UL), (start, end));
+        Assert.Equal(0, Query(0x1000, 1));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out start));
+        Assert.True(test.Context.TryReadUInt64(test.Output + 8, out end));
+        Assert.Equal((0UL, 0x4000UL), (start, end));
+        Assert.Equal(unchecked((int)0x8002000D), Query(0xC000, 1));
+    }
+
+    [Fact]
     public void FailedMultiPieceUnmapKeepsTheRemainingPieceMapped()
     {
         using var test = new BackedKernelMemory();

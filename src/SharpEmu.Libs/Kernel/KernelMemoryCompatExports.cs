@@ -105,7 +105,7 @@ public static partial class KernelMemoryCompatExports
     private static readonly object _ioTraceGate = new();
     private static readonly object _statCacheGate = new();
     private static readonly object _guestMountGate = new();
-    private static readonly Dictionary<ulong, DirectAllocation> _directAllocations = new();
+    private static readonly DirectMemoryAllocationMap _directAllocations = new(GuestMemoryLayout.DirectBytes);
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     // Keyed by (and kept sorted on) region base address so VirtualQuery can find a
     // containing/next region with a binary search instead of an O(n) scan. Every
@@ -150,7 +150,6 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    private static ulong _nextPhysicalAddress;
     private static ulong _nextVirtualAddress;
     // Start the address search outside the host memory regions.
     // On macOS, also exclude the graphics memory region below 0x7000000000.
@@ -207,7 +206,6 @@ public static partial class KernelMemoryCompatExports
         public int NextIndex { get; set; }
     }
 
-    private readonly record struct DirectAllocation(ulong Start, ulong Length, int MemoryType);
     private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
     private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible,
         bool IsDirect, ulong DirectStart, ulong BackingOffset = 0, bool IsReserved = false);
@@ -2739,18 +2737,11 @@ public static partial class KernelMemoryCompatExports
         var arg3 = ctx[CpuRegister.Rcx];
         var arg4 = ctx[CpuRegister.R8];
 
-        ulong used = 0;
+        ulong totalAvailable;
         lock (_memoryGate)
         {
-            foreach (var allocation in _directAllocations.Values)
-            {
-                used = Math.Min(GuestMemoryLayout.DirectBytes, used + allocation.Length);
-            }
+            totalAvailable = _directAllocations.AvailableBytes;
         }
-
-        var totalAvailable = used >= GuestMemoryLayout.DirectBytes
-            ? 0UL
-            : GuestMemoryLayout.DirectBytes - used;
 
         if (arg1 != 0 || arg2 != 0 || arg3 != 0 || arg4 != 0)
         {
@@ -3560,19 +3551,12 @@ public static partial class KernelMemoryCompatExports
 
         lock (_memoryGate)
         {
-            var candidates = _directAllocations.Values
-                .Where(block => findNext
-                    ? block.Start + block.Length > offset
-                    : offset >= block.Start && offset < block.Start + block.Length)
-                .OrderBy(block => block.Start);
-
-            foreach (var block in candidates)
+            if (_directAllocations.TryFindAllocation(offset, findNext, out var block))
             {
                 found = true;
                 matchStart = block.Start;
                 matchEnd = block.Start + block.Length;
                 matchMemoryType = block.MemoryType;
-                break;
             }
         }
 
@@ -5909,7 +5893,7 @@ public static partial class KernelMemoryCompatExports
 
             if (memoryType.HasValue && region.IsDirect && TryFindDirectAllocationLocked(region.DirectStart, out var allocation))
             {
-                _directAllocations[allocation.Start] = allocation with { MemoryType = memoryType.Value };
+                _directAllocations.SetMemoryType(allocation.Start, memoryType.Value);
             }
         }
 
@@ -6010,25 +5994,8 @@ public static partial class KernelMemoryCompatExports
         };
     }
 
-    private static bool TryFindDirectAllocationLocked(ulong directStart, out DirectAllocation allocation)
-    {
-        foreach (var candidate in _directAllocations.Values)
-        {
-            if (!TryAddU64(candidate.Start, candidate.Length, out var candidateEnd))
-            {
-                continue;
-            }
-
-            if (directStart >= candidate.Start && directStart < candidateEnd)
-            {
-                allocation = candidate;
-                return true;
-            }
-        }
-
-        allocation = default;
-        return false;
-    }
+    private static bool TryFindDirectAllocationLocked(ulong directStart, out DirectMemoryAllocationMap.Allocation allocation)
+        => _directAllocations.TryFindAllocation(directStart, findNext: false, out allocation);
 
     private static bool TryNormalizeProtectRange(
         ulong address,
@@ -6232,91 +6199,8 @@ public static partial class KernelMemoryCompatExports
         int memoryType,
         ulong allocationLimit,
         out ulong selectedAddress)
-    {
-        selectedAddress = 0;
-        if (length == 0 || searchStart >= searchEnd)
-        {
-            return false;
-        }
-
-        var effectiveAlignment = alignment == 0 ? OrbisPageSize : alignment;
-        if (!TryFindAllocatableDirectMemoryRangeLocked(searchStart, searchEnd, length, effectiveAlignment, allocationLimit, out var freePosition) ||
-            !TryAddU64(freePosition, length, out var endAddress))
-        {
-            return false;
-        }
-
-        _directAllocations[freePosition] = new DirectAllocation(freePosition, length, memoryType);
-        _nextPhysicalAddress = endAddress;
-        selectedAddress = freePosition;
-        return true;
-    }
-
-    private static bool TryFindAllocatableDirectMemoryRangeLocked(
-        ulong searchStart,
-        ulong searchEnd,
-        ulong length,
-        ulong alignment,
-        ulong allocationLimit,
-        out ulong selectedAddress)
-    {
-        selectedAddress = 0;
-        if (length == 0 || searchStart >= searchEnd)
-        {
-            return false;
-        }
-
-        var effectiveEnd = Math.Min(searchEnd, allocationLimit);
-        var candidate = AlignUp(searchStart, alignment);
-        if (candidate >= effectiveEnd)
-        {
-            return false;
-        }
-
-        var allocations = new List<DirectAllocation>(_directAllocations.Values);
-        allocations.Sort(static (left, right) => left.Start.CompareTo(right.Start));
-
-        foreach (var allocation in allocations)
-        {
-            if (!TryAddU64(allocation.Start, allocation.Length, out var allocationEnd))
-            {
-                return false;
-            }
-
-            if (allocationEnd <= candidate)
-            {
-                continue;
-            }
-
-            var gapEnd = Math.Min(allocation.Start, effectiveEnd);
-            if (candidate < gapEnd &&
-                TryAddU64(candidate, length, out var candidateEnd) &&
-                candidateEnd <= gapEnd)
-            {
-                selectedAddress = candidate;
-                return true;
-            }
-
-            if (allocation.Start >= effectiveEnd)
-            {
-                break;
-            }
-
-            candidate = AlignUp(Math.Max(candidate, allocationEnd), alignment);
-            if (candidate >= effectiveEnd)
-            {
-                return false;
-            }
-        }
-
-        if (!TryAddU64(candidate, length, out var endAddress) || endAddress > effectiveEnd)
-        {
-            return false;
-        }
-
-        selectedAddress = candidate;
-        return true;
-    }
+        => _directAllocations.TryAllocate(searchStart, Math.Min(searchEnd, allocationLimit), length,
+            alignment == 0 ? OrbisPageSize : alignment, memoryType, out selectedAddress);
 
     private static bool TryFindAvailableDirectMemorySpanLocked(
         ulong searchStart,
@@ -6324,90 +6208,7 @@ public static partial class KernelMemoryCompatExports
         ulong alignment,
         out ulong spanStart,
         out ulong spanLength)
-    {
-        spanStart = 0;
-        spanLength = 0;
-        if (searchStart >= searchEnd)
-        {
-            return false;
-        }
-
-        var effectiveEnd = Math.Min(searchEnd, GuestMemoryLayout.DirectBytes);
-        var candidate = AlignUp(searchStart, alignment);
-        if (candidate >= effectiveEnd)
-        {
-            return false;
-        }
-
-        var allocations = new List<DirectAllocation>(_directAllocations.Values);
-        allocations.Sort(static (left, right) => left.Start.CompareTo(right.Start));
-
-        foreach (var allocation in allocations)
-        {
-            if (!TryAddU64(allocation.Start, allocation.Length, out var allocationEnd))
-            {
-                return false;
-            }
-
-            if (allocationEnd <= candidate)
-            {
-                continue;
-            }
-
-            var gapEnd = Math.Min(allocation.Start, effectiveEnd);
-            if (candidate < gapEnd)
-            {
-                var candidateLength = gapEnd - candidate;
-                if (candidateLength > spanLength)
-                {
-                    spanStart = candidate;
-                    spanLength = candidateLength;
-                }
-            }
-
-            if (allocation.Start >= effectiveEnd)
-            {
-                break;
-            }
-
-            candidate = AlignUp(Math.Max(candidate, allocationEnd), alignment);
-            if (candidate >= effectiveEnd)
-            {
-                break;
-            }
-        }
-
-        if (candidate < effectiveEnd)
-        {
-            var candidateLength = effectiveEnd - candidate;
-            if (candidateLength > spanLength)
-            {
-                spanStart = candidate;
-                spanLength = candidateLength;
-            }
-        }
-
-        return spanLength != 0;
-    }
-
-    private static ulong GetDirectMemoryHighWaterMarkLocked()
-    {
-        ulong highWaterMark = 0;
-        foreach (var allocation in _directAllocations.Values)
-        {
-            if (!TryAddU64(allocation.Start, allocation.Length, out var endAddress))
-            {
-                return ulong.MaxValue;
-            }
-
-            if (endAddress > highWaterMark)
-            {
-                highWaterMark = endAddress;
-            }
-        }
-
-        return highWaterMark;
-    }
+        => _directAllocations.TryFindAvailableRange(searchStart, searchEnd, alignment, out spanStart, out spanLength);
 
     private static unsafe bool TryReadHostMemory(ulong address, Span<byte> destination)
     {

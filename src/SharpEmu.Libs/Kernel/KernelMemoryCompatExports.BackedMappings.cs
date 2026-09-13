@@ -76,9 +76,8 @@ public static partial class KernelMemoryCompatExports
                 GuestGpuMemoryHook.NoteUnmapped(region.Address, region.Length);
             _mappedRegions.Clear();
             _mappedRegionNames.Clear();
-            _directAllocations.Clear();
+            _directAllocations.Reset();
             _flexibleBacking.Reset();
-            _nextPhysicalAddress = 0;
             _nextVirtualAddress = 0;
             _backingOwner = null;
         }
@@ -311,22 +310,7 @@ public static partial class KernelMemoryCompatExports
     }
 
     private static bool HasPhysicalSpan(ulong start, ulong length)
-    {
-        if (length == 0 || start > ulong.MaxValue - length)
-            return false;
-        var current = start;
-        foreach (var allocation in _directAllocations.Values.OrderBy(allocation => allocation.Start))
-        {
-            if (allocation.Start + allocation.Length <= current)
-                continue;
-            if (allocation.Start > current)
-                return false;
-            current = Math.Min(start + length, allocation.Start + allocation.Length);
-            if (current == start + length)
-                return true;
-        }
-        return false;
-    }
+        => _directAllocations.ContainsAllocatedRange(start, length);
 
     private static bool TryReleaseDirectMemoryRangeLocked(CpuContext ctx, ulong start, ulong length)
     {
@@ -348,17 +332,7 @@ public static partial class KernelMemoryCompatExports
         {
             RemoveMappingLocked(alias.Address, alias.Length);
         }
-        foreach (var allocation in _directAllocations.Values.Where(allocation =>
-                     allocation.Start < end && start < allocation.Start + allocation.Length).ToArray())
-        {
-            var allocationEnd = allocation.Start + allocation.Length;
-            _directAllocations.Remove(allocation.Start);
-            if (allocation.Start < start)
-                _directAllocations.Add(allocation.Start, allocation with { Length = start - allocation.Start });
-            if (end < allocationEnd)
-                _directAllocations.Add(end, allocation with { Start = end, Length = allocationEnd - end });
-        }
-        _nextPhysicalAddress = GetDirectMemoryHighWaterMarkLocked();
+        _directAllocations.ReleaseRange(start, length);
         return true;
     }
 
