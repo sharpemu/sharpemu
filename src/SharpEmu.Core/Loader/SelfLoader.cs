@@ -264,6 +264,12 @@ public sealed class SelfLoader : ISelfLoader
             tlsModuleId,
             out var importedRelocations,
             out var importedModuleNames);
+        if (tlsModuleId != 0)
+        {
+            // Thread copies must include pointers written by relocation.
+            GuestTlsTemplate.UpdateInitializationImage(
+                tlsModuleId, ReadTlsInitializationImage(processTlsHeader, virtualMemory, imageBase));
+        }
         var effectiveImportStubs = importStubs.Count == 0
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
@@ -554,18 +560,7 @@ public sealed class SelfLoader : ISelfLoader
             return default;
         }
 
-        // tdata (initialized) bytes come from the mapped segment; tbss is the
-        // implicitly-zero remainder up to MemorySize.
-        var fileSize = (int)Math.Min(tlsHeader.FileSize, tlsHeader.MemorySize);
-        var initImage = fileSize > 0 ? new byte[fileSize] : [];
-        if (fileSize > 0 &&
-            !virtualMemory.TryRead(imageBase + tlsHeader.VirtualAddress, initImage))
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][TLS] Failed to read TLS init image at 0x{imageBase + tlsHeader.VirtualAddress:X}; seeding zeros.");
-            initImage = [];
-        }
-
+        var initImage = ReadTlsInitializationImage(tlsHeader, virtualMemory, imageBase);
         var staticOffset = GuestTlsTemplate.RegisterModule(
             tlsModuleId,
             initImage,
@@ -577,6 +572,19 @@ public sealed class SelfLoader : ISelfLoader
             $"filesz=0x{tlsHeader.FileSize:X} align=0x{tlsHeader.Alignment:X} " +
             $"static_offset=0x{staticOffset:X} total_static=0x{GuestTlsTemplate.StaticTlsSize:X}");
         return new ModuleTlsInfo(tlsHeader.MemorySize, staticOffset);
+    }
+
+    private static byte[] ReadTlsInitializationImage(
+        ProgramHeader header, IVirtualMemory virtualMemory, ulong imageBase)
+    {
+        if (header.FileSize > header.MemorySize || header.FileSize > int.MaxValue)
+            throw new InvalidDataException("PT_TLS initialization size is invalid.");
+
+        var initializationImage = new byte[(int)header.FileSize];
+        var address = checked(imageBase + header.VirtualAddress);
+        if (initializationImage.Length != 0 && !virtualMemory.TryRead(address, initializationImage))
+            throw new InvalidDataException($"Cannot read TLS initialization bytes at 0x{address:X}.");
+        return initializationImage;
     }
 
     private static IReadOnlyDictionary<ulong, string> ResolveAndPatchImportStubs(
