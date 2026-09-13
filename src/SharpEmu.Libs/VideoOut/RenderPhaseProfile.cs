@@ -448,6 +448,7 @@ internal static class RenderPhaseProfile
             string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
         ReportImageUploads();
+        SharpEmu.HLE.GuestMemory.GuestMemoryProfile.WriteReport();
         var commandReads = new List<string>();
         for (var index = 0; index < (int)CommandReadKind.Count; index++)
         {

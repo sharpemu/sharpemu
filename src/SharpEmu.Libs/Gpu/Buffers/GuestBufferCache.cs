@@ -4,6 +4,7 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -689,6 +690,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private void ReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite)
     {
+        using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         if (isWrite && !IsRegionRegistered(guestAddress, size))
         {
             return;

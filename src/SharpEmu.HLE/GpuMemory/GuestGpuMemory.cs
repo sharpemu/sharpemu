@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GuestMemory;
+
 namespace SharpEmu.HLE.GpuMemory;
 
 public interface IGpuQueueRelay
@@ -144,6 +146,7 @@ public sealed class GuestGpuMemory : IDisposable
     // The host mapping takes the guest protection here; the views themselves are mapped read-write.
     public void Register(ulong address, ulong size, GuestPageProtection protection)
     {
+        using var registerScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegister);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"map guest={protection}");
         _spansLock.EnterWriteLock();
@@ -207,22 +210,29 @@ public sealed class GuestGpuMemory : IDisposable
         {
             if (scheduler is { Active: true })
             {
+                using var drainScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterDrain);
                 scheduler.FinishMemoryAccess();
             }
 
-            _ = Buffers?.MarkCpuWrite(address, size);
-            Images?.Unregister(address, size);
-            _spansLock.EnterWriteLock();
-            try
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterBuffers))
+                _ = Buffers?.MarkCpuWrite(address, size);
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterImages))
+                Images?.Unregister(address, size);
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterSpans))
             {
-                _spans.Remove(address, size);
-            }
-            finally
-            {
-                _spansLock.ExitWriteLock();
+                _spansLock.EnterWriteLock();
+                try
+                {
+                    _spans.Remove(address, size);
+                }
+                finally
+                {
+                    _spansLock.ExitWriteLock();
+                }
             }
 
-            _pages.Permissions.Clear(address, size);
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.UnregisterPermissions))
+                _pages.Permissions.Clear(address, size);
             GuestGpuMemoryHook.Trace(address, size, "unmap-complete");
         }
     }
@@ -230,6 +240,7 @@ public sealed class GuestGpuMemory : IDisposable
     // Enter the GPU worker before the caller takes locks used by GPU memory reads.
     public void RunMappingChange(Action change)
     {
+        using var requestScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRequest);
         for (;;)
         {
             var attachment = Volatile.Read(ref _attachment);
@@ -256,9 +267,11 @@ public sealed class GuestGpuMemory : IDisposable
             // Finish callbacks before the mapping transaction takes its locks.
             if (scheduler is { Active: true })
             {
+                using var drainScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingDrain);
                 scheduler.FinishMemoryAccess();
             }
-            change();
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingApply))
+                change();
         }
     }
 

@@ -81,6 +81,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool TryReserveFreeRange(ulong address, ulong size)
     {
+        using var reservationScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.Reservation);
         if (!IsValidAlignedRange(address, size))
             return false;
         var end = address + size;
@@ -90,50 +91,60 @@ public sealed class GuestSpaceOwner : IDisposable
 
         lock (_lock)
         {
-            if (_disposed)
-                return false;
-            if (FindFreeRangeIndex(address, size) >= 0)
-                return true;
-            if (_mapped.Values.Any(range => range.Address < end && address < range.Address + range.Size))
-                return false;
-
-            // Keep owned placeholders. Reserve only the gaps between them.
-            var additions = new List<(ulong Address, ulong Size)>();
-            var current = address - address % Granularity;
-            foreach (var range in _owned.OrderBy(range => range.Address))
+            List<(ulong Address, ulong Size)> additions;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationSearch))
             {
-                if (range.Address + range.Size <= current)
-                    continue;
-                if (range.Address >= reservationEnd)
-                    break;
-                if (current < range.Address)
-                    additions.Add((current, range.Address - current));
-                current = Math.Max(current, Math.Min(reservationEnd, range.Address + range.Size));
-            }
-            if (current < reservationEnd)
-                additions.Add((current, reservationEnd - current));
+                if (_disposed)
+                    return false;
+                if (FindFreeRangeIndex(address, size) >= 0)
+                    return true;
+                if (_mapped.Values.Any(range => range.Address < end && address < range.Address + range.Size))
+                    return false;
 
-            for (var index = 0; index < additions.Count; index++)
-            {
-                var range = additions[index];
-                if (_host.ReserveHole(range.Address, range.Size) == range.Address)
-                    continue;
-                // No new range has joined an existing placeholder yet.
-                for (var previous = index - 1; previous >= 0; previous--)
+                // Keep owned placeholders. Reserve only the gaps between them.
+                additions = new List<(ulong Address, ulong Size)>();
+                var current = address - address % Granularity;
+                foreach (var range in _owned.OrderBy(range => range.Address))
                 {
-                    var rollback = additions[previous];
-                    if (!_host.FreeHole(rollback.Address, rollback.Size))
-                        OnFatal($"Cannot release the new reservation at 0x{rollback.Address:X16}.");
+                    if (range.Address + range.Size <= current)
+                        continue;
+                    if (range.Address >= reservationEnd)
+                        break;
+                    if (current < range.Address)
+                        additions.Add((current, range.Address - current));
+                    current = Math.Max(current, Math.Min(reservationEnd, range.Address + range.Size));
                 }
-                return false;
+                if (current < reservationEnd)
+                    additions.Add((current, reservationEnd - current));
             }
 
-            foreach (var range in additions)
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHost))
             {
-                _owned.Add(range);
-                AddFreeRange(range.Address, range.Size);
+                for (var index = 0; index < additions.Count; index++)
+                {
+                    var range = additions[index];
+                    if (_host.ReserveHole(range.Address, range.Size) == range.Address)
+                        continue;
+                    // No new range has joined an existing placeholder yet.
+                    for (var previous = index - 1; previous >= 0; previous--)
+                    {
+                        var rollback = additions[previous];
+                        if (!_host.FreeHole(rollback.Address, rollback.Size))
+                            OnFatal($"Cannot release the new reservation at 0x{rollback.Address:X16}.");
+                    }
+                    return false;
+                }
             }
-            return FindFreeRangeIndex(address, size) >= 0;
+
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationPublish))
+            {
+                foreach (var range in additions)
+                {
+                    _owned.Add(range);
+                    AddFreeRange(range.Address, range.Size);
+                }
+                return FindFreeRangeIndex(address, size) >= 0;
+            }
         }
     }
 
@@ -206,6 +217,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool MapShared(ulong address, ulong size, ulong offset, HostPageProtection protection, out HostViewFailure failure)
     {
+        using var mappingScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BackingMap);
         failure = HostViewFailure.AddressUnavailable;
         if (!IsValidAlignedRange(address, size))
         {
@@ -243,6 +255,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool UnmapShared(ulong address, ulong size)
     {
+        using var mappingScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BackingUnmap);
         if (!IsValidAlignedRange(address, size))
         {
             return false;
