@@ -3271,17 +3271,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly record struct TlsPatchCounts(
 		int Loads,
 		int Stores,
-		int StackCanaries,
-		int Sse4aBlends)
+		int StackCanaries)
 	{
-		public int Total => Loads + Stores + StackCanaries + Sse4aBlends;
+		public int Total => Loads + Stores + StackCanaries;
 
 		public static TlsPatchCounts operator +(TlsPatchCounts left, TlsPatchCounts right) =>
 			new(
 				left.Loads + right.Loads,
 				left.Stores + right.Stores,
-				left.StackCanaries + right.StackCanaries,
-				left.Sse4aBlends + right.Sse4aBlends);
+				left.StackCanaries + right.StackCanaries);
 	}
 
 	internal static IReadOnlyList<TlsPatchScanRange> BuildTlsPatchScanRanges(
@@ -3357,7 +3355,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		Console.Error.WriteLine(
 			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
-			$"{counts.StackCanaries} stack-canary accesses, {counts.Sse4aBlends} SSE4a EXTRQ blends " +
+			$"{counts.StackCanaries} stack-canary accesses " +
 			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
 	}
 
@@ -3368,7 +3366,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
-		int sse4aPatchCount = 0;
 		while (num < num2)
 		{
 			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
@@ -3424,10 +3421,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					{
 						num9++;
 					}
-					else if (remainingBytes >= 12 && TryPatchSse4aExtrqBlend(address, ptr + instructionOffset))
-					{
-						sse4aPatchCount++;
-					}
 					else if (TryPatchStackCanaryInstruction(address, ptr + instructionOffset))
 					{
 						num4++;
@@ -3436,45 +3429,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		return new TlsPatchCounts(num3, num9, num4, sse4aPatchCount);
-	}
-
-	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
-	{
-		// Rosetta does not implement AMD SSE4a EXTRQ. Recognize the compiler's
-		// EXTRQ+blend idiom (against whichever xmm0-xmm7 it allocated) and rewrite
-		// it into an equivalent SSE4.1 sequence. Match/encode is isolated in
-		// Sse4aExtrqBlendPatch so it can be unit-tested; here we only patch bytes.
-		var window = new ReadOnlySpan<byte>(source, Sse4aExtrqBlendPatch.SequenceLength);
-		if (!Sse4aExtrqBlendPatch.TryMatch(window, out var destRegister, out var srcRegister))
-		{
-			return false;
-		}
-
-		Span<byte> replacement = stackalloc byte[Sse4aExtrqBlendPatch.SequenceLength];
-		if (!Sse4aExtrqBlendPatch.TryEncode(destRegister, srcRegister, replacement))
-		{
-			return false;
-		}
-
-		uint oldProtect = 0;
-		if (!VirtualProtect((void*)address, (nuint)replacement.Length, 64u, &oldProtect))
-		{
-			return false;
-		}
-		try
-		{
-			for (var i = 0; i < replacement.Length; i++)
-			{
-				((byte*)address)[i] = replacement[i];
-			}
-		}
-		finally
-		{
-			VirtualProtect((void*)address, (nuint)replacement.Length, oldProtect, &oldProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)replacement.Length);
-		}
-		return true;
+		return new TlsPatchCounts(num3, num9, num4);
 	}
 
 	private unsafe bool IsPatternMatch(byte* ptr, byte[] pattern)

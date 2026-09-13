@@ -7,24 +7,8 @@ using SharpEmu.Core.Cpu.Emulation;
 
 namespace SharpEmu.Core.Cpu.Native;
 
-// General software fallback for the AMD-only instructions PS5 titles occasionally emit that a
-// Zen 2-only host implements but Intel hosts (and Rosetta 2 on Apple Silicon) do not:
-//   - SSE4a EXTRQ, immediate and register-controlled forms
-//   - SSE4a INSERTQ, immediate form
-//   - MONITORX/MWAITX
-//
-// This is a direct port of Kyty's Loader::X64InstructionEmulator (TryEmulateSse4a /
-// TryEmulateMonitorxMwaitx). SharpEmu already special-cases exactly one compiled EXTRQ+VPBLENDD
-// byte sequence at load time (Sse4aExtrqBlendPatch), which only helps the one idiom it was
-// reverse-engineered from. This file is a general, fault-time fallback that engages for any
-// EXTRQ/INSERTQ or MONITORX/MWAITX the narrower patch (or a title using a different
-// compiler/register allocation) does not cover, complementing rather than replacing it: the
-// load-time patch still avoids paying the fault-and-recover cost on the hot path it was built for,
-// while this method is the safety net for everything else.
-//
-// This is deliberately additive: DirectExecutionBackend.IllegalInstruction.cs (the BMI1/BMI2/ABM
-// fallback) is untouched, and this method is only reached from VectoredHandler after that one
-// has already declined to handle the fault.
+// Recover supported instructions only after an illegal-instruction fault.
+// Leave native instructions and unrelated register values unchanged.
 public sealed partial class DirectExecutionBackend
 {
     // Byte offset of Xmm0 within the Win64 CONTEXT record: FltSave (the XMM_SAVE_AREA32/FXSAVE

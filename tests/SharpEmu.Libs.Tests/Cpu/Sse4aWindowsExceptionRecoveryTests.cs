@@ -115,6 +115,53 @@ public sealed unsafe class Sse4aWindowsExceptionRecoveryTests
     private static int XmmOffset(int register) => Win64ContextXmm0Offset + register * 16;
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(15)]
+    public void ImmediateExtractChangesOnlyDestinationAndInstructionPointer(int destinationRegister)
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        byte[] instructions = destinationRegister < 8
+            ? [0x66, 0x0F, 0x78, (byte)(0xC0 | destinationRegister), 0x28, 0x00]
+            : [0x66, 0x41, 0x0F, 0x78, (byte)(0xC0 | (destinationRegister & 7)), 0x28, 0x00];
+        var code = AllocateProbeVisibleCode(instructions);
+        try
+        {
+            var contextBytes = new byte[0x4D0];
+            contextBytes.AsSpan().Fill(0xA5);
+            fixed (byte* context = contextBytes)
+            {
+                *(ulong*)(context + 0x78) = 0x1B86FD090;
+                *(ulong*)(context + Win64ContextRipOffset) = (ulong)code;
+                *(ulong*)(context + XmmOffset(destinationRegister)) = 0xAABB_FF93_00FF_9300;
+            }
+            var expected = (byte[])contextBytes.Clone();
+            fixed (byte* expectedContext = expected)
+            {
+                *(ulong*)(expectedContext + Win64ContextRipOffset) = (ulong)code + (ulong)instructions.Length;
+                *(ulong*)(expectedContext + XmmOffset(destinationRegister)) = 0x0000_0093_00FF_9300;
+                *(ulong*)(expectedContext + XmmOffset(destinationRegister) + 8) = 0;
+            }
+
+            var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
+            fixed (byte* context = contextBytes)
+            {
+                Assert.True((bool)TryRecoverAmdCompat.Invoke(backend,
+                    [Pointer.Box(context, typeof(void*)), (ulong)code])!);
+            }
+            Assert.Equal(expected, contextBytes);
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free((void*)code, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void ImmediateInsertRecoversAliasedRegisters(bool executeOnly)

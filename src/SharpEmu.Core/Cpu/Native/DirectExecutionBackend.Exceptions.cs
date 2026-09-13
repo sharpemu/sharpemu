@@ -1801,7 +1801,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
-				$"{counts.StackCanaries} stack-canary accesses, {counts.Sse4aBlends} SSE4a EXTRQ blends " +
+				$"{counts.StackCanaries} stack-canary accesses " +
 				$"(lazy-commit rescan 0x{committedBase:X16}-0x{committedBase + committedSize:X16})");
 		}
 	}

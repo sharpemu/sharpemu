@@ -3,7 +3,9 @@
 
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
@@ -36,7 +38,7 @@ public sealed class Gen5NativeReturnSmokeTests
             return;
         }
 
-        var result = await RunIsolatedWorker();
+        var result = await RunIsolatedWorker(nameof(SyntheticGen5Entry_ReturnsToHost));
 
         Assert.True(
             result.Completed,
@@ -50,10 +52,40 @@ public sealed class Gen5NativeReturnSmokeTests
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
 
-    private static void ExecuteSyntheticGuest()
+    [Fact]
+    public async Task ExtractAndBlendPreserveLivePointerThroughNativeExecution()
+    {
+        if (!IsSupportedHost || !Avx2.IsSupported)
+            return;
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(nameof(ExtractAndBlendPreserveLivePointerThroughNativeExecution));
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        // Keep a data pointer in RAX while the vector instructions process a color value.
+        // Read through that pointer after the extract and blend complete.
+        ExecuteSyntheticGuest([
+            0x48, 0x89, 0xF8,                         // mov rax,rdi
+            0x89, 0xD1, 0xC1, 0xE9, 0x08,             // mov ecx,edx; shr ecx,8
+            0xC5, 0xF9, 0x6E, 0xC2,                   // vmovd xmm0,edx
+            0xC4, 0xE3, 0x79, 0x22, 0xC9, 0x01,       // vpinsrd xmm1,xmm0,ecx,1
+            0xC5, 0xF9, 0x72, 0xD0, 0x10,             // vpsrld xmm0,xmm0,16
+            0x66, 0x0F, 0x78, 0xC1, 0x28, 0x00,       // extrq xmm1,40,0
+            0xC4, 0xE3, 0x79, 0x02, 0xC1, 0x02,       // vpblendd xmm0,xmm0,xmm1,2
+            0xC5, 0xFB, 0x10, 0x48, 0x10,             // vmovsd xmm1,[rax+16]
+            0x66, 0x48, 0x0F, 0x7E, 0xC8,             // movq rax,xmm1
+            0xC3
+        ]);
+    }
+
+    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null)
     {
         using var memory = new PhysicalVirtualMemory();
-        var image = new SelfLoader().Load(BuildSyntheticElf(), memory);
+        var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
         Assert.Equal((byte)2, image.ElfHeader.AbiVersion);
         Assert.Equal(0x0000_0008_0000_1000UL, image.EntryPoint);
 
@@ -87,13 +119,26 @@ public sealed class Gen5NativeReturnSmokeTests
         Assert.Null(dispatcher.LastNotImplementedInfo);
 
         var callerContext = new CpuContext(new TrackedCpuMemory(memory), Generation.Gen5);
+        ulong dataAddress = 0;
+        var recoveryCounter = typeof(DirectExecutionBackend).GetField(
+            "_sse4aInstructionsEmulated", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var recoveriesBefore = (long)recoveryCounter.GetValue(null)!;
+        if (callbackInstructions is not null)
+        {
+            var loadedInstructions = new byte[callbackInstructions.Length];
+            Assert.True(memory.TryRead(image.EntryPoint + 3, loadedInstructions));
+            Assert.Equal(callbackInstructions, loadedInstructions);
+            Assert.True(memory.TryAllocateAtOrAbove(0x1_0000_0000, 0x4000, false, 0x4000, out dataAddress));
+            Assert.True(memory.TryWriteUInt64(dataAddress + 16, CallbackReturnValue));
+        }
+
         Assert.True(
             backend.TryCallGuestFunction(
                 callerContext,
                 image.EntryPoint + 3,
+                dataAddress,
                 0,
-                0,
-                0,
+                callbackInstructions is not null ? 0x00FF9300UL : 0,
                 0,
                 0,
                 "synthetic-native-callback-return",
@@ -101,9 +146,15 @@ public sealed class Gen5NativeReturnSmokeTests
                 out var callbackError),
             callbackError);
         Assert.Equal(CallbackReturnValue, callbackReturn);
+        if (callbackInstructions is not null)
+        {
+            var recoveriesAfter = (long)recoveryCounter.GetValue(null)!;
+            var supportsSse4a = (X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0;
+            Assert.Equal(supportsSse4a ? 0L : 1L, recoveriesAfter - recoveriesBefore);
+        }
     }
 
-    private static async Task<WorkerResult> RunIsolatedWorker()
+    private static async Task<WorkerResult> RunIsolatedWorker(string testMethod)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -117,7 +168,7 @@ public sealed class Gen5NativeReturnSmokeTests
         startInfo.ArgumentList.Add(typeof(Gen5NativeReturnSmokeTests).Assembly.Location);
         startInfo.ArgumentList.Add("--filter");
         startInfo.ArgumentList.Add(
-            $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{nameof(SyntheticGen5Entry_ReturnsToHost)}");
+            $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{testMethod}");
         startInfo.Environment[WorkerEnvironmentVariable] = "1";
         startInfo.Environment["SHARPEMU_SENTINEL_PROBE"] = null;
 
@@ -164,20 +215,27 @@ public sealed class Gen5NativeReturnSmokeTests
     private static async Task<string> ReadOutput(Task<string> stdout, Task<string> stderr) =>
         await stdout + await stderr;
 
-    private static byte[] BuildSyntheticElf()
+    private static byte[] BuildSyntheticElf(byte[]? callbackInstructions)
     {
         const int elfHeaderSize = 0x40;
         const int programHeaderSize = 0x38;
         const int fileOffset = 0x1000;
         const ulong entryPoint = 0x1000;
-        Span<byte> payload = stackalloc byte[14];
+        Span<byte> payload = new byte[3 + (callbackInstructions?.Length ?? 11)];
         payload[0] = 0x31; // xor eax, eax
         payload[1] = 0xC0;
         payload[2] = 0xC3; // ret
-        payload[3] = 0x48; // mov rax, imm64
-        payload[4] = 0xB8;
-        BinaryPrimitives.WriteUInt64LittleEndian(payload[5..], CallbackReturnValue);
-        payload[13] = 0xC3; // ret
+        if (callbackInstructions is not null)
+        {
+            callbackInstructions.CopyTo(payload[3..]);
+        }
+        else
+        {
+            payload[3] = 0x48; // mov rax, imm64
+            payload[4] = 0xB8;
+            BinaryPrimitives.WriteUInt64LittleEndian(payload[5..], CallbackReturnValue);
+            payload[13] = 0xC3; // ret
+        }
         var image = new byte[fileOffset + payload.Length];
 
         image[0] = 0x7F;

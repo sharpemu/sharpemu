@@ -131,6 +131,45 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
     }
 
     [Fact]
+    public void ExtractSignalPreservesLivePointerAndOtherVectorRegisters()
+    {
+        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+            RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var code = AllocateProbeVisibleCode([0x66, 0x0F, 0x78, 0xC1, 0x28, 0x00]);
+        try
+        {
+            var frame = new FakeSignalFrame((ulong)code) { Accumulator = 0x1B86FD090 };
+            for (int registerIndex = 0; registerIndex < 16; registerIndex++)
+            {
+                frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16, (ulong)registerIndex);
+                frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16 + 8, ~(ulong)registerIndex);
+            }
+            frame.SetXmmLow(FxsaveXmm1Offset, 0xAABB_FF93_00FF_9300);
+            frame.FillMacOsExtendedVectorState(0xA5);
+
+            Assert.True(frame.Dispatch());
+
+            Assert.Equal(0x1B86FD090UL, frame.Accumulator);
+            Assert.Equal(0x0000_0093_00FF_9300UL, frame.XmmLow(FxsaveXmm1Offset));
+            Assert.Equal(0UL, frame.XmmHigh(FxsaveXmm1Offset));
+            Assert.Equal((ulong)code + 6, frame.Rip);
+            for (int registerIndex = 0; registerIndex < 16; registerIndex++)
+            {
+                if (registerIndex == 1) continue;
+                Assert.Equal((ulong)registerIndex, frame.XmmLow(FxsaveXmm0Offset + registerIndex * 16));
+                Assert.Equal(~(ulong)registerIndex, frame.XmmHigh(FxsaveXmm0Offset + registerIndex * 16));
+            }
+            frame.AssertMacOsExtendedVectorStateEquals(0xA5);
+        }
+        finally
+        {
+            FreeProbeVisibleCode(code);
+        }
+    }
+
+    [Fact]
     public void InsertInstructionPreservesOtherVectorRegisters()
     {
         if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
@@ -233,6 +272,20 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
                         ? *(ulong*)(machineContext + 144)
                         : *(ulong*)(userContext + LinuxUcontextGregsOffset + LinuxGregsRipOffset);
                 }
+            }
+        }
+
+        public ulong Accumulator
+        {
+            get
+            {
+                fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _userContext)
+                    return *(ulong*)(state + (OperatingSystem.IsMacOS() ? 16 : LinuxUcontextGregsOffset + 13 * 8));
+            }
+            set
+            {
+                fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _userContext)
+                    *(ulong*)(state + (OperatingSystem.IsMacOS() ? 16 : LinuxUcontextGregsOffset + 13 * 8)) = value;
             }
         }
 
