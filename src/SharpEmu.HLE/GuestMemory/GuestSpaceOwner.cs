@@ -77,6 +77,64 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
+    public bool TryReserveFreeRange(ulong address, ulong size)
+    {
+        if (!IsValidAlignedRange(address, size))
+            return false;
+        var end = address + size;
+        var reservationEnd = AlignUp(end, Granularity);
+        if (reservationEnd == 0)
+            return false;
+
+        lock (_lock)
+        {
+            if (_disposed)
+                return false;
+            if (FindFreeRangeIndex(address, size) >= 0)
+                return true;
+            if (_mapped.Values.Any(range => range.Address < end && address < range.Address + range.Size))
+                return false;
+
+            // Keep owned placeholders. Reserve only the gaps between them.
+            var additions = new List<(ulong Address, ulong Size)>();
+            var current = address - address % Granularity;
+            foreach (var range in _owned.OrderBy(range => range.Address))
+            {
+                if (range.Address + range.Size <= current)
+                    continue;
+                if (range.Address >= reservationEnd)
+                    break;
+                if (current < range.Address)
+                    additions.Add((current, range.Address - current));
+                current = Math.Max(current, Math.Min(reservationEnd, range.Address + range.Size));
+            }
+            if (current < reservationEnd)
+                additions.Add((current, reservationEnd - current));
+
+            for (var index = 0; index < additions.Count; index++)
+            {
+                var range = additions[index];
+                if (_host.ReserveHole(range.Address, range.Size) == range.Address)
+                    continue;
+                // No new range has joined an existing placeholder yet.
+                for (var previous = index - 1; previous >= 0; previous--)
+                {
+                    var rollback = additions[previous];
+                    if (!_host.FreeHole(rollback.Address, rollback.Size))
+                        OnFatal($"Cannot release the new reservation at 0x{rollback.Address:X16}.");
+                }
+                return false;
+            }
+
+            foreach (var range in additions)
+            {
+                _owned.Add(range);
+                AddFreeRange(range.Address, range.Size);
+            }
+            return FindFreeRangeIndex(address, size) >= 0;
+        }
+    }
+
     public bool OwnsReservedRange(ulong address, ulong size)
     {
         if (!IsValidRange(address, size))

@@ -15,6 +15,43 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelBackedMemoryTests
 {
     [Fact]
+    public void BatchRemapCanExtendAnUnmappedReservationWithoutOverwritingMappings()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong address = 0x102A000000;
+        test.Allocate(0, 0x410000);
+        test.Map(0, 0x200000, address);
+        test.Map(0x200000, 0x10000, address + 0x200000);
+        Assert.Equal(0, test.Unmap(address, 0x210000));
+
+        var entriesAddress = test.Output + 0x200;
+        for (var index = 0; index < 3; index++)
+        {
+            var entryAddress = entriesAddress + (ulong)index * 32;
+            var offset = (ulong)index * 0x200000;
+            Assert.True(test.Context.TryWriteUInt64(entryAddress, address + offset));
+            Assert.True(test.Context.TryWriteUInt64(entryAddress + 8, offset));
+            Assert.True(test.Context.TryWriteUInt64(entryAddress + 16, index == 2 ? 0x10000UL : 0x200000UL));
+            Assert.True(test.Context.TryWriteUInt64(entryAddress + 24, 0xF2));
+        }
+        test.Context[CpuRegister.Rdi] = entriesAddress;
+        test.Context[CpuRegister.Rsi] = 3;
+        test.Context[CpuRegister.Rdx] = test.Output + 0x300;
+        test.Context[CpuRegister.Rcx] = 0x90;
+        Assert.Equal(0, KernelMemoryCompatExports.KernelBatchMap2(test.Context));
+        Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out var processed));
+        Assert.Equal(3u, processed);
+        Assert.True(test.Memory.IsBackedRange(address, 0x410000));
+        Assert.True(test.Context.TryWriteUInt64(address, 0x123456789ABCDEF0));
+
+        Assert.Equal(unchecked((int)0x8002000C), KernelMemoryCompatExports.KernelBatchMap2(test.Context));
+        Assert.True(test.Context.TryReadUInt32(test.Output + 0x300, out processed));
+        Assert.Equal(0u, processed);
+        Assert.True(test.Context.TryReadUInt64(address, out var value));
+        Assert.Equal(0x123456789ABCDEF0UL, value);
+    }
+
+    [Fact]
     public void MacOsFlexibleMappingExcludesReservedGraphicsMemory()
     {
         if (!OperatingSystem.IsMacOS()) return;

@@ -1164,18 +1164,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private bool TryReserveBackingRange(ulong address, ulong size)
     {
-        if (_backedSpace!.ContainsFreeRange(address, size))
-        {
-            return true;
-        }
-
-        var granularity = _backedSpace.Granularity;
-        var start = address - address % granularity;
-        var end = address + size;
-        var padding = (granularity - end % granularity) % granularity;
-        return padding <= ulong.MaxValue - end &&
-            _backedSpace.TryReserveAddressRange(start, end + padding - start) &&
-            _backedSpace.ContainsFreeRange(address, size);
+        return _backedSpace!.TryReserveFreeRange(address, size);
     }
 
     public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)

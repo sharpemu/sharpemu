@@ -14,6 +14,82 @@ public sealed unsafe class GuestSpaceOwnerTests
 {
     private const ulong Page = GuestSpaceOwner.GuestPage;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReserveFreeRangeFillsGapsAndRollsBackFailedReservations(bool failSecondGap)
+    {
+        if (!Supported) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var granularity = host.Granularity;
+        var address = ProbeFreeAddress(host, 5 * granularity);
+        Assert.True(owner.TryReserveAddressRange(address + 2 * granularity, granularity));
+        host.Log.Clear();
+        if (failSecondGap)
+        {
+            host.FailNext(Op.ReserveHole, afterCalls: 1);
+            Assert.False(owner.TryReserveFreeRange(address, 5 * granularity));
+            Assert.Equal(new[] { Op.ReserveHole, Op.ReserveHole, Op.FreeHole }, host.Log);
+            Assert.True(owner.ContainsFreeRange(address + 2 * granularity, granularity));
+            Assert.Equal(address, host.ReserveHole(address, 2 * granularity));
+            Assert.True(host.FreeHole(address, 2 * granularity));
+        }
+
+        Assert.True(owner.TryReserveFreeRange(address, 5 * granularity));
+        Assert.True(owner.ContainsFreeRange(address, 5 * granularity));
+        Assert.True(owner.MapShared(address, 5 * granularity, 0, HostPageProtection.ReadWrite, out _));
+        *(ulong*)address = Marker;
+        Assert.Equal(Marker, *(ulong*)owner.AliasBase);
+        Assert.True(owner.UnmapShared(address, 5 * granularity));
+        owner.ReleaseAddressRanges();
+        Assert.Equal(address, host.ReserveHole(address, 5 * granularity));
+        Assert.True(host.FreeHole(address, 5 * granularity));
+    }
+
+    [Fact]
+    public void ReserveFreeRangeKeepsLiveMappingsInsideHostAlignmentPadding()
+    {
+        if (!Supported) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var holeSize = HoleSize(host);
+        var address = ProbeFreeAddress(host, 3 * holeSize);
+        Assert.True(owner.TryReserveAddressRange(address, holeSize), "The initial reservation failed.");
+        Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _), "The initial view failed.");
+        *(ulong*)address = Marker;
+        host.Log.Clear();
+        Assert.False(owner.TryReserveFreeRange(address, 3 * holeSize));
+        Assert.Empty(host.Log);
+        Assert.True(owner.TryReserveFreeRange(address + Page, 3 * holeSize - Page), "The reservation extension failed.");
+        Assert.Equal(Marker, *(ulong*)address);
+        Assert.True(owner.UnmapShared(address, Page), "The view release failed.");
+        Assert.True(owner.TryReserveFreeRange(address, 3 * holeSize), "The complete free range was not retained.");
+    }
+
+    [Fact]
+    public void ReserveFreeRangeDoesNotReplaceForeignReservations()
+    {
+        if (!Supported) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var holeSize = HoleSize(host);
+        var address = ProbeFreeAddress(host, 3 * holeSize);
+        Assert.True(owner.TryReserveAddressRange(address, holeSize));
+        var foreignAddress = address + 2 * holeSize;
+        Assert.Equal(foreignAddress, host.ReserveHole(foreignAddress, holeSize));
+        try
+        {
+            Assert.False(owner.TryReserveFreeRange(address, 3 * holeSize));
+            Assert.True(owner.ContainsFreeRange(address, holeSize));
+            Assert.False(owner.ContainsFreeRange(foreignAddress, holeSize));
+        }
+        finally
+        {
+            Assert.True(host.FreeHole(foreignAddress, holeSize));
+        }
+    }
+
     private static ulong AcquireRange(GuestSpaceOwner owner, IHostViewMemory host, ulong size)
     {
         for (var attempt = 0; attempt < 8; attempt++)
