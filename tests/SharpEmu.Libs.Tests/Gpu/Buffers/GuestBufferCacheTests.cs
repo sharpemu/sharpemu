@@ -24,6 +24,47 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
 {
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
+    [Fact]
+    public void ImageUploadFailureIdentifiesAHoleBetweenBackedEndpoints()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        var (address, granule, _) = harness.MapBackedSandwich();
+        var size = 3 * granule;
+        harness.Worker.Run(() =>
+        {
+            var failure = Assert.Throws<SchedulerFatalException>(() =>
+                harness.Cache.ObtainBufferForImage(address, size));
+            Assert.Contains("Could not read the mapped guest image backing", failure.Message);
+            Assert.Contains($"address=0x{address:X16} size=0x{size:X16}", failure.Message);
+            Assert.Contains("range_backed=False first_byte_backed=True last_byte_backed=True", failure.Message);
+            Assert.True(harness.Memory.IsBackedRange(address, granule));
+            Assert.True(harness.Memory.IsBackedRange(address + 2 * granule, granule));
+            _ = harness.Cache.ObtainBufferForImage(address, granule);
+            harness.Scheduler.Finish();
+        });
+    }
+
+    [Fact]
+    public void ImageUploadFailureDistinguishesStagingCapacityFromBackingReads()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        const ulong size = 512UL * 1024 * 1024 + 1;
+        harness.Worker.Run(() =>
+        {
+            var failure = Assert.Throws<SchedulerFatalException>(() =>
+                harness.Cache.ObtainBufferForImage(address, size));
+            Assert.Contains("Cannot reserve image staging space", failure.Message);
+            Assert.Contains($"address=0x{address:X16} size=0x{size:X16}", failure.Message);
+            Assert.Contains("capacity=0x0000000020000000", failure.Message);
+            Assert.DoesNotContain("Could not read", failure.Message);
+        });
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
