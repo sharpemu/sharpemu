@@ -524,20 +524,15 @@ internal static partial class Program
             return false;
         }
 
-        string[] childArgs;
-        var commandLineArgs = Environment.GetCommandLineArgs();
-        var entryAssembly = commandLineArgs.Length != 0 ? commandLineArgs[0] : null;
-        if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(entryAssembly))
-        {
-            childArgs = [entryAssembly, MitigatedChildFlag, .. args];
-        }
-        else
-        {
-            childArgs = [MitigatedChildFlag, .. args];
-        }
+        var commandLineArguments = Environment.GetCommandLineArgs();
+        var entryAssemblyPath = commandLineArguments.Length > 0 ? commandLineArguments[0] : null;
+        string[] childArguments =
+            Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(entryAssemblyPath)
+                ? [entryAssemblyPath, MitigatedChildFlag, .. args]
+                : [MitigatedChildFlag, .. args];
 
-        var commandLine = BuildCommandLine(processPath, childArgs);
+        var commandLine = BuildCommandLine(processPath, childArguments);
         var startupInfoEx = new STARTUPINFOEX();
         startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
         ConfigureInheritedStdHandles(ref startupInfoEx.StartupInfo);
