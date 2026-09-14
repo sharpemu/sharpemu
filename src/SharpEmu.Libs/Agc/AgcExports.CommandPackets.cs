@@ -725,16 +725,16 @@ public static partial class AgcExports
         ExportName = "sceAgcDcbWaitOnAddressGetSize",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbWaitOnAddressGetSize(CpuContext ctx)
+    public static int GetWaitOnAddressSize(CpuContext context)
     {
-        var size = (uint)ctx[CpuRegister.Rdi];
-        ctx[CpuRegister.Rax] = size switch
+        var labelSize = (uint)context[CpuRegister.Rdi];
+        context[CpuRegister.Rax] = labelSize switch
         {
             0 => 14u * sizeof(uint),
             1 => 16u * sizeof(uint),
             _ => 0,
         };
-        return (int)ctx[CpuRegister.Rax];
+        return (int)context[CpuRegister.Rax];
     }
 
     [SysAbiExport(

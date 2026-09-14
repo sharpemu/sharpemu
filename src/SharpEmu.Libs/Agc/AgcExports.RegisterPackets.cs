@@ -195,18 +195,18 @@ public static partial class AgcExports
         ExportName = "sceAgcDcbSetShRegisterDirect",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbSetShRegisterDirect(CpuContext ctx) =>
-        DcbSetRegisterDirect(ctx, ItSetShReg, "sh");
+    public static int SetShaderRegisterDirect(CpuContext context) =>
+        DcbSetRegisterDirect(context, ItSetShReg, "sh");
 
     [SysAbiExport(
         Nid = "QhPDD513V0w",
         ExportName = "sceAgcDcbSetShRegisterDirectGetSize",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbSetShRegisterDirectGetSize(CpuContext ctx)
+    public static int GetShaderRegisterDirectSize(CpuContext context)
     {
-        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
-        return (int)ctx[CpuRegister.Rax];
+        context[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)context[CpuRegister.Rax];
     }
 
     [SysAbiExport(

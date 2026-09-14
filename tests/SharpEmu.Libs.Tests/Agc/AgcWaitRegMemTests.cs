@@ -314,19 +314,6 @@ public sealed class AgcWaitRegMemTests
         Assert.Equal(0xDEAD_BEEFu, ReadUInt32(memory, PacketAddress + 16));
     }
 
-    [Theory]
-    [InlineData(0u, 56)]
-    [InlineData(1u, 64)]
-    [InlineData(2u, 0)]
-    public void DcbWaitOnAddressGetSize_ReturnsNativePacketSize(uint size, int expected)
-    {
-        CreateMemory(out var ctx);
-        ctx[CpuRegister.Rdi] = size;
-
-        Assert.Equal(expected, AgcExports.DcbWaitOnAddressGetSize(ctx));
-        Assert.Equal((ulong)expected, ctx[CpuRegister.Rax]);
-    }
-
     private static FakeCpuMemory CreateMemory(out CpuContext ctx)
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x2000);

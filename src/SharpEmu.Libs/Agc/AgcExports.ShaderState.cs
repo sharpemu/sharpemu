@@ -41,6 +41,8 @@ public static partial class AgcExports
     private const byte HsFrontShaderType = 5;
     private const byte GsBackShaderType = 6;
     private const byte HsBackShaderType = 7;
+    private const byte FunctionShaderType = 8;
+    private const OrbisGen2Result IncompleteShaderRegistersResult = unchecked((OrbisGen2Result)0x8A6C0005);
 
     private const ulong ShaderSpecialGeCntlOffset = 0x00;
     private const ulong ShaderSpecialVgtShaderStagesEnOffset = 0x08;
@@ -111,9 +113,10 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        if (!PatchShaderProgramRegisters(ctx, headerAddress, codeAddress))
+        var programRegisterResult = PatchShaderProgramRegisters(ctx, headerAddress, codeAddress);
+        if (programRegisterResult != OrbisGen2Result.ORBIS_GEN2_OK)
         {
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            return SetReturn(ctx, programRegisterResult);
         }
 
         if (destinationAddress != 0 &&
@@ -959,24 +962,46 @@ public static partial class AgcExports
         return true;
     }
 
-    private static bool PatchShaderProgramRegisters(CpuContext ctx, ulong headerAddress, ulong codeAddress)
+    private static OrbisGen2Result PatchShaderProgramRegisters(CpuContext context, ulong headerAddress, ulong codeAddress)
     {
-        if (!TryReadUInt64(ctx, headerAddress + ShaderShRegistersOffset, out var shRegistersAddress) ||
-            !TryReadByte(ctx, headerAddress + ShaderTypeOffset, out var shaderType) ||
-            !TryReadByte(ctx, headerAddress + ShaderNumShRegistersOffset, out var registerCount))
+        if (!TryReadUInt64(context, headerAddress + ShaderShRegistersOffset, out var shaderRegistersAddress) ||
+            !TryReadByte(context, headerAddress + ShaderTypeOffset, out var shaderType) ||
+            !TryReadByte(context, headerAddress + ShaderNumShRegistersOffset, out var registerCount))
         {
-            return false;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (shRegistersAddress == 0 || registerCount < 2)
+        if (shaderType > FunctionShaderType)
         {
-            return false;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        // Type bytes follow the Prospero half/fused enum used by fuse-shader
-        // (#326). Type 3 still patches VS PGM registers on this tree (pre-fuse
-        // CreateShader behavior); type 5 is the HS front half / hull path.
-        var expectedLo = shaderType switch
+        var permitsMissingProgramRegisters = shaderType is GsFrontShaderType or HsFrontShaderType or FunctionShaderType;
+        if (registerCount == 0)
+        {
+            return permitsMissingProgramRegisters ? OrbisGen2Result.ORBIS_GEN2_OK : IncompleteShaderRegistersResult;
+        }
+
+        if (shaderRegistersAddress == 0)
+        {
+            return IncompleteShaderRegistersResult;
+        }
+
+        // Read each declared entry before deciding whether the address pair can be absent.
+        Span<byte> registerTable = stackalloc byte[registerCount * 2 * sizeof(uint)];
+        if (shaderRegistersAddress > ulong.MaxValue - (ulong)registerTable.Length ||
+            !context.Memory.TryRead(shaderRegistersAddress, registerTable))
+        {
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (shaderType == FunctionShaderType)
+        {
+            return OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        // Select the address registers for the shader stage.
+        var expectedLowRegister = shaderType switch
         {
             ComputeShaderType => ComputePgmLo,
             PsShaderType => SpiShaderPgmLoPs,
@@ -987,7 +1012,7 @@ public static partial class AgcExports
             HsBackShaderType => SpiShaderPgmLoLs,
             _ => 0u,
         };
-        var expectedHi = shaderType switch
+        var expectedHighRegister = shaderType switch
         {
             ComputeShaderType => ComputePgmHi,
             PsShaderType => SpiShaderPgmHiPs,
@@ -999,66 +1024,58 @@ public static partial class AgcExports
             _ => 0u,
         };
 
-        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
-        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
-        // filled later via SetShRegisterDirect).
         if (!TryFindShaderProgramRegisterPair(
-                ctx,
-                shRegistersAddress,
+                registerTable,
+                shaderRegistersAddress,
                 registerCount,
-                expectedLo,
-                expectedHi,
-                out var loEntryAddress,
-                out var hiEntryAddress,
-                out var foundLo,
-                out var foundHi))
+                expectedLowRegister,
+                expectedHighRegister,
+                out var lowEntryAddress,
+                out var highEntryAddress,
+                out var foundLowRegister,
+                out var foundHighRegister,
+                out var hasProgramAddressEntries))
         {
-            TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
-            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
-            // omit PGM_LO/HI from the default table. Still succeed: the code VA
-            // lives at ShaderCodeOffset and later binder paths republish it.
-            // GS front headers can likewise start at RSRC1_GS (0x8A) instead of
-            // PGM_LO_GS (0x88) - same deal, skip the patch here.
-            if ((shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs) ||
-                (shaderType == GsFrontShaderType && firstLo is SpiShaderPgmRsrc1Gs or SpiShaderPgmLoGs))
+            var firstRegisterOffset = BinaryPrimitives.ReadUInt32LittleEndian(registerTable);
+            if (permitsMissingProgramRegisters && !hasProgramAddressEntries)
             {
                 TraceCreateShader(
                     0,
                     headerAddress,
                     codeAddress,
-                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstLo:X8}");
-                return true;
+                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstRegisterOffset:X8}");
+                return OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
             TraceCreateShader(
                 0,
                 headerAddress,
                 codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
-            return false;
+                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLowRegister:X8} first_lo=0x{firstRegisterOffset:X8}");
+            return IncompleteShaderRegistersResult;
         }
 
-        var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
-        var hiValue = (uint)((codeAddress >> 40) & 0xFFUL);
-        if (!TryWriteUInt32(ctx, loEntryAddress + sizeof(uint), loValue) ||
-            !TryWriteUInt32(ctx, hiEntryAddress + sizeof(uint), hiValue))
+        var lowValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
+        var highValue = (uint)((codeAddress >> 40) & 0xFFUL);
+        if (!TryWriteUInt32(context, lowEntryAddress + sizeof(uint), lowValue) ||
+            !TryWriteUInt32(context, highEntryAddress + sizeof(uint), highValue))
         {
-            return false;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (foundLo != expectedLo || foundHi != expectedHi)
+        if (foundLowRegister != expectedLowRegister || foundHighRegister != expectedHighRegister)
         {
             TraceCreateShader(
                 0,
                 headerAddress,
                 codeAddress,
-                $"patched-alt-registers type={shaderType} lo=0x{foundLo:X8} hi=0x{foundHi:X8}");
+                $"patched-alt-registers type={shaderType} lo=0x{foundLowRegister:X8} hi=0x{foundHighRegister:X8}");
         }
 
-        return true;
+        return OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static readonly (uint Lo, uint Hi)[] ShaderProgramRegisterPairs =
+    private static readonly (uint Low, uint High)[] ShaderProgramRegisterPairs =
     [
         (ComputePgmLo, ComputePgmHi),
         (SpiShaderPgmLoPs, SpiShaderPgmHiPs),
@@ -1070,86 +1087,88 @@ public static partial class AgcExports
     ];
 
     private static bool TryFindShaderProgramRegisterPair(
-        CpuContext ctx,
-        ulong shRegistersAddress,
+        ReadOnlySpan<byte> registerTable,
+        ulong shaderRegistersAddress,
         byte registerCount,
-        uint preferredLo,
-        uint preferredHi,
-        out ulong loEntryAddress,
-        out ulong hiEntryAddress,
-        out uint foundLo,
-        out uint foundHi)
+        uint preferredLowRegister,
+        uint preferredHighRegister,
+        out ulong lowEntryAddress,
+        out ulong highEntryAddress,
+        out uint foundLowRegister,
+        out uint foundHighRegister,
+        out bool hasProgramAddressEntries)
     {
-        loEntryAddress = 0;
-        hiEntryAddress = 0;
-        foundLo = 0;
-        foundHi = 0;
+        lowEntryAddress = 0;
+        highEntryAddress = 0;
+        foundLowRegister = 0;
+        foundHighRegister = 0;
+        hasProgramAddressEntries = false;
 
-        ulong preferredLoAddress = 0;
-        ulong preferredHiAddress = 0;
-        ulong fallbackLoAddress = 0;
-        ulong fallbackHiAddress = 0;
-        uint fallbackLo = 0;
-        uint fallbackHi = 0;
+        ulong preferredLowAddress = 0;
+        ulong preferredHighAddress = 0;
+        ulong fallbackLowAddress = 0;
+        ulong fallbackHighAddress = 0;
+        uint fallbackLowRegister = 0;
+        uint fallbackHighRegister = 0;
 
-        for (uint index = 0; index < registerCount; index++)
+        for (uint registerIndex = 0; registerIndex < registerCount; registerIndex++)
         {
-            var entryAddress = shRegistersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var offset))
+            var entryAddress = shaderRegistersAddress + ((ulong)registerIndex * 8);
+            var registerOffset = BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)(registerIndex * 8)..]);
+            foreach (var registerPair in ShaderProgramRegisterPairs)
             {
-                return false;
+                hasProgramAddressEntries |= registerOffset == registerPair.Low || registerOffset == registerPair.High;
             }
 
-            if (preferredLo != 0 && offset == preferredLo)
+            if (preferredLowRegister != 0 && registerOffset == preferredLowRegister)
             {
-                preferredLoAddress = entryAddress;
+                preferredLowAddress = entryAddress;
             }
-            else if (preferredHi != 0 && offset == preferredHi)
+            else if (preferredHighRegister != 0 && registerOffset == preferredHighRegister)
             {
-                preferredHiAddress = entryAddress;
+                preferredHighAddress = entryAddress;
             }
 
-            if (fallbackLoAddress != 0)
+            if (fallbackLowAddress != 0)
             {
                 continue;
             }
 
-            foreach (var pair in ShaderProgramRegisterPairs)
+            foreach (var registerPair in ShaderProgramRegisterPairs)
             {
-                if (offset != pair.Lo)
+                if (registerOffset != registerPair.Low)
                 {
                     continue;
                 }
 
                 // Prefer a contiguous LO/HI pair when present.
-                if (index + 1 < registerCount &&
-                    TryReadUInt32(ctx, entryAddress + 8, out var nextOffset) &&
-                    nextOffset == pair.Hi)
+                if (registerIndex + 1 < registerCount &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)((registerIndex + 1) * 8)..]) == registerPair.High)
                 {
-                    fallbackLoAddress = entryAddress;
-                    fallbackHiAddress = entryAddress + 8;
-                    fallbackLo = pair.Lo;
-                    fallbackHi = pair.Hi;
+                    fallbackLowAddress = entryAddress;
+                    fallbackHighAddress = entryAddress + 8;
+                    fallbackLowRegister = registerPair.Low;
+                    fallbackHighRegister = registerPair.High;
                     break;
                 }
 
-                for (uint hiIndex = 0; hiIndex < registerCount; hiIndex++)
+                for (uint highRegisterIndex = 0; highRegisterIndex < registerCount; highRegisterIndex++)
                 {
-                    if (hiIndex == index)
+                    if (highRegisterIndex == registerIndex)
                     {
                         continue;
                     }
 
-                    var hiAddress = shRegistersAddress + ((ulong)hiIndex * 8);
-                    if (!TryReadUInt32(ctx, hiAddress, out var hiOffset) || hiOffset != pair.Hi)
+                    var highAddress = shaderRegistersAddress + ((ulong)highRegisterIndex * 8);
+                    if (BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)(highRegisterIndex * 8)..]) != registerPair.High)
                     {
                         continue;
                     }
 
-                    fallbackLoAddress = entryAddress;
-                    fallbackHiAddress = hiAddress;
-                    fallbackLo = pair.Lo;
-                    fallbackHi = pair.Hi;
+                    fallbackLowAddress = entryAddress;
+                    fallbackHighAddress = highAddress;
+                    fallbackLowRegister = registerPair.Low;
+                    fallbackHighRegister = registerPair.High;
                     break;
                 }
 
@@ -1157,21 +1176,21 @@ public static partial class AgcExports
             }
         }
 
-        if (preferredLoAddress != 0 && preferredHiAddress != 0)
+        if (preferredLowAddress != 0 && preferredHighAddress != 0)
         {
-            loEntryAddress = preferredLoAddress;
-            hiEntryAddress = preferredHiAddress;
-            foundLo = preferredLo;
-            foundHi = preferredHi;
+            lowEntryAddress = preferredLowAddress;
+            highEntryAddress = preferredHighAddress;
+            foundLowRegister = preferredLowRegister;
+            foundHighRegister = preferredHighRegister;
             return true;
         }
 
-        if (fallbackLoAddress != 0 && fallbackHiAddress != 0)
+        if (fallbackLowAddress != 0 && fallbackHighAddress != 0)
         {
-            loEntryAddress = fallbackLoAddress;
-            hiEntryAddress = fallbackHiAddress;
-            foundLo = fallbackLo;
-            foundHi = fallbackHi;
+            lowEntryAddress = fallbackLowAddress;
+            highEntryAddress = fallbackHighAddress;
+            foundLowRegister = fallbackLowRegister;
+            foundHighRegister = fallbackHighRegister;
             return true;
         }
 
