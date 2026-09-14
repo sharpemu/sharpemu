@@ -456,13 +456,13 @@ public sealed record Gen5ShaderProgram(
     private readonly uint _parameterExportMask = ComputeParameterExportMask(Instructions);
     private const int ScalarRegisterCount = 256;
     private IReadOnlySet<uint>? _runtimeScalarRegisters;
-    private IReadOnlyDictionary<uint, uint>? _alternateImageEntries;
+    private IReadOnlyDictionary<uint, uint>? _alternateResourceEntries;
 
-    // Cache branch entries whose image instructions are skipped by a forward jump.
-    internal IReadOnlyDictionary<uint, uint> AlternateImageEntries =>
-        _alternateImageEntries ??= FindAlternateImageEntries();
+    // Cache branch entries whose resource instructions are skipped by a forward jump.
+    internal IReadOnlyDictionary<uint, uint> AlternateResourceEntries =>
+        _alternateResourceEntries ??= FindAlternateResourceEntries();
 
-    private IReadOnlyDictionary<uint, uint> FindAlternateImageEntries()
+    private IReadOnlyDictionary<uint, uint> FindAlternateResourceEntries()
     {
         var entries = new Dictionary<uint, uint>();
         var skippedRanges = new List<(uint Start, long End)>();
@@ -486,7 +486,7 @@ public sealed record Gen5ShaderProgram(
             if (skippedRanges.Any(range => instruction.Pc < range.Start &&
                 target > range.Start && target < range.End &&
                 Instructions.Any(candidate => candidate.Pc >= target && candidate.Pc < range.End &&
-                    candidate.Control is Gen5ImageControl)))
+                    candidate.Control is Gen5ImageControl or Gen5BufferMemoryControl or Gen5GlobalMemoryControl)))
             {
                 entries.Add(instruction.Pc, (uint)target);
             }

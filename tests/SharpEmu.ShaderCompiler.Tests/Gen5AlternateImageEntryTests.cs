@@ -18,7 +18,7 @@ public sealed class Gen5AlternateImageEntryTests
             new(4, Gen5ShaderEncoding.Sopp, "SNop", [0u], [], [], null),
             new(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0u], [], [], null),
         ]);
-        var property = typeof(Gen5ShaderProgram).GetProperty("AlternateImageEntries",
+        var property = typeof(Gen5ShaderProgram).GetProperty("AlternateResourceEntries",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var entries = Assert.IsAssignableFrom<IReadOnlyDictionary<uint, uint>>(property.GetValue(program));
         Assert.Empty(entries);

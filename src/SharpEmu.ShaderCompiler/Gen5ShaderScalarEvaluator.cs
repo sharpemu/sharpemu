@@ -166,7 +166,7 @@ public static partial class Gen5ShaderScalarEvaluator
     public static bool WasEmptySrtScalarPointerFallback(ulong shaderAddress) =>
         _emptySrtScalarPointerFallbacks.ContainsKey(shaderAddress);
 
-    // Discover image bindings in skipped blocks. Keep the registers from their branch entries.
+    // Discover resource bindings in skipped blocks. Keep the registers from their branch entries.
     private static readonly bool _cfgResourceDiscovery =
         !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_CFG_RESOURCE_DISCOVERY"),
@@ -227,9 +227,10 @@ public static partial class Gen5ShaderScalarEvaluator
         HashSet<uint> LaneRestoredScalarRegisters,
         ulong ExecMask,
         bool ScalarConditionCode,
-        bool Supplemental);
+        bool Supplemental,
+        bool FromConditionalEntry);
 
-    private readonly record struct ScalarPathKey(uint StartPc, ulong StateHash);
+    private readonly record struct ScalarPathKey(uint StartPc, ulong StateHash, bool FromConditionalEntry);
 
     private static ulong ComputeScalarStateHash(
         IReadOnlyList<uint> registers,
@@ -413,6 +414,7 @@ public static partial class Gen5ShaderScalarEvaluator
             new Dictionary<(ulong Address, uint Stride, uint DataFormat,
                 uint NumberFormat, uint ComponentCount), int>();
         var vertexInputAliasPcs = new List<List<uint>>();
+        HashSet<uint>? resolvedVertexInstructions = resolveVertexInputs ? [] : null;
         // Shared, cached, read-only: computed once per decoded program. The
         // set already includes every instruction's destination registers, so
         // the per-load additions the loop used to make are redundant.
@@ -420,7 +422,7 @@ public static partial class Gen5ShaderScalarEvaluator
         var resolvedImageByPc = new Dictionary<uint, int>();
         var finalScalarRegisters = (uint[])scalarRegisters.Clone();
         var pendingPaths = new Stack<ScalarPathState>();
-        Queue<ScalarPathState>? pendingImageEntries = null;
+        Queue<ScalarPathState>? pendingBranchEntries = null;
         var visitedPaths = new HashSet<ScalarPathKey>();
         using var pooledData = new PooledEvaluationDataScope(
             globalMemoryBindings,
@@ -434,7 +436,7 @@ public static partial class Gen5ShaderScalarEvaluator
             ulong pathExecMask,
             bool pathScc,
             bool supplemental,
-            bool imageEntry = false)
+            bool fromConditionalEntry = false)
         {
             var key = new ScalarPathKey(
                 pc,
@@ -443,7 +445,8 @@ public static partial class Gen5ShaderScalarEvaluator
                     vectorLaneValues,
                     laneRestoredScalarRegisters,
                     pathExecMask,
-                    pathScc));
+                    pathScc),
+                fromConditionalEntry);
             if (visitedPaths.Add(key))
             {
                 var queuedPath = new ScalarPathState(
@@ -453,8 +456,9 @@ public static partial class Gen5ShaderScalarEvaluator
                     laneRestoredScalarRegisters,
                     pathExecMask,
                     pathScc,
-                    supplemental);
-                if (imageEntry) (pendingImageEntries ??= new()).Enqueue(queuedPath);
+                    supplemental,
+                    fromConditionalEntry);
+                if (fromConditionalEntry) (pendingBranchEntries ??= new()).Enqueue(queuedPath);
                 else pendingPaths.Push(queuedPath);
             }
         }
@@ -475,10 +479,10 @@ public static partial class Gen5ShaderScalarEvaluator
         var sampleInstructions = measureWork && resolveVertexInputs &&
             Gen5ShaderEvaluationProfile.ShouldSampleInstructions(captureVertexInputsOnly);
         if (measureWork) work.SetupTicks = walkStarted - setupStarted;
-        while (pendingPaths.Count != 0 || pendingImageEntries is { Count: > 0 })
+        while (pendingPaths.Count != 0 || pendingBranchEntries is { Count: > 0 })
         {
             if (measureWork) work.Paths++;
-            var path = pendingImageEntries is { Count: > 0 } ? pendingImageEntries.Dequeue() : pendingPaths.Pop();
+            var path = pendingBranchEntries is { Count: > 0 } ? pendingBranchEntries.Dequeue() : pendingPaths.Pop();
             scalarRegisters = path.ScalarRegisters;
             var vectorLaneValues = path.VectorLaneValues;
             var laneRestoredScalarRegisters = path.LaneRestoredScalarRegisters;
@@ -520,13 +524,14 @@ public static partial class Gen5ShaderScalarEvaluator
                 }
 
                 // Use the incoming registers before the other branch can replace a descriptor.
-                if (_cfgResourceDiscovery && !path.Supplemental && instruction.Encoding == Gen5ShaderEncoding.Sopp &&
+                if (_cfgResourceDiscovery && (!path.Supplemental || path.FromConditionalEntry) &&
+                    instruction.Encoding == Gen5ShaderEncoding.Sopp &&
                     instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) &&
-                    state.Program.AlternateImageEntries.TryGetValue(instruction.Pc, out var imageEntryPc))
+                    state.Program.AlternateResourceEntries.TryGetValue(instruction.Pc, out var resourceEntryPc))
                 {
-                    QueuePath(imageEntryPc, (uint[])scalarRegisters.Clone(),
+                    QueuePath(resourceEntryPc, (uint[])scalarRegisters.Clone(),
                         CloneVectorLaneValues(vectorLaneValues), new HashSet<uint>(laneRestoredScalarRegisters),
-                        execMask, scalarConditionCode, supplemental: true, imageEntry: true);
+                        execMask, scalarConditionCode, supplemental: true, fromConditionalEntry: true);
                 }
 
                 if (instruction.Opcode == "SBranch" &&
@@ -535,7 +540,7 @@ public static partial class Gen5ShaderScalarEvaluator
                     if (targetPc > instruction.Pc)
                     {
                         // Scan skipped blocks after their saved conditional entries.
-                        // Resolved image bindings take priority over this fall-through state.
+                        // Resolved resource bindings take priority over this fall-through state.
                         if (_cfgResourceDiscovery)
                         {
                             var fallthroughPc = instruction.Pc +
@@ -754,7 +759,8 @@ public static partial class Gen5ShaderScalarEvaluator
                 if (instruction.Control is Gen5BufferMemoryControl bufferMemory)
                 {
                 if (path.Supplemental &&
-                    HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc))
+                    (HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc) ||
+                     resolvedVertexInstructions?.Contains(instruction.Pc) == true))
                 {
                     continue;
                 }
@@ -857,6 +863,12 @@ public static partial class Gen5ShaderScalarEvaluator
                         vertexReadBytes = Math.Min(vertexReadBytes, requiredBytes);
                     }
 
+                    if (_traceVertexInputShape)
+                    {
+                        TraceUnmappedVertexInput(ctx, state, instruction, bufferMemory,
+                            bufferDescriptor, initialScalarRegisters, scalarRegisters, path.Supplemental);
+                    }
+
                     if (!TryCreateVertexInputBinding(
                             instruction,
                             bufferMemory,
@@ -882,6 +894,7 @@ public static partial class Gen5ShaderScalarEvaluator
                         vertexInputBinding.DataFormat,
                         vertexInputBinding.NumberFormat,
                         vertexInputBinding.ComponentCount);
+                    resolvedVertexInstructions!.Add(instruction.Pc);
                     if (vertexInputByView.TryGetValue(
                             vertexInputView,
                             out var existingVertexInput))
@@ -1324,6 +1337,45 @@ public static partial class Gen5ShaderScalarEvaluator
             StringComparison.Ordinal);
 
     private static readonly HashSet<string> _tracedVertexInputShapes = [];
+
+    private static readonly HashSet<(ulong ShaderAddress, uint InstructionOffset)> _tracedUnmappedVertexInputs = [];
+
+    // Record the source registers and program when a fetch resolves outside readable guest memory.
+    private static void TraceUnmappedVertexInput(
+        CpuContext context,
+        Gen5ShaderState state,
+        Gen5ShaderInstruction instruction,
+        Gen5BufferMemoryControl control,
+        BufferDescriptor descriptor,
+        IReadOnlyList<uint> initialScalarRegisters,
+        IReadOnlyList<uint> scalarRegisters,
+        bool supplemental)
+    {
+        if (context.Memory.CanRead(descriptor.BaseAddress, 1))
+        {
+            return;
+        }
+
+        lock (_tracedUnmappedVertexInputs)
+        {
+            if (!_tracedUnmappedVertexInputs.Add((state.Program.Address, instruction.Pc)))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine($"[VERTEX-UNMAPPED] shader=0x{state.Program.Address:X16} " +
+            $"pc=0x{instruction.Pc:X} resource_register={control.ScalarResource} " +
+            $"address=0x{descriptor.BaseAddress:X16} stride={descriptor.Stride} " +
+            $"size={descriptor.SizeBytes} supplemental={supplemental}");
+        Console.Error.WriteLine("[VERTEX-UNMAPPED] initial_scalars=" +
+            string.Join(',', initialScalarRegisters.Select(static value => value.ToString("X8"))));
+        Console.Error.WriteLine("[VERTEX-UNMAPPED] fetch_scalars=" +
+            string.Join(',', scalarRegisters.Select(static value => value.ToString("X8"))));
+        Console.Error.WriteLine("[VERTEX-UNMAPPED] program=" +
+            string.Join(',', state.Program.Instructions.SelectMany(static item => item.Words)
+                .Select(static value => value.ToString("X8"))));
+    }
 
     private static void TraceVertexInputShape(
         IReadOnlyList<Gen5VertexInputBinding> bindings)
