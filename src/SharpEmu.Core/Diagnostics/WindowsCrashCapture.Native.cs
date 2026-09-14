@@ -9,9 +9,12 @@ namespace SharpEmu.Core.Diagnostics;
 public static partial class WindowsCrashCapture
 {
     private const uint ExceptionEvent = 1;
+    private const uint CreateThreadEvent = 2;
     private const uint CreateProcessEvent = 3;
+    private const uint ExitThreadEvent = 4;
     private const uint ExitProcessEvent = 5;
     private const uint LoadLibraryEvent = 6;
+    private const uint UnloadLibraryEvent = 7;
     private const uint BreakpointException = 0x80000003;
     private const uint DebugContinue = 0x00010002;
     private const uint DebugExceptionNotHandled = 0x80010001;
@@ -76,6 +79,10 @@ public static partial class WindowsCrashCapture
         [FieldOffset(168)] public uint FirstChance;
         [FieldOffset(16)] public nint FileHandle;
         [FieldOffset(16)] public uint ExitCode;
+        [FieldOffset(24)] public nint LoadedLibraryBase;
+        [FieldOffset(16)] public nint UnloadedLibraryBase;
+        [FieldOffset(32)] public nint ThreadStartAddress;
+        [FieldOffset(64)] public nint ProcessThreadStartAddress;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -143,6 +150,9 @@ public static partial class WindowsCrashCapture
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(nint handle);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", SetLastError = true)]
+    private static unsafe partial uint GetFinalPathNameByHandle(nint file, char* path, uint length, uint flags);
 
     [LibraryImport("dbghelp.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

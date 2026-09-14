@@ -111,6 +111,7 @@ public static partial class WindowsCrashCapture
     {
         var initialBreakpoint = true;
         var captured = false;
+        var debuggerBreaks = new DebuggerBreakTracker();
         while (true)
         {
             if (!WaitForDebugEventEx(out var debugEvent, uint.MaxValue))
@@ -120,8 +121,15 @@ public static partial class WindowsCrashCapture
             var ready = false;
             try
             {
-                if (debugEvent.Kind is CreateProcessEvent or LoadLibraryEvent && debugEvent.FileHandle != 0)
-                    _ = CloseHandle(debugEvent.FileHandle);
+                try
+                {
+                    debuggerBreaks.Observe(debugEvent);
+                }
+                finally
+                {
+                    if (debugEvent.Kind is CreateProcessEvent or LoadLibraryEvent && debugEvent.FileHandle != 0)
+                        _ = CloseHandle(debugEvent.FileHandle);
+                }
                 if (debugEvent.Kind == ExceptionEvent)
                 {
                     continuation = DebugExceptionNotHandled;
@@ -130,6 +138,11 @@ public static partial class WindowsCrashCapture
                         initialBreakpoint = false;
                         continuation = DebugContinue;
                         ready = true;
+                    }
+                    else if (debuggerBreaks.IsDebuggerBreak(debugEvent))
+                    {
+                        continuation = DebugContinue;
+                        report.WriteLine($"Debugger break continued. Thread: {debugEvent.ThreadId}.");
                     }
                     else if (debugEvent.FirstChance == 0 && !captured)
                     {
@@ -150,7 +163,7 @@ public static partial class WindowsCrashCapture
 
             if (ready)
             {
-                report.WriteLine("Capture ready. First-chance exceptions remain unhandled by the helper.");
+                report.WriteLine("Capture ready. Application exceptions remain unhandled by the helper.");
                 readyEvent.Set();
             }
             if (debugEvent.Kind == ExitProcessEvent)

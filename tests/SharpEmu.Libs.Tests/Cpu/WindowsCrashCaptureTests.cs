@@ -19,6 +19,9 @@ public sealed class WindowsCrashCaptureTests
         Assert.Equal(1232, Marshal.SizeOf<WindowsCrashCapture.ThreadContext>());
         Assert.Equal(16, Marshal.SizeOf<WindowsCrashCapture.DumpExceptionInformation>());
         Assert.Equal(168, Marshal.OffsetOf<WindowsCrashCapture.DebugEvent>("FirstChance").ToInt32());
+        Assert.Equal(24, Marshal.OffsetOf<WindowsCrashCapture.DebugEvent>("LoadedLibraryBase").ToInt32());
+        Assert.Equal(32, Marshal.OffsetOf<WindowsCrashCapture.DebugEvent>("ThreadStartAddress").ToInt32());
+        Assert.Equal(64, Marshal.OffsetOf<WindowsCrashCapture.DebugEvent>("ProcessThreadStartAddress").ToInt32());
         Assert.Equal(32, Marshal.OffsetOf<WindowsCrashCapture.ExceptionRecord>("Parameters").ToInt32());
         Assert.Equal(4, Marshal.OffsetOf<WindowsCrashCapture.DumpExceptionInformation>("Pointers").ToInt32());
     }
@@ -62,6 +65,10 @@ public sealed class WindowsCrashCaptureTests
     [InlineData("access-violation", true)]
     [InlineData("fast-fail", true)]
     [InlineData("dump-failure", false)]
+    [InlineData("debugger-breaks", false)]
+    [InlineData("debugger-breaks-then-crash", true)]
+    [InlineData("application-breakpoint", true)]
+    [InlineData("application-debugbreak", true)]
     public async Task CapturesOnlyUnhandledExceptions(string scenario, bool expectDump)
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
@@ -100,6 +107,14 @@ public sealed class WindowsCrashCaptureTests
         {
             using var helperExited = ((IAsyncResult)helper).AsyncWaitHandle;
             await Task.Run(() => WindowsCrashCapture.WaitForHelper(readyEvent, helperExited)).WaitAsync(TimeSpan.FromSeconds(45));
+            if (scenario.StartsWith("debugger-breaks", StringComparison.Ordinal))
+            {
+                for (var breakIndex = 1; breakIndex <= 3; breakIndex++)
+                {
+                    Assert.True(DebugBreakProcess(target.Handle));
+                    await WaitForDebuggerBreakAsync(target, dumpPath + ".capture.log", breakIndex);
+                }
+            }
             startEvent.Set();
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(45));
             var helperResult = await helper.WaitAsync(TimeSpan.FromSeconds(45));
@@ -112,7 +127,8 @@ public sealed class WindowsCrashCaptureTests
             {
                 Assert.Contains("Dump complete.", report);
                 Assert.NotEqual(0, target.ExitCode);
-                VerifyDump(dumpPath, scenario == "fast-fail" ? 0xC0000409u : 0xC0000005u);
+                VerifyDump(dumpPath, scenario == "fast-fail" ? 0xC0000409u :
+                    scenario.StartsWith("application-", StringComparison.Ordinal) ? 0x80000003u : 0xC0000005u);
             }
             else if (scenario == "dump-failure")
             {
@@ -134,6 +150,28 @@ public sealed class WindowsCrashCaptureTests
             await target.WaitForExitAsync();
             await helper.WaitAsync(TimeSpan.FromSeconds(15));
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DebugBreakProcess(nint process);
+
+    private static async Task WaitForDebuggerBreakAsync(Process target, string reportPath, int expectedCount)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (true)
+        {
+            string report;
+            using (var stream = new FileStream(reportPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = new StreamReader(stream))
+                report = await reader.ReadToEndAsync(timeout.Token);
+            if (report.Split("Debugger break continued.", StringSplitOptions.None).Length - 1 >= expectedCount)
+                return;
+            Assert.False(target.HasExited, report);
+            Assert.DoesNotContain("Capture failed:", report);
+            Assert.DoesNotContain("Unhandled exception:", report);
+            await Task.Delay(10, timeout.Token);
         }
     }
 
@@ -166,7 +204,11 @@ public sealed class WindowsCrashCaptureTests
         input.BaseStream.Position = streams[6] + 164;
         var contextOffset = input.ReadUInt32();
         input.BaseStream.Position = contextOffset + 248;
-        Assert.Equal(exceptionAddress, input.ReadUInt64());
+        var instructionAddress = input.ReadUInt64();
+        if (exceptionCode == 0x80000003u)
+            Assert.InRange(instructionAddress, exceptionAddress, exceptionAddress + 1);
+        else
+            Assert.Equal(exceptionAddress, instructionAddress);
 
         input.BaseStream.Position = streams[9];
         var rangeCount = input.ReadUInt64();
@@ -178,7 +220,10 @@ public sealed class WindowsCrashCaptureTests
             if (exceptionAddress >= address && exceptionAddress - address < size)
             {
                 input.BaseStream.Position = checked((long)(memoryOffset + exceptionAddress - address));
-                Assert.Equal(exceptionCode == 0xC0000409u ? (ushort)0x29CD : (ushort)0x008B, input.ReadUInt16());
+                if (exceptionCode == 0x80000003u)
+                    Assert.Equal(0xCC, input.ReadByte());
+                else
+                    Assert.Equal(exceptionCode == 0xC0000409u ? (ushort)0x29CD : (ushort)0x008B, input.ReadUInt16());
                 return;
             }
             memoryOffset += size;
@@ -201,12 +246,23 @@ public sealed class WindowsCrashCaptureTests
             [DllImport("kernel32.dll")] static extern IntPtr AddVectoredExceptionHandler(uint first, IntPtr handler);
             [DllImport("kernel32.dll")] static extern uint SetErrorMode(uint mode);
             [DllImport("kernel32.dll")] static extern bool FlushInstructionCache(IntPtr process, IntPtr address, UIntPtr size);
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr module, string name);
             public static void Run(string scenario)
             {
                 SetErrorMode(2);
-                byte[] payload = scenario == "clean" ? new byte[] { 0x31,0xC0,0xC3 } :
+                byte[] payload = scenario == "clean" || scenario == "debugger-breaks" ? new byte[] { 0x31,0xC0,0xC3 } :
+                    scenario == "application-breakpoint" ? new byte[] { 0xCC,0x31,0xC0,0xC3 } :
                     scenario == "fast-fail" ? new byte[] { 0xB9,7,0,0,0,0xCD,0x29 } :
                     new byte[] { 0xB9,0xE8,3,0,0,0x31,0xC0,0x8B,0,0xFF,0xC9,0x75,0xF8,0x31,0xC0,0xC3 };
+                if (scenario == "application-debugbreak")
+                {
+                    var entry = GetProcAddress(GetModuleHandle("ntdll.dll"), "DbgBreakPoint");
+                    if (entry == IntPtr.Zero) throw new InvalidOperationException("Could not find the breakpoint entry.");
+                    payload = new byte[] { 0x48,0x83,0xEC,0x28,0x48,0xB8,0,0,0,0,0,0,0,0,
+                        0xFF,0xD0,0x48,0x83,0xC4,0x28,0x31,0xC0,0xC3 };
+                    BitConverter.GetBytes(entry.ToInt64()).CopyTo(payload, 6);
+                }
                 if (scenario == "handled")
                 {
                     byte[] handler = {
