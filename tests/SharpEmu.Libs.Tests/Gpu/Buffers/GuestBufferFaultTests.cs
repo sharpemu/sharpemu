@@ -102,8 +102,8 @@ public sealed class GuestBufferFaultTests
             Assert.False(GuestGpuMemoryHook.TryResolveFault(FaultKind.Write, 0x3_0000_0000));
             Assert.Contains("faults_declined=2", GuestGpuMemoryHook.GetSummary());
 
-            // Lost race: two guest threads faulting the same GPU-dirty page through the live
-            // handler both resume; the first hops to the worker while the second spins natively.
+            // Two guest threads fault on the same GPU-dirty page.
+            // Store synchronization must let both resume after the download.
             var raced = harness.MapBacked(0x10000, ReadWrite);
             harness.Worker.Run(() =>
             {

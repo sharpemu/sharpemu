@@ -213,6 +213,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private nint _guestReturnStub;
 
 	private nint _workerAbortStub;
+
 	private uint _workerDoneEventTlsIndex = uint.MaxValue;
 
 	private uint _tbbAbortEligibleTlsIndex = uint.MaxValue;
@@ -718,8 +719,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
 
 	private int _mainHostThreadId;
-
-	public static string? CurrentTitleId { get; set; }
 
 	[ThreadStatic]
 	private static ulong _currentExternalGuestThreadHandle;
@@ -2774,14 +2773,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return (nint)ptr;
 	}
 
-	internal unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
+	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
 	{
-		// Live VEH trampoline used by SetupExceptionHandler. Must pre-filter
-		// FastFail / CLR / MSVC C++ / stack-overflow the same way as
-		// WindowsFaultHandling.CreateHandlerThunk: entering managed VEH while
-		// the thread is in cooperative GC mode fail-fasts with
-		// "UnmanagedCallersOnly method from managed code" (tLT18–22).
-		// Extra headroom for native worker abort and FastFail diagnostics.
+		// Filter runtime exceptions before entering managed code.
+		// Reserve space for native worker recovery and fatal diagnostics.
 		const uint stubSize = 2048u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
 		if (ptr == null)
@@ -3143,21 +3138,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		*(nint*)(code + offset) = managedHandler;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
 		EmitByte(code, ref offset, 0xE9);
 		int hostRestoreJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 
 		int guestStackOffset = offset;
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
 		EmitByte(code, ref offset, 0xB9);
 		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = _tlsGetValueAddress;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
 		int missingTlsJump = offset;
