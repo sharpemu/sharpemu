@@ -17,25 +17,14 @@ public sealed class Gen5FlatMemoryTests
     [Fact]
     public void SadU32CompilesToUnsignedMinMaxDifferenceAndAdd()
     {
-        var sad = new Gen5ShaderInstruction(
-            0,
-            Gen5ShaderEncoding.Vop3,
-            "VSadU32",
-            [0, 0],
-            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2)],
-            [Gen5Operand.Vector(3)],
-            null);
-        var end = new Gen5ShaderInstruction(
-            8,
-            Gen5ShaderEncoding.Sopp,
-            "SEndpgm",
-            [SEndpgm],
-            [],
-            [],
-            null);
+        var program = DecodeProgram(0xD15D0003u, 0x040A0300u, SEndpgm);
+        var addition = program.Instructions[0];
+        Assert.Equal("VSadU32", addition.Opcode);
+        Assert.Equal([Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2)], addition.Sources);
+        Assert.Equal([Gen5Operand.Vector(3)], addition.Destinations);
         var scalarRegisters = new uint[256];
         var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, [sad, end]),
+            program,
             [],
             null);
         var evaluation = new Gen5ShaderEvaluation(
@@ -58,6 +47,20 @@ public sealed class Gen5FlatMemoryTests
         Assert.Contains((ushort)SpirvOp.ExtInst, opcodes);
         Assert.Contains((ushort)SpirvOp.ISub, opcodes);
         Assert.Contains((ushort)SpirvOp.IAdd, opcodes);
+        var extendedOperations = new List<uint>();
+        for (var offset = 5 * sizeof(uint); offset < compiled.Spirv.Length;)
+        {
+            var header = BinaryPrimitives.ReadUInt32LittleEndian(compiled.Spirv.AsSpan(offset));
+            if ((ushort)header == (ushort)SpirvOp.ExtInst)
+            {
+                extendedOperations.Add(BinaryPrimitives.ReadUInt32LittleEndian(compiled.Spirv.AsSpan(offset + 4 * sizeof(uint))));
+            }
+
+            offset += checked((int)(header >> 16) * sizeof(uint));
+        }
+
+        Assert.Contains(38u, extendedOperations);
+        Assert.Contains(41u, extendedOperations);
     }
 
     public static TheoryData<uint, string> F16CompareOpcodes => new()

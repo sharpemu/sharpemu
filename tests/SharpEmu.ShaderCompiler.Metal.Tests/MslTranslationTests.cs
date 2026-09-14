@@ -52,9 +52,8 @@ public sealed class MslTranslationTests
                 out var shader,
                 out var error),
             error);
-        Assert.Contains("max(", shader.Source, StringComparison.Ordinal);
-        Assert.Contains(" - min(", shader.Source, StringComparison.Ordinal);
-        Assert.Contains(" + (", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("uint v[256]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("((max(v[0], v[1]) - min(v[0], v[1])) + (v[2]))", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
