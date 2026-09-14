@@ -745,7 +745,7 @@ public static partial class AgcExports
                 Vertex = ProgramId(compiled.Vertex),
                 Pixel = ProgramId(compiled.Pixel),
                 VertexInput = CreateVertexInput(vertexProgram, exportEvaluation),
-                PixelInput = new PixelInputInfo { InputCount = pixelInputCount, Stage = new ShaderStageResources(pixelProgram, CreateSnapshot(pixelEvaluation, pixelState)) },
+                PixelInput = new PixelInputInfo { InputCount = pixelInputCount, Stage = new ShaderStageResources(pixelProgram, CreateSnapshot(pixelEvaluation, pixelProgram.UserDataBase)) },
                 SolidClear = solidClear,
                 PositionStream = FindPositionStream(vertexInputs),
             };
@@ -1000,6 +1000,10 @@ public static partial class AgcExports
                 Stage = stage,
                 Hash = state.ShaderChecksum | (address << 32),
                 UserDataBase = state.UserDataScalarRegisterBase,
+                VertexOffsetScalarRegister = stage == ShaderStageKind.Vertex &&
+                    Gen5ShaderTranslator.TryGetEmbeddedVertexOffsetRegister(state, vertexInputs, out var vertexOffsetRegister)
+                        ? vertexOffsetRegister
+                        : ShaderProgramInfo.NoScalarRegister,
                 ParameterExportMask = state.Program.ParameterExportMask,
                 Buffers = buffers,
                 Images = images,
@@ -1054,7 +1058,7 @@ public static partial class AgcExports
         }
 
         // The descriptor words of every resource: real when the scalars carry them, else formed from the binding.
-        private static ResourceSnapshot CreateSnapshot(Gen5ShaderEvaluation evaluation, Gen5ShaderState state)
+        private static ResourceSnapshot CreateSnapshot(Gen5ShaderEvaluation evaluation, uint userDataBase)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceSnapshotCreation);
             var scalars = evaluation.InitialScalarRegisters;
@@ -1090,13 +1094,12 @@ public static partial class AgcExports
                 }
             }
 
-            _ = state;
             return new ResourceSnapshot
             {
                 Buffers = buffers,
                 Images = images,
                 Samplers = samplers.ToArray(),
-                UserData = scalars.ToArray(),
+                UserData = scalars.Skip(checked((int)userDataBase)).ToArray(),
             };
         }
 
@@ -1138,7 +1141,7 @@ public static partial class AgcExports
             {
                 Buffers = buffers.ToArray(),
                 FetchEmbedded = inputs.Count != 0,
-                Stage = new ShaderStageResources(vertexProgram, CreateSnapshot(evaluation, null!)),
+                Stage = new ShaderStageResources(vertexProgram, CreateSnapshot(evaluation, vertexProgram.UserDataBase)),
             };
         }
 
@@ -1286,7 +1289,7 @@ public static partial class AgcExports
                     ThreadGroupSizeEnabled = compute.ThreadGroupSizeEnable,
                     WaveSize = waveLanes,
                     LocalDataShareDwords = compute.LocalDataShareSize,
-                    Stage = new ShaderStageResources(program, CreateSnapshot(evaluation, shaderState)),
+                    Stage = new ShaderStageResources(program, CreateSnapshot(evaluation, program.UserDataBase)),
                 },
             };
         }

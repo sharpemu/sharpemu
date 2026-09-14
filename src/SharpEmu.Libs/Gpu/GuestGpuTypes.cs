@@ -118,11 +118,7 @@ internal sealed record GuestVertexBuffer(
     byte[] Data,
     int Length,
     bool Pooled,
-    bool PerInstance = false,
-    uint BaseRecord = 0)
-{
-    public ulong BindingOffsetBytes => (ulong)BaseRecord * Stride;
-}
+    bool PerInstance = false);
 
 internal sealed record GuestIndexBuffer(
     byte[] Data,
