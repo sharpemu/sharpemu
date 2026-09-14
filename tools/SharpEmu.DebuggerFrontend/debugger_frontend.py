@@ -1076,7 +1076,11 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
     def _has_valid_csrf_token(self) -> bool:
         token_values = self.headers.get_all(CSRF_HEADER, [])
         supplied_token = token_values[0] if len(token_values) == 1 else ""
-        return bool(supplied_token) and hmac.compare_digest(supplied_token, self.server.csrf_token)
+        return (
+            bool(supplied_token)
+            and supplied_token.isascii()
+            and hmac.compare_digest(supplied_token, self.server.csrf_token)
+        )
 
     @staticmethod
     def _parse_host_authority(value: str) -> tuple[str, int] | None:
