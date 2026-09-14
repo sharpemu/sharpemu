@@ -319,7 +319,6 @@ public sealed partial class DirectExecutionBackend
 			DumpPointerWindow("fault-register-r13", r13, 0x60);
 			DumpPointerWindow("fault-register-r14", r14, 0x60);
 
-
 			try
 			{
 				Console.Error.WriteLine("[LOADER][INFO]   Frame chain (RBP walk):");
@@ -1211,7 +1210,7 @@ public sealed partial class DirectExecutionBackend
 		for (int offset = 0; offset < size; offset += 8)
 		{
 			ulong slotAddress = baseAddress + (ulong)offset;
-			if (!TryReadQword(slotAddress, out var value))
+			if (slotAddress < baseAddress || !TryReadDiagnosticHostQword(slotAddress, out var value))
 			{
 				Console.Error.WriteLine($"[LOADER][INFO]     +0x{offset:X2}: <unreadable>");
 				break;
@@ -1252,12 +1251,18 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostQword(ulong address, out ulong value)
+	private static bool TryReadHostQword(ulong address, out ulong value)
 	{
 		value = 0;
-		if (address < 65536) return false;
+		if (address < 0x10000)
+		{
+			return false;
+		}
 		if (!OperatingSystem.IsWindows())
 		{
+			// A stray read inside the signal handler would raise a nested
+			// SIGSEGV and kill the process before diagnostics finish, so
+			// probe the region table instead of relying on try/catch.
 			return TryReadStackU64(address, out value);
 		}
 

@@ -3356,75 +3356,79 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
 	{
-		ulong num = rangeStart;
-		ulong num2 = rangeEnd;
-		int num3 = 0;
-		int num4 = 0;
-		int num9 = 0;
-		while (num < num2)
+		var cursor = rangeStart;
+		var counts = default(TlsPatchCounts);
+		while (cursor < rangeEnd)
 		{
-			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
+			var executableStart = cursor;
+			if (!TryGetExecutableRegionEnd(cursor, rangeEnd, out var executableEnd))
 			{
-				num += 4096uL;
+				cursor = executableEnd;
 				continue;
 			}
-			ulong num5 = Math.Max(num, lpBuffer.BaseAddress);
-			ulong num6 = lpBuffer.BaseAddress + lpBuffer.RegionSize;
-			if (num6 > num2)
+			// Keep instruction boundaries across adjacent executable host regions.
+			while (executableEnd < rangeEnd &&
+				TryGetExecutableRegionEnd(executableEnd, rangeEnd, out var nextEnd))
 			{
-				num6 = num2;
+				executableEnd = nextEnd;
 			}
-			uint num7 = lpBuffer.Protect & 0xFF;
-			bool flag = lpBuffer.State == 4096 && (lpBuffer.Protect & PAGE_GUARD) == 0 && num7 != PAGE_NOACCESS;
-			bool flag2 = num7 == PAGE_EXECUTE || num7 == 32 || num7 == 64 || num7 == PAGE_EXECUTE_WRITECOPY;
-			if (flag && flag2 && num6 > num5 + MinTlsPatchInstructionBytes)
+			cursor = executableEnd;
+			var reader = new CpuPatcher.UnsafeCodeReader((byte*)executableStart, executableEnd - executableStart);
+			var decoder = Decoder.Create(64, reader);
+			decoder.IP = executableStart;
+			while (reader.Position < executableEnd - executableStart)
 			{
-				byte* ptr = (byte*)num5;
-				int scanBytes = (int)(num6 - num5);
-				// These patterns must only be recognized at instruction boundaries.
-				// Scanning byte by byte can match inside another instruction -- an
-				// embedded immediate, say -- and the patch then overwrites that
-				// instruction with its call/NOP sequence, corrupting guest code.
-				var reader = new CpuPatcher.UnsafeCodeReader(ptr, scanBytes);
-				var decoder = Decoder.Create(64, reader, DecoderOptions.None);
-				decoder.IP = num5;
-				while (reader.Position < scanBytes)
+				decoder.Decode(out var instruction);
+				if (instruction.Code != Code.INVALID)
 				{
-					int instructionOffset = reader.Position;
-					decoder.Decode(out var instruction);
-					if (instruction.Code == Code.INVALID ||
-						instruction.Length <= 0 ||
-						instructionOffset + instruction.Length > scanBytes)
-					{
-						// Data or padding inside an executable range: step over it
-						// rather than abandoning the rest of the region.
-						if (reader.Position <= instructionOffset)
-						{
-							reader.Skip(1);
-						}
-
-						continue;
-					}
-
-					nint address = (nint)(ptr + instructionOffset);
-					int remainingBytes = scanBytes - instructionOffset;
-					if (TryPatchTlsLoadInstruction(address, ptr + instructionOffset, remainingBytes))
-					{
-						num3++;
-					}
-					else if (remainingBytes >= 12 && TryPatchTlsImmediateStoreInstruction(address, ptr + instructionOffset))
-					{
-						num9++;
-					}
-					else if (TryPatchStackCanaryInstruction(address, ptr + instructionOffset))
-					{
-						num4++;
-					}
+					counts += PatchDecodedTlsInstruction(in instruction);
 				}
 			}
-			num = num6 > num ? num6 : num + 4096uL;
 		}
-		return new TlsPatchCounts(num3, num9, num4);
+		return counts;
+	}
+
+	private static unsafe bool TryGetExecutableRegionEnd(ulong address, ulong rangeEnd, out ulong regionEnd)
+	{
+		regionEnd = address + Math.Min(4096uL, rangeEnd - address);
+		if (VirtualQuery((void*)address, out var information, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+			information.RegionSize == 0 || information.BaseAddress > address ||
+			information.RegionSize > ulong.MaxValue - information.BaseAddress)
+			return false;
+
+		var queriedEnd = information.BaseAddress + information.RegionSize;
+		if (queriedEnd <= address)
+			return false;
+		regionEnd = Math.Min(queriedEnd, rangeEnd);
+		var protection = information.Protect & 0xFF;
+		return information.State == MEM_COMMIT && (information.Protect & PAGE_GUARD) == 0 &&
+			(protection is PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY);
+	}
+
+	private unsafe TlsPatchCounts PatchDecodedTlsInstruction(in Instruction instruction)
+	{
+		if (instruction.SegmentPrefix != Register.FS || instruction.MemoryBase != Register.None ||
+			instruction.MemoryIndex != Register.None || instruction.HasLockPrefix)
+			return default;
+
+		var source = (byte*)instruction.IP;
+		var prefixLength = 0;
+		// Retain supported operand-size prefixes without searching instruction operands.
+		while (prefixLength < instruction.Length && source[prefixLength] == 0x66)
+			prefixLength++;
+		if (instruction.Code == Code.Mov_r64_rm64 && instruction.MemoryDisplacement64 == 0 &&
+			instruction.Length - prefixLength == 9 &&
+			TryPatchTlsLoadInstruction((nint)(source + prefixLength), source + prefixLength, 9))
+			return new TlsPatchCounts(1, 0, 0);
+
+		if (instruction.Code == Code.Mov_rm32_imm32 && instruction.Length == 12 &&
+			TryPatchTlsImmediateStoreInstruction((nint)source, source))
+			return new TlsPatchCounts(0, 1, 0);
+
+		if (instruction.Code is Code.Mov_r32_rm32 or Code.Mov_r64_rm64 or Code.Xor_r32_rm32 or Code.Xor_r64_rm64 &&
+			TryPatchStackCanaryInstruction((nint)source, source, instruction.Length))
+			return new TlsPatchCounts(0, 0, 1);
+		return default;
 	}
 
 	private unsafe bool IsPatternMatch(byte* ptr, byte[] pattern)
@@ -3439,70 +3443,56 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
-	private unsafe bool TryPatchStackCanaryInstruction(nint address, byte* source)
+	private unsafe bool TryPatchStackCanaryInstruction(nint address, byte* source, int availableLength)
 	{
-		if (*source != 100)
+		if (availableLength < 8 || *source != 0x64)
 		{
 			return false;
 		}
-		byte b = 0;
-		int num = 1;
-		int num2 = 8;
-		if (source[1] >= 64 && source[1] <= 79)
+		byte registerPrefix = 0;
+		int opcodeOffset = 1;
+		int instructionLength = 8;
+		if (source[1] >= 0x40 && source[1] <= 0x4F)
 		{
-			b = source[1];
-			num = 2;
-			num2 = 9;
+			registerPrefix = source[1];
+			opcodeOffset = 2;
+			instructionLength = 9;
 		}
-		byte b2 = source[num];
-		if (b2 != 139 && b2 != 51)
+		if (availableLength != instructionLength)
+			return false;
+		byte opcode = source[opcodeOffset];
+		if (opcode != 0x8B && opcode != 0x33)
 		{
 			return false;
 		}
-		byte b3 = source[num + 1];
-		byte b4 = source[num + 2];
-		if (b3 >> 6 != 0 || (b3 & 7) != 4 || b4 != 37)
+		byte registerAddressing = source[opcodeOffset + 1];
+		byte indexAddressing = source[opcodeOffset + 2];
+		if (registerAddressing >> 6 != 0 || (registerAddressing & 7) != 4 || indexAddressing != 0x25)
 		{
 			return false;
 		}
-		int num3 = *(int*)(source + num + 3);
-		if (num3 != 40)
+		int displacement = *(int*)(source + opcodeOffset + 3);
+		if (displacement != 0x28)
 		{
 			return false;
 		}
-		int num4 = ((b3 >> 3) & 7) | (((b & 4) != 0) ? 8 : 0);
-		bool flag = (b & 8) != 0;
-		int num5 = 64;
-		if (flag)
+		int destinationRegister = ((registerAddressing >> 3) & 7) | (((registerPrefix & 4) != 0) ? 8 : 0);
+		int replacementPrefix = 0x40;
+		if ((registerPrefix & 8) != 0)
 		{
-			num5 |= 8;
+			replacementPrefix |= 8;
 		}
-		if (num4 >= 8)
+		if (destinationRegister >= 8)
 		{
-			num5 |= 5;
+			replacementPrefix |= 5;
 		}
-		byte b5 = (byte)(0xC0 | ((num4 & 7) << 3) | (num4 & 7));
-		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, (nuint)num2, 64u, &flNewProtect))
-		{
-			return false;
-		}
-		try
-		{
-			*(byte*)address = (byte)num5;
-			*(sbyte*)(address + 1) = 49;
-			*(byte*)(address + 2) = b5;
-			for (int i = 3; i < num2; i++)
-			{
-				*(sbyte*)(address + i) = -112;
-			}
-		}
-		finally
-		{
-			VirtualProtect((void*)address, (nuint)num2, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)num2);
-		}
-		return true;
+		byte replacementRegisters = (byte)(0xC0 | ((destinationRegister & 7) << 3) | (destinationRegister & 7));
+		Span<byte> replacement = stackalloc byte[instructionLength];
+		replacement.Fill(0x90);
+		replacement[0] = (byte)replacementPrefix;
+		replacement[1] = 0x31;
+		replacement[2] = replacementRegisters;
+		return WriteTlsInstruction(address, replacement);
 	}
 
     private unsafe bool TryPatchTlsLoadInstruction(nint address, byte* source, int availableLength)
@@ -3531,24 +3521,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         var displacement = (long)handler - ((long)address + 6);
         if (displacement < int.MinValue || displacement > int.MaxValue)
             return false;
-        uint previousProtection = 0;
-        if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &previousProtection))
-            return false;
-        try
-        {
-            // REX.W keeps retained operand-size prefixes from changing the call width.
-            var patch = new Span<byte>((void*)address, instructionLength);
-            patch.Fill(0x90);
-            patch[0] = 0x48;
-            patch[1] = 0xE8;
-            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(patch[2..], (int)displacement);
-            return true;
-        }
-        finally
-        {
-            VirtualProtect((void*)address, (nuint)instructionLength, previousProtection, &previousProtection);
-            FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)instructionLength);
-        }
+        // REX.W keeps retained operand-size prefixes from changing the call width.
+        Span<byte> patch = stackalloc byte[instructionLength];
+        patch.Fill(0x90);
+        patch[0] = 0x48;
+        patch[1] = 0xE8;
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(patch[2..], (int)displacement);
+        return WriteTlsInstruction(address, patch);
     }
 
     private readonly nint[] _tlsRegisterLoadHelpers = new nint[16];
@@ -3653,36 +3632,59 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe bool PatchCallSite(nint address, int instructionLength, nint target)
 	{
-		if (instructionLength < 5)
+		if (instructionLength is < 5 or > 15)
+			return false;
+		var displacement = (long)target - ((long)address + 5);
+		if (displacement < int.MinValue || displacement > int.MaxValue)
 		{
+			Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
 			return false;
 		}
-		uint flNewProtect = default(uint);
-		if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &flNewProtect))
-		{
+		Span<byte> replacement = stackalloc byte[instructionLength];
+		replacement.Fill(0x90);
+		replacement[0] = 0xE8;
+		System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(replacement[1..], (int)displacement);
+		return WriteTlsInstruction(address, replacement);
+	}
+
+	private static unsafe bool WriteTlsInstruction(nint address, ReadOnlySpan<byte> replacement)
+	{
+		if (replacement.Length is < 1 or > 15 ||
+			VirtualQuery((void*)address, out var information, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+			information.RegionSize > ulong.MaxValue - information.BaseAddress)
 			return false;
-		}
+		var regionEnd = information.BaseAddress + information.RegionSize;
+		if (information.BaseAddress > (ulong)address || regionEnd <= (ulong)address)
+			return false;
+
+		// An instruction can cross two pages with different protection settings.
+		var firstLength = (nuint)Math.Min((ulong)replacement.Length, regionEnd - (ulong)address);
+		var secondLength = (nuint)replacement.Length - firstLength;
+		var secondAddress = (byte*)address + firstLength;
+		uint firstProtection = 0;
+		uint secondProtection = 0;
+		if (!VirtualProtect((void*)address, firstLength, PAGE_EXECUTE_READWRITE, &firstProtection))
+			return false;
+		var secondWritable = false;
 		try
 		{
-			long num = target - (address + 5);
-			if (num < int.MinValue || num > int.MaxValue)
+			if (secondLength != 0)
 			{
-				Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
-				return false;
+				secondWritable = VirtualProtect(secondAddress, secondLength, PAGE_EXECUTE_READWRITE, &secondProtection);
+				if (!secondWritable)
+					return false;
 			}
-			*(byte*)address = 232;
-			*(int*)(address + 1) = (int)num;
-			for (int i = 5; i < instructionLength; i++)
-			{
-				*(byte*)(address + i) = 144;
-			}
+			replacement.CopyTo(new Span<byte>((void*)address, replacement.Length));
+			return true;
 		}
 		finally
 		{
-			VirtualProtect((void*)address, (nuint)instructionLength, flNewProtect, &flNewProtect);
-			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)instructionLength);
+			uint ignoredProtection = 0;
+			if (secondWritable)
+				VirtualProtect(secondAddress, secondLength, secondProtection, &ignoredProtection);
+			VirtualProtect((void*)address, firstLength, firstProtection, &ignoredProtection);
+			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)replacement.Length);
 		}
-		return true;
 	}
 
 	private unsafe void TryPreReservePrtAperture(ulong baseAddress, ulong size)

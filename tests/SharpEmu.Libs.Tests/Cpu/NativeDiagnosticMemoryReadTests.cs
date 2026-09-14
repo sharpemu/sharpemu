@@ -4,6 +4,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Native;
+using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using Xunit;
 
@@ -85,5 +86,46 @@ public sealed class NativeDiagnosticMemoryReadTests
         {
             Marshal.FreeHGlobal(source);
         }
+    }
+
+    [Theory]
+    [InlineData(HostMemory.PAGE_NOACCESS)]
+    [InlineData(HostMemory.PAGE_READWRITE | 0x100u)]
+    public unsafe void WindowsDiagnosticReadsRejectAnUnreadableTrailingPage(uint protection)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pageSize = (nuint)Environment.SystemPageSize;
+        var memory = (byte*)HostMemory.Alloc(null, pageSize * 2, 0x3000, HostMemory.PAGE_READWRITE);
+        Assert.NotEqual(0, (nint)memory);
+        try
+        {
+            var address = (ulong)(memory + pageSize - 4);
+            var destination = new byte[16];
+            Assert.True((bool)TryReadHostBytes.Invoke(null, [address, destination])!);
+            Assert.True(HostMemory.Protect(memory + pageSize, pageSize, protection, out _));
+            Assert.False((bool)TryReadHostBytes.Invoke(null, [address, destination])!);
+            object?[] arguments = [address, 0UL];
+            Assert.False((bool)TryReadDiagnosticHostQword.Invoke(null, arguments)!);
+            Assert.Equal(0UL, arguments[1]);
+            Assert.NotEqual((nuint)0, HostMemory.Query(memory + pageSize, out var region));
+            Assert.Equal(protection, region.Protect);
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free(memory, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(0xFFF0UL)]
+    [InlineData(0x0000_7FFF_FFFF_FFF8UL)]
+    [InlineData(ulong.MaxValue - 7)]
+    public void DiagnosticReadsRejectInvalidRanges(ulong address)
+    {
+        Assert.False((bool)TryReadHostBytes.Invoke(null, [address, new byte[16]])!);
+        object?[] arguments = [address, 0UL];
+        Assert.False((bool)TryReadDiagnosticHostQword.Invoke(null, arguments)!);
+        Assert.Equal(0UL, arguments[1]);
     }
 }
