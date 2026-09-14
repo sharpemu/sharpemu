@@ -2529,11 +2529,8 @@ public static partial class Gen5ShaderTranslator
             {
                 var extra = words[1];
                 var vectorAddress = extra & 0xFF;
-                // FLAT/GLOBAL encodes the load destination in the high byte
-                // of the second dword.  MUBUF uses bits [15:8] instead, so
-                // sharing that extraction here silently clobbers the wrong
-                // VGPR range for GLOBAL_LOAD_* instructions.
-                var vectorData = (extra >> 24) & 0xFF;
+                var sourceVectorRegister = (extra >> 8) & 0xFF;
+                var destinationVectorRegister = (extra >> 24) & 0xFF;
                 var scalarAddress = (extra >> 16) & 0x7F;
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",
@@ -2580,21 +2577,36 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Scalar(scalarAddress),
                     ];
-                destinations = memoryOpcode.StartsWith(
-                        "GlobalLoad",
-                        StringComparison.Ordinal)
+                var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal);
+                var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal);
+                var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal);
+                var globallyCoherent = ((word >> 16) & 1) != 0;
+                if (isStore || isAtomic)
+                {
+                    sources = [.. sources, .. Enumerable
+                        .Range((int)sourceVectorRegister, checked((int)dwordCount))
+                        .Select(index => Gen5Operand.Vector((uint)index))];
+                }
+                else if (isLoad && memoryOpcode.Contains("D16", StringComparison.Ordinal))
+                {
+                    // A partial load preserves the other half of the destination.
+                    sources = [.. sources, Gen5Operand.Vector(destinationVectorRegister)];
+                }
+
+                destinations = isLoad || (isAtomic && globallyCoherent)
                     ? Enumerable
-                        .Range((int)vectorData, checked((int)dwordCount))
+                        .Range((int)destinationVectorRegister, checked((int)dwordCount))
                         .Select(index => Gen5Operand.Vector((uint)index))
                         .ToArray()
                     : [];
                 control = new Gen5GlobalMemoryControl(
                     dwordCount,
                     vectorAddress,
-                    vectorData,
+                    sourceVectorRegister,
+                    destinationVectorRegister,
                     usesFlatAddress ? uint.MaxValue : scalarAddress,
                     SignExtend(word & 0x1FFF, 13),
-                    ((word >> 16) & 1) != 0,
+                    globallyCoherent,
                     ((word >> 17) & 1) != 0,
                     usesFlatAddress);
                 break;

@@ -2583,10 +2583,10 @@ public static partial class Gen5SpirvTranslator
                             BufferWordPointer(bindingIndex, dwordAddress),
                             UInt(1),
                             UInt(0x48),
-                            LoadV(control.VectorData));
+                            LoadV(control.SourceVectorRegister));
                         if (control.Glc)
                         {
-                            StoreV(control.VectorData, original);
+                            StoreV(control.DestinationVectorRegister, original);
                         }
                     });
                 });
@@ -2605,13 +2605,13 @@ public static partial class Gen5SpirvTranslator
                         StoreBufferBytes(
                             bindingIndex,
                             byteAddress,
-                            LoadV(control.VectorData),
+                            LoadV(control.SourceVectorRegister),
                             byteCount,
                             sourceShift);
                         return;
                     }
 
-                    // GLOBAL_STORE/LOAD_DWORD(x2/x3/x4) are dword-aligned by the GCN ISA, so read/write dwords directly instead of the per-byte loop.
+                    // Aligned stores can transfer complete words.
                     for (uint index = 0; index < control.DwordCount; index++)
                     {
                         var indexedDwordAddress = index == 0
@@ -2620,7 +2620,7 @@ public static partial class Gen5SpirvTranslator
                         StoreBufferWord(
                             bindingIndex,
                             indexedDwordAddress,
-                            LoadV(control.VectorData + index));
+                            LoadV(control.SourceVectorRegister + index));
                     }
                 });
                 return true;
@@ -2634,11 +2634,11 @@ public static partial class Gen5SpirvTranslator
                     out var d16High))
             {
                 StoreV(
-                    control.VectorData,
+                    control.DestinationVectorRegister,
                     LoadSubdwordBufferValue(
                         bindingIndex,
                         byteAddress,
-                        LoadV(control.VectorData),
+                        LoadV(control.DestinationVectorRegister),
                         loadByteCount,
                         signExtend,
                         d16,
@@ -2652,7 +2652,7 @@ public static partial class Gen5SpirvTranslator
                     ? dwordAddress
                     : IAdd(dwordAddress, UInt(index));
                 StoreV(
-                    control.VectorData + index,
+                    control.DestinationVectorRegister + index,
                     LoadBufferWord(bindingIndex, indexedDwordAddress));
             }
 

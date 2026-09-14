@@ -320,6 +320,7 @@ public sealed class Gen5ShaderScalarEvaluatorPoolTests
             0,
             0,
             0,
+            0,
             Glc: false,
             Slc: false));
 

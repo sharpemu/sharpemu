@@ -140,7 +140,7 @@ public sealed class Gen5ScalarLoadRangeTests
     {
         var globalLoad = new Gen5ShaderInstruction(
             16, Gen5ShaderEncoding.Flat, "GlobalLoadDword", [], [], [],
-            new Gen5GlobalMemoryControl(1, 0, 0, 0, 0, Glc: false, Slc: false));
+            new Gen5GlobalMemoryControl(1, 0, 0, 0, 0, 0, Glc: false, Slc: false));
         Evaluate(snapshot, new RangeMemory(),
             [MaskOffset(0, 0x1F0), Load(8), globalLoad],
             binding => Assert.Equal(256UL * 1024, binding.Size));

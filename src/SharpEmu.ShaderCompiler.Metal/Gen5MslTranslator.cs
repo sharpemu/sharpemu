@@ -1392,7 +1392,8 @@ public static partial class Gen5MslTranslator
                 instruction.Opcode,
                 bindingIndex,
                 address,
-                control.VectorData,
+                control.SourceVectorRegister,
+                control.DestinationVectorRegister,
                 control.DwordCount,
                 control.Glc,
                 out error);
@@ -1454,6 +1455,7 @@ public static partial class Gen5MslTranslator
                 instruction.Opcode,
                 bindingIndex,
                 address,
+                control.VectorData,
                 control.VectorData,
                 control.DwordCount,
                 control.Glc,
@@ -1713,7 +1715,8 @@ public static partial class Gen5MslTranslator
             string opcode,
             int bindingIndex,
             string byteAddress,
-            uint vectorData,
+            uint sourceVectorRegister,
+            uint destinationVectorRegister,
             uint dwordCount,
             bool glc,
             out string error)
@@ -1733,10 +1736,10 @@ public static partial class Gen5MslTranslator
                 _indent++;
                 var original = Temp(
                     "uint",
-                    $"{function}((device atomic_uint*)(b{bindingIndex} + ({byteAddress} >> 2)), v[{vectorData}], memory_order_relaxed)");
+                    $"{function}((device atomic_uint*)(b{bindingIndex} + ({byteAddress} >> 2)), v[{sourceVectorRegister}], memory_order_relaxed)");
                 if (glc)
                 {
-                    Line($"v[{vectorData}] = {original};");
+                    Line($"v[{destinationVectorRegister}] = {original};");
                 }
 
                 _indent--;
@@ -1755,15 +1758,15 @@ public static partial class Gen5MslTranslator
                 if (TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift))
                 {
                     var source = sourceShift == 0
-                        ? $"v[{vectorData}]"
-                        : $"(v[{vectorData}] >> {sourceShift})";
+                        ? $"v[{sourceVectorRegister}]"
+                        : $"(v[{sourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {source}, {storeBytes}u);");
                 }
                 else
                 {
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{vectorData + index}], 4u);");
+                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}], 4u);");
                     }
                 }
 
@@ -1779,16 +1782,16 @@ public static partial class Gen5MslTranslator
                     $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {loadBytes}u, {(signExtend ? "true" : "false")})");
                 if (!d16)
                 {
-                    StoreVector(vectorData, loaded);
+                    StoreVector(destinationVectorRegister, loaded);
                     return true;
                 }
 
                 // D16 loads merge into one half of the destination register.
                 StoreVector(
-                    vectorData,
+                    destinationVectorRegister,
                     d16High
-                        ? $"(v[{vectorData}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
-                        : $"(v[{vectorData}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                        ? $"(v[{destinationVectorRegister}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                        : $"(v[{destinationVectorRegister}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
                 return true;
             }
 
@@ -1798,7 +1801,7 @@ public static partial class Gen5MslTranslator
                 for (uint index = 0; index < dwordCount; index++)
                 {
                     StoreVector(
-                        vectorData + index,
+                        destinationVectorRegister + index,
                         LoadWord(bindingIndex, $"({byteAddress} + {index * 4}u)"));
                 }
 

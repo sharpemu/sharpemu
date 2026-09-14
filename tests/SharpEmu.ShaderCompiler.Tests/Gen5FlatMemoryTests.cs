@@ -14,6 +14,64 @@ public sealed class Gen5FlatMemoryTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint SEndpgm = 0xBF810000;
 
+    public static IEnumerable<object[]> GlobalMemoryRegisterCases()
+    {
+        foreach (var usesFlatAddress in new[] { false, true })
+        foreach (var opcode in new uint[] { 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 50, 56 })
+        {
+            yield return [usesFlatAddress, opcode, false];
+            if (opcode is 50 or 56) yield return [usesFlatAddress, opcode, true];
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(GlobalMemoryRegisterCases))]
+    public void GlobalMemoryInstructions_KeepSeparateReadAndWriteRegisters(bool usesFlatAddress, uint opcode, bool returnsValue)
+    {
+        var word = 0xDC00_0000u | (opcode << 18) | (usesFlatAddress ? 0 : 2u << 14) | (returnsValue ? 1u << 16 : 0);
+        var instruction = DecodeProgram(word, 0x0810_0309, SEndpgm).Instructions[0];
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control);
+        Assert.Equal(3u, control.SourceVectorRegister);
+        Assert.Equal(8u, control.DestinationVectorRegister);
+        Assert.Equal(9u, control.VectorAddress);
+        Assert.Equal(usesFlatAddress ? uint.MaxValue : 16u, control.ScalarAddress);
+        Assert.Equal(usesFlatAddress, control.UsesFlatAddress);
+        Assert.Equal(returnsValue, control.Glc);
+
+        var isLoad = opcode is >= 8 and <= 15 or >= 32 and <= 37;
+        var componentCount = opcode switch { 13 or 29 => 2, 14 or 30 => 4, 15 or 31 => 3, _ => 1 };
+        Assert.Equal((uint)componentCount, control.DwordCount);
+        Gen5Operand[] addressSources = usesFlatAddress
+            ? [Gen5Operand.Vector(9), Gen5Operand.Vector(10)]
+            : [Gen5Operand.Vector(9), Gen5Operand.Scalar(16)];
+        var expectedSources = addressSources.ToList();
+        if (!isLoad)
+            expectedSources.AddRange(Enumerable.Range(3, componentCount).Select(index => Gen5Operand.Vector((uint)index)));
+        else if (opcode is >= 32 and <= 37)
+            expectedSources.Add(Gen5Operand.Vector(8));
+
+        Assert.Equal(expectedSources, instruction.Sources);
+        Assert.Equal(isLoad || returnsValue
+            ? Enumerable.Range(8, componentCount).Select(index => Gen5Operand.Vector((uint)index))
+            : [], instruction.Destinations);
+    }
+
+    [Fact]
+    public void ReturningAtomic_InvalidatesThePreviousFlatAddressDefinition()
+    {
+        var program = DecodeProgram(
+            0x7E02_020C, 0x7E04_020D,
+            0xDCC9_8000, 0x0110_0309,
+            0xDC30_0000, 0x087D_0001,
+            SEndpgm);
+        var atomic = program.Instructions[2];
+        Assert.Equal("GlobalAtomicAdd", atomic.Opcode);
+        Assert.Equal([Gen5Operand.Vector(1)], atomic.Destinations);
+        var load = Assert.IsType<Gen5GlobalMemoryControl>(program.Instructions[3].Control);
+        Assert.True(load.UsesFlatAddress);
+        Assert.Equal(uint.MaxValue, load.ScalarAddress);
+    }
+
     [Fact]
     public void SadU32CompilesToUnsignedMinMaxDifferenceAndAdd()
     {
@@ -184,7 +242,8 @@ public sealed class Gen5FlatMemoryTests
             instruction.Control);
         Assert.True(control.UsesFlatAddress);
         Assert.Equal(1u, control.VectorAddress);
-        Assert.Equal(0u, control.VectorData);
+        Assert.Equal(0u, control.SourceVectorRegister);
+        Assert.Equal(0u, control.DestinationVectorRegister);
         Assert.Equal(12u, control.ScalarAddress);
         Assert.Equal(
             [
@@ -228,53 +287,6 @@ public sealed class Gen5FlatMemoryTests
         Assert.Contains(
             (ushort)SpirvOp.ISub,
             ReadSpirvOpcodes(compiled.Spirv));
-    }
-
-    [Fact]
-    public void GlobalLoadUsesHighByteForVectorDestination()
-    {
-        var memory = new TestCpuMemory(ShaderAddress, 0x4000);
-        uint[] words =
-        [
-            // global_load_dwordx4 v[8:11], v9, s[16:17]
-            0xDC388000,
-            0x08100009,
-            SEndpgm,
-        ];
-        var shader = new byte[words.Length * sizeof(uint)];
-        for (var index = 0; index < words.Length; index++)
-        {
-            BinaryPrimitives.WriteUInt32LittleEndian(
-                shader.AsSpan(index * sizeof(uint)),
-                words[index]);
-        }
-        Assert.True(memory.TryWrite(ShaderAddress, shader));
-
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        Assert.True(
-            Gen5ShaderTranslator.TryDecodeProgram(
-                ctx,
-                ShaderAddress,
-                out var program,
-                out var decodeError),
-            decodeError);
-
-        var instruction = Assert.Single(
-            program.Instructions,
-            item => item.Opcode == "GlobalLoadDwordx4");
-        var control = Assert.IsType<Gen5GlobalMemoryControl>(
-            instruction.Control);
-        Assert.Equal(9u, control.VectorAddress);
-        Assert.Equal(8u, control.VectorData);
-        Assert.Equal(16u, control.ScalarAddress);
-        Assert.Equal(
-            [
-                Gen5Operand.Vector(8),
-                Gen5Operand.Vector(9),
-                Gen5Operand.Vector(10),
-                Gen5Operand.Vector(11),
-            ],
-            instruction.Destinations);
     }
 
     private static IReadOnlyList<ushort> ReadSpirvOpcodes(byte[] spirv)

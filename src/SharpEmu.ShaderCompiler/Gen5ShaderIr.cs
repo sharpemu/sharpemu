@@ -277,7 +277,8 @@ public sealed record Gen5ImageControl(
 public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,
-    uint VectorData,
+    uint SourceVectorRegister,
+    uint DestinationVectorRegister,
     uint ScalarAddress,
     int OffsetBytes,
     bool Glc,
