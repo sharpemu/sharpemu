@@ -85,6 +85,24 @@ public sealed class PageGuardTests : IDisposable
     }
 
     [Fact]
+    public void MaskedRestorationRecordsOnlyThePagesWhoseWriteAccessChanged()
+    {
+        using var guard = new PageGuard(_space);
+        var mask = new PageMask();
+        mask.SetRange(1, 2);
+        mask.SetRange(3, 4);
+        guard.AddWatchMask(Block, mask, blockReads: false);
+        Assert.Equal(0, guard.GetWriteRestorationVersion(Block + 0x1000));
+        guard.RemoveWatchMask(Block, mask, blockReads: false);
+        Assert.NotEqual(0, guard.GetWriteRestorationVersion(Block + 0x1000));
+        Assert.Equal(0, guard.GetWriteRestorationVersion(Block + 0x2000));
+        Assert.NotEqual(0, guard.GetWriteRestorationVersion(Block + 0x3000));
+        guard.ClearWriteRestorations(Block + 0x1000, 0x1000);
+        Assert.Equal(0, guard.GetWriteRestorationVersion(Block + 0x1000));
+        Assert.NotEqual(0, guard.GetWriteRestorationVersion(Block + 0x3000));
+    }
+
+    [Fact]
     public void AddWatchMask_ProtectsEachRunSeparately()
     {
         using var guard = new PageGuard(_space);

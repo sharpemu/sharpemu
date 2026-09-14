@@ -18,6 +18,9 @@ public interface IGuestBackedSpace
     // Wait for view replacement, then confirm that the restored page allows the access.
     bool CanRetryRestoredViewAccess(ulong address, GuestPageProtection access) => false;
 
+    // Confirm current host access without changing the mapping or its protection.
+    bool AllowsMappedAccess(ulong address, GuestPageProtection access) => false;
+
     // Copies through the backing alias only: no protection change, no store notification.
     bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data);
     bool TryReadBacking(ulong address, Span<byte> data);

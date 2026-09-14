@@ -19,6 +19,7 @@ public sealed class PageGuard : IDisposable
     private const ulong BlockBytes = TrackerLayout.BlockBytes;
     private const ulong SpaceBytes = TrackerLayout.SpaceBytes;
     private const int PagesPerBlock = TrackerLayout.PagesPerBlock;
+    private static long _nextWriteRestorationVersion;
 
     private struct PageCounts
     {
@@ -96,6 +97,7 @@ public sealed class PageGuard : IDisposable
     {
         public int Lock;
         public readonly PageCounts[] Pages = new PageCounts[PagesPerBlock];
+        public long[]? WriteRestorations;
     }
 
     // This lock runs in the fault handler. It must not allocate.
@@ -174,6 +176,34 @@ public sealed class PageGuard : IDisposable
         return kind == FaultKind.Write
             ? allowedAccess == (GuestPageProtection.Read | GuestPageProtection.Write)
             : allowedAccess != GuestPageProtection.None;
+    }
+
+    internal long GetWriteRestorationVersion(ulong address)
+    {
+        var block = FindBlock(address);
+        if (block == null) return 0;
+        using var held = new BlockLock(block);
+        var pageIndex = (int)(address % BlockBytes / PageBytes);
+        return (block.Pages[pageIndex].GetAllowedAccess() & GuestPageProtection.Write) != 0
+            ? block.WriteRestorations?[pageIndex] ?? 0 : 0;
+    }
+
+    // A new mapping must not inherit recovery evidence from the previous mapping.
+    internal void ClearWriteRestorations(ulong address, ulong size)
+    {
+        var end = GetPageRangeEnd(address, size);
+        for (var cursor = GetPageStart(address); cursor < end;)
+        {
+            var blockEnd = Math.Min(end, (cursor / BlockBytes + 1) * BlockBytes);
+            var block = FindBlock(cursor);
+            if (block != null)
+            {
+                using var held = new BlockLock(block);
+                if (block.WriteRestorations is { } restorations)
+                    Array.Clear(restorations, (int)(cursor % BlockBytes / PageBytes), (int)((blockEnd - cursor) / PageBytes));
+            }
+            cursor = blockEnd;
+        }
     }
 
     internal string DescribeWatchers(ulong address)
@@ -279,6 +309,9 @@ public sealed class PageGuard : IDisposable
     {
         using var _ = new BlockLock(block);
         var pages = block.Pages;
+        // Allocate before adding protection, never while resolving a fault.
+        if (track) block.WriteRestorations ??= new long[PagesPerBlock];
+        var restorationVersion = 0L;
         var allowedAccess = Derive(blockBase + (ulong)first * PageBytes, pages[first]);
         var rangeBegin = 0;
         var rangeBytes = 0UL;
@@ -303,6 +336,19 @@ public sealed class PageGuard : IDisposable
             var oldAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
             var newCount = pages[pageIndex].ChangeWatchCount(update ? (track ? 1 : -1) : 0, isRead, address);
             var newAllowedAccess = Derive(guest, pages[pageIndex].GetAllowedAccess());
+            if (update && block.WriteRestorations is { } restorations)
+            {
+                if ((newAllowedAccess & GuestPageProtection.Write) == 0)
+                {
+                    restorations[pageIndex] = 0;
+                }
+                else if ((oldAllowedAccess & GuestPageProtection.Write) == 0)
+                {
+                    if (restorationVersion == 0)
+                        restorationVersion = Interlocked.Increment(ref _nextWriteRestorationVersion);
+                    restorations[pageIndex] = restorationVersion;
+                }
+            }
             if (update && GuestGpuMemoryHook.Traces(address, PageBytes))
                 GuestGpuMemoryHook.Trace(address, PageBytes,
                     $"watch track={track} block_reads={isRead} guest={guest} read_watch={pages[pageIndex].ReadWatchCount} write_watch={pages[pageIndex].WriteWatchCount} old={oldAllowedAccess} new={newAllowedAccess}");

@@ -1064,29 +1064,47 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
-            if (_disposed || _backedSpace?.IsRestoredView(address) != true ||
-                !_hostMemory.Query(address, out var region) || region.State != HostRegionState.Committed ||
-                (OperatingSystem.IsWindows() && (region.RawProtection & PAGE_GUARD) != 0))
-            {
-                return false;
-            }
-
-            return access switch
-            {
-                GuestPageProtection.Read => region.Protection is HostPageProtection.ReadOnly or
-                    HostPageProtection.ReadWrite or HostPageProtection.ReadExecute or
-                    HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
-                GuestPageProtection.Write => region.Protection is HostPageProtection.ReadWrite or
-                    HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
-                GuestPageProtection.Execute => region.Protection is HostPageProtection.Execute or
-                    HostPageProtection.ReadExecute or HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
-                _ => false,
-            };
+            return _backedSpace?.IsRestoredView(address) == true && AllowsMappedAccessLocked(address, access);
         }
         finally
         {
             _gate.ExitReadLock();
         }
+    }
+
+    public bool AllowsMappedAccess(ulong address, GuestPageProtection access)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            return AllowsMappedAccessLocked(address, access);
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    private bool AllowsMappedAccessLocked(ulong address, GuestPageProtection access)
+    {
+        if (_disposed || _backedSpace?.IsBacked(address, 1) != true ||
+            !_hostMemory.Query(address, out var region) || region.State != HostRegionState.Committed ||
+            (OperatingSystem.IsWindows() && (region.RawProtection & PAGE_GUARD) != 0))
+        {
+            return false;
+        }
+
+        return access switch
+        {
+            GuestPageProtection.Read => region.Protection is HostPageProtection.ReadOnly or
+                HostPageProtection.ReadWrite or HostPageProtection.ReadExecute or
+                HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+            GuestPageProtection.Write => region.Protection is HostPageProtection.ReadWrite or
+                HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+            GuestPageProtection.Execute => region.Protection is HostPageProtection.Execute or
+                HostPageProtection.ReadExecute or HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy,
+            _ => false,
+        };
     }
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)

@@ -22,6 +22,11 @@ public interface IGpuQueueRelay
 
 public sealed class GuestGpuMemory : IDisposable
 {
+    [ThreadStatic]
+    private static ulong _lastWriteRetryPage;
+    [ThreadStatic]
+    private static long _lastWriteRetryVersion;
+
     private readonly PageGuard _pages;
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
@@ -46,14 +51,14 @@ public sealed class GuestGpuMemory : IDisposable
 
     public PageGuard Pages => _pages;
 
-    // Stores arrive once the host GPU is ready; null stores decline every fault.
+    // Stores arrive once the host GPU is ready; null stores cannot perform cache recovery.
     public void AttachStores(IGuestBufferStore? buffers, IGuestImageStore? images)
     {
         Volatile.Write(ref _buffers, buffers);
         Volatile.Write(ref _images, images);
     }
 
-    // Retry only after store recovery or confirmation that a replaced view is accessible.
+    // Retry after recovery, including a watch removed before the fault reached its store.
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         const ulong faultSize = 8;
@@ -80,6 +85,12 @@ public sealed class GuestGpuMemory : IDisposable
             handled = buffers?.DownloadToCpu(address, faultSize) ?? false;
         }
 
+        if (!handled && kind == FaultKind.Write && TryRetryReleasedWrite(address, faultSize))
+        {
+            TraceFault("write-restored");
+            return true;
+        }
+
         if (!handled && kind != FaultKind.Unknown && AddressSpace is IGuestBackedSpace backing &&
             backing.CanRetryRestoredViewAccess(address, RequiredAccess(kind)) &&
             Covers(address, faultSize) && GuestPermits(kind, address) && _pages.Allows(address, kind))
@@ -98,6 +109,25 @@ public sealed class GuestGpuMemory : IDisposable
                 GuestGpuMemoryHook.Trace(address, faultSize,
                     $"fault={kind} result={result} guest={_pages.Permissions.Lookup(address)} buffers={Buffers != null} images={Images != null} {_pages.DescribeWatchers(address)}");
         }
+    }
+
+    private bool TryRetryReleasedWrite(ulong address, ulong size)
+    {
+        var version = _pages.GetWriteRestorationVersion(address);
+        var page = address & ~(TrackerLayout.PageBytes - 1);
+        if (version == 0 || (_lastWriteRetryPage == page && _lastWriteRetryVersion == version) ||
+            AddressSpace is not IGuestBackedSpace backing ||
+            !backing.AllowsMappedAccess(address, GuestPageProtection.Write) ||
+            !Covers(address, size) || !GuestPermits(FaultKind.Write, address) ||
+            _pages.GetWriteRestorationVersion(address) != version)
+        {
+            return false;
+        }
+
+        // An immediate repeat needs a new restoration, not another blind retry.
+        _lastWriteRetryPage = page;
+        _lastWriteRetryVersion = version;
+        return true;
     }
 
     public bool MarkCpuWrite(ulong address, ulong size)
@@ -159,6 +189,7 @@ public sealed class GuestGpuMemory : IDisposable
             _spansLock.ExitWriteLock();
         }
 
+        _pages.ClearWriteRestorations(address, size);
         _pages.Permissions.Set(address, size, protection);
         _pages.Reapply(address, size);
     }

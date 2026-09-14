@@ -131,6 +131,31 @@ public sealed class GuestImageFaultTests
             Assert.Contains("faults_resolved=", GuestGpuMemoryHook.GetSummary());
             resolved = ResolvedCount();
 
+            // The renderer can delete an image after a write faults but before its store lookup.
+            var retiredMapping = harness.MapBacked(2 * TrackerLayout.BlockBytes, ReadWrite);
+            var boundary = (retiredMapping / TrackerLayout.BlockBytes + 1) * TrackerLayout.BlockBytes;
+            var retiredRequest = Color32(boundary - 8, 4);
+            var retiredIdentifier = harness.Acquire(ref retiredRequest);
+            Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(boundary));
+            Assert.False(harness.Store.DownloadToCpu(boundary, 8));
+            var deletingStore = new BeforeWriteStore(harness.Store, () =>
+                harness.Worker.Run(() => harness.Images.DeleteImageForTest(retiredIdentifier)));
+            harness.Gpu.AttachStores(deletingStore, harness.Images);
+            try
+            {
+                guest.Write(boundary, 0x1234_5678_9ABC_DEF0);
+            }
+            finally
+            {
+                harness.Gpu.AttachStores(harness.Cache, harness.Images);
+            }
+            Assert.False(deletingStore.HandledWrite);
+            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(boundary));
+            Assert.Equal(0x1234_5678_9ABC_DEF0UL, guest.Read(boundary));
+            Assert.Contains($"faults_resolved={++resolved} ", GuestGpuMemoryHook.GetSummary());
+            harness.Finish();
+            Assert.False(harness.Images.Contains(retiredIdentifier));
+
             // Unmapping a watched image range deletes the image and drops its watch.
             var unmapped = harness.MapBacked(0x10000, ReadWrite);
             var unmappedRequest = Color32(unmapped, 4);
@@ -185,5 +210,19 @@ public sealed class GuestImageFaultTests
             var end = summary.IndexOf(' ', start);
             return int.Parse(summary.AsSpan(start, end - start));
         }
+    }
+
+    private sealed class BeforeWriteStore(IGuestBufferStore store, Action beforeWrite) : IGuestBufferStore
+    {
+        private Action? _beforeWrite = beforeWrite;
+        public bool HandledWrite { get; private set; }
+
+        public bool MarkCpuWrite(ulong address, ulong size)
+        {
+            Interlocked.Exchange(ref _beforeWrite, null)?.Invoke();
+            return HandledWrite = store.MarkCpuWrite(address, size);
+        }
+
+        public bool DownloadToCpu(ulong address, ulong size) => store.DownloadToCpu(address, size);
     }
 }
