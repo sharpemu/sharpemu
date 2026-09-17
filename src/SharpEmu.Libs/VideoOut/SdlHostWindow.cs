@@ -517,7 +517,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private static bool PollWindowEvent(SDL_Event* windowEvent)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEventPolling);
-        return SDL_PollEvent(windowEvent);
+        if (!WindowPollProfile.Enabled) return SDL_PollEvent(windowEvent);
+        var startedAt = Stopwatch.GetTimestamp();
+        var returnedEvent = SDL_PollEvent(windowEvent);
+        var finishedAt = Stopwatch.GetTimestamp();
+        WindowPollProfile.Record(startedAt, finishedAt, returnedEvent, returnedEvent ? (uint)windowEvent->type : 0);
+        return returnedEvent;
     }
 
     private void HandleKey(SDL_KeyboardEvent keyEvent)
