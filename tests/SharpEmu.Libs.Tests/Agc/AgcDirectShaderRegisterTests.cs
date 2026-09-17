@@ -126,6 +126,44 @@ public sealed class AgcDirectShaderRegisterTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SetShaderRegisterRangeDirect_UsesBufferProvidedByCallback(bool reservePayload)
+    {
+        var context = CreateContext(out var memory);
+        var replacementPacketAddress = PacketAddress + 0x100;
+        WriteUInt64(memory, CommandBufferAddress + 0x18, PacketAddress + 8);
+        WriteUInt64(memory, CommandBufferAddress + 0x20, 0x1234);
+        WriteUInt64(memory, CommandBufferAddress + 0x28, 0x5678);
+        WriteUInt32(memory, SubmitAddress, 17);
+        WriteUInt32(memory, SubmitAddress + 4, 29);
+        WriteUInt32(memory, replacementPacketAddress + 8, 0xAABBCCDD);
+        WriteUInt32(memory, replacementPacketAddress + 12, 0x11223344);
+        context[CpuRegister.Rsi] = 0x40;
+        context[CpuRegister.Rdx] = reservePayload ? 0 : SubmitAddress;
+        context[CpuRegister.Rcx] = 2;
+        var scheduler = new CapacityCallbackScheduler(memory, true, true, 4, replacementPacketAddress);
+        var previousScheduler = GuestThreadExecution.Scheduler;
+        try
+        {
+            GuestThreadExecution.Scheduler = scheduler;
+
+            Assert.Equal(0, AgcExports.CbSetShRegisterRangeDirect(context));
+
+            Assert.Equal(1, scheduler.CallCount);
+            Assert.Equal(replacementPacketAddress, context[CpuRegister.Rax]);
+            Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
+            Assert.Equal(reservePayload ? 0xAABBCCDDu : 17u, ReadUInt32(memory, replacementPacketAddress + 8));
+            Assert.Equal(reservePayload ? 0x11223344u : 29u, ReadUInt32(memory, replacementPacketAddress + 12));
+            Assert.Equal(replacementPacketAddress + 16, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        }
+        finally
+        {
+            GuestThreadExecution.Scheduler = previousScheduler;
+        }
+    }
+
     private static CpuContext CreateContext(out FakeCpuMemory memory)
     {
         memory = new FakeCpuMemory(BaseAddress, 0x1000);
@@ -173,7 +211,8 @@ public sealed class AgcDirectShaderRegisterTests
         Assert.True(memory.TryWrite(address, bytes));
     }
 
-    private sealed class CapacityCallbackScheduler(FakeCpuMemory memory, bool succeeds, bool providesCapacity) : IGuestThreadScheduler
+    private sealed class CapacityCallbackScheduler(FakeCpuMemory memory, bool succeeds, bool providesCapacity,
+        uint expectedDwords = 3, ulong replacementPacketAddress = PacketAddress) : IGuestThreadScheduler
     {
         public int CallCount { get; private set; }
         public bool SupportsGuestContextTransfer => false;
@@ -185,11 +224,12 @@ public sealed class AgcDirectShaderRegisterTests
             CallCount++;
             Assert.Equal(0x1234UL, entryPoint);
             Assert.Equal(CommandBufferAddress, bufferAddress);
-            Assert.Equal(3UL, requiredDwords);
+            Assert.Equal((ulong)expectedDwords, requiredDwords);
             Assert.Equal(0x5678UL, userData);
             if (providesCapacity)
             {
-                WriteUInt64(memory, CommandBufferAddress + 0x18, PacketAddress + 12);
+                WriteUInt64(memory, CommandBufferAddress + 0x10, replacementPacketAddress);
+                WriteUInt64(memory, CommandBufferAddress + 0x18, replacementPacketAddress + expectedDwords * 4);
             }
 
             returnValue = 0;

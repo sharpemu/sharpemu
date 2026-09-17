@@ -113,18 +113,30 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        for (uint i = 0; i < valueCount; i++)
-        {
-            var value = 0u;
-            if (valuesAddress != 0 &&
-                !TryReadUInt32(ctx, valuesAddress + (i * sizeof(uint)), out value))
-            {
-                return ReturnPointer(ctx, 0);
-            }
+        var payloadAddress = commandAddress + 8;
+        var payloadSize = (ulong)valueCount * sizeof(uint);
+        var validRanges = valuesAddress <= ulong.MaxValue - payloadSize &&
+            payloadAddress <= ulong.MaxValue - payloadSize;
+        var separateRanges = validRanges &&
+            (valuesAddress + payloadSize <= payloadAddress || payloadAddress + payloadSize <= valuesAddress);
+        var copied = valuesAddress != 0 && separateRanges &&
+            ctx.Memory.TryCopy(payloadAddress, valuesAddress, payloadSize);
 
-            if (!TryWriteUInt32(ctx, commandAddress + 8 + (i * sizeof(uint)), value))
+        // A null source reserves the payload for the caller to fill later.
+        // Keep forward word-copy behavior when a bulk copy is not available.
+        if (valuesAddress != 0 && !copied)
+        {
+            for (uint valueIndex = 0; valueIndex < valueCount; valueIndex++)
             {
-                return ReturnPointer(ctx, 0);
+                if (!TryReadUInt32(ctx, valuesAddress + (valueIndex * sizeof(uint)), out var value))
+                {
+                    return ReturnPointer(ctx, 0);
+                }
+
+                if (!TryWriteUInt32(ctx, payloadAddress + (valueIndex * sizeof(uint)), value))
+                {
+                    return ReturnPointer(ctx, 0);
+                }
             }
         }
 
