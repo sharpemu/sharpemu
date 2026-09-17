@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 
@@ -69,6 +70,75 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Span<byte> status = stackalloc byte[8];
         Assert.True(_memory.TryRead(StatusAddress, status));
         return BinaryPrimitives.ReadUInt64LittleEndian(status);
+    }
+
+    [Fact]
+    public void VblankStatusContainsTheLastEventProcessCounter()
+    {
+        _context[CpuRegister.Rdi] = (ulong)_handle;
+        Assert.Equal(0, VideoOutExports.VideoOutWaitVblank(_context));
+        _context[CpuRegister.Rsi] = StatusAddress;
+        Assert.Equal(0, VideoOutExports.VideoOutGetVblankStatus(_context));
+        Span<byte> status = stackalloc byte[0x28];
+        Assert.True(_memory.TryRead(StatusAddress, status));
+        Assert.True(BinaryPrimitives.ReadUInt64LittleEndian(status) >= 1);
+        var processCounter = BinaryPrimitives.ReadUInt64LittleEndian(status[0x18..]);
+        Assert.NotEqual(0UL, processCounter);
+        Assert.Equal((ulong)((UInt128)processCounter * 1_000_000 / (ulong)Stopwatch.Frequency),
+            BinaryPrimitives.ReadUInt64LittleEndian(status[0x08..]));
+        Assert.NotEqual(0UL, BinaryPrimitives.ReadUInt64LittleEndian(status[0x10..]));
+    }
+
+    [Fact]
+    public void VblankEventsAndWaitsUseTheSameDisplayCount()
+    {
+        _context[CpuRegister.Rdi] = StatusAddress;
+        _context[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelEventQueueCompatExports.KernelCreateEqueue(_context));
+        var bytes = new byte[8];
+        Assert.True(_memory.TryRead(StatusAddress, bytes));
+        var queue = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+        try
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            _context[CpuRegister.Rdx] = 0;
+            Assert.Equal(0, VideoOutExports.VideoOutAddVblankEvent(_context));
+            _context[CpuRegister.Rdi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutWaitVblank(_context));
+            var timeout = BitConverter.GetBytes(1_000_000u);
+            Assert.True(_memory.TryWrite(MemoryBase + 0x400, timeout));
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = MemoryBase + 0x200;
+            _context[CpuRegister.Rdx] = 1;
+            _context[CpuRegister.Rcx] = MemoryBase + 0x300;
+            _context[CpuRegister.R8] = MemoryBase + 0x400;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelWaitEqueue(_context));
+            Assert.True(_memory.TryRead(MemoryBase + 0x210, bytes));
+            var eventCount = BinaryPrimitives.ReadUInt64LittleEndian(bytes) >> 16;
+            Assert.True(eventCount >= 1);
+
+            _context[CpuRegister.Rdi] = (ulong)_handle;
+            _context[CpuRegister.Rsi] = StatusAddress;
+            Assert.Equal(0, VideoOutExports.VideoOutGetVblankStatus(_context));
+            Assert.True(_memory.TryRead(StatusAddress, bytes));
+            var statusCount = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+            Assert.True(statusCount >= eventCount);
+            var ports = (System.Collections.IDictionary)typeof(VideoOutExports)
+                .GetField("_ports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+            var port = ports[_handle]!;
+            var openedAt = (long)port.GetType().GetField("OpenTimestamp")!.GetValue(port)!;
+            var elapsedCount = (ulong)((Stopwatch.GetTimestamp() - openedAt) / VideoOutDisplayClock.RefreshInterval(60));
+            Assert.True(statusCount <= elapsedCount);
+        }
+        finally
+        {
+            _context[CpuRegister.Rdi] = queue;
+            _context[CpuRegister.Rsi] = (ulong)_handle;
+            Assert.Equal(0, VideoOutExports.VideoOutDeleteVblankEvent(_context));
+            _context[CpuRegister.Rdi] = queue;
+            Assert.Equal(0, KernelEventQueueCompatExports.KernelDeleteEqueue(_context));
+        }
     }
 
     [Theory]

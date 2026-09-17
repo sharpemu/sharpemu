@@ -355,8 +355,11 @@ public static class KernelRuntimeCompatExports
     }
 
     internal static ulong ReadProcessTimeCounter()
+        => ReadProcessTimeCounterAt(Stopwatch.GetTimestamp());
+
+    internal static ulong ReadProcessTimeCounterAt(long timestamp)
     {
-        var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
+        var elapsedTicks = timestamp - _processStartCounter;
         return unchecked((ulong)Math.Max(0, elapsedTicks));
     }
 

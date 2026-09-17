@@ -207,6 +207,10 @@ public static partial class VideoOutExports
 
         AudioOutExports.ShutdownAllPorts();
         Interlocked.Exchange(ref _vblankStopRequested, 1);
+        lock (_stateGate)
+        {
+            Monitor.PulseAll(_stateGate);
+        }
         HostSessionControl.RequestShutdown(reason);
         GuestGpu.Current.RequestClose();
 
@@ -222,7 +226,8 @@ public static partial class VideoOutExports
     {
         public required int Handle { get; init; }
         public int FlipRate { get; set; }
-        public ulong VblankCount { get; set; }
+        public required VideoOutDisplayClock DisplayClock { get; init; }
+        public ulong PublishedVblankCount { get; set; }
         public ulong FlipCount { get; set; }
         public ulong FlipProcessTime { get; set; }
         public ulong FlipProcessTimeCounter { get; set; }
@@ -245,7 +250,6 @@ public static partial class VideoOutExports
         public List<FlipEventRegistration> FlipEvents { get; } = new();
         public List<FlipEventRegistration> VblankEvents { get; } = new();
         public long OpenTimestamp;
-        public long LastVblankTimestamp;
         public long LastPresentationTimestamp = -1;
     }
 
@@ -311,12 +315,15 @@ public static partial class VideoOutExports
             }
 
             var handle = _nextHandle++;
+            var timestampFrequency = KernelRuntimeCompatExports.TscFrequency;
             var openedAt = Stopwatch.GetTimestamp();
             _ports[handle] = new VideoOutPortState
             {
                 Handle = handle,
                 OpenTimestamp = openedAt,
-                LastVblankTimestamp = openedAt,
+                DisplayClock = new VideoOutDisplayClock(openedAt,
+                    KernelRuntimeCompatExports.ReadProcessTimeCounterAt(openedAt),
+                    KernelRuntimeCompatExports.ReadTscCounter(), timestampFrequency),
             };
             return handle;
         }
@@ -734,32 +741,18 @@ public static partial class VideoOutExports
     public static int VideoOutWaitVblank(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!TryGetPort(handle, out var port))
-        {
-            return OrbisVideoOutErrorInvalidHandle;
-        }
-
-        // Wait to the next boundary of the emulated display refresh rather
-        // than a raw Thread.Sleep(1): coarse sleeps overshoot to the
-        // scheduler quantum, which mis-paces games that spin on vblank. A
-        // caller that arrives past the boundary already missed the vblank:
-        // report it immediately instead of charging a full extra interval.
-        var intervalTicks = Stopwatch.Frequency / Math.Max(1, (long)port.RefreshRate);
-        var now = Stopwatch.GetTimestamp();
-        var last = Interlocked.Read(ref port.LastVblankTimestamp);
-        var target = last + intervalTicks;
-        if (target <= now || target > now + intervalTicks)
-        {
-            Interlocked.CompareExchange(ref port.LastVblankTimestamp, now, last);
-        }
-        else
-        {
-            HostTiming.SleepUntil(target);
-            Interlocked.CompareExchange(ref port.LastVblankTimestamp, target, last);
-        }
+        long target;
         lock (_stateGate)
         {
-            port.VblankCount++;
+            if (!_ports.TryGetValue(handle, out var port)) return OrbisVideoOutErrorInvalidHandle;
+            port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
+            target = port.DisplayClock.NextTimestamp(port.RefreshRate);
+        }
+        HostTiming.SleepUntil(target);
+        lock (_stateGate)
+        {
+            if (!_ports.TryGetValue(handle, out var port)) return OrbisVideoOutErrorInvalidHandle;
+            port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -784,27 +777,16 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        var now = Stopwatch.GetTimestamp();
-        ulong count;
-        long openedAt;
-        lock (_stateGate)
-        {
-            openedAt = port.OpenTimestamp;
-            var elapsedTicks = Math.Max(now - openedAt, 0);
-            var elapsedCount = unchecked((ulong)(elapsedTicks *
-                Math.Max(1L, (long)port.RefreshRate) / Stopwatch.Frequency));
-            port.VblankCount = Math.Max(port.VblankCount, elapsedCount);
-            count = port.VblankCount;
-        }
-
-        var elapsedMicroseconds = unchecked((ulong)(Math.Max(now - openedAt, 0) *
-            1_000_000L / Stopwatch.Frequency));
         Span<byte> status = stackalloc byte[VideoOutVblankStatusSize];
         status.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(status, count);
-        BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..], elapsedMicroseconds);
-        BinaryPrimitives.WriteUInt64LittleEndian(status[0x10..], unchecked((ulong)now));
-        status[0x20] = 0;
+        lock (_stateGate)
+        {
+            port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
+            BinaryPrimitives.WriteUInt64LittleEndian(status, port.DisplayClock.Count);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..], port.DisplayClock.ProcessMicroseconds);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x10..], port.DisplayClock.TimestampCounter);
+            BinaryPrimitives.WriteUInt64LittleEndian(status[0x18..], port.DisplayClock.ProcessCounter);
+        }
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -872,6 +854,11 @@ public static partial class VideoOutExports
 
         lock (_stateGate)
         {
+            if (port.VblankEvents.Count == 0)
+            {
+                port.DisplayClock.Advance(Stopwatch.GetTimestamp(), port.RefreshRate);
+                port.PublishedVblankCount = port.DisplayClock.Count;
+            }
             var existingIndex = port.VblankEvents.FindIndex(registration => registration.Equeue == equeue);
             if (existingIndex >= 0)
             {
@@ -881,6 +868,7 @@ public static partial class VideoOutExports
             {
                 port.VblankEvents.Add(new FlipEventRegistration(equeue, userData));
             }
+            Monitor.PulseAll(_stateGate);
         }
 
         // A guest that parks its main/render loop on a vblank event needs a
@@ -1521,13 +1509,13 @@ public static partial class VideoOutExports
     private static void VblankTickLoop()
     {
         var pending = new List<(ulong Equeue, ulong DataHint, ulong UserData)>();
-        var next = Stopwatch.GetTimestamp();
         while (Volatile.Read(ref _vblankStopRequested) == 0)
         {
-            uint refresh = 60;
+            var next = long.MaxValue;
             pending.Clear();
             lock (_stateGate)
             {
+                var now = Stopwatch.GetTimestamp();
                 foreach (var port in _ports.Values)
                 {
                     if (port.VblankEvents.Count == 0)
@@ -1535,13 +1523,21 @@ public static partial class VideoOutExports
                         continue;
                     }
 
-                    refresh = port.RefreshRate == 0 ? 60 : port.RefreshRate;
-                    port.VblankCount++;
-                    var dataHint = (port.VblankCount & 0x0000_FFFF_FFFF_FFFFUL) << 16;
+                    port.DisplayClock.Advance(now, port.RefreshRate);
+                    next = Math.Min(next, port.DisplayClock.NextTimestamp(port.RefreshRate));
+                    if (port.DisplayClock.Count <= port.PublishedVblankCount) continue;
+                    port.PublishedVblankCount = port.DisplayClock.Count;
+                    var dataHint = (port.DisplayClock.Count & 0x0000_FFFF_FFFF_FFFFUL) << 16;
                     foreach (var registration in port.VblankEvents)
                     {
                         pending.Add((registration.Equeue, dataHint, registration.UserData));
                     }
+                }
+                if (next == long.MaxValue)
+                {
+                    if (Volatile.Read(ref _vblankStopRequested) != 0) return;
+                    Monitor.Wait(_stateGate);
+                    continue;
                 }
             }
 
@@ -1553,14 +1549,6 @@ public static partial class VideoOutExports
                     OrbisKernelEventFilterVideoOut,
                     dataHint,
                     userData);
-            }
-
-            var interval = Stopwatch.Frequency / Math.Max(1, (long)refresh);
-            next += interval;
-            var now = Stopwatch.GetTimestamp();
-            if (next < now)
-            {
-                next = now;
             }
 
             HostTiming.SleepUntil(next);
