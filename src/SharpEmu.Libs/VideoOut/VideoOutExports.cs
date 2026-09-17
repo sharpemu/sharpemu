@@ -250,6 +250,9 @@ public static partial class VideoOutExports
         public List<FlipEventRegistration> FlipEvents { get; } = new();
         public List<FlipEventRegistration> VblankEvents { get; } = new();
         public long OpenTimestamp;
+        public long LastCpuFlipTimestamp = -1;
+        public int WindowTop;
+        public int WindowBottom = int.MaxValue;
         public long LastPresentationTimestamp = -1;
     }
 
@@ -414,7 +417,10 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        port.FlipRate = rate;
+        lock (_stateGate)
+        {
+            port.FlipRate = rate;
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1101,12 +1107,16 @@ public static partial class VideoOutExports
     public static int VideoOutSetWindowModeMargins(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        _ = unchecked((int)ctx[CpuRegister.Rsi]);
-        _ = unchecked((int)ctx[CpuRegister.Rdx]);
-
-        return TryGetPort(handle, out _)
-            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : OrbisVideoOutErrorInvalidHandle;
+        var top = unchecked((int)ctx[CpuRegister.Rsi]);
+        var bottom = unchecked((int)ctx[CpuRegister.Rdx]);
+        lock (_stateGate)
+        {
+            if (!_ports.TryGetValue(handle, out var port)) return OrbisVideoOutErrorInvalidHandle;
+            if (top < 0 || bottom < top || bottom > port.OutputHeight) return OrbisVideoOutErrorInvalidValue;
+            port.WindowTop = top;
+            port.WindowBottom = bottom;
+        }
+        return 0;
     }
 
     [SysAbiExport(
@@ -1372,7 +1382,11 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
-        PaceFlip(port.FlipRate);
+        if (!PaceFlip(handle, flipMode))
+        {
+            CancelFlip(requestId);
+            return OrbisVideoOutErrorInvalidHandle;
+        }
         PerfOverlay.RecordSubmit();
 
         var guestImageSubmitted = false;
@@ -1471,8 +1485,6 @@ public static partial class VideoOutExports
         Environment.GetEnvironmentVariable("SHARPEMU_NO_FLIP_PACING"),
         "1",
         StringComparison.Ordinal);
-    private static long _lastFlipPacingTimestamp;
-
     private static Thread? _vblankThread;
     private static readonly object _vblankThreadGate = new();
 
@@ -1555,45 +1567,28 @@ public static partial class VideoOutExports
         }
     }
 
-    /// <summary>
-    /// Emulates the display vblank cadence: hardware completes flips at the
-    /// requested rate, which is what paces the game's main loop. Without this
-    /// the guest runs as fast as the GPU pipeline drains, so frame delivery
-    /// is bursty and animation judders. When the emulator runs slower than
-    /// the target rate the sleep never engages.
-    /// </summary>
-    private static void PaceFlip(int flipRate)
+    // CPU submissions use the same per-port eligibility rules as queued GPU flips.
+    private static bool PaceFlip(int handle, int flipMode)
     {
-        if (_flipPacingDisabled)
+        long? readyAt = null;
+        while (true)
         {
-            return;
-        }
-
-        var refreshRate = flipRate switch
-        {
-            1 => 30,
-            2 => 20,
-            _ => 60,
-        };
-        var intervalTicks = Stopwatch.Frequency / refreshRate;
-        var now = Stopwatch.GetTimestamp();
-        var last = Interlocked.Read(ref _lastFlipPacingTimestamp);
-        var target = last + intervalTicks;
-        if (target <= now)
-        {
-            Interlocked.CompareExchange(ref _lastFlipPacingTimestamp, now, last);
-            return;
-        }
-
-        var waitMilliseconds = (target - now) * 1000 / Stopwatch.Frequency;
-        if (waitMilliseconds is >= 0 and < 100)
-        {
-            // Precise wait: Thread.Sleep alone overshoots by a scheduler
-            // quantum, which caps the flip rate below the target cadence.
+            long target;
+            lock (_stateGate)
+            {
+                if (!_ports.TryGetValue(handle, out var port)) return false;
+                var now = Stopwatch.GetTimestamp();
+                readyAt ??= now;
+                target = VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastCpuFlipTimestamp,
+                    now, port.RefreshRate, port.FlipRate, flipMode, port.OutputHeight, port.WindowTop, port.WindowBottom, readyAt.Value);
+                if (_flipPacingDisabled || target <= now)
+                {
+                    port.LastCpuFlipTimestamp = now;
+                    return true;
+                }
+            }
             HostTiming.SleepUntil(target);
         }
-
-        Interlocked.CompareExchange(ref _lastFlipPacingTimestamp, target, last);
     }
 
     private static int RegisterBufferRange(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex = -1)

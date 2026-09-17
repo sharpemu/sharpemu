@@ -37,6 +37,7 @@ public static partial class VideoOutExports
         public int FlipMode;
         public long FlipArg;
         public bool GpuQueued;
+        public long? ReadyTimestamp;
         public ulong EventHint;
         public FlipEventRegistration[]? FlipEvents;
         public int FlipEventCount;
@@ -165,7 +166,7 @@ public static partial class VideoOutExports
         }
     }
 
-    // Submission does not reserve a future refresh. Only presentation consumes a refresh interval.
+    // Ordinary flips consume a refresh at presentation; multiple flips share a readiness boundary.
     internal static bool CanPresentFlip(ulong requestId, long timestamp)
     {
         if (requestId == 0)
@@ -179,22 +180,18 @@ public static partial class VideoOutExports
             {
                 return false;
             }
-            return _flipPacingDisabled || !request.GpuQueued ||
-                IsRefreshAvailable(port.OpenTimestamp, port.LastPresentationTimestamp, timestamp, port.RefreshRate, port.FlipRate);
+            if (_flipPacingDisabled || !request.GpuQueued) return true;
+            if (request.FlipMode == VideoOutDisplayClock.FlipModeVsyncMultiple && request.ReadyTimestamp is null)
+                return false;
+            return VideoOutDisplayClock.NextFlipTimestamp(port.OpenTimestamp, port.LastPresentationTimestamp,
+                    timestamp, port.RefreshRate, port.FlipRate, request.FlipMode, port.OutputHeight,
+                    port.WindowTop, port.WindowBottom, request.ReadyTimestamp ?? timestamp) <= timestamp;
         }
     }
 
     internal static bool IsRefreshAvailable(long openedAt, long lastPresentedAt, long timestamp, uint refreshRate, int flipRate)
-    {
-        if (lastPresentedAt < 0)
-        {
-            return true;
-        }
-        var refreshInterval = Math.Max(1L, Stopwatch.Frequency / Math.Max(1L, refreshRate));
-        var flipInterval = refreshInterval * Math.Max(1L, (long)flipRate + 1);
-        return Math.Max(0, timestamp - openedAt) / flipInterval >
-            Math.Max(0, lastPresentedAt - openedAt) / flipInterval;
-    }
+        => VideoOutDisplayClock.NextFlipTimestamp(openedAt, lastPresentedAt, timestamp,
+            refreshRate, flipRate, 1, 0, 0, 0, timestamp) <= timestamp;
 
     // Publish completion counters and events unless the request was cancelled.
     internal static void CompleteFlip(ulong requestId)
@@ -222,6 +219,7 @@ public static partial class VideoOutExports
                 }
 
                 var completedAt = Stopwatch.GetTimestamp();
+                request.ReadyTimestamp = completedAt;
                 port.CompletedLatencyFlipArgs[request.FlipArg] = completedAt;
                 port.CompletedLatencyFlipArgOrder.Enqueue((request.FlipArg, completedAt));
                 PruneTimestampHistory(port.CompletedLatencyFlipArgs, port.CompletedLatencyFlipArgOrder);

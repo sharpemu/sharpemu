@@ -72,6 +72,99 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         return BinaryPrimitives.ReadUInt64LittleEndian(status);
     }
 
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(2, true)]
+    [InlineData(4, false)]
+    public void PresentationEligibilityUsesTheRequestedFlipMode(int flipMode, bool immediatelyEligible)
+    {
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, flipMode, 21, true, out var request));
+        // Fix the previous presentation time to avoid a wall-clock boundary race.
+        var ports = (System.Collections.IDictionary)typeof(VideoOutExports)
+            .GetField("_ports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var port = ports[_handle]!;
+        var timestamp = Stopwatch.GetTimestamp();
+        port.GetType().GetField("LastPresentationTimestamp")!.SetValue(port, timestamp);
+        Assert.Equal(immediatelyEligible, VideoOutExports.CanPresentFlip(request, timestamp));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MultipleGpuFlipsWaitForReadinessAndShareOneVblank(int flipRate)
+    {
+        _context[CpuRegister.Rdi] = (ulong)_handle;
+        _context[CpuRegister.Rsi] = (ulong)flipRate;
+        Assert.Equal(0, VideoOutExports.VideoOutSetFlipRate(_context));
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 4, 31, true, out var firstRequest));
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 4, 32, true, out var secondRequest));
+
+        var ports = (System.Collections.IDictionary)typeof(VideoOutExports)
+            .GetField("_ports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var port = ports[_handle]!;
+        var openedAt = (long)port.GetType().GetField("OpenTimestamp")!.GetValue(port)!;
+        var refreshInterval = VideoOutDisplayClock.RefreshInterval(60);
+        var readyAt = openedAt + refreshInterval / 2;
+        var boundary = openedAt + refreshInterval;
+        Assert.False(VideoOutExports.CanPresentFlip(firstRequest, boundary + refreshInterval));
+        Assert.False(VideoOutExports.CanPresentFlip(secondRequest, boundary + refreshInterval));
+
+        var requests = (System.Collections.IDictionary)typeof(VideoOutExports)
+            .GetField("_flipRequests", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        foreach (var requestId in new[] { firstRequest, secondRequest })
+        {
+            var beforeCompletion = Stopwatch.GetTimestamp();
+            VideoOutExports.CompleteFlip(requestId);
+            var request = requests[requestId]!;
+            var readyTimestampField = request.GetType().GetField("ReadyTimestamp")!;
+            var completionTimestamp = Assert.IsType<long>(readyTimestampField.GetValue(request));
+            Assert.InRange(completionTimestamp, beforeCompletion, Stopwatch.GetTimestamp());
+            // Fixed readiness avoids a wall-clock race between the two completion calls.
+            readyTimestampField.SetValue(request, (long?)readyAt);
+            VideoOutExports.CompleteFlip(requestId);
+            Assert.Equal(readyAt, Assert.IsType<long>(readyTimestampField.GetValue(request)));
+            Assert.False(VideoOutExports.CanPresentFlip(requestId, boundary - 1));
+            Assert.True(VideoOutExports.CanPresentFlip(requestId, boundary));
+        }
+
+        VideoOutExports.MarkFlipPresented(firstRequest);
+        Assert.True(VideoOutExports.CanPresentFlip(secondRequest, boundary));
+        Assert.True(VideoOutExports.CanPresentFlip(secondRequest, boundary + 10 * refreshInterval));
+        _context[CpuRegister.Rdi] = (ulong)_handle;
+        Assert.Equal(0, VideoOutExports.VideoOutClose(_context));
+        Assert.False(VideoOutExports.CanPresentFlip(secondRequest, boundary));
+    }
+
+    [Fact]
+    public async Task MultipleCpuFlipWaitReachesTheBoundaryWithoutMovingItsDeadline()
+    {
+        var ports = (System.Collections.IDictionary)typeof(VideoOutExports)
+            .GetField("_ports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var port = ports[_handle]!;
+        var openedAt = (long)port.GetType().GetField("OpenTimestamp")!.GetValue(port)!;
+        var refreshInterval = VideoOutDisplayClock.RefreshInterval(60);
+        var beforeWait = Stopwatch.GetTimestamp();
+        var firstBoundary = openedAt + ((beforeWait - openedAt) / refreshInterval + 1) * refreshInterval;
+        var paceFlip = typeof(VideoOutExports).GetMethod("PaceFlip",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var completion = Task.Run(() => (bool)paceFlip.Invoke(null, new object[] { _handle, 4 })!);
+        try
+        {
+            Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(Stopwatch.GetTimestamp() >= firstBoundary);
+        }
+        finally
+        {
+            if (!completion.IsCompleted)
+            {
+                _context[CpuRegister.Rdi] = (ulong)_handle;
+                VideoOutExports.VideoOutClose(_context);
+                await completion.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+    }
+
     [Fact]
     public void VblankStatusContainsTheLastEventProcessCounter()
     {
