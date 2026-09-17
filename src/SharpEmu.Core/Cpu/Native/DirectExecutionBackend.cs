@@ -1184,6 +1184,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_importLoopGuardSeconds = GetImportLoopGuardSeconds();
 		_entryReturnSentinelRip = 0uL;
 		_forcedGuestExit = false;
+		StartGuestFlowTraces();
 		HostSessionControl.SetShutdownHandler(RequestHostShutdown);
 		_importLoopSignatureCount = 0;
 		_importLoopSignatureWriteIndex = 0;
@@ -1245,6 +1246,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			? "Host shutdown requested."
 			: $"Host shutdown requested: {reason}";
 		Console.Error.WriteLine($"[LOADER][INFO] {LastError}");
+		// Process exit can bypass disposal; finish the retained trace before returning to the caller.
+		WriteGuestFlowTraces();
 	}
 
 	private bool SetupImportStubs(IReadOnlyDictionary<ulong, string> importStubs)
@@ -4448,11 +4451,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				owner.State = GuestThreadRunState.Blocked;
 				owner.BlockReason = callbackReason ?? reason;
+				RecordGuestThreadFlow(owner, GuestThreadFlowProfile.EventKind.Blocked, owner.BlockReason);
 				if (owner.BlockWaiter is not null && owner.BlockWaiter.TryWake())
 				{
 					owner.State = GuestThreadRunState.Ready;
 					owner.BlockReason = null;
 					owner.BlockDeadlineTimestamp = 0;
+					RecordGuestThreadFlow(owner, GuestThreadFlowProfile.EventKind.Ready);
 				}
 			}
 			if (_logGuestThreads)
@@ -4489,6 +4494,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						owner.BlockDeadlineTimestamp = 0;
 						owner.BlockReason = null;
 						owner.State = GuestThreadRunState.Running;
+						RecordGuestThreadFlow(owner, GuestThreadFlowProfile.EventKind.CallbackResumed);
 						ready = true;
 					}
 				}
@@ -5667,6 +5673,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.BlockReason = "host shutdown";
 				thread.HostThread = null;
 				thread.ExecutorActive = false;
+				RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.ExecutorReleased);
 			}
 			return;
 		}
@@ -5726,6 +5733,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
 			using (LockGate("RunGuestThread.exit"))
 			{
+				RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.RunStopped, blockReason);
 				switch (exitReason)
 				{
 					case GuestNativeCallExitReason.Returned:
@@ -5741,6 +5749,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					case GuestNativeCallExitReason.Blocked:
 						thread.State = GuestThreadRunState.Blocked;
 						thread.BlockReason = blockReason;
+						RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Blocked, blockReason);
 						if (thread.HasBlockedContinuation &&
 							thread.BlockWaiter is not null &&
 							thread.BlockWaiter.TryWake())
@@ -5807,6 +5816,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out PendingGuestException pending)
 	{
 		thread.ExecutorActive = false;
+		RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.ExecutorReleased);
 		if (thread.State == GuestThreadRunState.Ready)
 		{
 			// A wake can arrive before the previous executor releases this thread.
@@ -6986,6 +6996,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 			if (candidate.ExecutorActive)
 			{
+				RecordGuestThreadFlow(candidate, GuestThreadFlowProfile.EventKind.ClaimDeferred);
 				_readyGuestThreads.Enqueue(candidate);
 				Interlocked.Increment(ref _readyGuestThreadCount);
 				candidate.ExecutorClaimDeferrals++;
@@ -7235,9 +7246,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		if (!WaitForGuestThreadQuiescence(TimeSpan.FromSeconds(5)))
 		{
 			GuestSessionLeaked = true;
+			WriteGuestFlowTraces();
 			return;
 		}
 
+		WriteGuestFlowTraces();
 		ClearGuestThreads();
 		if (ReferenceEquals(_posixSignalBackend, this))
 		{

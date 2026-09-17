@@ -7,6 +7,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Threading;
 using System.Diagnostics.CodeAnalysis;
+using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -53,6 +54,7 @@ public static class KernelPthreadCompatExports
 
     private sealed class PthreadMutexState
     {
+        public long ProfileIdentity { get; } = MutexHandoffProfile.CreateIdentity();
         private long _ownerThreadId;
         private int _recursionCount;
         private int _queuedWaiterCount;
@@ -1067,6 +1069,7 @@ public static class KernelPthreadCompatExports
 
             if (state.TryReleaseUncontended(currentThreadId))
             {
+                ProfileMutexHandoff(state, "Released", mutexAddress);
                 if (state.QueuedWaiterCount != 0)
                 {
                     WakeFirstMutexWaiter(state);
@@ -1097,6 +1100,7 @@ public static class KernelPthreadCompatExports
             if (state.RecursionCount == 0)
             {
                 state.OwnerThreadId = 0;
+                ProfileMutexHandoff(state, "Released", mutexAddress);
 
                 // Hand the mutex directly to the head waiter instead of only
                 // waking it and relying on it to re-acquire. A woken waiter that
@@ -1119,7 +1123,7 @@ public static class KernelPthreadCompatExports
 
         if (nextWaiter is { Cooperative: true })
         {
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(nextWaiter.WakeKey, 1);
+            WakeProfiledMutexWaiter(state, nextWaiter);
         }
 
         TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -2097,6 +2101,7 @@ public static class KernelPthreadCompatExports
         };
         waiter.Node = state.Waiters.AddLast(waiter);
         state.WaiterAddedLocked();
+        ProfileMutexHandoff(state, "Queued", waiter: waiter);
         return waiter;
     }
 
@@ -2159,6 +2164,7 @@ public static class KernelPthreadCompatExports
         state.WaiterRemovedLocked();
         waiter.Node = null;
         Volatile.Write(ref waiter.Granted, 1);
+        ProfileMutexHandoff(state, "Granted", waiter: waiter);
         return true;
     }
 
@@ -2181,8 +2187,23 @@ public static class KernelPthreadCompatExports
 
         if (nextWaiter is { Cooperative: true })
         {
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(nextWaiter.WakeKey, 1);
+            WakeProfiledMutexWaiter(state, nextWaiter);
         }
+    }
+
+    private static void WakeProfiledMutexWaiter(PthreadMutexState state, PthreadMutexWaiter waiter)
+    {
+        ProfileMutexHandoff(state, "WakeStarted", waiter: waiter);
+        var wakeCount = GuestThreadExecution.Scheduler?.WakeBlockedThreads(waiter.WakeKey, 1) ?? 0;
+        ProfileMutexHandoff(state, "WakeFinished", waiter: waiter, result: wakeCount);
+    }
+
+    private static void ProfileMutexHandoff(PthreadMutexState state, string stage, ulong address = 0,
+        PthreadMutexWaiter? waiter = null, int result = 0)
+    {
+        if (!MutexHandoffProfile.Enabled) return;
+        MutexHandoffProfile.Record(state.ProfileIdentity, stage, address, state.OwnerThreadId,
+            waiter?.ThreadId ?? 0, waiter?.WakeKey ?? "none", state.QueuedWaiterCount, result);
     }
 
     private static int WaitForHostMutexLock(CpuContext ctx, PthreadMutexState state, PthreadMutexWaiter waiter)
@@ -2533,6 +2554,9 @@ public static class KernelPthreadCompatExports
 
     private static void TracePthreadMutex(CpuContext ctx, string operation, ulong mutexAddress, ulong resolvedAddress, PthreadMutexState? state, ulong currentThreadId, int result)
     {
+        if (MutexHandoffProfile.Enabled)
+            MutexHandoffProfile.Record(state?.ProfileIdentity ?? 0, operation, mutexAddress,
+                state?.OwnerThreadId ?? 0, currentThreadId, waiting: state?.QueuedWaiterCount ?? 0, result: result);
         if (!ShouldTracePthreadMutex(mutexAddress, resolvedAddress))
         {
             return;

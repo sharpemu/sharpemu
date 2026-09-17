@@ -44,10 +44,51 @@ public sealed unsafe partial class DirectExecutionBackend
             StringComparison.Ordinal);
 
     private readonly ConcurrentDictionary<ulong, GuestSchedulerThreadStats> _guestSchedulerStats = new();
+    private readonly GuestThreadFlowProfile _guestThreadFlowProfile = new();
+    private readonly object _guestTraceOutputGate = new();
     private long _guestSchedulerProfileWindowStart = Stopwatch.GetTimestamp();
     private long _guestSchedulerProfileNextReport =
         Stopwatch.GetTimestamp() + (Stopwatch.Frequency * 5L);
     private int _guestSchedulerProfileReporting;
+
+    private void StartGuestFlowTraces()
+    {
+        lock (_guestTraceOutputGate)
+        {
+            _guestThreadFlowProfile.StartSession();
+            SharpEmu.Libs.Diagnostics.SemaphoreSignalProfile.StartSession();
+            SharpEmu.Libs.Diagnostics.MutexHandoffProfile.StartSession();
+        }
+    }
+
+    private void WriteGuestFlowTraces(TextWriter? output = null)
+    {
+        output ??= Console.Error;
+        lock (_guestTraceOutputGate)
+        {
+            var signals = SharpEmu.Libs.Diagnostics.SemaphoreSignalProfile.Close();
+            var mutexes = SharpEmu.Libs.Diagnostics.MutexHandoffProfile.Close();
+            try
+            {
+                _guestThreadFlowProfile.WriteTrace(output);
+                SharpEmu.Libs.Diagnostics.SemaphoreSignalProfile.WriteTrace(output, signals);
+                SharpEmu.Libs.Diagnostics.MutexHandoffProfile.WriteTrace(output, mutexes);
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                // A closed trace output must not prevent native session cleanup.
+            }
+        }
+    }
+
+    private void RecordGuestThreadFlow(GuestThreadState thread, GuestThreadFlowProfile.EventKind kind, string? reason = null)
+    {
+        if (!GuestThreadFlowProfile.Enabled) return;
+        _guestThreadFlowProfile.Record(new GuestThreadFlowProfile.TraceEvent(
+            Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, thread.ThreadHandle,
+            thread.Name, kind, reason, thread.BlockWakeKey, Volatile.Read(ref thread.LastImportNid),
+            Volatile.Read(ref thread.LastImportRdi), Volatile.Read(ref thread.LastImportRsi), thread.BlockDeadlineTimestamp));
+    }
 
     private GuestSchedulerThreadStats GetGuestSchedulerStats(GuestThreadState thread)
     {
@@ -60,6 +101,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void ProfileGuestThreadReady(GuestThreadState thread)
     {
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Ready);
         if (!_profileGuestScheduler)
         {
             return;
@@ -81,6 +123,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void ProfileGuestThreadClaimed(GuestThreadState thread)
     {
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Claimed);
         if (!_profileGuestScheduler)
         {
             return;
@@ -100,6 +143,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void ProfileGuestThreadScheduled(GuestThreadState thread)
     {
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.Scheduled);
         if (!_profileGuestScheduler)
         {
             return;
@@ -112,6 +156,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
     private void ProfileGuestThreadRunStarted(GuestThreadState thread)
     {
+        RecordGuestThreadFlow(thread, GuestThreadFlowProfile.EventKind.RunStarted);
         if (!_profileGuestScheduler)
         {
             return;

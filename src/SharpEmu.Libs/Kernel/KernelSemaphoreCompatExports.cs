@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -318,13 +319,18 @@ public static class KernelSemaphoreCompatExports
         LibraryName = "libKernel")]
     public static int KernelSignalSema(CpuContext ctx, uint handle, int signalCount)
     {
+        var signalTrace = SemaphoreSignalProfile.Begin(handle, signalCount);
         if (!_semaphores.TryGetValue(handle, out var semaphore))
         {
+            signalTrace.Record(SemaphoreSignalProfile.Stage.Rejected,
+                result: (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
         }
 
         if (signalCount <= 0)
         {
+            signalTrace.Record(SemaphoreSignalProfile.Stage.Rejected,
+                result: (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
@@ -332,10 +338,13 @@ public static class KernelSemaphoreCompatExports
         {
             if (semaphore.Count > semaphore.MaxCount - signalCount)
             {
+                signalTrace.Record(SemaphoreSignalProfile.Stage.Rejected,
+                    result: (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             }
 
             semaphore.Count += signalCount;
+            signalTrace.Record(SemaphoreSignalProfile.Stage.Published, semaphore.Count, semaphore.WaitingThreads);
             // Wake host-thread waiters parked in the fallback path.
             Monitor.PulseAll(semaphore.Gate);
             if (_traceSema)
@@ -346,7 +355,9 @@ public static class KernelSemaphoreCompatExports
 
         // Wake cooperatively-blocked guest threads; their wake predicate
         // acquires the tokens atomically, so this respects the new count.
-        _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
+        signalTrace.Record(SemaphoreSignalProfile.Stage.WakeStarted);
+        var wakeCount = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle)) ?? 0;
+        signalTrace.Record(SemaphoreSignalProfile.Stage.WakeFinished, result: wakeCount);
         return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
