@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.HLE.GuestMemory;
@@ -234,7 +235,7 @@ public sealed class GuestSpaceOwner : IDisposable
             {
                 Monitor.Enter(mappingLock, ref taken);
                 _protectionScope = new ProtectionRangeScope(protectionLocks, 0,
-                    (ulong)protectionLocks.Length << ProtectionBlockShift);
+                    (ulong)protectionLocks.Length << ProtectionBlockShift, profileWait: false);
             }
             catch
             {
@@ -269,7 +270,7 @@ public sealed class GuestSpaceOwner : IDisposable
         private readonly int _lockCount;
         private int _acquiredLockCount;
 
-        public ProtectionRangeScope(object[] protectionLocks, ulong address, ulong size)
+        public ProtectionRangeScope(object[] protectionLocks, ulong address, ulong size, bool profileWait = true)
         {
             _protectionLocks = protectionLocks;
             var firstBlock = address >> ProtectionBlockShift;
@@ -277,6 +278,7 @@ public sealed class GuestSpaceOwner : IDisposable
             _lockCount = (int)Math.Min((ulong)protectionLocks.Length, lastBlock - firstBlock + 1);
             _firstLockIndex = _lockCount == protectionLocks.Length ? 0 : (int)(firstBlock % (ulong)protectionLocks.Length);
             _acquiredLockCount = 0;
+            using var profile = profileWait ? GpuMemoryAccessProfile.MeasureBackingProtectionWait() : default;
             try
             {
                 while (_acquiredLockCount < _lockCount)
@@ -544,6 +546,7 @@ public sealed class GuestSpaceOwner : IDisposable
             var stop = Math.Min(end, range.Address + range.Size);
             if (start < stop)
             {
+                using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(stop - start);
                 if (!_host.ChangeAccess(start, stop - start, protection)) return false;
             }
         }

@@ -362,6 +362,7 @@ public sealed partial class GuestImageCache
     // A CPU write on the faulting thread: true when an image page covers the range.
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
+        GpuMemoryAccessProfile.CountImageCpuWrite();
         if (!IsValidRange(address, size))
         {
             return false;
@@ -373,6 +374,7 @@ public sealed partial class GuestImageCache
 
     public void InvalidateMemory(ulong address, ulong size)
     {
+        GpuMemoryAccessProfile.CountImageCpuWrite();
         if (!IsValidRange(address, size))
         {
             throw SubmissionScheduler.Fatal($"The memory invalidation range is invalid: address=0x{address:X16} size=0x{size:X16}.");
@@ -451,6 +453,7 @@ public sealed partial class GuestImageCache
 
     public ImageRegionInfo QueryRegion(ulong address, ulong size)
     {
+        GpuMemoryAccessProfile.CountImageQuery(gpuDirtyOnly: false);
         if (!IsValidRange(address, size))
         {
             return default;
@@ -479,6 +482,7 @@ public sealed partial class GuestImageCache
     // Only byte overlap with a GPU-owned image can make a clean backing read unsafe.
     public bool HasGpuModifiedImageBytes(ulong address, ulong size)
     {
+        GpuMemoryAccessProfile.CountImageQuery(gpuDirtyOnly: true);
         if (!IsValidRange(address, size)) return false;
 
         using var held = _lock.Hold();

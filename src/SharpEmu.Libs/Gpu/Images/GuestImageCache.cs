@@ -20,7 +20,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
-    private readonly RegionLock _lock = new();
+    private readonly RegionLock _lock = new(RegionLock.Category.ImageCache);
     private readonly PageGuard _pages;
     private readonly ColorToMultisampleDepthBlit _blit;
     private readonly GpuTiler _tiler;

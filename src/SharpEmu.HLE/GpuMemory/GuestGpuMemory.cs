@@ -61,6 +61,7 @@ public sealed class GuestGpuMemory : IDisposable
     // Retry after recovery, including a watch removed before the fault reached its store.
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
+        using var profile = GpuMemoryAccessProfile.MeasureFault(kind);
         const ulong faultSize = 8;
         if (!Covers(address, faultSize))
         {

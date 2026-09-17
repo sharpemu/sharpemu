@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GuestMemory;
+using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using Xunit;
 using static SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport;
@@ -159,8 +161,10 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         });
     }
 
-    [Fact]
-    public void TransientProtectionDoesNotAllocateOnNewThread()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TransientProtectionDoesNotAllocateAfterGuestThreadEntry(bool faultPath)
     {
         if (!Supported) return;
         var host = HostViewMemory.Create();
@@ -170,12 +174,18 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         long allocated = -1;
         RunOnNewThread(() =>
         {
-            var before = GC.GetAllocatedBytesForCurrentThread();
-            var succeeded = true;
-            for (var iteration = 0; iteration < 100; iteration++)
-                succeeded &= owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite);
-            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-            Assert.True(succeeded);
+            var previous = GuestThreadExecution.EnterGuestThread(1);
+            try
+            {
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                using var fault = faultPath ? GpuMemoryAccessProfile.MeasureFault(FaultKind.Write) : default;
+                var succeeded = true;
+                for (var iteration = 0; iteration < 100; iteration++)
+                    succeeded &= owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite);
+                allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+                Assert.True(succeeded);
+            }
+            finally { GuestThreadExecution.RestoreGuestThread(previous); }
         });
         Assert.Equal(0, allocated);
     }

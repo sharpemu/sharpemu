@@ -170,25 +170,28 @@ public sealed class GuestPageTracker
         var cleared = new List<(TrackedRegion Region, ulong Address, ulong Size)>();
         try
         {
-            VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+            using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
-                region.Lock.Enter();
-                held.Add(region);
-                var address = region.BaseAddress + offset;
-                region.ForEachCpuUploadRange(
-                    preserveHotPages: !isWritten && preserveCpuWriteHotPages,
-                    address,
-                    bytes,
-                    (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
-                    rangeFunc);
-                if (!isWritten)
+                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
                 {
-                    region.Lock.Exit();
-                    held.Remove(region);
-                }
+                    region.Lock.Enter();
+                    held.Add(region);
+                    var address = region.BaseAddress + offset;
+                    region.ForEachCpuUploadRange(
+                        preserveHotPages: !isWritten && preserveCpuWriteHotPages,
+                        address,
+                        bytes,
+                        (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
+                        rangeFunc);
+                    if (!isWritten)
+                    {
+                        region.Lock.Exit();
+                        held.Remove(region);
+                    }
 
-                return false;
-            });
+                    return false;
+                });
+            }
             uploadFunc();
             if (isWritten)
             {

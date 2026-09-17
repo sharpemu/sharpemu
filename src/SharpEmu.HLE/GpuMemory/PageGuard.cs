@@ -108,9 +108,12 @@ public sealed class PageGuard : IDisposable
         public BlockLock(PageBlock block)
         {
             _block = block;
-            while (Interlocked.CompareExchange(ref block.Lock, 1, 0) != 0)
+            if (Interlocked.CompareExchange(ref block.Lock, 1, 0) != 0)
             {
-                Thread.SpinWait(1);
+                using var profile = GpuMemoryAccessProfile.MeasureAccess(
+                    GpuMemoryAccessProfile.Operation.PageLockWait, GpuMemoryAccessProfile.Operation.FaultPageLockWait);
+                do { Thread.SpinWait(1); }
+                while (Interlocked.CompareExchange(ref block.Lock, 1, 0) != 0);
             }
         }
 
@@ -123,6 +126,7 @@ public sealed class PageGuard : IDisposable
 
     public PageGuard(IGuestAddressSpace addressSpace)
     {
+        GpuMemoryAccessProfile.Initialize();
         if (Environment.SystemPageSize != (int)PageBytes)
         {
             OnFatal($"The host page size is not supported: 0x{Environment.SystemPageSize:X8}.");
@@ -278,6 +282,8 @@ public sealed class PageGuard : IDisposable
 
     private void ApplyAccess(ulong address, ulong size, GuestPageProtection allowedAccess)
     {
+        using var profile = GpuMemoryAccessProfile.MeasureAccess(
+            GpuMemoryAccessProfile.Operation.HostProtection, GpuMemoryAccessProfile.Operation.FaultHostProtection, size);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"host-protect derived={allowedAccess}");
         if (!_addressSpace.TryProtect(address, size, allowedAccess))

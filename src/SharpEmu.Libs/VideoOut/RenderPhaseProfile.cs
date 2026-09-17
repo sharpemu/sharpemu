@@ -465,6 +465,7 @@ internal static class RenderPhaseProfile
         BufferUploadProfile.Report();
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
+        SharpEmu.HLE.GpuMemory.GpuMemoryAccessProfile.WriteReport();
         WindowPollProfile.Report();
         SharpEmu.HLE.GuestMemory.GuestMemoryProfile.WriteReport();
         var commandReads = new List<string>();

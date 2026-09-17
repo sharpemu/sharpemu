@@ -275,6 +275,7 @@ public static class GuestThreadExecution
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
         var previous = _currentGuestThreadHandle;
         _currentGuestThreadHandle = threadHandle;
         _pendingBlockReason = null;

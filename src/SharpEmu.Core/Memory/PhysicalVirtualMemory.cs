@@ -1393,7 +1393,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        _gate.EnterReadLock();
+        using (GpuMemoryAccessProfile.MeasureAddressSpaceProtectionWait()) _gate.EnterReadLock();
         try
         {
             var access = ResolveProtection(protection);
@@ -1430,10 +1430,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                         return false;
                     }
 
-                    if (info.State == HostRegionState.Committed &&
-                        !_hostMemory.Protect(cursor, segmentEnd - cursor, access, out _))
+                    if (info.State == HostRegionState.Committed)
                     {
-                        return false;
+                        using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(segmentEnd - cursor);
+                        if (!_hostMemory.Protect(cursor, segmentEnd - cursor, access, out _)) return false;
                     }
 
                     cursor = segmentEnd;
