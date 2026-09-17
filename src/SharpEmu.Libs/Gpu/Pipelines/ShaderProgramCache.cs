@@ -411,6 +411,17 @@ internal sealed class ShaderProgramCache
         if (resources.Info.UsesDeviceAddresses)
         {
             ShaderCacheCounters.CountDeviceAddressProgram();
+            if (VideoOut.BufferUploadProfile.Enabled)
+            {
+                var accesses = plan.Memory.Entries.Where(memory => !memory.PlanningOnly &&
+                    memory.Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or MemoryResourceKind.Global).ToArray();
+                var instructions = accesses.Select(memory => $"0x{memory.Pc:X}:{memory.Kind}:{memory.Access}").Distinct().ToArray();
+                Console.Error.WriteLine($"[PERF][DEVICE_ADDRESS_PROGRAM] stage={source.Stage} hash=0x{source.Hash:X16} " +
+                    $"address=0x{source.Address:X16} accesses={accesses.Length} " +
+                    $"bounded_ranges={plan.DeviceAddressRanges.Count(range => range.Bounded && range.Plannable)} " +
+                    $"unbounded_ranges={plan.DeviceAddressRanges.Count(range => !range.Bounded || !range.Plannable)} " +
+                    $"instructions={string.Join(',', instructions.Take(32))} omitted={Math.Max(0, instructions.Length - 32)}");
+            }
         }
 
         if (!layout.UsesPushData)

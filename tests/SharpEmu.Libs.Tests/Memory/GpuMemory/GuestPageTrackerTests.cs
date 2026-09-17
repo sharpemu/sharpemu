@@ -78,6 +78,8 @@ public sealed class GuestPageTrackerTests : IDisposable
     {
         const ulong address = 0x2_0300_0000;
 
+        Assert.Equal(0ul, _tracker.CountCpuWriteHotBytes(address, Page));
+        Assert.False(_tracker.HasRegion(address, Page));
         Assert.True(_tracker.HasCpuDirtyPages(address, Page));
         Assert.False(_tracker.HasGpuDirtyPages(address, Page));
         Assert.True(_tracker.HasRegion(address, Page));
@@ -518,6 +520,8 @@ public sealed class GuestPageTrackerTests : IDisposable
         _tracker.ForEachUploadRange(address, Page, false, NoRange, NoUpload);
         _tracker.MarkCpuDirtyPages(address, Page);
         Assert.True(_tracker.IsCpuWriteHotRange(address, Page));
+        Assert.Equal(Page, _tracker.CountCpuWriteHotBytes(address, Page));
+        Assert.Equal(123ul, _tracker.CountCpuWriteHotBytes(address + 7, 123));
 
         var uploads = 0;
         _tracker.ForEachUploadRange(address, Page, false, (_, _) => uploads++, NoUpload);
@@ -530,6 +534,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.Equal(3, uploads);
         Assert.False(_tracker.IsCpuWriteHotRange(address, Page));
         Assert.False(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.Equal(0ul, _tracker.CountCpuWriteHotBytes(address, Page));
         Assert.True(_tracker.HasGpuDirtyPages(address, Page));
 
         _tracker.ClearGpuDirtyPages(address, Page);
@@ -593,6 +598,8 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.Equal((address, Page), uploads[0]);
         Assert.True(_tracker.HasCpuDirtyPages(address, Page));
         Assert.False(_tracker.HasCpuDirtyPages(address + Page, Page));
+        Assert.Equal(Page, _tracker.CountCpuWriteHotBytes(address, Page * 2));
+        Assert.Equal(7ul, _tracker.CountCpuWriteHotBytes(address + Page - 7, 14));
         Assert.True(IsWritable(address));
         Assert.False(IsWritable(address + Page));
 

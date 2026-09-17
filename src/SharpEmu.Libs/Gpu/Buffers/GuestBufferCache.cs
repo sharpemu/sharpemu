@@ -1064,9 +1064,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         bool preserveCpuWriteHotPages = true)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
+        var startedAt = BufferUploadProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         // The locked query observes completed writes; a later write remains dirty for the next obtain.
         if (!preserveCpuWriteHotPages && !isWritten && !isTexelBuffer && !_tracker.HasCpuDirtyPages(guestAddress, size))
         {
+            if (BufferUploadProfile.Enabled)
+                BufferUploadProfile.Record(guestAddress, size, 0, 0, 0, System.Diagnostics.Stopwatch.GetTimestamp() - startedAt);
             return false;
         }
         var copies = new List<BufferCopy>();
@@ -1115,6 +1118,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             vk.CmdPipelineBarrier(
                 native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
                 0, null, 1, &after, 0, null);
+        }
+
+        if (BufferUploadProfile.Enabled)
+        {
+            var elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - startedAt;
+            ulong hotBytes = 0;
+            foreach (var copy in copies)
+                hotBytes += _tracker.CountCpuWriteHotBytes(buffer.CpuAddress + copy.DstOffset, copy.Size);
+            BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
         }
 
         if (isTexelBuffer && !isWritten)

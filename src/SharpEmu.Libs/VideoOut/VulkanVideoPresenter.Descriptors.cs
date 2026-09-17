@@ -297,7 +297,22 @@ internal static unsafe partial class VulkanVideoPresenter
         // Uploads every mapped range into the cache before a device-address draw; the fault pass follows.
         public void PrepareDeviceAddresses()
         {
-            _ = RequirePreparation();
+            var preparation = RequirePreparation();
+            ulong vertexProgramHash = 0, pixelProgramHash = 0, computeProgramHash = 0;
+            if (BufferUploadProfile.Enabled)
+            {
+                foreach (var stage in preparation.Stages)
+                {
+                    if (!stage.Program.UsesDeviceAddresses) continue;
+                    switch (stage.Program.Stage)
+                    {
+                        case ShaderStageKind.Vertex: vertexProgramHash = stage.Program.Hash; break;
+                        case ShaderStageKind.Pixel: pixelProgramHash = stage.Program.Hash; break;
+                        case ShaderStageKind.Compute: computeProgramHash = stage.Program.Hash; break;
+                    }
+                }
+            }
+            using var profileScope = BufferUploadProfile.BeginSweep(vertexProgramHash, pixelProgramHash, computeProgramHash);
             var memory = GuestGpuMemoryHook.Current ?? throw SubmissionScheduler.Fatal("A device-address program needs the guest GPU memory registry.");
             var spans = new List<GuestSpan>();
             memory.ForEachSpan((address, size) => spans.Add(new GuestSpan(address, size)));

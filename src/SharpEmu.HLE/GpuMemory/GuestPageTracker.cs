@@ -49,6 +49,19 @@ public sealed class GuestPageTracker
         });
     }
 
+    public ulong CountCpuWriteHotBytes(ulong address, ulong size)
+    {
+        RejectUploadCallbackReentry();
+        ulong count = 0;
+        VisitRegions(address, size, create: false, (region, offset, bytes) =>
+        {
+            using var regionLock = region.Lock.Hold();
+            count += region.CountCpuWriteHotBytes(offset, bytes);
+            return false;
+        });
+        return count;
+    }
+
     public void MarkCpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Cpu, enable: true, create: true);
 
     public void MarkGpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Gpu, enable: true, create: true);

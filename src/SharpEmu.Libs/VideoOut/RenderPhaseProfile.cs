@@ -462,6 +462,7 @@ internal static class RenderPhaseProfile
             string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
         ReportImageUploads();
+        BufferUploadProfile.Report();
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
         WindowPollProfile.Report();

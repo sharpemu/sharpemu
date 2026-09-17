@@ -56,6 +56,17 @@ public sealed class TrackedRegion
         return true;
     }
 
+    public ulong CountCpuWriteHotBytes(ulong offset, ulong size)
+    {
+        var (start, end) = GetPageRange(BaseAddress + offset, size);
+        ulong bytes = 0;
+        foreach (var (first, last) in new PageMask(_hotCpuWrites, start, end))
+        {
+            bytes += Math.Min((ulong)last * PageBytes, offset + size) - Math.Max((ulong)first * PageBytes, offset);
+        }
+        return bytes;
+    }
+
     // Count only clean-to-dirty transitions. Repeated reads cannot make a page hot.
     public void MarkCpuWrite(ulong address, ulong size)
     {
