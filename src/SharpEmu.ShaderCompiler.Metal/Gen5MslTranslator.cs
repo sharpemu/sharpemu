@@ -1376,8 +1376,13 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "DsWriteB32":
+                case "DsWriteAddtidB32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
+                    if (instruction.Opcode == "DsWriteAddtidB32")
+                    {
+                        address = Temp("uint", $"({address} & 0xFFFFu) + (sharpemu_lane << 2u)");
+                    }
                     StoreLds(LdsIndex(address, control.SingleOffsetBytes), RawSource(instruction, 1));
                     return true;
                 }
