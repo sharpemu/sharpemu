@@ -289,18 +289,20 @@ public static class AvPlayerExports
         }
     }
 
-    private enum VideoFrameReadResult
+    internal enum VideoFrameReadResult
     {
         Pending,
         Ready,
         End,
     }
 
-    private sealed class VideoFrameQueue : IDisposable
+    internal sealed class VideoFrameQueue : IDisposable
     {
         private readonly Stream _stream;
         private readonly int _frameByteCount;
         private readonly Channel<byte[]> _frames;
+        private readonly ConcurrentQueue<byte[]> _reusableFrames = new();
+        private byte[]? _currentFrame;
         private readonly CancellationTokenSource _stop = new();
         private readonly Thread _worker;
         private int _completed;
@@ -330,13 +332,21 @@ public static class AvPlayerExports
 
         public VideoFrameReadResult TryRead(out byte[]? frame)
         {
+            var completed = Volatile.Read(ref _completed) != 0;
             if (_frames.Reader.TryRead(out frame))
             {
+                // The consumer keeps this frame until the next successful read.
+                // Storage belongs to this queue and is never shared with a new playback.
+                if (_currentFrame is not null)
+                {
+                    _reusableFrames.Enqueue(_currentFrame);
+                }
+                _currentFrame = frame;
                 return VideoFrameReadResult.Ready;
             }
 
             frame = null;
-            return Volatile.Read(ref _completed) != 0
+            return completed
                 ? VideoFrameReadResult.End
                 : VideoFrameReadResult.Pending;
         }
@@ -347,7 +357,10 @@ public static class AvPlayerExports
             {
                 while (!_stop.IsCancellationRequested)
                 {
-                    var frame = GC.AllocateUninitializedArray<byte>(_frameByteCount);
+                    if (!_reusableFrames.TryDequeue(out var frame))
+                    {
+                        frame = GC.AllocateUninitializedArray<byte>(_frameByteCount);
+                    }
                     if (!ReadExactly(_stream, frame))
                     {
                         break;

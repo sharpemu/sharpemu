@@ -26,6 +26,7 @@ internal sealed unsafe class FfmpegMediaStream : Stream
     private int _streamIndex;
 
     private byte[] _pending = [];
+    private byte[] _videoConversionBuffer = [];
     private int _pendingOffset;
     private bool _draining;
     private bool _finished;
@@ -371,7 +372,13 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             return null;
         }
         var lumaBytes = width * height;
-        var output = new byte[lumaBytes + lumaBytes / 2];
+        var outputByteCount = checked(lumaBytes + lumaBytes / 2);
+        if (_videoConversionBuffer.Length != outputByteCount)
+        {
+            _videoConversionBuffer = new byte[outputByteCount];
+        }
+        // Read consumes the previous output before conversion can reuse its storage.
+        var output = _videoConversionBuffer;
         fixed (byte* outputPointer = output)
         {
             var planes = new byte*[4] { outputPointer, outputPointer + lumaBytes, null, null };
@@ -522,6 +529,8 @@ internal sealed unsafe class FfmpegMediaStream : Stream
 
         lock (_decodeGate)
         {
+            _pending = [];
+            _videoConversionBuffer = [];
             if (_swsContext is not null)
             {
                 ffmpeg.sws_freeContext(_swsContext);
