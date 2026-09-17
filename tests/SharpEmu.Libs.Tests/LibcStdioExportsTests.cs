@@ -234,6 +234,8 @@ public sealed class LibcStdioExportsTests
         var fixture = OpenTemporaryFile("rb", contents);
         using var writeEntered = new ManualResetEventSlim();
         using var releaseWrite = new ManualResetEventSlim();
+        StdioTestWorker? readWorker = null;
+        StdioTestWorker? seekWorker = null;
         try
         {
             fixture.Memory.BeforeWrite = (address, _) =>
@@ -244,7 +246,7 @@ public sealed class LibcStdioExportsTests
                 }
 
                 writeEntered.Set();
-                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)));
+                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)), "The test did not release the blocked read.");
             };
 
             var readContext = CreateContext(fixture.Memory);
@@ -252,30 +254,30 @@ public sealed class LibcStdioExportsTests
             readContext[CpuRegister.Rsi] = 1;
             readContext[CpuRegister.Rdx] = 32;
             readContext[CpuRegister.Rcx] = fixture.Handle;
-            var readTask = Task.Run(() => LibcStdioExports.Fread(readContext));
+            readWorker = new StdioTestWorker(() => LibcStdioExports.Fread(readContext));
 
-            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)), "The read did not reach the guest-memory write.");
 
             var seekContext = CreateContext(fixture.Memory);
             seekContext[CpuRegister.Rdi] = fixture.Handle;
             seekContext[CpuRegister.Rsi] = 48;
             seekContext[CpuRegister.Rdx] = 0;
-            var seekTask = Task.Run(() => LibcStdioExports.Fseek(seekContext));
+            seekWorker = new StdioTestWorker(() => LibcStdioExports.Fseek(seekContext));
 
-            await Task.Delay(100);
-            Assert.False(seekTask.IsCompleted);
+            seekWorker.AssertBlocked("Seek did not block behind the active read.");
             releaseWrite.Set();
 
-            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readTask);
-            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await seekTask);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readWorker.Result);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await seekWorker.Result);
             var actual = new byte[32];
             Assert.True(fixture.Memory.TryRead(DataAddress, actual));
             Assert.True(actual.SequenceEqual(contents.AsSpan(0, 32)));
         }
         finally
         {
-            fixture.Memory.BeforeWrite = null;
             releaseWrite.Set();
+            StdioTestWorker.JoinAll(readWorker, seekWorker);
+            fixture.Memory.BeforeWrite = null;
             fixture.Dispose();
         }
     }
@@ -286,6 +288,8 @@ public sealed class LibcStdioExportsTests
         var fixture = OpenTemporaryFile("rb", Enumerable.Range(0, 64).Select(value => (byte)value).ToArray());
         using var writeEntered = new ManualResetEventSlim();
         using var releaseWrite = new ManualResetEventSlim();
+        StdioTestWorker? readWorker = null;
+        StdioTestWorker? closeWorker = null;
         try
         {
             fixture.Memory.BeforeWrite = (address, _) =>
@@ -296,7 +300,7 @@ public sealed class LibcStdioExportsTests
                 }
 
                 writeEntered.Set();
-                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)));
+                Assert.True(releaseWrite.Wait(TimeSpan.FromSeconds(5)), "The test did not release the blocked read.");
             };
 
             var readContext = CreateContext(fixture.Memory);
@@ -304,20 +308,19 @@ public sealed class LibcStdioExportsTests
             readContext[CpuRegister.Rsi] = 1;
             readContext[CpuRegister.Rdx] = 32;
             readContext[CpuRegister.Rcx] = fixture.Handle;
-            var readTask = Task.Run(() => LibcStdioExports.Fread(readContext));
+            readWorker = new StdioTestWorker(() => LibcStdioExports.Fread(readContext));
 
-            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(writeEntered.Wait(TimeSpan.FromSeconds(5)), "The read did not reach the guest-memory write.");
 
             var closeContext = CreateContext(fixture.Memory);
             closeContext[CpuRegister.Rdi] = fixture.Handle;
-            var closeTask = Task.Run(() => LibcStdioExports.Fclose(closeContext));
+            closeWorker = new StdioTestWorker(() => LibcStdioExports.Fclose(closeContext));
 
-            await Task.Delay(100);
-            Assert.False(closeTask.IsCompleted);
+            closeWorker.AssertBlocked("Close did not block behind the active read.");
             releaseWrite.Set();
 
-            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readTask);
-            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await closeTask);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await readWorker.Result);
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, await closeWorker.Result);
 
             var lateReadContext = CreateContext(fixture.Memory);
             lateReadContext[CpuRegister.Rdi] = DataAddress;
@@ -331,9 +334,50 @@ public sealed class LibcStdioExportsTests
         }
         finally
         {
-            fixture.Memory.BeforeWrite = null;
             releaseWrite.Set();
+            StdioTestWorker.JoinAll(readWorker, closeWorker);
+            fixture.Memory.BeforeWrite = null;
             fixture.Dispose();
+        }
+    }
+
+    private sealed class StdioTestWorker
+    {
+        private readonly Thread _thread;
+        private readonly TaskCompletionSource<int> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<int> Result => _result.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        public StdioTestWorker(Func<int> operation)
+        {
+            _thread = new Thread(() =>
+            {
+                try
+                {
+                    _result.SetResult(operation());
+                }
+                catch (Exception exception)
+                {
+                    _result.SetException(exception);
+                }
+            }) { IsBackground = true };
+            _thread.Start();
+        }
+
+        public void AssertBlocked(string message)
+        {
+            // The worker has no test-side waits; blocking occurs inside the file operation.
+            Assert.True(SpinWait.SpinUntil(() => _result.Task.IsCompleted ||
+                (_thread.ThreadState & ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(5)), message);
+            Assert.False(_result.Task.IsCompleted, message);
+        }
+
+        public static void JoinAll(params StdioTestWorker?[] workers)
+        {
+            var allStopped = true;
+            foreach (var worker in workers)
+                allStopped &= worker is null || worker._thread.Join(TimeSpan.FromSeconds(5));
+            Assert.True(allStopped, "A file-operation worker did not stop during cleanup.");
         }
     }
 
