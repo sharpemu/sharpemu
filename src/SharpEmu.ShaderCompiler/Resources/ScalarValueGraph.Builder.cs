@@ -1142,6 +1142,8 @@ public sealed partial class ScalarValueGraph
                     return Binary(ScalarOperation.Or32, Binary(ScalarOperation.Or32, Source(0), Source(1)), Source(2));
                 case "VAdd3U32":
                     return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.IAdd32, Source(0), Source(1)), Source(2));
+                case "VXadU32":
+                    return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.Xor32, Source(0), Source(1)), Source(2));
                 case "VSadU32":
                 {
                     var low = Binary(ScalarOperation.UMin32, Source(0), Source(1));
