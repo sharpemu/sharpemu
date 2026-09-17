@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -63,16 +64,18 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_trackedImageBindings", new List<ResourceSlotIdentifier>());
         SetField("_submissionContext", new SubmissionContext { QueueName = "presenter.test", SubmissionId = 1 });
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
-        SetField("_computeThreadLimits", new uint[3]);
+        SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
+        SetField("_maxPushDescriptors", vulkan.MaxPushDescriptors);
+        SetField("_noAttachmentSampleCounts", SampleCountFlags.Count1Bit);
         HostBuffers = new VulkanHostBufferPool(128UL * 1024 * 1024, allocation => InvokeMethod("DestroyHostBufferAllocation", allocation));
         SetField("_hostBufferPool", HostBuffers);
         SetField("_maxColorAttachments", 8u);
         SetField("_renderHostLimits", new RenderHostLimits(16384, 16384, 16384, 16384));
         foreach (var name in new[]
         {
-            "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions", "_recycledDescriptorPools",
-            "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys", "_descriptorLayouts", "_shaderDigests",
-            "_renderPipelines", "_computeEntries", "_pipelineEntries",
+            "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
+            "_deferredGuestImageVersionDestroys",
+            "_pipelineEntries", "_shaderModules",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -144,27 +147,9 @@ internal sealed class PresenterUnderTest : IDisposable
         Harness.Vulkan.AssertNoValidationMessages();
     }
 
-    private unsafe void DestroyPipelineResources()
+    private void DestroyPipelineResources()
     {
         InvokeMethod("DestroyRenderPipelines");
-        var layouts = GetField<IDictionary>("_descriptorLayouts");
-        foreach (var layout in layouts.Values)
-        {
-            var layoutType = layout!.GetType();
-            var pipelineLayout = (PipelineLayout)layoutType.GetProperty("PipelineLayout")!.GetValue(layout)!;
-            var descriptorSetLayout = (DescriptorSetLayout)layoutType.GetProperty("DescriptorSetLayout")!.GetValue(layout)!;
-            Harness.Vulkan.Vk.DestroyPipelineLayout(Harness.Vulkan.Device, pipelineLayout, null);
-            if (descriptorSetLayout.Handle != 0)
-            {
-                Harness.Vulkan.Vk.DestroyDescriptorSetLayout(Harness.Vulkan.Device, descriptorSetLayout, null);
-            }
-        }
-
-        layouts.Clear();
-        var descriptorPools = GetField<Stack<DescriptorPool>>("_recycledDescriptorPools");
-        while (descriptorPools.TryPop(out var descriptorPool))
-        {
-            Harness.Vulkan.Vk.DestroyDescriptorPool(Harness.Vulkan.Device, descriptorPool, null);
-        }
+        GetField<DescriptorHeap>("_descriptorHeap").Dispose();
     }
 }

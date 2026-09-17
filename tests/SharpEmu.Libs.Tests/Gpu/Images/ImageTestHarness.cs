@@ -128,19 +128,25 @@ internal static class ReferenceShaders
 // A missing device or feature skips a test; the required switch turns that into a failure.
 internal static class GatePrerequisites
 {
-    public static bool Ready([NotNullWhen(true)] HeadlessVulkan? vulkan, bool sampleRateShading = false, bool samplerAnisotropy = false, bool referenceSpirv = false)
+    // Set SHARPEMU_TEST_REQUIRE_DEVICE=1 to fail, instead of skip, when a device or feature is missing.
+    public const string RequireDeviceVariable = "SHARPEMU_TEST_REQUIRE_DEVICE";
+
+    public static bool DeviceRequired => Environment.GetEnvironmentVariable(RequireDeviceVariable) == "1";
+
+    public static bool Ready([NotNullWhen(true)] HeadlessVulkan? vulkan, bool sampleRateShading = false, bool samplerAnisotropy = false, bool referenceSpirv = false, bool shaderInt64 = false)
     {
         var missing = vulkan is null ? "a Vulkan device"
             : sampleRateShading && !vulkan.SampleRateShading ? "the sampleRateShading device feature"
             : samplerAnisotropy && !vulkan.SamplerAnisotropy ? "the samplerAnisotropy device feature"
             : referenceSpirv && !vulkan.SupportsSpirv16 ? "a Vulkan 1.3 device for the SPIR-V 1.6 reference modules"
+            : shaderInt64 && !vulkan.ShaderInt64 ? "the shaderInt64 device feature"
             : null;
         if (missing is null)
         {
             return true;
         }
 
-        Assert.False(ReferenceShaders.Required, $"The required gate cannot run without {missing}.");
+        Assert.False(DeviceRequired || ReferenceShaders.Required, $"The required gate cannot run without {missing}.");
         return false;
     }
 }

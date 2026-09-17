@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
@@ -31,27 +32,9 @@ public sealed class MslTranslationTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, [sad, end]),
-            [],
-            null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
-
-        Assert.True(
-            Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [sad, end]), ShaderStage.Compute, localSizeX: 1);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains("uint v[256]", shader.Source, StringComparison.Ordinal);
         Assert.Contains("((max(v[0], v[1]) - min(v[0], v[1])) + (v[2]))", shader.Source, StringComparison.Ordinal);
     }
@@ -75,27 +58,9 @@ public sealed class MslTranslationTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, [compare, end]),
-            [],
-            null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
-
-        Assert.True(
-            Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [compare, end]), ShaderStage.Compute, localSizeX: 1);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains("as_type<half>", shader.Source, StringComparison.Ordinal);
         Assert.Contains(" < ", shader.Source, StringComparison.Ordinal);
     }
@@ -105,7 +70,7 @@ public sealed class MslTranslationTests
     {
         foreach (var fixture in Gen5ComputeFixtures.All)
         {
-            var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+            var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
             Assert.Equal(Gen5MslStage.Compute, shader.Stage);
             Assert.Equal("gen5_cs", shader.EntryPoint);
             Assert.Contains("kernel void gen5_cs(", shader.Source, StringComparison.Ordinal);
@@ -116,7 +81,7 @@ public sealed class MslTranslationTests
     [Fact]
     public void ExecMaskedStoresAreGuarded()
     {
-        var shader = Gen5ComputeFixtures.CompileOrThrow(Gen5ComputeFixtures.ExecStore);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
 
         // Every buffer store must sit behind the per-lane EXEC guard.
         Assert.Contains("if (exec)", shader.Source, StringComparison.Ordinal);
@@ -129,7 +94,7 @@ public sealed class MslTranslationTests
     [Fact]
     public void LoopFixtureProducesMultipleDispatcherBlocks()
     {
-        var shader = Gen5ComputeFixtures.CompileOrThrow(Gen5ComputeFixtures.Loop);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Loop);
 
         // The backward branch splits the program into at least three blocks and
         // the conditional branch selects between loop head and fallthrough.
@@ -142,21 +107,19 @@ public sealed class MslTranslationTests
     [Fact]
     public void DispatcherIsBoundedByDefault()
     {
-        var shader = Gen5ComputeFixtures.CompileOrThrow(Gen5ComputeFixtures.Fmac);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Fmac);
         Assert.Contains("if (++steps >=", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void UniformsCarryDispatchLimitAndBufferLengths()
+    public void ArgumentBufferCarriesBufferLengthsAndUsesSeparatePushData()
     {
-        var shader = Gen5ComputeFixtures.CompileOrThrow(Gen5ComputeFixtures.ExecStore);
-        Assert.Contains("struct SharpEmuUniforms", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("dispatch_limit_x", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("buffer_bytes[", shader.Source, StringComparison.Ordinal);
-
-        // One global binding: b0 at [[buffer(0)]], uniforms at [[buffer(1)]].
-        Assert.Contains("device uint* b0 [[buffer(0)]]", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("[[buffer(1)]]", shader.Source, StringComparison.Ordinal);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.ExecStore);
+        Assert.NotNull(shader.ArgumentLayout);
+        Assert.Contains("buffer_bytes [[id(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_resources [[buffer(0)]]", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_push_data [[buffer(1)]]", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SharpEmuUniforms", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -203,24 +166,9 @@ public sealed class MslTranslationTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, [export, end]),
-            [],
-            null);
-        var evaluation = new Gen5ShaderEvaluation(
-            new uint[128],
-            new uint[128],
-            [],
-            []);
-
-        Assert.True(
-            Gen5MslTranslator.TryCompilePixelShader(
-                state,
-                evaluation,
-                [],
-                out var shader,
-                out var error),
-            error);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [export, end]), ShaderStage.Pixel, pixelOutputs: []);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains(
             "bool pixel_valid_mask_active = true;",
             shader.Source,
@@ -326,7 +274,7 @@ public sealed class MslTranslationTests
         var shader = CompileImageStore(dstSelect, dmask: 0xF);
 
         Assert.Contains(
-            $"tex0.write(vec<float, 4>({expectedComponents}),",
+            $".write(vec<float, 4>({expectedComponents}),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -339,7 +287,7 @@ public sealed class MslTranslationTests
             dmask: 0);
 
         Assert.Contains(
-            "tex0.write(vec<float, 4>(as_type<float>(v[4]), 0.0f, 0.0f, 0.0f),",
+            ".write(vec<float, 4>(as_type<float>(v[4]), 0.0f, 0.0f, 0.0f),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -353,7 +301,7 @@ public sealed class MslTranslationTests
             opcode: "ImageStoreMip");
 
         Assert.Contains(
-            "tex0.write(vec<float, 4>(as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])),",
+            ".write(vec<float, 4>(as_type<float>(v[7]), as_type<float>(v[4]), as_type<float>(v[5]), as_type<float>(v[6])),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -367,11 +315,11 @@ public sealed class MslTranslationTests
             unifiedFormat: 69u); // FORMAT_16_16_16_16_UINT
 
         Assert.Contains(
-            "texture2d<uint, access::write> tex0",
+            "texture2d<uint, access::write>",
             shader.Source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "tex0.write(vec<uint, 4>(v[6], v[5], v[4], v[7]),",
+            ".write(vec<uint, 4>(v[6], v[5], v[4], v[7]),",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -390,7 +338,7 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
         var exception = Assert.Throws<InvalidOperationException>(
-            () => Gen5ComputeFixtures.CompileOrThrow(fixture));
+            () => Gen5ComputeFixtures.CompileRequestOrThrow(fixture));
         Assert.Contains("pc=0x", exception.Message, StringComparison.Ordinal);
     }
 
@@ -406,7 +354,7 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains("12u + (s[124])", shader.Source, StringComparison.Ordinal);
         Assert.Contains("< 256u ?", shader.Source, StringComparison.Ordinal);
@@ -427,7 +375,7 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains(" != ", shader.Source, StringComparison.Ordinal);
         Assert.Contains("(uint)ctz(", shader.Source, StringComparison.Ordinal);
@@ -449,7 +397,7 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains("popcount(", shader.Source, StringComparison.Ordinal);
         Assert.Contains(">> 16u", shader.Source, StringComparison.Ordinal);
@@ -476,9 +424,130 @@ public sealed class MslTranslationTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains("pc = (false) ?", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true, 22u)]
+    [InlineData(false, 0u)]
+    public void TypedBufferLoadUsesTheInstructionFormatAndUntypedKeepsTheDescriptorTable(bool typed, uint typedFormat)
+    {
+        var load = new Gen5ShaderInstruction(
+            0,
+            typed ? Gen5ShaderEncoding.Mtbuf : Gen5ShaderEncoding.Mubuf,
+            typed ? "TBufferLoadFormatXyzw" : "BufferLoadFormatXyzw",
+            [0, 0],
+            [Gen5Operand.Vector(0), Gen5Operand.Scalar(8), Gen5Operand.Source(128, null)],
+            [Gen5Operand.Vector(4)],
+            new Gen5BufferMemoryControl(
+                4,
+                0,
+                4,
+                8,
+                0,
+                IndexEnabled: false,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false,
+                Typed: typed,
+                TypedFormat: typedFormat));
+        var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
+        var scalars = new uint[256];
+        scalars[8] = 0x2000;
+        scalars[10] = 64;
+        scalars[11] = 77u << 12;
+        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [load, end]), scalars[..12]);
+
+        if (typed)
+        {
+            Assert.DoesNotContain("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
+            Assert.Contains("sharpemu_format_layout(4u, 0u,", shader.Source, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("sharpemu_gfx10_formats[(", shader.Source, StringComparison.Ordinal);
+            Assert.Contains("== 7u ?", shader.Source, StringComparison.Ordinal);
+            Assert.Contains(": true);", shader.Source, StringComparison.Ordinal);
+            Assert.DoesNotContain("sharpemu_format_bytes", shader.Source, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TypedBufferStoreEncodesAndPlacesEachComponentInOneElement()
+    {
+        // Format 14 is 8_8 unorm: both registers are encoded, packed into one element
+        // with a two-byte mask, and stored under the descriptor and element bounds.
+        var shader = CompileTypedBufferAccess("TBufferStoreFormatXy", dwordCount: 2, typedFormat: 14);
+
+        Assert.Contains("if (exec && ", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v[4], 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v[5], 8u, 0u, 3u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("<< 8u), 0u, 0u, 0u), uint4(0xFFFFu, 0x0u, 0x0u, 0x0u));", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("2u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_store_bytes(b", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TypedBufferStoreOfWholeDwordsKeepsTheRegisterBits()
+    {
+        // Format 77 is 32x4 float: four aligned dword stores, no encoding, one bounds test.
+        var shader = CompileTypedBufferAccess("TBufferStoreFormatXyzw", dwordCount: 4, typedFormat: 77);
+
+        Assert.Contains(", v[4], 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("+ 12u), v[7], 4u);", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("16u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_format_encode(v[", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_store_element(b", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("TBufferLoadFormatX", 1u, 4u)]
+    [InlineData("TBufferLoadFormatXy", 2u, 8u)]
+    [InlineData("TBufferStoreFormatX", 1u, 4u)]
+    [InlineData("TBufferStoreFormatXy", 2u, 8u)]
+    public void TypedBufferBoundsUseOnlyTransferredComponents(string opcode, uint componentCount, uint accessBytes)
+    {
+        var shader = CompileTypedBufferAccess(opcode, componentCount, typedFormat: 77);
+        Assert.Contains($"{accessBytes}u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("16u <= sharpemu_resources.buffer_bytes[0] && ", shader.Source, StringComparison.Ordinal);
+    }
+
+    private static Gen5MslShader CompileTypedBufferAccess(string opcode, uint dwordCount, uint typedFormat)
+    {
+        var data = new Gen5Operand[dwordCount];
+        for (var index = 0; index < data.Length; index++)
+        {
+            data[index] = Gen5Operand.Vector(4 + (uint)index);
+        }
+
+        var access = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mtbuf,
+            opcode,
+            [0, 0],
+            [Gen5Operand.Vector(0), Gen5Operand.Scalar(8), Gen5Operand.Source(128, null)],
+            data,
+            new Gen5BufferMemoryControl(
+                dwordCount,
+                0,
+                4,
+                8,
+                0,
+                IndexEnabled: false,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false,
+                Typed: true,
+                TypedFormat: typedFormat));
+        var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
+        var scalars = new uint[256];
+        scalars[8] = 0x2000;
+        scalars[10] = 64;
+        scalars[11] = 77u << 12;
+        var shader = CompileMaterialized(new Gen5ShaderProgram(0, [access, end]), scalars[..12]);
+        return shader;
     }
 
     [Fact]
@@ -509,40 +578,15 @@ public sealed class MslTranslationTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, [fetch, end]),
-            [],
-            null);
-        var registers = new uint[256];
-        var data = new byte[8];
-        var evaluation = new Gen5ShaderEvaluation(
-            registers,
-            registers,
-            [],
-            [],
-            VertexInputs:
-            [
-                new Gen5VertexInputBinding(
-                    0,
-                    0,
-                    2,
-                    11,
-                    7,
-                    0x1000,
-                    8,
-                    0,
-                    data,
-                    data.Length,
-                    DataPooled: false),
-            ]);
-
-        Assert.True(
-            Gen5MslTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var shader,
-                out var error),
-            error);
+        var program = new Gen5ShaderProgram(0, [fetch, end]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, 1, 0, 0, new HashSet<uint> { 0 });
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(resources.Info, [], false, false, false);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            VertexInputs = [new ShaderVertexInput(0, 0, 2, 7, false, [])],
+        };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains("v[2] = 0u;", shader.Source, StringComparison.Ordinal);
     }
 
@@ -581,30 +625,26 @@ public sealed class MslTranslationTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0x1_0000_C000, [store, end]),
-            [],
-            null);
-        var descriptor = new uint[8];
-        descriptor[1] = unifiedFormat << 20;
-        descriptor[3] = (9u << 28) | dstSelect;
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [new Gen5ImageBinding(0, opcode, control, descriptor, [], null)],
-            []);
-
-        Assert.True(
-            Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var userData = new uint[16];
+        userData[8] = 0x20;
+        userData[9] = unifiedFormat << 20;
+        userData[11] = (9u << 28) | dstSelect;
+        return CompileMaterialized(new Gen5ShaderProgram(0x1_0000_C000, [store, end]), userData);
+    }
+    private static Gen5MslShader CompileMaterialized(Gen5ShaderProgram program, uint[] userData)
+    {
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, (uint)userData.Length);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, new ResourceRuntimeInputs { UserData = userData },
+            ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, (uint)userData.Length), false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader;
     }
+
 }

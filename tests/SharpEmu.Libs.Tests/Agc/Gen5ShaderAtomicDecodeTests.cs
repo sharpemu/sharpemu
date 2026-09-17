@@ -16,46 +16,6 @@ public sealed class Gen5ShaderAtomicDecodeTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint EndPgm = 0xBF810000;
 
-    // Compute-stage register block: COMPUTE_USER_DATA_0 and COMPUTE_PGM_RSRC2,
-    // required since TryCreateState validates the USER_SGPR count.
-    internal const uint ComputeUserDataRegister = 0x240;
-    internal const uint ComputePgmRsrc2Register = 0x213;
-
-    [Fact]
-    public void ShaderChecksumSeparatesProgramsReusingOneGuestAddress()
-    {
-        var memory = new FakeCpuMemory(ShaderAddress, 0x1000);
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        var registers = new Dictionary<uint, uint> { [ComputePgmRsrc2Register] = 0 };
-
-        WriteProgram(memory, ShaderAddress, [0xBF800000]);
-        Assert.True(Gen5ShaderTranslator.TryCreateState(
-            ctx,
-            ShaderAddress,
-            0,
-            registers,
-            ComputeUserDataRegister,
-            out var first,
-            out var firstError,
-            shaderChecksum: 0x11111111), firstError);
-
-        WriteProgram(memory, ShaderAddress, [0xBF8C0000]);
-        Assert.True(Gen5ShaderTranslator.TryCreateState(
-            ctx,
-            ShaderAddress,
-            0,
-            registers,
-            ComputeUserDataRegister,
-            out var second,
-            out var secondError,
-            shaderChecksum: 0x22222222), secondError);
-
-        Assert.Equal("SNop", first.Program.Instructions[0].Opcode);
-        Assert.Equal("SWaitcnt", second.Program.Instructions[0].Opcode);
-        Assert.Equal(0x11111111u, first.ShaderChecksum);
-        Assert.Equal(0x22222222u, second.ShaderChecksum);
-    }
-
     [Fact]
     public void BufferAtomicUmax_DecodesControlAndDestination()
     {
@@ -174,16 +134,13 @@ public sealed class Gen5ShaderAtomicDecodeTests
         var ctx = new CpuContext(memory, Generation.Gen5);
         WriteProgram(memory, ShaderAddress, words);
         Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
+            Gen5ShaderTranslator.TryDecodeProgram(
                 ctx,
                 ShaderAddress,
-                0,
-                new Dictionary<uint, uint> { [ComputePgmRsrc2Register] = 0 },
-                ComputeUserDataRegister,
-                out var state,
+                out var program,
                 out var error),
             error);
-        return state.Program.Instructions[0];
+        return program.Instructions[0];
     }
 
     internal static void WriteProgram(FakeCpuMemory memory, ulong address, uint[] words)

@@ -4,24 +4,13 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// Regression tests for the VOP1 register-relative moves V_MOVRELD_B32 /
-// V_MOVRELS_B32 / V_MOVRELSD_B32 / V_MOVRELSD_2_B32 (opcodes 0x42/0x43/0x44/
-// 0x48). These add M0 at run time to the source and/or destination register
-// number encoded in the instruction, which is how a shader compiler implements
-// a dynamically indexed array that stayed in registers. The decoder named them
-// but nothing lowered them, so they hit the vector-ALU switch default and failed
-// emission ("unsupported vector opcode"), dropping the whole shader — Astro Bot
-// ships pixel shaders that use V_MOVRELS_B32.
-//
-// The register file is a private uint array, so the lowering is an OpAccessChain
-// with a computed (non-constant) index. Each test therefore asserts both that
-// the shader survives translation and that the relative operand really became a
-// dynamic index rather than a constant one.
+// Checks computed register indices and rejects invalid relative sources.
 public sealed class Gen5MoveRelativeSpirvTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
@@ -184,22 +173,13 @@ public sealed class Gen5MoveRelativeSpirvTests
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
         var ctx = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        var shaderRegisters = new Dictionary<uint, uint>
+        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ShaderAddress, out var program, out error))
         {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
+            return false;
+        }
 
-        if (!Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
-                out error) ||
-            !Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error) ||
-            !Gen5SpirvTranslator.TryCompileComputeShader(
-                state, evaluation, 1, 1, 1, out var shader, out error))
+        var request = ResourceTestProgram.Request(program, userDataCount: 16);
+        if (!Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error))
         {
             return false;
         }

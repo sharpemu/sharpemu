@@ -4,25 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ImageTests
 {
-    [Theory]
-    [InlineData("ImageLoad", null, false)]
-    [InlineData("ImageStore", null, false)]
-    [InlineData("ImageSample", null, false)]
-    [InlineData("ImageLoadMip", null, true)]
-    [InlineData("ImageStoreMip", null, true)]
-    [InlineData("ImageLoadMip", 0u, false)]
-    [InlineData("ImageStoreMip", 2u, false)]
-    public void DynamicMipRequiresAnUnresolvedMipOperand(string opcode, uint? mipLevel, bool expected)
-    {
-        var binding = new Gen5ImageBinding(0, opcode, null!, [], [], mipLevel);
-        Assert.Equal(expected, binding.HasDynamicMip);
-    }
 
     private const ulong ShaderAddress = 0x1_0000_C000;
 
@@ -105,15 +94,14 @@ public sealed class Gen5ImageTests
     }
 
     [Theory]
-    [InlineData(1u, SpirvOp.FOrdLessThan)]
-    [InlineData(2u, SpirvOp.FOrdEqual)]
-    [InlineData(3u, SpirvOp.FOrdLessThanEqual)]
-    [InlineData(4u, SpirvOp.FOrdGreaterThan)]
-    [InlineData(5u, SpirvOp.FOrdNotEqual)]
-    [InlineData(6u, SpirvOp.FOrdGreaterThanEqual)]
-    public void ImageSampleCompareUsesSamplerCompareFunction(
-        uint compareFunction,
-        SpirvOp expectedOperation)
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    [InlineData(4u)]
+    [InlineData(5u)]
+    [InlineData(6u)]
+    public void ImageSampleCompareUsesNativeDepthComparison(
+        uint compareFunction)
     {
         var instructions = ReadSpirvInstructions(
             CompileImageOperation(
@@ -121,11 +109,11 @@ public sealed class Gen5ImageTests
                 dimension: 1,
                 samplerWord0: compareFunction << 12));
 
-        Assert.Contains(instructions, item => item.Opcode == expectedOperation);
+        Assert.Contains(instructions, item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
     }
 
     [Fact]
-    public void ImageSampleCompareLzAppliesLinearDepthFilteringPerTexel()
+    public void ImageSampleCompareLzUsesNativeFilteringWithTheSampler()
     {
         var instructions = ReadSpirvInstructions(
             CompileImageOperation(
@@ -134,16 +122,9 @@ public sealed class Gen5ImageTests
                 samplerWord0: 0x00006012,
                 samplerWord2: 0x00500000));
 
-        Assert.Equal(
-            4,
-            instructions.Count(item => item.Opcode == SpirvOp.ImageFetch));
-        Assert.DoesNotContain(
-            instructions,
-            item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
-        Assert.Equal(
-            4,
-            instructions.Count(
-                item => item.Opcode == SpirvOp.FOrdGreaterThanEqual));
+        Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageFetch);
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
     }
 
     [Theory]
@@ -253,38 +234,30 @@ public sealed class Gen5ImageTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(ShaderAddress, [imageInstruction, end]),
-            [],
-            null);
-        var scalarRegisters = new uint[256];
-        var descriptor = new uint[8];
-        descriptor[1] = unifiedFormat << 20;
-        descriptor[3] = ((descriptorType ?? (dimension == 2 ? 10u : 9u)) << 28) | dstSelect;
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [
-                new Gen5ImageBinding(
-                    imageInstruction.Pc,
-                    imageInstruction.Opcode,
-                    control,
-                    descriptor,
-                    [samplerWord0, 0u, samplerWord2, 0u],
-                    null),
-            ],
-            []);
+        var program = new Gen5ShaderProgram(ShaderAddress, [imageInstruction, end]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, ResourceTestProgram.Hash, 0, 20);
+        var userData = new uint[20];
+        userData[8] = 0x20;
+        userData[9] = unifiedFormat << 20;
+        userData[11] = ((descriptorType ?? (dimension == 2 ? 10u : 9u)) << 28) | dstSelect;
+        userData[16] = samplerWord0;
+        userData[18] = samplerWord2;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData),
+            ref snapshot, ref specialization));
+        if (opcode.Contains("Sample", StringComparison.Ordinal))
+        {
+            Assert.Equal(samplerWord0, Assert.Single(snapshot.Samplers)[0]);
+            Assert.Equal(samplerWord2, snapshot.Samplers[0][2]);
+        }
 
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, 20), false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader.Spirv;
     }
 

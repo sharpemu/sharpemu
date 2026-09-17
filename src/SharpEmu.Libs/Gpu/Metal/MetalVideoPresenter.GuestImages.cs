@@ -691,6 +691,7 @@ internal static partial class MetalVideoPresenter
         var completedWork = 0;
         RecycleCompletedUploadPages();
         RecycleCompletedSnapshotResources();
+        ScanCompletedFaultBitmaps();
         DrainGuestImageCpuSync(device);
         try
         {
@@ -735,6 +736,15 @@ internal static partial class MetalVideoPresenter
                             break;
                         case ComputeGuestDispatch computeDispatch:
                             ExecuteComputeDispatch(device, queue, computeDispatch);
+                            break;
+                        case GlobalDataShareFill fill:
+                            ExecuteGlobalDataShareFill(device, queue, fill);
+                            break;
+                        case GlobalDataShareCopyFromGuest copyFromGuest:
+                            ExecuteGlobalDataShareCopyFromGuest(device, queue, copyFromGuest);
+                            break;
+                        case GlobalDataShareCopyToGuest copyToGuest:
+                            ExecuteGlobalDataShareCopyToGuest(device, queue, copyToGuest);
                             break;
                     }
                 }

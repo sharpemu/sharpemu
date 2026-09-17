@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -87,20 +88,11 @@ public sealed class Gen5VopcF16Tests
             [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(ShaderAddress, [compare]),
-            [],
-            null);
-        var scalars = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(scalars, scalars, [], []);
+        var request = ResourceTestProgram.Request(new Gen5ShaderProgram(ShaderAddress, [compare]), userDataCount: 0);
 
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var shader,
                 out var error),
             error);

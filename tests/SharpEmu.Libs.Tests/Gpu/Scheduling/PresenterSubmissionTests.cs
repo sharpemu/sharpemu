@@ -437,7 +437,7 @@ public sealed class PresenterSubmissionTests
         {
             "_batchResources", "_batchRetireBuffers",
             "_pendingGuestSubmissions",
-            "_recycledDescriptorPools", "_deferredResourceDestroys", "_deferredGuestImageVersionDestroys",
+            "_deferredGuestImageVersionDestroys",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -447,13 +447,7 @@ public sealed class PresenterSubmissionTests
         Set(presenter, "_batchOpen", true);
         Set(presenter, "_activeGuestQueue", new VulkanGuestQueueIdentity("test.queue", 7));
 
-        var binding = NewNested("GlobalBufferResource");
-        Set(binding, "Writable", true);
-        var resources = NewNested("TranslatedDrawResources");
-        var bindings = Array.CreateInstance(binding.GetType(), 1);
-        bindings.SetValue(binding, 0);
-        Set(resources, "GlobalMemoryBuffers", bindings);
-        Set(resources, "DescriptorPool", new DescriptorPool(123));
+        var resources = NewNested("SubmissionUploadResources");
         ((IList)Get(presenter, "_batchResources")).Add(resources);
 
         var device = new FakeTickDevice { CompleteOnSubmit = route != "flush" };
@@ -478,7 +472,7 @@ public sealed class PresenterSubmissionTests
                 break;
             case "shutdown": scheduler.Shutdown(); break;
             case "wait": scheduler.Wait(scheduler.CurrentTick); break;
-            case "flush": Invoke(presenter, "FlushBatchedGuestCommands", new object?[] { null }); break;
+            case "flush": Invoke(presenter, "FlushBatchedGuestCommands"); break;
         }
 
         Assert.Equal(1UL, Assert.Single(device.Submits).Tick);
@@ -494,14 +488,12 @@ public sealed class PresenterSubmissionTests
         {
             Invoke(presenter, "CollectCompletedGuestSubmissions", false);
             Assert.Single(((IEnumerable)Get(presenter, "_pendingGuestSubmissions")).Cast<object>());
-            Assert.Empty((IEnumerable)Get(presenter, "_recycledDescriptorPools"));
             device.Complete(1);
             device.CompleteOnSubmit = true;
         }
 
         Invoke(presenter, "CollectCompletedGuestSubmissions", false);
         Assert.Empty((IEnumerable)Get(presenter, "_pendingGuestSubmissions"));
-        Assert.Single(((IEnumerable)Get(presenter, "_recycledDescriptorPools")).Cast<object>());
         Assert.Equal(1UL, Get(presenter, "_completedTimeline"));
 
         if (route != "shutdown")

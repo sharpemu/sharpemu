@@ -22,6 +22,7 @@ public static class RenderTrace
     private static int _imageClears;
     private static int _metadataClears;
     private static int _nullComputeShaders;
+    private static int _pipelineLines;
     private static long _sequence;
 
     public static long NextSequence() => Interlocked.Increment(ref _sequence);
@@ -50,4 +51,7 @@ public static class RenderTrace
     public static bool MetadataClear() => Interlocked.Increment(ref _metadataClears) <= 32;
 
     public static bool NullComputeShader() => Interlocked.Increment(ref _nullComputeShaders) <= 32;
+
+    // The shader and pipeline cache lines: lookups, hits, compiles, bindings and commits.
+    public static bool Pipeline() => Interlocked.Increment(ref _pipelineLines) <= 4096;
 }

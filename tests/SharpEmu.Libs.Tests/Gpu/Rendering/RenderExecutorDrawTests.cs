@@ -87,7 +87,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
             "debug DrawIndexAuto 3 600 3 0 1 0",
             "debug DrawIndexAuto 3 700 3 0 1 0",
             "reset_bindings");
-        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("bind_vertex", StringComparison.Ordinal));
+        Assert.Contains("bind_vertex ", _host.Calls);
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("bind_index", StringComparison.Ordinal));
     }
 

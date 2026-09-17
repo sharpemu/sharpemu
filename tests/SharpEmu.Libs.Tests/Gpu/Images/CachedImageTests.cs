@@ -236,7 +236,19 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { LevelCount = 3 }));
         Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { BaseLayer = 2 }));
         Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Aspect = ImageAspectFlags.DepthBit }));
-        Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Type = ImageViewType.Type3D }));
+        var typeFailure = Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with { Type = ImageViewType.Type3D }));
+        Assert.Contains("typeValid=False", typeFailure.Message);
+        Assert.Contains("exists=True", typeFailure.Message);
+        Assert.Contains($"address=0x{image.Description.Data.Address:X16}", typeFailure.Message);
+        Assert.Contains($"image=0x{image.Backing.Handle.Handle:X16}", typeFailure.Message);
+        Assert.Contains($"imageType={(int)image.Backing.ImageType}", typeFailure.Message);
+        var mappingFailure = Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(request with
+        {
+            Mapping = new ComponentMapping((ComponentSwizzle)255, ComponentSwizzle.Identity, ComponentSwizzle.Identity, ComponentSwizzle.Identity),
+        }));
+        Assert.Contains("mapping=255,0,0,0", mappingFailure.Message);
+        Assert.Contains("mappingValid=False", mappingFailure.Message);
+        Assert.Contains("usageValid=True", mappingFailure.Message);
         Assert.All(fatal.Messages, message => Assert.Contains("image view is invalid", message));
 
         var depth = harness.CreateImage(Color2D(16, 16, format: Format.D32Sfloat));

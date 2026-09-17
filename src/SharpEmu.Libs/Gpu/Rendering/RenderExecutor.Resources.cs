@@ -183,8 +183,28 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         using var preparation = _host.BeginPreparation();
-        var vertexBindings = _host.PrepareBindings(vertexInput.Stage);
-        var pixelBindings = state.PixelActive ? _host.PrepareBindings(pixelInput.Stage) : null;
+        IPreparedBindings vertexBindings;
+        IPreparedBindings? pixelBindings;
+        try
+        {
+            vertexBindings = _host.PrepareBindings(vertexInput.Stage);
+            pixelBindings = state.PixelActive ? _host.PrepareBindings(pixelInput.Stage) : null;
+        }
+        catch (DrawImageTypeMismatchException rejection)
+        {
+            if (_strictDrawResources)
+            {
+                throw _host.Fatal(rejection.Message);
+            }
+
+            if (_reportedDrawImageTypeMismatches.Add(rejection.WarningKey))
+            {
+                Console.Error.WriteLine($"[GPU][WARN][DRAW_SKIPPED] {rejection.Message} " +
+                    "The draw was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
+            }
+
+            return;
+        }
         var vertexProgram = vertexInput.Stage.Program ?? throw _host.Fatal("The vertex stage has no program.");
         var pixelProgram = pixelBindings is null ? null : pixelInput.Stage.Program ?? throw _host.Fatal("The pixel stage has no program.");
         if (vertexProgram.UsesDeviceAddresses || (pixelProgram?.UsesDeviceAddresses ?? false))
@@ -211,6 +231,7 @@ public sealed partial class RenderExecutor
             in state.Rendering,
             topology,
             primitiveRestart,
+            state.Programs.DisableBlending,
             state.Programs.Vertex,
             state.Programs.Pixel);
         if (setBindDebug)
@@ -223,10 +244,7 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x200);
         }
 
-        if (vertexBuffers.Length != 0)
-        {
-            _host.BindVertexBuffers(vertexBuffers);
-        }
+        _host.BindVertexBuffers(vertexBuffers, vertexInput);
 
         if (pixelBindings is not null && setAutoDebug)
         {

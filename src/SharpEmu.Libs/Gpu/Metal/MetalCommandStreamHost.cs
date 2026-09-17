@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -21,6 +22,7 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     {
         _backend = backend;
         _snapshots = snapshots;
+        _context = new CpuContext(memory, Generation.Gen5);
     }
 
     public override void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
@@ -31,23 +33,89 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
         base.BeginSubmission(queueId, submissionId, geometrySnapshots);
     }
 
+    // The global data share lives on the GPU; its transfers queue behind the draws before them.
     public override void FillBuffer(ulong address, ulong size, uint value, bool isGds)
     {
-        base.FillBuffer(address, size, value, isGds);
-        if (!isGds)
+        if (isGds)
         {
-            MirrorTransferToSnapshotImage(address, size, value);
+            if ((address & 3) != 0 || (size & 3) != 0)
+            {
+                throw Fatal($"The fill range is not dword aligned: address=0x{address:X16} size=0x{size:X}.");
+            }
+
+            if (address > GdsBytes || size > (ulong)GdsBytes - address)
+            {
+                throw Fatal($"The GDS fill range is outside the buffer: offset=0x{address:X} size=0x{size:X}.");
+            }
+
+            // A blit fill repeats one byte, so a pattern with unequal bytes is expanded and copied.
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+            if (bytes[0] == bytes[1] && bytes[1] == bytes[2] && bytes[2] == bytes[3])
+            {
+                _ = _snapshots.SubmitGlobalDataShareFill(address, size, bytes[0]);
+                return;
+            }
+
+            var expanded = new byte[size];
+            for (var offset = 0; offset < expanded.Length; offset += sizeof(uint))
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(expanded.AsSpan(offset), value);
+            }
+
+            _ = _snapshots.SubmitGlobalDataShareCopyFromGuest(address, expanded);
+            return;
         }
+
+        base.FillBuffer(address, size, value, isGds);
+        MirrorTransferToSnapshotImage(address, size, value);
     }
 
     public override void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
     {
-        base.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
-        if (!destinationIsGds)
+        if (size == 0)
         {
-            MirrorTransferToSnapshotImage(destination, size, null);
+            return;
         }
+
+        if (destinationIsGds && sourceIsGds)
+        {
+            throw Fatal($"A GDS-to-GDS copy is not supported: destination=0x{destination:X} source=0x{source:X} size=0x{size:X}.");
+        }
+
+        if ((destinationIsGds && (destination > GdsBytes || size > (ulong)GdsBytes - destination)) ||
+            (sourceIsGds && (source > GdsBytes || size > (ulong)GdsBytes - source)) ||
+            (!destinationIsGds && destination == 0) ||
+            (!sourceIsGds && source == 0))
+        {
+            throw Fatal($"The copy range is invalid: destination=0x{destination:X16} source=0x{source:X16} size=0x{size:X} dstGds={destinationIsGds} srcGds={sourceIsGds}.");
+        }
+
+        if (destinationIsGds)
+        {
+            var bytes = new byte[checked((int)size)];
+            if (!Memory.TryRead(source, bytes))
+            {
+                throw Fatal($"The copy cannot read guest memory: address=0x{source:X16} size=0x{size:X}.");
+            }
+
+            _ = _snapshots.SubmitGlobalDataShareCopyFromGuest(destination, bytes);
+            return;
+        }
+
+        if (sourceIsGds)
+        {
+            _ = _snapshots.SubmitGlobalDataShareCopyToGuest(destination, source, size);
+            return;
+        }
+
+        base.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
+        MirrorTransferToSnapshotImage(destination, size, null);
     }
+
+    // Reached only after SynchronizeGpu, so the shared buffer holds every queued transfer and shader write.
+    public override void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
+        _snapshots.ReadGlobalDataShare(destination, wordOffset, wordCount);
 
     // A transfer that covers a whole snapshot image replaces that image's pixels.
     private void MirrorTransferToSnapshotImage(ulong destination, ulong byteCount, uint? fillValue)
@@ -115,10 +183,10 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
         VideoOutExports.MarkFlipPresented(requestId);
     }
 
-    // The presenter keeps its own captured versions; waiting for the ordered queue is the sync point.
+    // The ordered queue runs every earlier record and then waits for the GPU to complete them.
     public override void SynchronizeGpu()
     {
-        var sequence = MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, "command_stream synchronize");
+        var sequence = _snapshots.SubmitGpuSynchronization("command_stream synchronize");
         if (sequence != 0)
         {
             _ = MetalVideoPresenter.WaitForGuestWork(sequence, Timeout.Infinite);

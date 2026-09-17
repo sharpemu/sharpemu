@@ -475,6 +475,26 @@ public sealed partial class GuestImageCache
         return new ImageRegionInfo(imagePages, imageBytes, gpuImageBytes);
     }
 
+    // Only byte overlap with a GPU-owned image can make a clean backing read unsafe.
+    public bool HasGpuModifiedImageBytes(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size)) return false;
+
+        using var held = _lock.Hold();
+        if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive)) return false;
+        for (var page = first; page < lastExclusive; page++)
+        {
+            var owners = _pageOwners.Find(page);
+            if (owners is null) continue;
+            for (var ownerIndex = 0; ownerIndex < owners.Count; ownerIndex++)
+            {
+                var image = _slots.TryGet(owners[ownerIndex]);
+                if (image is not null && !image.DepthOwner.IsValid && image.GpuOverlaps(address, size)) return true;
+            }
+        }
+        return false;
+    }
+
     // The guest unmapped the range: drop its metadata and every image in it without a readback.
     void IGuestImageStore.Unregister(ulong address, ulong size)
     {

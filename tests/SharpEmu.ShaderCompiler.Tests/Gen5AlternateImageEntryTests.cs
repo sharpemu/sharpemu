@@ -1,8 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Tests;
@@ -10,7 +11,7 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5AlternateImageEntryTests
 {
     [Fact]
-    public void ConditionalWithoutSkippedImageBlockDoesNotCreateAnAlternateEntry()
+    public void ConditionalWithoutImageAccessHasNoImageResources()
     {
         var program = new Gen5ShaderProgram(0x1000,
         [
@@ -18,11 +19,7 @@ public sealed class Gen5AlternateImageEntryTests
             new(4, Gen5ShaderEncoding.Sopp, "SNop", [0u], [], [], null),
             new(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0u], [], [], null),
         ]);
-        var property = typeof(Gen5ShaderProgram).GetProperty("AlternateResourceEntries",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var entries = Assert.IsAssignableFrom<IReadOnlyDictionary<uint, uint>>(property.GetValue(program));
-        Assert.Empty(entries);
-        Assert.Same(entries, property.GetValue(program));
+        Assert.Empty(Extract(program, stage: ShaderStage.Pixel).Info.Images);
     }
 
     [Theory]
@@ -53,19 +50,12 @@ public sealed class Gen5AlternateImageEntryTests
             new Gen5ImageControl(1, 0, [], 0, 0, 32, 1, false, false, false, false, false)));
         instructions.Add(new(36, Gen5ShaderEncoding.Sopp, "SEndpgm", [0u], [], [], null));
         var program = new Gen5ShaderProgram(0x1000, instructions);
-        var state = new Gen5ShaderState(program, registers, null);
-
-        Assert.True(Gen5ShaderScalarEvaluator.TryEvaluate(
-            new CpuContext(new UnreadableMemory(), Generation.Gen5), state, out var evaluation, out var error), error);
-        var binding = Assert.Single(evaluation.ImageBindings);
-        Assert.Equal(28u, binding.Pc);
-        Assert.Equal(imageWords, binding.ResourceDescriptor);
-        Assert.Equal(samplerWords, binding.SamplerDescriptor);
-    }
-
-    private sealed class UnreadableMemory : ICpuMemory
-    {
-        public bool TryRead(ulong address, Span<byte> destination) => false;
-        public bool TryWrite(ulong address, ReadOnlySpan<byte> source) => false;
+        var plan = Extract(program, userDataCount: 40, stage: ShaderStage.Pixel);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(registers), ref snapshot, ref specialization));
+        Assert.Equal(28u, plan.Memory[0].Pc);
+        Assert.Equal(imageWords, Assert.Single(snapshot.Images));
+        Assert.Equal(samplerWords, Assert.Single(snapshot.Samplers));
     }
 }

@@ -537,6 +537,47 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TrackedReadOnlyUploadRearmsHotPagesAndRetriesFailures(bool failUpload)
+    {
+        var address = Allocate(1);
+        _tracker.ForEachUploadRange(address, Page, false, NoRange, NoUpload);
+        _tracker.MarkCpuDirtyPages(address, Page);
+        _tracker.ForEachUploadRange(address, Page, false, NoRange, NoUpload);
+        _tracker.MarkCpuDirtyPages(address, Page);
+        Assert.True(_tracker.IsCpuWriteHotRange(address, Page));
+
+        if (failUpload)
+        {
+            Assert.Throws<InvalidOperationException>(() => _tracker.ForEachUploadRange(
+                address, Page, false, NoRange, () => throw new InvalidOperationException(),
+                preserveCpuWriteHotPages: false));
+            Assert.True(_tracker.HasCpuDirtyPages(address, Page));
+            Assert.True(IsWritable(address));
+        }
+
+        var uploads = 0;
+        for (var repeat = 0; repeat < 3; repeat++)
+            _tracker.ForEachUploadRange(address, Page, false, (_, _) => uploads++, NoUpload,
+                preserveCpuWriteHotPages: false);
+        Assert.Equal(1, uploads);
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.False(_tracker.HasGpuDirtyPages(address, Page));
+        Assert.False(IsWritable(address));
+        Assert.True(_tracker.IsCpuWriteHotRange(address, Page));
+
+        _tracker.MarkCpuDirtyPages(address, Page);
+        _tracker.ForEachUploadRange(address, Page, false, (_, _) => uploads++, NoUpload,
+            preserveCpuWriteHotPages: false);
+        Assert.Equal(2, uploads);
+        Assert.False(IsWritable(address));
+
+        _tracker.UntrackMemory(address, Page);
+        Release(address, Page);
+    }
+
     [Fact]
     public void ReadOnlyUploadClearsColdPagesAndPreservesHotPages()
     {

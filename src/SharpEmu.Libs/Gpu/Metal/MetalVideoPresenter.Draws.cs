@@ -12,10 +12,9 @@ namespace SharpEmu.Libs.Gpu.Metal;
 // depth-only draws are ordered guest work publishing into guest images; onscreen
 // draws ride the presentation), while execution is idiomatic Metal: render passes
 // express load/clear intent directly, the driver's hazard tracking replaces the
-// explicit barrier choreography, and the binding layout follows the translation
-// contract documented on Gen5MslTranslator (global buffers at their flat slot,
-// SharpEmuUniforms after them, textures and samplers at the image slots, vertex
-// streams at a high base that never collides with global buffers).
+// explicit barrier choreography, and each stage reads its resources through one
+// argument buffer at slot 0 with the push block at slot 1, vertex streams at a
+// high base that never collides with them.
 internal static partial class MetalVideoPresenter
 {
     private const nuint VertexBufferSlotBase = 26;
@@ -89,7 +88,11 @@ internal static partial class MetalVideoPresenter
         uint PrimitiveType,
         GuestIndexBuffer? IndexBuffer,
         GuestRenderState RenderState,
-        int BaseVertex = 0);
+        int BaseVertex = 0,
+        GuestStageBindings[]? StageBindings = null)
+    {
+        public GuestStageBindings[] Stages => StageBindings ?? [];
+    }
 
     private sealed record OffscreenGuestDraw(
         TranslatedGuestDraw Draw,
@@ -248,7 +251,8 @@ internal static partial class MetalVideoPresenter
         GuestRenderState? renderState,
         GuestDepthTarget? depthTarget,
         ulong shaderAddress,
-        int baseVertex = 0)
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null)
     {
         if (targets.Count == 0)
         {
@@ -297,7 +301,8 @@ internal static partial class MetalVideoPresenter
                         primitiveType,
                         indexBuffer,
                         effectiveRenderState,
-                        baseVertex),
+                        baseVertex,
+                        stageBindings is null ? null : ToArray(stageBindings)),
                     ToArray(targets),
                     depthTarget,
                     PublishTarget: true,
@@ -326,7 +331,8 @@ internal static partial class MetalVideoPresenter
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers,
         GuestRenderState? renderState,
         ulong shaderAddress,
-        int baseVertex = 0)
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null)
     {
         if (depthTarget.Address == 0 || depthTarget.Width == 0 || depthTarget.Height == 0)
         {
@@ -354,7 +360,8 @@ internal static partial class MetalVideoPresenter
                         primitiveType,
                         indexBuffer,
                         renderState ?? GuestRenderState.Default,
-                        baseVertex),
+                        baseVertex,
+                        stageBindings is null ? null : ToArray(stageBindings)),
                     [new GuestRenderTarget(Address: 0, depthTarget.Width, depthTarget.Height, Format: 10, NumberType: 0)],
                     depthTarget,
                     PublishTarget: false,
@@ -676,12 +683,15 @@ internal static partial class MetalVideoPresenter
             CreateClearPass(target, new MtlClearColor { Alpha = 1 }));
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
         var work = new OffscreenGuestDraw(draw, [], null, PublishTarget: false, ShaderAddress: 0);
+        var batchScan = SuspendOpenFaultScan();
         EncodeDrawBindings(device, encoder, work, textureHandles, textureOwned, out var writeBackBuffers);
         EncodeDrawCall(encoder, draw);
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
         TagSnapshotResources(commandBuffer);
+        TagFaultScan(commandBuffer);
+        ResumeOpenFaultScan(batchScan);
         if (writeBackBuffers.Count > 0)
         {
             WaitForCommittedCommandBuffer(commandBuffer);
@@ -808,46 +818,6 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Builds and binds a stage's sampler argument buffer: one 8-byte
-    /// Tier 2 resource ID per sampled image, written into an arena slice and
-    /// bound at the shader's SamplerArgBufferIndex. The stage's images are
-    /// draw.Textures[ImageBindingBase + j] for its j-th image, matching how the
-    /// translator numbered SamplerSlots. No-op for stages that sample nothing.</summary>
-    private static void BindSamplerArgumentBuffer(
-        nint device,
-        nint encoder,
-        nint selSetBuffer,
-        MetalCompiledGuestShader shader,
-        GuestDrawTexture[] textures)
-    {
-        var slots = shader.Shader.SamplerSlots;
-        var count = shader.Shader.SamplerCount;
-        var argIndex = shader.Shader.SamplerArgBufferIndex;
-        if (slots is null || count == 0 || argIndex < 0)
-        {
-            return;
-        }
-
-        var imageBase = shader.Shader.ImageBindingBase;
-        var slice = AllocateUpload(device, count * sizeof(ulong), out var buffer, out var offset);
-        slice.Clear();
-        for (var j = 0; j < slots.Count; j++)
-        {
-            var slot = slots[j];
-            if (slot < 0)
-            {
-                continue;
-            }
-
-            var sampler = GetOrCreateSampler(device, textures[imageBase + j].Sampler);
-            var resourceId = MetalNative.SendGpuResourceId(sampler, MetalNative.Selector("gpuResourceID"));
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
-                slice[(slot * sizeof(ulong))..], resourceId);
-        }
-
-        MetalNative.SendSetBuffer(encoder, selSetBuffer, buffer, (nuint)offset, (nuint)argIndex);
-    }
-
     /// <summary>Resolves every texture a draw samples, encoding any snapshot
     /// blits into <paramref name="blitCommandBuffer"/>; must run before the
     /// consuming encoder opens on that command buffer.</summary>
@@ -866,10 +836,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Binds everything the translation contract names: global buffers
-    /// and SharpEmuUniforms to both stages, the pre-resolved textures/samplers
-    /// to both stages, vertex streams at the high slots. Collects the writable
-    /// buffers for guest write-back.</summary>
+    // Uploads the draw's guest buffers once, fills each stage's argument buffer and binds the vertex streams.
     private static void EncodeDrawBindings(
         nint device,
         nint encoder,
@@ -883,88 +850,28 @@ internal static partial class MetalVideoPresenter
 
         var selSetVertexBuffer = MetalNative.Selector("setVertexBuffer:offset:atIndex:");
         var selSetFragmentBuffer = MetalNative.Selector("setFragmentBuffer:offset:atIndex:");
-        var bufferCount = draw.GlobalMemoryBuffers.Length;
-        Span<uint> boundBytes = stackalloc uint[Math.Max(bufferCount, 1)];
-        for (var index = 0; index < bufferCount; index++)
+        var uploads = UploadDrawBuffers(device, draw.GlobalMemoryBuffers, writeBackBuffers);
+        var pushData = MergePushData(draw.Stages);
+        if (FindStageBindings(draw.Stages, GuestStageKind.Vertex, draw.VertexShader) is { } vertexBindings && draw.VertexShader is { } vertexShader)
         {
-            var guest = draw.GlobalMemoryBuffers[index];
-            var pointer = UploadGlobalBuffer(
-                device, guest, out var buffer, out var offset, out boundBytes[index]);
-            MetalNative.SendSetBuffer(encoder, selSetVertexBuffer, buffer, (nuint)offset, (nuint)index);
-            MetalNative.SendSetBuffer(encoder, selSetFragmentBuffer, buffer, (nuint)offset, (nuint)index);
-            if (guest.Writable && guest.WriteBackToGuest)
+            EncodeStageResources(
+                device, new StageEncoder(encoder, selSetVertexBuffer, RenderStageVertex), vertexShader.Shader.ArgumentLayout,
+                vertexBindings, uploads, textureHandles, pushData);
+        }
+
+        if (FindStageBindings(draw.Stages, GuestStageKind.Pixel, draw.PixelShader) is { } pixelBindings)
+        {
+            EncodeStageResources(
+                device, new StageEncoder(encoder, selSetFragmentBuffer, RenderStageFragment), draw.PixelShader.Shader.ArgumentLayout,
+                pixelBindings, uploads, textureHandles, pushData);
+        }
+
+        for (var index = 0; index < textureHandles.Length; index++)
+        {
+            if (textureHandles[index] != 0 && textureOwned[index])
             {
-                writeBackBuffers.Add((pointer, guest));
+                MetalNative.SendVoid(textureHandles[index], MetalNative.Selector("release"));
             }
-        }
-
-        // SharpEmuUniforms per the translation contract: dispatch limit (unused by
-        // graphics stages), reserved, then each bound buffer's byte length
-        // (including the alignment-bias prefix the shader indexes past).
-        var uniforms = AllocateUpload(
-            device,
-            16 + (Math.Max(bufferCount, 1) * sizeof(uint)),
-            out var uniformsBuffer,
-            out var uniformsOffset);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms, 1);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms[4..], 1);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms[8..], 1);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(uniforms[12..], 0);
-        for (var index = 0; index < bufferCount; index++)
-        {
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
-                uniforms[(16 + (index * sizeof(uint)))..],
-                boundBytes[index]);
-        }
-
-        // Each stage declares SharpEmuUniforms at its own translation-time index
-        // (globalBufferBase + totalGlobalBufferCount). A draw whose vertex-stage
-        // guest buffers sit after the pixel stage's gives the two stages
-        // different indices, so bind the buffer at each stage's declared slot —
-        // one shared index leaves the other stage's uniforms unbound, which
-        // zeroes its bounds-checked loads (caught by Metal API validation as
-        // "missing Buffer binding ... for sharpemu_uniforms").
-        var vertexUniformsIndex = draw.VertexShader?.Shader.UniformsBufferIndex ?? -1;
-        MetalNative.SendSetBuffer(
-            encoder,
-            selSetVertexBuffer,
-            uniformsBuffer,
-            (nuint)uniformsOffset,
-            (nuint)(vertexUniformsIndex >= 0 ? vertexUniformsIndex : bufferCount));
-        var fragmentUniformsIndex = draw.PixelShader.Shader.UniformsBufferIndex;
-        MetalNative.SendSetBuffer(
-            encoder,
-            selSetFragmentBuffer,
-            uniformsBuffer,
-            (nuint)uniformsOffset,
-            (nuint)(fragmentUniformsIndex >= 0 ? fragmentUniformsIndex : bufferCount));
-
-        var selSetVertexTexture = MetalNative.Selector("setVertexTexture:atIndex:");
-        var selSetFragmentTexture = MetalNative.Selector("setFragmentTexture:atIndex:");
-        // Texture slots are global across the draw's stages ([0, vertexImageBase)
-        // is the pixel stage's block), so textures bind to both stage tables at
-        // their global index.
-        for (var index = 0; index < draw.Textures.Length; index++)
-        {
-            var texture = textureHandles[index];
-            if (texture != 0)
-            {
-                MetalNative.SendSetAtIndex(encoder, selSetVertexTexture, texture, (nuint)index);
-                MetalNative.SendSetAtIndex(encoder, selSetFragmentTexture, texture, (nuint)index);
-                if (textureOwned[index])
-                {
-                    MetalNative.SendVoid(texture, MetalNative.Selector("release"));
-                }
-            }
-        }
-
-        // Samplers travel in a per-stage argument buffer (Metal caps direct
-        // sampler slots at 16 per stage, but shaders sample more), one entry
-        // per sampled image.
-        BindSamplerArgumentBuffer(device, encoder, selSetFragmentBuffer, draw.PixelShader, draw.Textures);
-        if (draw.VertexShader is { } vertexShader)
-        {
-            BindSamplerArgumentBuffer(device, encoder, selSetVertexBuffer, vertexShader, draw.Textures);
         }
 
         Span<nuint> vertexSlots = stackalloc nuint[draw.VertexBuffers.Length];
@@ -2021,6 +1928,8 @@ internal static partial class MetalVideoPresenter
             descriptor,
             MetalNative.Selector("setMinFilter:"),
             minFilter is 1 or 3 ? 1 : 0);
+        // The stage argument buffer stores the sampler's resource id; Metal refuses one without this flag.
+        MetalNative.SendVoidBool(descriptor, MetalNative.Selector("setSupportArgumentBuffers:"), true);
 
         var handle = MetalNative.Send(
             device, MetalNative.Selector("newSamplerStateWithDescriptor:"), descriptor);
@@ -2030,39 +1939,6 @@ internal static partial class MetalVideoPresenter
         }
 
         return handle;
-    }
-
-    // A guest global buffer is bound so the shader's alignment bias (the guest
-    // base address's low bits below the storage-buffer offset alignment) lands
-    // on the real data: the slice holds bias + length bytes with the data at
-    // offset bias, matching how the Vulkan backend binds into a larger
-    // allocation at an aligned-down descriptor offset. boundBytes is what
-    // SharpEmuUniforms must carry so the shader's bounds check passes. The
-    // returned pointer addresses the data (past the bias) for write-backs.
-    private const ulong StorageBufferOffsetAlignment = 256;
-
-    private static unsafe nint UploadGlobalBuffer(
-        nint device,
-        GuestMemoryBuffer guest,
-        out nint buffer,
-        out int offset,
-        out uint boundBytes)
-    {
-        var bias = (int)((ulong)guest.BaseAddress & (StorageBufferOffsetAlignment - 1));
-        var length = Math.Clamp(guest.Length, 0, guest.Data.Length);
-        boundBytes = (uint)(bias + length);
-        var slice = AllocateUpload(device, bias + Math.Max(length, 1), out buffer, out offset);
-        if (bias != 0)
-        {
-            // Deterministic zeros below the bias, like the padded copy had.
-            slice[..bias].Clear();
-        }
-
-        guest.Data.AsSpan(0, length).CopyTo(slice[bias..]);
-        fixed (byte* data = slice)
-        {
-            return (nint)(data + bias);
-        }
     }
 
     private static void WriteBuffersBackToGuest(

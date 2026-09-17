@@ -26,50 +26,8 @@ internal interface IGuestGpuBackend
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 
-    // Shader compilation. The optional base/index parameters describe how a multi-stage
-    // draw lays both stages' resources into one flat per-role slot space (buffers,
-    // images, scalar-spill slots); each backend maps those slots to its own API binding
-    // model. -1 keeps the emitter's single-stage defaults.
-
-    bool TryCompileVertexShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1);
-
-    bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        IReadOnlyList<Gen5PixelOutputBinding> outputs,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1);
-
-    bool TryCompileComputeShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int totalGlobalBufferCount = -1,
-        int initialScalarBufferIndex = -1,
-        uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1);
+    // Compiles one permutation of a program over its resource plan and binding layout.
+    bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
 
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
@@ -104,10 +62,6 @@ internal interface IGuestGpuBackend
 
     /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
     bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
-
-    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
-    /// they cross the seam.</summary>
-    ulong GuestStorageBufferOffsetAlignment { get; }
 
     /// <summary>Counts a guest shader translation for the perf overlay.</summary>
     void CountShaderCompilation();
@@ -152,7 +106,8 @@ internal interface IGuestImageSnapshotBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0);
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null);
 
     void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -169,7 +124,8 @@ internal interface IGuestImageSnapshotBackend
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0);
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null);
 
     void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -198,7 +154,21 @@ internal interface IGuestImageSnapshotBackend
         bool writesGlobalMemory,
         uint threadCountX = uint.MaxValue,
         uint threadCountY = uint.MaxValue,
-        uint threadCountZ = uint.MaxValue);
+        uint threadCountZ = uint.MaxValue,
+        GuestStageBindings? stageBindings = null);
+    // Global data share transfers queue in stream order behind the draws before them.
+    long SubmitGlobalDataShareFill(ulong offset, ulong size, byte value);
+
+    long SubmitGlobalDataShareCopyFromGuest(ulong offset, byte[] bytes);
+
+    long SubmitGlobalDataShareCopyToGuest(ulong guestAddress, ulong offset, ulong size);
+
+    // Valid after a GPU synchronization: the words the queued transfers and shaders left.
+    void ReadGlobalDataShare(Span<uint> destination, uint wordOffset, uint wordCount);
+
+    // A record that completes after every earlier record and the GPU work they committed.
+    long SubmitGpuSynchronization(string debugName);
+
     /// <summary>Whether the image exists on the backend or an already-queued upload
     /// owns its initialization (a pending image may skip a duplicate upload but is
     /// not yet a valid flip source).</summary>

@@ -4,6 +4,8 @@
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using System.Buffers.Binary;
 using Xunit;
 
@@ -87,22 +89,9 @@ public sealed class Gen5ScalarLaneTransferTests
             instruction => Assert.Equal("SWqmB32", instruction.Opcode),
             instruction => Assert.Equal("SEndpgm", instruction.Opcode));
 
-        var state = new Gen5ShaderState(program, new uint[10], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
+        var request = ResourceTestProgram.Request(program);
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var compiled,
-                out var compileError),
+            Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compileError),
             compileError);
 
         var opcodes = ReadSpirvOpcodes(compiled.Spirv);
@@ -167,30 +156,31 @@ public sealed class Gen5ScalarLaneTransferTests
                     new Gen5Operand(Gen5OperandKind.LiteralConstant, 0),
                 ],
                 Gen5Operand.Scalar(14)),
-            EndProgram(28),
+            ResourceTestProgram.EndProgram(28),
         ];
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, instructions),
-            [0, 0, 1, 0, 0, 0x100, 0, 0, 0x10, 0, 0, 0xF0F0_F0F0, 0x8000_0000],
-            null,
-            UserDataScalarRegisterBase: 0);
-        var ctx = new CpuContext(
-            new TestCpuMemory(0x1000, 0x100),
-            Generation.Gen5);
-
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                state,
-                out var evaluation,
-                out var error),
-            error);
-        Assert.Equal(40u, evaluation.ScalarRegisters[6]);
-        Assert.Equal(0xAAu, evaluation.ScalarRegisters[7]);
-        Assert.Equal(0xF0u, evaluation.ScalarRegisters[9]);
-        Assert.Equal(1u, evaluation.ScalarRegisters[10]);
-        Assert.Equal(17u, evaluation.ScalarRegisters[13]);
-        Assert.Equal(1u, evaluation.ScalarRegisters[14]);
+        uint[] userData = [0, 0, 1, 0, 0, 0x100, 0, 0, 0x10, 0, 0, 0xF0F0_F0F0, 0x8000_0000];
+        uint[] resultRegisters = [6, 7, 9, 10, 13, 14];
+        instructions.RemoveAt(instructions.Count - 1);
+        for (var index = 0; index < resultRegisters.Length; index++)
+        {
+            instructions.Add(ResourceTestProgram.ScalarLoad(
+                28 + (uint)index * 8, resultRegisters[index], destination: 100));
+        }
+        instructions.Add(ResourceTestProgram.EndProgram(28 + (uint)resultRegisters.Length * 8));
+        var inputBytes = (uint)userData.Length * 8;
+        var initialized = userData.Select((value, index) =>
+            ResourceTestProgram.MoveScalar((uint)index * 8, (uint)index, value)).ToList();
+        initialized.AddRange(instructions.Select(instruction => instruction with { Pc = instruction.Pc + inputBytes }));
+        var plan = ResourceTestProgram.Extract(new Gen5ShaderProgram(0, initialized), userDataCount: 0);
+        var evaluator = new RuntimeValueEvaluator(plan, ResourceTestProgram.Inputs([]));
+        var actual = new List<uint>();
+        foreach (var access in plan.Accesses)
+        {
+            Assert.True(evaluator.Evaluate(access!.Handle!.Operands[0], out var value),
+                $"Cannot resolve s{resultRegisters[actual.Count]}: {access.Handle.Operands[0].Kind}.");
+            actual.Add(value);
+        }
+        Assert.Equal([40u, 0xAAu, 0xF0u, 1u, 17u, 1u], actual);
     }
 
     [Fact]
@@ -229,22 +219,9 @@ public sealed class Gen5ScalarLaneTransferTests
             move.Sources);
         Assert.Equal([Gen5Operand.Vector(55)], move.Destinations);
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
+        var request = ResourceTestProgram.Request(program);
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var compiled,
-                out var compileError),
+            Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compileError),
             compileError);
 
         var opcodes = ReadSpirvOpcodes(compiled.Spirv);
@@ -252,193 +229,6 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Contains((ushort)SpirvOp.ULessThan, opcodes);
         Assert.Contains((ushort)SpirvOp.Select, opcodes);
     }
-
-    [Fact]
-    public void FixedLaneSaveRestorePreservesScalarValues()
-    {
-        List<Gen5ShaderInstruction> instructions =
-        [
-            WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 2),
-            WriteLane(8, vectorRegister: 18, scalarRegister: 85, lane: 5),
-            MoveScalar(16, scalarRegister: 84, value: 0xDEAD_BEEF),
-            MoveScalar(20, scalarRegister: 85, value: 0xBAD0_CAFE),
-            ReadLane(24, scalarRegister: 84, vectorRegister: 18, lane: 2),
-            ReadLane(32, scalarRegister: 85, vectorRegister: 18, lane: 5),
-            EndProgram(40),
-        ];
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, instructions),
-            [0x413B_A5B0, 0x0000_0004],
-            null,
-            UserDataScalarRegisterBase: 84);
-        var ctx = new CpuContext(
-            new TestCpuMemory(0x1000, 0x100),
-            Generation.Gen5);
-
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                state,
-                out var evaluation,
-                out var error),
-            error);
-        Assert.Equal(0x413B_A5B0u, evaluation.ScalarRegisters[84]);
-        Assert.Equal(0x0000_0004u, evaluation.ScalarRegisters[85]);
-    }
-
-    [Fact]
-    public void FullVectorWriteInvalidatesSavedLane()
-    {
-        List<Gen5ShaderInstruction> instructions =
-        [
-            WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 2),
-            new Gen5ShaderInstruction(
-                8,
-                Gen5ShaderEncoding.Vop1,
-                "VMovB32",
-                [0u],
-                [Gen5Operand.Scalar(0)],
-                [Gen5Operand.Vector(18)],
-                null),
-            MoveScalar(12, scalarRegister: 84, value: 0xDEAD_BEEF),
-            ReadLane(16, scalarRegister: 84, vectorRegister: 18, lane: 2),
-            EndProgram(24),
-        ];
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, instructions),
-            [0x413B_A5B0],
-            null,
-            UserDataScalarRegisterBase: 84);
-        var ctx = new CpuContext(
-            new TestCpuMemory(0x1000, 0x100),
-            Generation.Gen5);
-
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                state,
-                out var evaluation,
-                out var error),
-            error);
-        Assert.Equal(0xDEAD_BEEFu, evaluation.ScalarRegisters[84]);
-    }
-
-    [Fact]
-    public void RestoredPointerBypassesFalseControlFlowMerge()
-    {
-        const ulong pointer = 0x1000;
-        const uint expected = 0x1234_5678;
-        List<Gen5ShaderInstruction> instructions =
-        [
-            WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 2),
-            WriteLane(8, vectorRegister: 18, scalarRegister: 85, lane: 5),
-            MoveScalar(16, scalarRegister: 84, value: 0),
-            MoveScalar(20, scalarRegister: 85, value: 0),
-            Branch(24, "SCbranchScc0", wordOffset: 4),
-            ReadLane(28, scalarRegister: 84, vectorRegister: 18, lane: 2),
-            ReadLane(36, scalarRegister: 85, vectorRegister: 18, lane: 5),
-            new Gen5ShaderInstruction(
-                44,
-                Gen5ShaderEncoding.Smem,
-                "SLoadDword",
-                [0u, 0u],
-                [Gen5Operand.Scalar(84), Gen5Operand.Source(125)],
-                [Gen5Operand.Scalar(4)],
-                new Gen5ScalarMemoryControl(1, 0, null)),
-            EndProgram(52),
-        ];
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0, instructions),
-            [unchecked((uint)pointer), unchecked((uint)(pointer >> 32))],
-            null,
-            UserDataScalarRegisterBase: 84);
-        var memory = new TestCpuMemory(pointer, 256 * 1024);
-        Span<byte> expectedBytes = stackalloc byte[sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(expectedBytes, expected);
-        Assert.True(memory.TryWrite(pointer, expectedBytes));
-        var ctx = new CpuContext(memory, Generation.Gen5);
-
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                state,
-                out var evaluation,
-                out var error),
-            error);
-        Assert.Equal(expected, evaluation.ScalarRegisters[4]);
-    }
-
-    private static Gen5ShaderInstruction WriteLane(
-        uint pc,
-        uint vectorRegister,
-        uint scalarRegister,
-        uint lane) =>
-        new(
-            pc,
-            Gen5ShaderEncoding.Vop3,
-            "VWritelaneB32",
-            [0u, 0u],
-            [
-                Gen5Operand.Scalar(scalarRegister),
-                Gen5Operand.Source(128 + lane),
-                Gen5Operand.Scalar(0),
-            ],
-            [Gen5Operand.Vector(vectorRegister)],
-            null);
-
-    private static Gen5ShaderInstruction ReadLane(
-        uint pc,
-        uint scalarRegister,
-        uint vectorRegister,
-        uint lane) =>
-        new(
-            pc,
-            Gen5ShaderEncoding.Vop3,
-            "VReadlaneB32",
-            [0u, 0u],
-            [
-                Gen5Operand.Vector(vectorRegister),
-                Gen5Operand.Source(128 + lane),
-                Gen5Operand.Scalar(0),
-            ],
-            [Gen5Operand.Scalar(scalarRegister)],
-            null);
-
-    private static Gen5ShaderInstruction MoveScalar(
-        uint pc,
-        uint scalarRegister,
-        uint value) =>
-        new(
-            pc,
-            Gen5ShaderEncoding.Sop1,
-            "SMovB32",
-            [0u],
-            [new Gen5Operand(Gen5OperandKind.LiteralConstant, value)],
-            [Gen5Operand.Scalar(scalarRegister)],
-            null);
-
-    private static Gen5ShaderInstruction Branch(
-        uint pc,
-        string opcode,
-        short wordOffset) =>
-        new(
-            pc,
-            Gen5ShaderEncoding.Sopp,
-            opcode,
-            [unchecked((uint)(ushort)wordOffset)],
-            [],
-            [],
-            null);
-
-    private static Gen5ShaderInstruction EndProgram(uint pc) =>
-        new(
-            pc,
-            Gen5ShaderEncoding.Sopp,
-            "SEndpgm",
-            [0u],
-            [],
-            [],
-            null);
 
     private static Gen5ShaderInstruction ScalarInstruction(
         uint pc,

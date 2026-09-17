@@ -18,9 +18,6 @@ internal static unsafe partial class VulkanVideoPresenter
         // Scheduler ticks: the last submitted tick and the highest tick known retired.
         private ulong _submitTimeline;
         private ulong _completedTimeline;
-        private IReadOnlyList<TranslatedDrawResources>? _batchReferencedResources;
-        private readonly Queue<(TranslatedDrawResources Resources, ulong RetireTimeline)>
-            _deferredResourceDestroys = new();
         private readonly Queue<(GuestImageResource Image, ulong RetireTimeline)>
             _deferredGuestImageVersionDestroys = new();
         private readonly List<(VkBuffer Buffer, DeviceMemory Memory)> _batchRetireBuffers = new();
@@ -31,14 +28,14 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private sealed record PendingGuestSubmission(
             ulong Tick,
-            IReadOnlyList<TranslatedDrawResources> Resources,
+            IReadOnlyList<SubmissionUploadResources> Resources,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers);
 
         // Translated draws are recorded into the scheduler's current buffer and
         // submitted once per drained work batch (one vkQueueSubmit per batch).
         private bool _batchOpen;
         private int _batchDrawCount;
-        private readonly List<TranslatedDrawResources> _batchResources = new();
+        private readonly List<SubmissionUploadResources> _batchResources = new();
 
 
         private CommandBuffer BeginBatchedGuestCommands()
@@ -54,24 +51,15 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Submits the current recording buffer with everything the batch lists own.
-        private void FlushBatchedGuestCommands(
-            IReadOnlyList<TranslatedDrawResources>? referencedResources = null)
+        private void FlushBatchedGuestCommands()
         {
             if (!_batchOpen)
             {
                 return;
             }
 
-            _batchReferencedResources = referencedResources;
-            try
-            {
-                using var profile = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit);
-                _scheduler.Flush();
-            }
-            finally
-            {
-                _batchReferencedResources = null;
-            }
+            using var profile = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit);
+            _scheduler.Flush();
         }
 
         private void PrepareGuestSubmission(SubmitBundle bundle)
@@ -163,7 +151,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var resources in submission.Resources)
             {
-                DestroyTranslatedDrawResources(resources);
+                RecycleSubmissionUploads(resources);
             }
 
             foreach (var (buffer, memory) in submission.RetireBuffers)

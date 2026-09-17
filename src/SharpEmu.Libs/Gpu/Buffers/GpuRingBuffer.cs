@@ -15,6 +15,7 @@ public sealed class GpuRingBuffer : GpuBuffer
     {
         public ulong Tick;
         public ulong UpperBound;
+        public ulong LastReservation;
     }
 
     private ulong _offset;
@@ -26,6 +27,25 @@ public sealed class GpuRingBuffer : GpuBuffer
     private int _waitCursor;
     private ulong _waitBound;
     private int _retainedContents;
+    private ulong _committedReservations;
+    private readonly List<AllocationRetention> _allocationRetentions = [];
+
+    private sealed class AllocationRetention(GpuRingBuffer owner, ulong startingReservation) : IDisposable
+    {
+        private GpuRingBuffer? _owner = owner;
+        public ulong StartingReservation { get; } = startingReservation;
+
+        public void Dispose()
+        {
+            var owner = Interlocked.Exchange(ref _owner, null);
+            if (owner is null) return;
+            lock (owner._allocationRetentions)
+            {
+                owner.RecordRetainedAllocationUse(StartingReservation);
+                owner._allocationRetentions.Remove(this);
+            }
+        }
+    }
 
     private sealed class ContentRetention(GpuRingBuffer owner) : IDisposable
     {
@@ -53,6 +73,41 @@ public sealed class GpuRingBuffer : GpuBuffer
         return new ContentRetention(this);
     }
 
+    // A new preparation owns no ring bytes until its first allocation is committed.
+    internal IDisposable RetainUpcomingAllocations()
+    {
+        var retention = new AllocationRetention(this, _committedReservations);
+        lock (_allocationRetentions)
+        {
+            _allocationRetentions.Add(retention);
+        }
+        return retention;
+    }
+
+    private bool HasRetainedContents()
+    {
+        if (Volatile.Read(ref _retainedContents) != 0) return true;
+        lock (_allocationRetentions)
+        {
+            foreach (var retention in _allocationRetentions)
+            {
+                if (retention.StartingReservation != _committedReservations) return true;
+            }
+        }
+        return false;
+    }
+
+    // Preparation can submit the upload before recording its consumer on a later tick.
+    private void RecordRetainedAllocationUse(ulong startingReservation)
+    {
+        for (var index = _currentWatchCursor - 1; index >= 0; index--)
+        {
+            ref var watch = ref _currentWatches[index];
+            if (watch.LastReservation <= startingReservation) break;
+            watch.Tick = Math.Max(watch.Tick, Scheduler.CurrentTick);
+        }
+    }
+
     // False when the ring cannot serve the request, or when waiting is refused and needed.
     public bool TryMap(ulong size, out ulong offset, ulong alignment = 0, bool allowWait = true)
     {
@@ -74,7 +129,7 @@ public sealed class GpuRingBuffer : GpuBuffer
         }
 
         var wrap = alignedOffset > Size - mappedSize;
-        if (wrap && Volatile.Read(ref _retainedContents) != 0)
+        if (wrap && HasRetainedContents())
         {
             return false;
         }
@@ -116,10 +171,12 @@ public sealed class GpuRingBuffer : GpuBuffer
         }
 
         _offset += _mappedSize;
+        _committedReservations++;
         var tick = Scheduler.CurrentTick;
         if (_currentWatchCursor != 0 && _currentWatches[_currentWatchCursor - 1].Tick == tick)
         {
             _currentWatches[_currentWatchCursor - 1].UpperBound = _offset;
+            _currentWatches[_currentWatchCursor - 1].LastReservation = _committedReservations;
             return;
         }
 
@@ -131,6 +188,7 @@ public sealed class GpuRingBuffer : GpuBuffer
         ref var watch = ref _currentWatches[_currentWatchCursor++];
         watch.UpperBound = _offset;
         watch.Tick = tick;
+        watch.LastReservation = _committedReservations;
     }
 
     public ulong Copy(ReadOnlySpan<byte> source, ulong alignment = 0)

@@ -383,6 +383,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         return XxHash3.HashToUInt64(bytes);
     }
 
+    internal bool SupportsViewType(in ImageViewDescription view) => IsValidViewType(Backing, view);
+
     private static bool IsValidViewType(ImageBacking image, in ImageViewDescription view)
     {
         switch (image.ImageType)
@@ -453,11 +455,16 @@ public sealed unsafe partial class CachedImage : IDisposable
         var rangesValid = levelsValid && normalized.LayerCount != 0 && normalized.BaseLayer < viewLayers && normalized.LayerCount <= viewLayers - normalized.BaseLayer;
         var mappingValid = ViewFormatRules.IsComponentSwizzle(normalized.Mapping.R) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.G) &&
                            ViewFormatRules.IsComponentSwizzle(normalized.Mapping.B) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.A);
-        if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !mappingValid || !IsValidViewType(image, normalized) || !IsValidAspect(image, normalized.Aspect))
+        var typeValid = IsValidViewType(image, normalized);
+        var aspectValid = IsValidAspect(image, normalized.Aspect);
+        if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !mappingValid || !typeValid || !aspectValid)
         {
             throw SubmissionScheduler.Fatal(
                 $"The image view is invalid: imageFormat={(int)image.Format} viewFormat={(int)normalized.Format} type={(int)normalized.Type} aspect=0x{(uint)normalized.Aspect:x} " +
-                $"mip={normalized.BaseLevel}+{normalized.LevelCount} layer={normalized.BaseLayer}+{normalized.LayerCount} usage=0x{(uint)normalized.Usage:x} imageLevels={image.MipLevels} imageLayers={image.Layers}.");
+                $"mip={normalized.BaseLevel}+{normalized.LevelCount} layer={normalized.BaseLayer}+{normalized.LayerCount} usage=0x{(uint)normalized.Usage:x} imageLevels={image.MipLevels} imageLayers={image.Layers} " +
+                $"address=0x{Description.Data.Address:X16} image=0x{image.Handle.Handle:X16} imageType={(int)image.ImageType} imageFlags=0x{(uint)image.Flags:x} imageUsage=0x{(uint)image.Usage:x} " +
+                $"mapping={(int)normalized.Mapping.R},{(int)normalized.Mapping.G},{(int)normalized.Mapping.B},{(int)normalized.Mapping.A} " +
+                $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
         }
 
         foreach (var cached in Views)

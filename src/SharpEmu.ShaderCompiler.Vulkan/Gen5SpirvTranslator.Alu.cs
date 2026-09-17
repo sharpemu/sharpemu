@@ -1777,7 +1777,7 @@ public static partial class Gen5SpirvTranslator
                 condition = _module.AddInstruction(operation, _boolType, left, right);
             }
 
-            if (_state.Program.Address == 0x0000000500781200ul &&
+            if (_request.Program.Address == 0x0000000500781200ul &&
                 ((instruction.Pc == 0x4D4 &&
                   Environment.GetEnvironmentVariable(
                       "SHARPEMU_FORCE_TITLE_COMPARE_4D4") == "1") ||
@@ -1878,12 +1878,16 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SGetpcB64")
             {
-                var pc = _state.Program.Address +
-                    instruction.Pc +
-                    (ulong)(instruction.Words.Count * sizeof(uint));
-                StoreS(destination, UInt((uint)pc));
-                StoreS(destination + 1, UInt((uint)(pc >> 32)));
-                return true;
+                {
+                    // The draw's shader base comes from push data, so one module serves every address.
+                    var (baseLow, baseHigh) = LoadShaderBase();
+                    var next = IAdd64(
+                        Pair64(baseLow, baseHigh),
+                        ULong(instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))));
+                    StoreS(destination, Narrow(next));
+                    StoreS(destination + 1, Narrow(ShiftRightLogical64(next, ULong(32))));
+                    return true;
+                }
             }
 
             if (instruction.Opcode == "SBcnt1I32B64")

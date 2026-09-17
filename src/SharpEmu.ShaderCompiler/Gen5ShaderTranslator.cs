@@ -13,92 +13,16 @@ namespace SharpEmu.ShaderCompiler;
 public static partial class Gen5ShaderTranslator
 {
     private static int _dppVectorsValidated;
-    /// <summary>
-    /// Bitmask (256 bits) of scalar registers whose values the program can
-    /// observe: scalar source operands (widened for 64-bit pairs), the
-    /// descriptor/sampler/address ranges named by instruction controls, and
-    /// the implicit state registers. Deterministic per instruction stream, so
-    /// the SPIR-V that loads exactly these registers from the per-draw
-    /// initial-state buffer is byte-stable across draws.
-    /// </summary>
-    public static ulong[] ComputeConsumedScalarMask(Gen5ShaderProgram program)
-    {
-        var mask = new ulong[4];
-        AddConsumedScalar(mask, 106, 2);
-        AddConsumedScalar(mask, 124, 2);
-        AddConsumedScalar(mask, 126, 2);
-        foreach (var instruction in program.Instructions)
-        {
-            foreach (var source in instruction.Sources)
-            {
-                if (source.Kind == Gen5OperandKind.ScalarRegister)
-                {
-                    AddConsumedScalar(mask, source.Value, 2);
-                }
-            }
-
-            // Scalar memory bases can be a 4-dword buffer descriptor.
-            if (instruction.Encoding is Gen5ShaderEncoding.Smem or Gen5ShaderEncoding.Smrd &&
-                instruction.Sources.Count > 0 &&
-                instruction.Sources[0].Kind == Gen5OperandKind.ScalarRegister)
-            {
-                AddConsumedScalar(mask, instruction.Sources[0].Value, 4);
-            }
-
-            switch (instruction.Control)
-            {
-                case Gen5ImageControl image:
-                    AddConsumedScalar(mask, image.ScalarResource, 8);
-                    AddConsumedScalar(mask, image.ScalarSampler, 4);
-                    break;
-                case Gen5ScalarMemoryControl { DynamicOffsetRegister: { } offsetRegister }:
-                    AddConsumedScalar(mask, offsetRegister, 2);
-                    break;
-                case Gen5GlobalMemoryControl global:
-                    AddConsumedScalar(mask, global.ScalarAddress, 2);
-                    break;
-                case Gen5BufferMemoryControl buffer:
-                    AddConsumedScalar(mask, buffer.ScalarResource, 4);
-                    break;
-            }
-        }
-
-        return mask;
-    }
-
-    private static void AddConsumedScalar(ulong[] mask, uint register, uint count)
-    {
-        for (uint index = 0; index < count; index++)
-        {
-            var target = register + index;
-            if (target < 256)
-            {
-                mask[target >> 6] |= 1UL << (int)(target & 63);
-            }
-        }
-    }
-
-    public static bool IsScalarConsumed(ulong[] mask, uint register) =>
-        register < 256 && (mask[register >> 6] & (1UL << (int)(register & 63))) != 0;
 
     private const int MaxInstructions = 16384;
     private const ulong ShaderSizeOffset = 0x44;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
-    private const uint PsUserDataRegister = 0x0C;
-    private const uint VsUserDataRegister = 0x4C;
-    private const uint GsUserDataRegister = 0x8C;
-    private const uint EsUserDataRegister = 0xCC;
-    private const uint ComputeUserDataRegister = 0x240;
-    private const uint ComputePgmRsrc2Register = 0x213;
-    private const int MaximumHardwareUserSgprs = 64;
-    private static readonly ConditionalWeakTable<object, ShaderDecodeCache> _decodeCaches = new();
+    private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
 
-    private sealed class ShaderDecodeCache
+    private sealed class FusedProgramRegistry
     {
         public object Gate { get; } = new();
-        public Dictionary<(ulong Address, uint Checksum), Gen5ShaderProgram> Programs { get; } = new();
         public Dictionary<ulong, FusedShaderParts> FusedPrograms { get; } = new();
-        public Dictionary<(ulong Header, uint Checksum), Gen5ShaderMetadata?> Metadata { get; } = new();
     }
 
     private sealed record FusedShaderParts(
@@ -125,95 +49,34 @@ public static partial class Gen5ShaderTranslator
             return;
         }
 
-        var cache = _decodeCaches.GetValue(ctx.Memory, static _ => new ShaderDecodeCache());
-        lock (cache.Gate)
+        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
+        lock (registry.Gate)
         {
-            cache.FusedPrograms[entryAddress] = new FusedShaderParts(
+            registry.FusedPrograms[entryAddress] = new FusedShaderParts(
                 entryHeaderAddress,
                 continuationAddress,
                 continuationHeaderAddress);
-            foreach (var key in cache.Programs.Keys
-                         .Where(key => key.Address == entryAddress)
-                         .ToArray())
-            {
-                cache.Programs.Remove(key);
-            }
         }
     }
 
-    private static readonly uint[] FullscreenBarycentricEs =
-    [
-        0xBFA00001, 0x7E000000, 0x7E000000, 0x7E000000,
-        0x93EBFF03, 0x00080008, 0x8F6A8C6B, 0x8700FF03,
-        0x000000FF, 0x887C6A00, 0xBF900009, 0x81EA6BC0,
-        0x90FE6AC1, 0xF8000941, 0x00000000, 0x81EA00C0,
-        0xBF8CFF0F, 0x90FE6AC1, 0x36040A81, 0x2C060A81,
-        0x7E000280, 0x7E0202F2, 0xD7460002, 0x03050302,
-        0xD7460003, 0x03050303, 0x7E040B02, 0x7E060B03,
-        0xF80008CF, 0x01000302, 0xBF810000,
-    ];
-
-    private static readonly uint[] FullscreenBarycentricPs =
-    [
-        0xD52F0000, 0x00000200,
-        0xD52F0001, 0x00000602,
-        0xF8001C0F, 0x00000100,
-        0xBF810000,
-    ];
-
-    private static readonly uint[] Gen5RectListExportEs =
-    [
-        0xBFA00001, 0x7E000000, 0x7E000000, 0x7E000000,
-        0x9380FF03, 0x00080008, 0x8F6A8C00, 0x876BFF03,
-        0x000000FF, 0x887C6A6B, 0xBF900009, 0x81EA6BC0,
-        0x90FE6AC1, 0x36060A81, 0x2C080A81, 0x7E020280,
-        0x7E0402F2, 0xD7460003, 0x03050303, 0xD7460004,
-        0x03050304, 0x7E060B03, 0x7E080B04, 0xF80008CF,
-        0x02010403, 0x81EA00C0, 0xBF8CFF0F, 0x90FE6AC1,
-        0xF8000941, 0x00000000, 0xBF810000,
-    ];
-
-    private static readonly uint[] Gen5QuadExportEs =
-    [
-        0xBEFC03FF, 0x61937B18, 0xBF960000, 0xBFA00002,
-        0x93EBFF03, 0x00080008, 0x8F6A8C6B, 0x8700FF03,
-        0x000000FF, 0x887C6A00, 0xBF900009, 0x81EA6BC0,
-        0x90FE6AC1, 0xF8000941, 0x00000000, 0x81EA00C0,
-        0xBF8CFF0F, 0x90FE6AC1, 0x2C080A81, 0x36040A81,
-        0x7E0002F2, 0x7E020280, 0xD5690005, 0x000208C2,
-        0xD7460003, 0x03050302, 0x7E040B02, 0x7E080B04,
-        0x4A0A0A81, 0x7E060B03, 0x7E0A0B05, 0xF80008CF,
-        0x00000503, 0xF800020F, 0x01010402, 0xBF810000,
-    ];
-
-    public static bool TryTranslate(
+    // The continuation registered for an entry address, when the guest joined two code objects.
+    public static bool TryGetFusedProgramParts(
         CpuContext ctx,
-        ulong exportShaderAddress,
-        ulong pixelShaderAddress,
-        uint psInputEna,
-        uint psInputAddr,
-        out GuestDrawKind drawKind)
+        ulong entryAddress,
+        out ulong continuationAddress,
+        out ulong continuationHeaderAddress)
     {
-        drawKind = GuestDrawKind.None;
-        if (exportShaderAddress == 0 ||
-            pixelShaderAddress == 0 ||
-            psInputEna != 0x00000002 ||
-            psInputAddr != 0x00000002 ||
-            !MatchesProgram(ctx, exportShaderAddress, FullscreenBarycentricEs) ||
-            !MatchesProgram(ctx, pixelShaderAddress, FullscreenBarycentricPs))
+        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
+        FusedShaderParts? parts;
+        lock (registry.Gate)
         {
-            return false;
+            registry.FusedPrograms.TryGetValue(entryAddress, out parts);
         }
 
-        drawKind = GuestDrawKind.FullscreenBarycentric;
-        return true;
+        continuationAddress = parts?.ContinuationAddress ?? 0;
+        continuationHeaderAddress = parts?.ContinuationHeaderAddress ?? 0;
+        return parts is not null;
     }
-
-    public static bool IsFullscreenExportShader(CpuContext ctx, ulong exportShaderAddress) =>
-        exportShaderAddress != 0 &&
-        (MatchesProgram(ctx, exportShaderAddress, FullscreenBarycentricEs) ||
-         MatchesProgram(ctx, exportShaderAddress, Gen5RectListExportEs) ||
-         MatchesProgram(ctx, exportShaderAddress, Gen5QuadExportEs));
 
     public static string Describe(CpuContext ctx, ulong exportShaderAddress, ulong pixelShaderAddress)
     {
@@ -232,242 +95,6 @@ public static partial class Gen5ShaderTranslator
                 .Select(word => $"{word:X8}"))
             : $"error={error}";
 
-    public static bool TryCreateState(
-        CpuContext ctx,
-        ulong shaderAddress,
-        ulong shaderHeaderAddress,
-        IReadOnlyDictionary<uint, uint> shaderRegisters,
-        uint userDataBaseRegister,
-        out Gen5ShaderState state,
-        out string error,
-        Gen5ComputeSystemRegisters? computeSystemRegisters = null,
-        uint userDataScalarRegisterBase = 0,
-        uint shaderChecksum = 0)
-    {
-        ValidateUserSgprCountDecoding();
-        state = default!;
-        error = string.Empty;
-        var cache = _decodeCaches.GetValue(ctx.Memory, static _ => new ShaderDecodeCache());
-        var programKey = (Address: shaderAddress, Checksum: shaderChecksum);
-        Gen5ShaderProgram? program;
-        lock (cache.Gate)
-        {
-            cache.Programs.TryGetValue(programKey, out program);
-        }
-
-        if (program is null)
-        {
-            if (!TryDecodeProgram(ctx, shaderAddress, out program, out error))
-            {
-                return false;
-            }
-
-            lock (cache.Gate)
-            {
-                cache.Programs.TryAdd(programKey, program);
-            }
-        }
-
-        Gen5ShaderMetadata? metadata = null;
-        if (shaderHeaderAddress != 0)
-        {
-            var metadataKey = (Header: shaderHeaderAddress, Checksum: shaderChecksum);
-            var metadataCached = false;
-            lock (cache.Gate)
-            {
-                metadataCached = cache.Metadata.TryGetValue(metadataKey, out metadata);
-            }
-
-            if (!metadataCached)
-            {
-                if (Gen5ShaderMetadataReader.TryRead(
-                        ctx,
-                        shaderHeaderAddress,
-                        out var decodedMetadata))
-                {
-                    metadata = decodedMetadata;
-                }
-
-                lock (cache.Gate)
-                {
-                    cache.Metadata.TryAdd(metadataKey, metadata);
-                }
-            }
-        }
-
-        if (!TryGetUserSgprCount(
-                shaderRegisters,
-                userDataBaseRegister,
-                out var userSgprCount,
-                out var rsrc2Register,
-                out _))
-        {
-            error =
-                $"missing-user-sgpr-count ud_reg=0x{userDataBaseRegister:X} " +
-                $"rsrc2_reg=0x{rsrc2Register:X}";
-            return false;
-        }
-
-        var userData = new uint[userSgprCount];
-        for (uint index = 0; index < userData.Length; index++)
-        {
-            shaderRegisters.TryGetValue(userDataBaseRegister + index, out userData[index]);
-        }
-
-        state = new Gen5ShaderState(
-            program,
-            userData,
-            metadata,
-            computeSystemRegisters,
-            userDataScalarRegisterBase,
-            shaderChecksum);
-        return true;
-    }
-
-    private static bool TryGetUserSgprCount(
-        IReadOnlyDictionary<uint, uint> shaderRegisters,
-        uint userDataBaseRegister,
-        out int count,
-        out uint rsrc2Register,
-        out uint rsrc2)
-    {
-        rsrc2Register = userDataBaseRegister == ComputeUserDataRegister
-            ? ComputePgmRsrc2Register
-            : userDataBaseRegister - 1;
-        if (!shaderRegisters.TryGetValue(rsrc2Register, out rsrc2))
-        {
-            count = 0;
-            return false;
-        }
-
-        count = checked((int)((rsrc2 >> 1) & 0x1Fu));
-        // GFX10 PS/VS/GS expose a sixth USER_SGPR bit. ES and compute do not.
-        // AGC's logical user-data layout (including its SRT pointer and back
-        // user data) describes memory reached through these SGPRs; it does not
-        // increase the hardware register window.
-        var hasUserSgprMsb = userDataBaseRegister is
-            PsUserDataRegister or VsUserDataRegister or GsUserDataRegister;
-        if (hasUserSgprMsb &&
-            (rsrc2 & (1u << 27)) != 0)
-        {
-            count |= 0x20;
-        }
-
-        // Primary SH defaults leave SPI_SHADER_PGM_RSRC2_PS at 0. Draws that
-        // still wrote USER_DATA_n via SetShReg would otherwise translate with
-        // an empty SRT window (Astro title PS → Address-0 descriptors →
-        // device lost). Recover the window from contiguous live registers.
-        if (count == 0 &&
-            userDataBaseRegister is not ComputeUserDataRegister)
-        {
-            var probed = 0;
-            while (probed < MaximumHardwareUserSgprs &&
-                   shaderRegisters.ContainsKey(userDataBaseRegister + (uint)probed))
-            {
-                probed++;
-            }
-
-            count = probed;
-        }
-
-        if (userDataBaseRegister is not (PsUserDataRegister or
-                VsUserDataRegister or
-                GsUserDataRegister or
-                EsUserDataRegister or
-                ComputeUserDataRegister) ||
-            count > MaximumHardwareUserSgprs)
-        {
-            count = 0;
-            return false;
-        }
-
-        return true;
-    }
-
-    [Conditional("DEBUG")]
-    private static void ValidateUserSgprCountDecoding()
-    {
-        static int Decode(uint baseRegister, uint rsrc2)
-        {
-            var registers = new Dictionary<uint, uint>
-            {
-                [baseRegister == ComputeUserDataRegister
-                    ? ComputePgmRsrc2Register
-                    : baseRegister - 1] = rsrc2,
-            };
-            var decoded =
-                TryGetUserSgprCount(registers, baseRegister, out var count, out _, out _);
-            Debug.Assert(decoded);
-            return count;
-        }
-
-        Debug.Assert(Decode(PsUserDataRegister, 2u << 1) == 2);
-        Debug.Assert(Decode(PsUserDataRegister, (3u << 1) | (1u << 27)) == 35);
-        Debug.Assert(Decode(VsUserDataRegister, (1u << 1) | (1u << 27)) == 33);
-        Debug.Assert(Decode(GsUserDataRegister, (4u << 1) | (1u << 27)) == 36);
-        Debug.Assert(Decode(EsUserDataRegister, (7u << 1) | (1u << 27)) == 7);
-        Debug.Assert(Decode(ComputeUserDataRegister, (11u << 1) | (1u << 27)) == 11);
-    }
-
-    public static string DescribeState(Gen5ShaderState state)
-    {
-        var userData = string.Join(
-            ',',
-            state.UserData.Select((value, index) => $"s{index}=0x{value:X8}"));
-        var systemRegisters = state.ComputeSystemRegisters is { } compute
-            ? $" compute[{DescribeComputeSystemRegisters(compute)}]"
-            : string.Empty;
-        if (state.Metadata is not { } metadata)
-        {
-            return
-                $"ud_base=s{state.UserDataScalarRegisterBase} hw_ud={state.UserData.Count} " +
-                $"ud[{userData}]" +
-                $"{systemRegisters} metadata=missing";
-        }
-
-        var direct = string.Join(
-            ',',
-            metadata.DirectResources.Select(resource => $"{resource.Key}:{resource.Value}"));
-        var resources = string.Join(
-            ',',
-            metadata.Resources.Select(resource =>
-                $"{resource.Kind}[{resource.Slot}]@{resource.OffsetDwords}" +
-                (resource.SizeFlag ? "+" : string.Empty)));
-        return
-            $"ud_base=s{state.UserDataScalarRegisterBase} hw_ud={state.UserData.Count} " +
-            $"ud[{userData}]" +
-            $"{systemRegisters} metadata[eud={metadata.ExtendedUserDataSizeDwords}," +
-            $"srt={metadata.ShaderResourceTableSizeDwords},direct={direct},resources={resources}]";
-    }
-
-    private static string DescribeComputeSystemRegisters(Gen5ComputeSystemRegisters registers) =>
-        $"x={DescribeRegister(registers.WorkGroupXRegister)}," +
-        $"y={DescribeRegister(registers.WorkGroupYRegister)}," +
-        $"z={DescribeRegister(registers.WorkGroupZRegister)}," +
-        $"size={DescribeRegister(registers.ThreadGroupSizeRegister)}";
-
-    private static string DescribeRegister(uint? register) =>
-        register.HasValue ? $"s{register.Value}" : "-";
-
-    private static bool MatchesProgram(CpuContext ctx, ulong address, ReadOnlySpan<uint> expected)
-    {
-        var bytes = new byte[expected.Length * sizeof(uint)];
-        if (!ctx.Memory.TryRead(address, bytes))
-        {
-            return false;
-        }
-
-        for (var index = 0; index < expected.Length; index++)
-        {
-            if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint))) != expected[index])
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     // Public contract entry: emitter test suites and tools drive the decoder directly
     // from raw instruction words.
     public static bool TryDecodeProgram(
@@ -477,11 +104,11 @@ public static partial class Gen5ShaderTranslator
         out string error)
     {
         ValidateDppControlVectors();
-        var cache = _decodeCaches.GetValue(ctx.Memory, static _ => new ShaderDecodeCache());
+        var registry = _fusedProgramsByMemory.GetValue(ctx.Memory, static _ => new FusedProgramRegistry());
         FusedShaderParts? fusedParts;
-        lock (cache.Gate)
+        lock (registry.Gate)
         {
-            cache.FusedPrograms.TryGetValue(address, out fusedParts);
+            registry.FusedPrograms.TryGetValue(address, out fusedParts);
         }
 
         if (fusedParts is not null)
@@ -1612,7 +1239,8 @@ public static partial class Gen5ShaderTranslator
         out uint sizeDwords,
         out string error)
     {
-        var opcode = (word >> 16) & 0x7;
+        // The fourth opcode bit lives in the second word and selects the D16 forms.
+        var opcode = ((word >> 16) & 0x7) | (((extra >> 21) & 1) << 3);
         name = opcode switch
         {
             0x00 => "TBufferLoadFormatX",
@@ -1623,6 +1251,14 @@ public static partial class Gen5ShaderTranslator
             0x05 => "TBufferStoreFormatXy",
             0x06 => "TBufferStoreFormatXyz",
             0x07 => "TBufferStoreFormatXyzw",
+            0x08 => "TBufferLoadFormatD16X",
+            0x09 => "TBufferLoadFormatD16Xy",
+            0x0A => "TBufferLoadFormatD16Xyz",
+            0x0B => "TBufferLoadFormatD16Xyzw",
+            0x0C => "TBufferStoreFormatD16X",
+            0x0D => "TBufferStoreFormatD16Xy",
+            0x0E => "TBufferStoreFormatD16Xyz",
+            0x0F => "TBufferStoreFormatD16Xyzw",
             _ => string.Empty,
         };
         sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
@@ -1972,45 +1608,6 @@ public static partial class Gen5ShaderTranslator
 
         return sourceIndex;
     }
-
-    public static bool RequiresStorageImage(
-        Gen5ImageBinding binding,
-        IReadOnlyList<Gen5ImageBinding> stageBindings)
-    {
-        if (IsStorageImageOperation(binding.Opcode))
-        {
-            return true;
-        }
-
-        if (!IsImageLoadOperation(binding.Opcode))
-        {
-            return false;
-        }
-
-        // IMAGE_LOAD itself is read-only and maps naturally to OpImageFetch,
-        // including for block-compressed textures which Vulkan cannot expose
-        // as storage images. Keep it as storage only when the same resolved
-        // descriptor is also written in this shader stage, preserving coherent
-        // read/write access through one storage-image representation.
-        return stageBindings.Any(candidate =>
-            IsStorageImageOperation(candidate.Opcode) &&
-            binding.ResourceDescriptor.SequenceEqual(candidate.ResourceDescriptor));
-    }
-
-    public static bool IsVolumeImageBinding(Gen5ImageBinding binding)
-    {
-        if (binding.ResourceDescriptor.Count >= 4)
-        {
-            var resourceType = (binding.ResourceDescriptor[3] >> 28) & 0xFu;
-            if (resourceType >= 8)
-                return resourceType == 10;
-        }
-
-        return binding.Control.Dimension == 2;
-    }
-
-    public static bool IsArrayedImageBinding(Gen5ImageBinding binding) =>
-        binding.Control.IsArray && !IsVolumeImageBinding(binding);
 
     public static bool IsDataShareAtomic(string name) => name switch
     {
@@ -2685,10 +2282,14 @@ public static partial class Gen5ShaderTranslator
                 var scalarOffset = (extra >> 24) & 0xFF;
                 var dwordCount = opcode switch
                 {
-                    "TBufferLoadFormatX" => 1u,
-                    "TBufferLoadFormatXy" => 2u,
-                    "TBufferLoadFormatXyz" => 3u,
-                    "TBufferLoadFormatXyzw" => 4u,
+                    "TBufferLoadFormatX" or "TBufferStoreFormatX" => 1u,
+                    "TBufferLoadFormatXy" or "TBufferStoreFormatXy" => 2u,
+                    "TBufferLoadFormatXyz" or "TBufferStoreFormatXyz" => 3u,
+                    "TBufferLoadFormatXyzw" or "TBufferStoreFormatXyzw" => 4u,
+                    "TBufferLoadFormatD16X" or "TBufferLoadFormatD16Xy" or
+                    "TBufferStoreFormatD16X" or "TBufferStoreFormatD16Xy" => 1u,
+                    "TBufferLoadFormatD16Xyz" or "TBufferLoadFormatD16Xyzw" or
+                    "TBufferStoreFormatD16Xyz" or "TBufferStoreFormatD16Xyzw" => 2u,
                     _ => 0u,
                 };
                 sources =
@@ -2710,7 +2311,9 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 13) & 1) != 0,
                     ((word >> 12) & 1) != 0,
                     ((word >> 14) & 1) != 0,
-                    ((extra >> 22) & 1) != 0);
+                    ((extra >> 22) & 1) != 0,
+                    Typed: true,
+                    TypedFormat: (word >> 19) & 0x7F);
                 break;
             }
             case Gen5ShaderEncoding.Mimg:

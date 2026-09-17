@@ -10,16 +10,19 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
@@ -112,23 +115,45 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
 
     public RenderHostDeviceTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
-    // One float2 position program and one solid red pixel program, laid out as the provider lays out a draw.
-    private sealed class FixedProgramProvider(AgcExports.IHostPipelineFactory factory, ulong vertexAddress) : IShaderPipelineProvider
+    // One float2 position program and one solid red pixel program over empty resource plans.
+    private sealed class FixedProgramProvider(IShaderPipelineHost host, ulong vertexAddress, bool pushData = false) : IShaderPipelineProvider
     {
-        private readonly AgcExports.CompiledStageProgram _vertex = new()
-        {
-            Shader = new VulkanCompiledGuestShader(CreatePositionVertexShader()),
-            Stage = ShaderStageKind.Vertex,
-            Hash = 1,
-            VertexAttributes = [new AgcExports.VertexAttributeLayout(0, 0, 2, 11, 7, 0, false)],
-        };
+        private const uint Float2Format = 64;
+        private static readonly uint[] UserRegisters = [0, 1];
+        private readonly ShaderProgramInfo _vertex = EmptyProgram(ShaderStageKind.Vertex, 1, fetchComponents: 2, userDataRegisters: pushData ? UserRegisters : null, pushDataStart: 2);
+        private readonly ShaderProgramInfo _pixel = EmptyProgram(ShaderStageKind.Pixel, 2, userDataRegisters: pushData ? UserRegisters : null);
+        private readonly ResourceSnapshot _snapshot = new() { UserData = pushData ? [0x11, 0x22] : [] };
+        private ShaderProgram _vertexProgram;
+        private ShaderProgram _pixelProgram;
 
-        private readonly AgcExports.CompiledStageProgram _pixel = new()
+        internal static ShaderProgramInfo EmptyProgram(ShaderStageKind stage, ulong hash, ShaderResourceInfo? info = null, uint fetchComponents = 0, uint[]? userDataRegisters = null, uint pushDataStart = 0)
         {
-            Shader = new VulkanCompiledGuestShader(SpirvFixedShaders.CreateSolidFragment(1f, 0f, 0f, 1f)),
-            Stage = ShaderStageKind.Pixel,
-            Hash = 2,
-        };
+            info ??= new ShaderResourceInfo();
+            var program = new ShaderProgramInfo
+            {
+                Stage = stage,
+                Hash = hash,
+                UserDataCount = (uint)(userDataRegisters?.Length ?? 0),
+                Resources = new SpecializedResourceInfo { Info = info },
+                Bindings = BindingLayout.Allocate(info, userDataRegisters ?? [], usesGlobalDataShare: false, usesFlattenedTable: false, usesShaderBase: false, pushDataStart),
+            };
+            program.VertexFetchComponents[0] = (byte)fetchComponents;
+            return program;
+        }
+
+        public bool UsesPushData => _vertex.Bindings!.UsesPushData && _pixel.Bindings!.UsesPushData;
+
+        // Modules are created on the worker with the first draw, like the cache does.
+        private void EnsureModules()
+        {
+            if (_vertexProgram.IsValid)
+            {
+                return;
+            }
+
+            _vertexProgram = new ShaderProgram(1, host.CreateShaderModule(new VulkanCompiledGuestShader(CreatePositionVertexShader()), ShaderStage.Vertex, 1, 1));
+            _pixelProgram = new ShaderProgram(2, host.CreateShaderModule(new VulkanCompiledGuestShader(SpirvFixedShaders.CreateSolidFragment(1f, 0f, 0f, 1f)), ShaderStage.Pixel, 2, 2));
+        }
 
         public GraphicsPrograms GetGraphicsPrograms(
             VertexStageRegisters vertex,
@@ -136,18 +161,22 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             ShaderInterfaceRegisters shaderInterface,
             ContextRegisters context,
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
-            bool pixelActive) =>
-            new()
+            bool pixelActive)
+        {
+            EnsureModules();
+            return new()
             {
-                Vertex = new ShaderProgram(1),
-                Pixel = new ShaderProgram(2),
+                Vertex = _vertexProgram,
+                Pixel = _pixelProgram,
                 VertexInput = new VertexInputInfo
                 {
                     Buffers = [new VertexInputBuffer(vertexAddress, VertexStride, VertexCount)],
-                    Stage = new ShaderStageResources(_vertex, new ResourceSnapshot()),
+                    Attributes = [new VertexAttributeResource(new BufferDescriptorWords((uint)vertexAddress, (uint)(vertexAddress >> 32) | (VertexStride << 16), VertexCount, Float2Format << 12), 0, 2, 0, 0, 0, 0)],
+                    Stage = new ShaderStageResources(_vertex, _snapshot),
                 },
-                PixelInput = new PixelInputInfo { InputCount = 0, Stage = new ShaderStageResources(_pixel, new ResourceSnapshot()) },
+                PixelInput = new PixelInputInfo { InputCount = 0, Stage = new ShaderStageResources(_pixel, _snapshot) },
             };
+        }
 
         public PipelineHandle CreateGraphicsPipeline(
             ReadOnlySpan<ColorTargetState> colors,
@@ -158,11 +187,14 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             in RenderingState rendering,
             PrimitiveTopology topology,
             bool primitiveRestartEnabled,
+            bool disableBlending,
             ShaderProgram vertexProgram,
             ShaderProgram pixelProgram) =>
-            factory.CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, vertexProgram, pixelProgram);
+            host.CreateGraphicsPipeline(ShaderPipelineCache.BuildGraphicsDescription(
+                colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
+                vertexProgram, pixelProgram, host.NoAttachmentSampleCounts));
 
-        public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator) =>
+        public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
             throw new InvalidOperationException("The test provider has no compute program.");
 
         public PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program) =>
@@ -266,6 +298,60 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
     }
 
     [Theory]
+    [InlineData(ShaderStageKind.Vertex)]
+    [InlineData(ShaderStageKind.Pixel)]
+    [InlineData(ShaderStageKind.Compute)]
+    public void PrepareBindings_RejectsDrawImageTypesButKeepsComputeViewChecksFatal(ShaderStageKind stage)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var info = new ShaderResourceInfo
+        {
+            Images = [new ImageResource
+            {
+                Dimension = ImageDimension.Dim1D,
+                ResourceClass = global::SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Sampled,
+                NumericClass = ImageNumericClass.Float,
+                Read = true,
+            }],
+        };
+        var program = FixedProgramProvider.EmptyProgram(stage, 0x1234, info);
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, 1, 1);
+        var snapshot = new ResourceSnapshot { Images = [words] };
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var request = ImageRequestBuilders.Texture(words, new ShaderImageShape(false, false, false, false, TextureNumericClass.Float)).Request;
+            var description = request.Description;
+            description.Type = GuestImageType.Color1D;
+            var identifier = harness.Images.InsertImageForTest(description);
+            Assert.Equal(identifier, harness.Images.FindImage(ref request));
+            var image = harness.Images.GetImage(identifier);
+            Assert.Equal(ImageType.Type1D, image.Backing.ImageType);
+            Assert.Equal(ImageViewType.Type2D, request.View.Type);
+            Assert.False(image.SupportsViewType(request.View));
+            if (stage == ShaderStageKind.Compute)
+            {
+                var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+                var failure = Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.BindResources(prepared));
+                Assert.Contains("typeValid=False", failure.Message);
+            }
+            else
+            {
+                var failure = Assert.Throws<DrawImageTypeMismatchException>(() =>
+                    presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot)));
+                Assert.Contains("imageType=0 viewType=1", failure.Message);
+            }
+        });
+        presenter.Run(presenter.RenderHost.ResetBindings);
+        harness.Finish();
+        harness.Shutdown();
+    }
+
+    [Theory]
     [InlineData(true, true)]
     [InlineData(false, true)]
     [InlineData(true, false)]
@@ -278,22 +364,108 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         var harness = presenter.Harness;
         var address = harness.MapBacked(0x10000, ReadWrite);
         var image = TargetImage(presenter, RegisterWords.Color(address, Size, Size));
-        var program = new AgcExports.CompiledStageProgram
-        {
-            Shader = new VulkanCompiledGuestShader([]),
-            Stage = ShaderStageKind.Compute,
-            Buffers = [new BufferResourceInfo(true, writable, false, formatted, false, 0x10000, 0)],
-            GlobalBuffers = [new GuestMemoryBuffer(address, [], 0, 0x10000, false, writable)],
-        };
+        var info = new ShaderResourceInfo { Buffers = [new BufferResource { Read = true, Written = writable, Formatted = formatted, MaxByteExtent = 0x10000 }] };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3, info);
+        var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 0x10000, 0]] };
         presenter.Run(() =>
         {
             Assert.False(image.IsBufferModified);
             using var preparation = presenter.RenderHost.BeginPreparation();
-            presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, new ResourceSnapshot()));
+            var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+            presenter.RenderHost.BindResources(prepared);
             Assert.Equal(formatted && writable, image.IsBufferModified);
         });
         harness.Finish();
         harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ClampMappedSize_AcceptsPrivateAndBackedRangesAndStopsAtTheirEnd(bool privateMemory)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        var harness = presenter.Harness;
+        var address = privateMemory ? harness.MapPrivate(0x10000) : harness.MapBacked(0x10000, ReadWrite);
+        presenter.Run(() =>
+        {
+            Assert.Equal(32UL, presenter.RenderHost.ClampMappedSize(address + 0x1DA0, 32));
+            Assert.Equal(16UL, presenter.RenderHost.ClampMappedSize(address + 0xFFF0, 32));
+            Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.ClampMappedSize(address + 0x10000, 32));
+            Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.ClampMappedSize(address, 0));
+            Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.ClampMappedSize(0, 32));
+            Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.ClampMappedSize(ulong.MaxValue - 15, 32));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ClampMappedSize_DoesNotCrossAnUnmappedGap()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var (first, granule, last) = presenter.Harness.MapBackedSandwich();
+        presenter.Run(() => Assert.Equal(16UL,
+            presenter.RenderHost.ClampMappedSize(first + granule - 16, last - first + 16)));
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
+    public void PrepareBindings_PrivateBufferUploadsCurrentBytesAndStillRejectsGpuWrites()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        presenter.SetField("_minStorageBufferOffsetAlignment", 256UL);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        Assert.True(harness.Memory.TryAllocateAtOrAbove(0x2_0000_0000, 0x10000, executable: true, 0x4000, out var allocation));
+        harness.Gpu.Register(allocation, 0x10000, ReadWrite | GuestPageProtection.Execute);
+        var address = allocation + 0x1DA0;
+        var resource = new BufferResource { Read = true, MaxByteExtent = 32 };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3,
+            new ShaderResourceInfo { Buffers = [resource] });
+        var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 32, 0]] };
+        Assert.False(harness.Memory.IsBackedView(address));
+        Assert.True(harness.Memory.CanRead(address, 32));
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            foreach (byte seed in new byte[] { 17, 91 })
+            {
+                var expected = Enumerable.Range(0, 32).Select(index => (byte)(seed + index)).ToArray();
+                Assert.True(harness.Memory.TryWrite(address, expected));
+                var buffer = presenter.Run(() =>
+                {
+                    using var preparation = presenter.RenderHost.BeginPreparation();
+                    var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+                    presenter.RenderHost.BindResources(prepared);
+                    return harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, 32));
+                });
+                Assert.Equal(expected, harness.ReadBack(buffer, buffer.Offset(address), 32));
+                Assert.Equal(HostPageProtection.ReadExecute, harness.Protection(address));
+            }
+
+            resource.Written = true;
+            presenter.Run(() =>
+            {
+                using var preparation = presenter.RenderHost.BeginPreparation();
+                var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+                Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.BindResources(prepared));
+            });
+            Assert.Contains(fatal.Messages, message => message.StartsWith("Could not write the required direct backing", StringComparison.Ordinal));
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, 32));
+            Assert.Equal(HostPageProtection.ReadExecute, harness.Protection(address));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Shutdown();
+        Assert.Equal(HostPageProtection.ReadWriteExecute, harness.Protection(address));
     }
 
     [Fact]
@@ -313,7 +485,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         var firstWords = RegisterWords.Color(firstTarget, Size, Size);
         var secondWords = RegisterWords.Color(secondTarget, Size, Size);
         harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
-        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((AgcExports.IHostPipelineFactory)presenter.Instance, vertices));
+        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
         GuestGpuMemoryHook.Attach(harness.Gpu);
         try
         {
@@ -321,7 +493,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             // The guarded write marks the pages dirty; the second obtain uploads the new bytes.
             Assert.True(harness.Memory.TryWrite(vertices, Triangle(-1f, -1f, -0.5f, -1f, -1f, -0.5f)));
             presenter.Run(() => executor.DrawAuto(2, Banks(secondWords), Draw()));
-            presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands", (object?)null));
+            presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
             harness.Finish();
 
             var first = harness.ReadImageBytes(TargetImage(presenter, firstWords));
@@ -335,6 +507,40 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         finally
         {
             GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void NewPreparation_ReusesRetiredStreamSpaceAfterTheRingFills()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var stream = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, new byte[0x100]);
+
+        for (var preparationIndex = 0; preparationIndex < 3; preparationIndex++)
+        {
+            presenter.Run(() =>
+            {
+                Assert.True(stream.TryMap(stream.Size, out _));
+                stream.Commit();
+            });
+            harness.Finish();
+            presenter.Run(() =>
+            {
+                using var preparation = presenter.RenderHost.BeginPreparation();
+                var binding = presenter.RenderHost.ObtainBuffer(address, 0x100, false);
+                Assert.Equal(stream.Handle.Handle, binding.Handle);
+                Assert.Equal(0UL, binding.Offset);
+                var transient = presenter.RenderHost.UploadTransient(new byte[0x100], 16);
+                Assert.Equal(stream.Handle.Handle, transient.Handle);
+            });
+            harness.Finish();
         }
 
         harness.Shutdown();
@@ -373,7 +579,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         harness.Shutdown();
     }
 
-    // A ring that would wrap over the preparation sends the expanded indices to a host buffer; the draw reads it.
+    // Retained ring bytes force expanded indices into a host buffer; the draw reads it before retirement.
     [Fact]
     public void OverflowIndexBuffer_IsConsumedByTheDrawAndRetiredWithIt()
     {
@@ -392,20 +598,18 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
         harness.Write(indices, [0, 1, 2]);
         var stream = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream);
-        var chunk = new byte[stream.Size / 4];
         presenter.Run(() =>
         {
-            for (var index = 0; index < 4; index++)
-            {
-                stream.Copy(chunk, 16);
-            }
+            Assert.True(stream.TryMap(stream.Size, out _, 16));
+            stream.Commit();
         });
+        using var retention = stream.RetainContents();
 
-        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((AgcExports.IHostPipelineFactory)presenter.Instance, vertices));
+        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
         presenter.Run(() => executor.DrawIndexed(1, Banks(words), new DrawIndexedArguments(0, 0, VertexCount, indices, 2, 1, 0, 0, DrawOffsetSource.Packet)));
         Assert.Equal(0UL, presenter.HostBuffers.CachedBytes);
 
-        presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands", (object?)null));
+        presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
         harness.Finish();
         presenter.Run(() => presenter.InvokeMethod("WaitForAllGuestSubmissions"));
         Assert.Equal(8UL, presenter.HostBuffers.CachedBytes);
@@ -420,7 +624,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         if (!Ready()) return;
         var presenter = new PresenterUnderTest(_vulkan);
         var pipelines = presenter.GetField<System.Collections.IDictionary>("_pipelineEntries");
-        var layouts = presenter.GetField<System.Collections.IDictionary>("_descriptorLayouts");
+        var layouts = presenter.GetField<System.Collections.IDictionary>("_shaderModules");
         using (presenter)
         {
             presenter.LoadRenderingCommands();
@@ -429,7 +633,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             presenter.Harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
             var words = RegisterWords.Color(target, Size, Size);
             var executor = new RenderExecutor(presenter.RenderHost,
-                new FixedProgramProvider((AgcExports.IHostPipelineFactory)presenter.Instance, vertices));
+                new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
             presenter.Run(() => executor.DrawAuto(1, Banks(words), Draw()));
             Assert.NotEmpty(pipelines);
             Assert.NotEmpty(layouts);
@@ -438,6 +642,96 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         Assert.Empty(pipelines);
         Assert.Empty(layouts);
         _vulkan.AssertNoValidationMessages();
+    }
+
+    // Both stages push their blocks into the one 128-byte range; the validation layer checks the layout covers them.
+    [Fact]
+    public void PushConstants_CoverBothStagesOfADrawInOneRange()
+    {
+        if (!Ready())
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var target = harness.MapBacked(0x10000, ReadWrite);
+        var vertices = harness.MapBacked(0x10000, ReadWrite);
+        var words = RegisterWords.Color(target, Size, Size);
+        harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
+        var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, pushData: true);
+        Assert.True(provider.UsesPushData);
+        var executor = new RenderExecutor(presenter.RenderHost, provider);
+        presenter.Run(() => executor.DrawAuto(1, Banks(words), Draw()));
+        presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
+        harness.Finish();
+        var pixels = harness.ReadImageBytes(TargetImage(presenter, words));
+        Assert.Equal(Red, Pixel(pixels, Size / 2, Size / 2));
+        harness.Shutdown();
+        _vulkan.AssertNoValidationMessages();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GuestWordReaders_RejectUnmappedMemoryAndClearTheResult(bool cleanOnly)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var host = (IShaderPipelineHost)presenter.Instance;
+        presenter.Run(() =>
+        {
+            const ulong unmappedAddress = 0x12340000;
+            uint word = uint.MaxValue;
+            var success = cleanOnly
+                ? host.TryReadCleanGuestWord(unmappedAddress, out word)
+                : host.TryReadGuestWord(unmappedAddress, out word);
+            Assert.False(success);
+            Assert.Equal(0u, word);
+        });
+    }
+
+    // The plain reader downloads a GPU-written range first; the clean reader refuses it until the GPU is done.
+    [Fact]
+    public void GuestWordReaders_HonourGpuOwnershipOfTheRange()
+    {
+        if (!Ready())
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, BitConverter.GetBytes(0xCAFEF00Du));
+        var host = (IShaderPipelineHost)presenter.Instance;
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            presenter.Run(() =>
+            {
+                Assert.True(host.TryReadGuestWord(address, out var word));
+                Assert.Equal(0xCAFEF00Du, word);
+                Assert.True(host.TryReadCleanGuestWord(address, out word));
+                Assert.Equal(0xCAFEF00Du, word);
+
+                _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: true);
+                Assert.False(host.TryReadCleanGuestWord(address, out _));
+                Assert.False(host.TryReadCleanGuestWord(address + 0x800, out _));
+                Assert.True(host.TryReadCleanGuestWord(address + 0x2000, out _));
+                Assert.True(host.TryReadGuestWord(address, out word));
+                Assert.Equal(0xCAFEF00Du, word);
+            });
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Finish();
+        harness.Shutdown();
     }
 
     [Fact]
@@ -455,7 +749,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         var vertices = harness.MapBacked(0x10000, ReadWrite);
         var words = RegisterWords.Color(target, Size, Size);
         harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
-        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((AgcExports.IHostPipelineFactory)presenter.Instance, vertices));
+        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
         var rendering = (IRenderingState)presenter.Instance;
         presenter.Run(() =>
         {
@@ -464,7 +758,7 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             executor.DrawAuto(2, Banks(words), Draw());
             Assert.True(rendering.IsRendering);
             Assert.Equal(1L, presenter.GetField<long>("_renderingScopesBegun"));
-            presenter.InvokeMethod("FlushBatchedGuestCommands", (object?)null);
+            presenter.InvokeMethod("FlushBatchedGuestCommands");
             Assert.False(rendering.IsRendering);
         });
         harness.Finish();

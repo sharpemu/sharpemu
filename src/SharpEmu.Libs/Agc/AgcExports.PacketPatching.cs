@@ -455,7 +455,6 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
-        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-address");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -491,7 +490,6 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.patch_{registerSpace}_count cmd=0x{commandAddress:X16} count={registerCount}");
-        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-count");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -588,41 +586,8 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.patch_{registerSpace}_add cmd=0x{commandAddress:X16} add={registerCount} total={newCount}");
-        TraceIndirectDepthPatchedPacket(ctx, commandAddress, registerSpace, "patch-add");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static void TraceIndirectDepthPatchedPacket(
-        CpuContext ctx,
-        ulong commandAddress,
-        string registerSpace,
-        string source)
-    {
-        if (!_traceDepthMetadata ||
-            registerSpace != "cx" ||
-            !TryGetIndirectPatchLayout(
-                ctx,
-                commandAddress,
-                registerSpace,
-                out var addressOffset,
-                out var countOffset,
-                out var countMask) ||
-            !TryReadUInt32(ctx, commandAddress + addressOffset, out var addressLow) ||
-            !TryReadUInt32(ctx, commandAddress + addressOffset + sizeof(uint), out var addressHigh) ||
-            !TryReadUInt32(ctx, commandAddress + countOffset, out var rawCount))
-        {
-            return;
-        }
-
-        var registersAddress = ((ulong)addressHigh << 32) | (addressLow & 0xFFFF_FFFCu);
-        TraceIndirectDepthTable(
-            ctx,
-            source,
-            RCxRegsIndirect,
-            commandAddress,
-            registersAddress,
-            rawCount & countMask);
     }
 
     private static bool TryGetIndirectPatchLayout(

@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
@@ -12,10 +11,6 @@ public static partial class AgcExports
     // This partial constructs AGC register-programming command packets.
 
     private const uint CbSetShRegisterRangeMarker = 0x6875000D;
-    private static readonly ConcurrentDictionary<(ulong Table, uint Pair), byte>
-        _tracedSuspiciousIndirectDepthEntries = new();
-    private static readonly ulong? _traceIndirectCxHash = ParseIndirectCxTraceHash();
-    private static int _indirectCxPairDumpCount;
 
     [SysAbiExport(
         Nid = "UZbQjYAwwXM",
@@ -247,13 +242,6 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        TraceIndirectDepthTable(
-            ctx,
-            "emit",
-            packetRegister,
-            commandBufferAddress,
-            registersAddress,
-            registerCount);
 
         var op = packetRegister switch
         {
@@ -275,158 +263,6 @@ public static partial class AgcExports
 
         TraceAgc($"agc.dcb_set_{registerSpace}_indirect buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16} count={registerCount}");
         return ReturnPointer(ctx, commandAddress);
-    }
-
-    private static void TraceIndirectDepthTable(
-        CpuContext ctx,
-        string source,
-        uint packetRegister,
-        ulong commandBufferAddress,
-        ulong registersAddress,
-        uint registerCount)
-    {
-        if (!_traceDepthMetadata ||
-            packetRegister != RCxRegsIndirect ||
-            registersAddress == 0)
-        {
-            return;
-        }
-
-        var boundedCount = Math.Min(registerCount & 0x3FFFu, 4096u);
-        var offsetHash = 14695981039346656037UL;
-        var valueHash = 14695981039346656037UL;
-        for (uint index = 0; index < boundedCount; index++)
-        {
-            var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var rawOffset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
-            {
-                return;
-            }
-
-            offsetHash = (offsetHash ^ rawOffset) * 1099511628211UL;
-            valueHash = (valueHash ^ value) * 1099511628211UL;
-        }
-
-        if (_traceIndirectCxHash == offsetHash &&
-            Interlocked.Increment(ref _indirectCxPairDumpCount) <= 16)
-        {
-            for (uint index = 0; index < boundedCount; index++)
-            {
-                var entryAddress = registersAddress + ((ulong)index * 8);
-                if (!TryReadUInt32(ctx, entryAddress, out var rawOffset) ||
-                    !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
-                {
-                    break;
-                }
-
-                Console.Error.WriteLine(
-                    $"[LOADER][TRACE] agc.indirect_cx_pair source={source} " +
-                    $"rip=0x{ctx.Rip:X16} table=0x{registersAddress:X16} " +
-                    $"count={registerCount} offset_hash=0x{offsetHash:X16} " +
-                    $"value_hash=0x{valueHash:X16} pair={index} " +
-                    $"raw=0x{rawOffset:X8} reg=0x{(rawOffset & ~0x7000_0000u):X8} " +
-                    $"value=0x{value:X8}");
-            }
-        }
-
-        for (uint index = 0; index < boundedCount; index++)
-        {
-            var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var rawOffset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
-            {
-                return;
-            }
-
-            var registerOffset = rawOffset & ~0x7000_0000u;
-            if (registerOffset != DbDepthSizeXy)
-            {
-                continue;
-            }
-
-            var width = (value & 0x3FFFu) + 1;
-            var height = ((value >> 16) & 0x3FFFu) + 1;
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] agc.indirect_depth_source source={source} " +
-                $"rip=0x{ctx.Rip:X16} buf=0x{commandBufferAddress:X16} " +
-                $"table=0x{registersAddress:X16} count={registerCount} pair={index} " +
-                $"entry=0x{entryAddress:X16} raw=0x{rawOffset:X8} " +
-                $"value=0x{value:X8} size={width}x{height} " +
-                $"offset_hash=0x{offsetHash:X16} value_hash=0x{valueHash:X16}");
-
-            if (value == 0x00000007u &&
-                _tracedSuspiciousIndirectDepthEntries.TryAdd((registersAddress, index), 0))
-            {
-                TraceSuspiciousIndirectDepthEntry(
-                    ctx,
-                    source,
-                    commandBufferAddress,
-                    registersAddress,
-                    registerCount,
-                    index);
-            }
-        }
-    }
-
-    private static ulong? ParseIndirectCxTraceHash()
-    {
-        var value = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_INDIRECT_CX_HASH");
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var span = value.AsSpan().Trim();
-        if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            span = span[2..];
-        }
-
-        return ulong.TryParse(
-            span,
-            System.Globalization.NumberStyles.AllowHexSpecifier,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out var hash)
-            ? hash
-            : null;
-    }
-
-    private static void TraceSuspiciousIndirectDepthEntry(
-        CpuContext ctx,
-        string source,
-        ulong commandBufferAddress,
-        ulong registersAddress,
-        uint registerCount,
-        uint pairIndex)
-    {
-        const uint radius = 4;
-        var boundedCount = Math.Min(registerCount & 0x3FFFu, 4096u);
-        var first = pairIndex > radius ? pairIndex - radius : 0;
-        var last = Math.Min(boundedCount, pairIndex + radius + 1);
-        var entries = new List<string>((int)(last - first));
-        for (var index = first; index < last; index++)
-        {
-            var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var rawOffset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
-            {
-                entries.Add($"{index}:unreadable");
-                continue;
-            }
-
-            entries.Add($"{index}:0x{rawOffset:X8}=0x{value:X8}");
-        }
-
-        var returnAddress = TryReadUInt64(ctx, ctx[CpuRegister.Rsp], out var valueAtStack)
-            ? $"0x{valueAtStack:X16}"
-            : "unreadable";
-        Console.Error.WriteLine(
-            $"[LOADER][TRACE] agc.indirect_depth_provenance source={source} " +
-            $"rip=0x{ctx.Rip:X16} ret={returnAddress} " +
-            $"buf=0x{commandBufferAddress:X16} table=0x{registersAddress:X16} " +
-            $"count={registerCount} pair={pairIndex} " +
-            $"window=[{string.Join(',', entries)}]");
     }
 
     private static int DcbSetRegisterDirect(CpuContext ctx, uint op, string registerSpace)

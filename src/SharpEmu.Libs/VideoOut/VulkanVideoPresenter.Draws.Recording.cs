@@ -259,7 +259,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private static bool ShouldTraceVulkanResources() =>
             _traceVulkanResourcesEnabled;
 
-        private void DestroyTranslatedDrawResources(TranslatedDrawResources resources)
+        private void RecycleSubmissionUploads(SubmissionUploadResources resources)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceDestroy);
             foreach (var texture in resources.Textures)
@@ -270,49 +270,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            foreach (var globalBuffer in resources.GlobalMemoryBuffers)
-            {
-                globalBuffer?.StreamRetention?.Dispose();
-                if (globalBuffer is null || !globalBuffer.OwnsBuffer)
-                {
-                    continue;
-                }
-
-                RecycleHostBuffer(globalBuffer.Buffer, globalBuffer.Memory);
-            }
-
             foreach (var (buffer, memory) in resources.OverflowBuffers ?? [])
             {
                 RecycleHostBuffer(buffer, memory);
-            }
-
-            if (!resources.PipelineCached && resources.Pipeline.Handle != 0)
-            {
-                _vk.DestroyPipeline(_device, resources.Pipeline, null);
-            }
-
-            if (resources.DescriptorPool.Handle != 0)
-            {
-                if (_recycledDescriptorPools.Count < 256)
-                {
-                    _recycledDescriptorPools.Push(resources.DescriptorPool);
-                }
-                else
-                {
-                    _vk.DestroyDescriptorPool(_device, resources.DescriptorPool, null);
-                }
-            }
-
-            if (!resources.DescriptorLayoutCached &&
-                resources.PipelineLayout.Handle != 0)
-            {
-                _vk.DestroyPipelineLayout(_device, resources.PipelineLayout, null);
-            }
-
-            if (!resources.DescriptorLayoutCached &&
-                resources.DescriptorSetLayout.Handle != 0)
-            {
-                _vk.DestroyDescriptorSetLayout(_device, resources.DescriptorSetLayout, null);
             }
         }
     }

@@ -16,7 +16,7 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Contains($"v[{8 + component}] = sharpemu_load_word", source);
+            Assert.Contains($"v[{8 + component}] = sharpemu_load_device_dword", source);
         Assert.DoesNotContain("v[3] =", source);
     }
 
@@ -29,7 +29,7 @@ public sealed class GlobalMemoryRegisterTests
     {
         var source = Compile(opcode);
         for (var component = 0; component < componentCount; component++)
-            Assert.Contains($", v[{3 + component}], 4u);", source);
+            Assert.Matches($@"sharpemu_store_device_dword\([^\r\n]*, v\[{3 + component}\]\);", source);
         Assert.DoesNotContain(", v[8],", source);
     }
 
@@ -65,6 +65,6 @@ public sealed class GlobalMemoryRegisterTests
     {
         var word = 0xDC00_8000u | (opcode << 18) | (returnsValue ? 1u << 16 : 0);
         var fixture = new Gen5ComputeFixture("global-registers", [word, 0x0810_0309, 0xBF81_0000], 16, 64);
-        return Gen5ComputeFixtures.CompileOrThrow(fixture).Source;
+        return Gen5ComputeFixtures.CompileRequestOrThrow(fixture).Source;
     }
 }

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
-using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -33,11 +32,6 @@ internal static class DcbSubmissionProfile
     private static long _vertexSnapshotMisses;
     private static long _vertexSnapshotMismatches;
     private static long _vertexSnapshotReuses;
-    private static long _discardedVertexBytes;
-    private static long _discardedVertexCaptureTicks;
-    private static long _earlyVertexReuses;
-    private static long _avoidedVertexBytes;
-    private static long _vertexReuseCheckTicks;
     private static readonly long[] _captureSelections = new long[3];
     private static int _reportedCaptureRejection;
 
@@ -59,7 +53,7 @@ internal static class DcbSubmissionProfile
 
     public static bool Enabled => _enabled;
 
-    internal enum SnapshotPhase { IndexCapture, ShaderState, IndexScan, Evaluation, RetainedCopy, PayloadCapture, Registers, Cleanup, HeaderLookup, Count }
+    internal enum SnapshotPhase { IndexCapture, Evaluation, RetainedCopy, Registers, Count }
     private static readonly long[] _snapshotPhaseTicks = new long[(int)SnapshotPhase.Count];
     private static readonly long[] _snapshotPhaseCalls = new long[(int)SnapshotPhase.Count];
     private static long _retainedVertexBytes;
@@ -85,7 +79,7 @@ internal static class DcbSubmissionProfile
         long accounted = 0;
         for (var index = 0; index < phases.Length; index++)
         {
-            if (index != (int)SnapshotPhase.PayloadCapture) accounted += phases[index];
+            accounted += phases[index];
         }
         return Math.Max(0, total - accounted);
     }
@@ -95,7 +89,7 @@ internal static class DcbSubmissionProfile
         if (Enabled) Interlocked.Add(ref _retainedVertexBytes, bytes);
     }
 
-    public static void RecordVertexSnapshot(bool available, bool matched, long bytes = 0, long captureTicks = 0, bool reusedBeforeCapture = false)
+    public static void RecordVertexSnapshot(bool available, bool matched)
     {
         if (!_enabled)
         {
@@ -112,38 +106,7 @@ internal static class DcbSubmissionProfile
         else
         {
             Interlocked.Increment(ref _vertexSnapshotReuses);
-            if (reusedBeforeCapture)
-            {
-                Interlocked.Increment(ref _earlyVertexReuses);
-                Interlocked.Add(ref _avoidedVertexBytes, bytes);
-                Interlocked.Add(ref _vertexReuseCheckTicks, captureTicks);
-            }
-            else
-            {
-                Interlocked.Add(ref _discardedVertexBytes, bytes);
-                Interlocked.Add(ref _discardedVertexCaptureTicks, captureTicks);
-            }
         }
-    }
-
-    internal static long CountUniqueVertexBytes(IReadOnlyList<Gen5VertexInputBinding> bindings)
-    {
-        long bytes = 0;
-        for (var index = 0; index < bindings.Count; index++)
-        {
-            var binding = bindings[index];
-            var length = Math.Clamp(binding.DataLength, 0, binding.Data.Length);
-            var previousLength = 0;
-            for (var previous = 0; previous < index; previous++)
-            {
-                if (ReferenceEquals(bindings[previous].Data, binding.Data))
-                {
-                    previousLength = Math.Max(previousLength, Math.Clamp(bindings[previous].DataLength, 0, binding.Data.Length));
-                }
-            }
-            bytes += Math.Max(0, length - previousLength);
-        }
-        return bytes;
     }
 
     public static void Record(
@@ -208,11 +171,6 @@ internal static class DcbSubmissionProfile
             var captureAccepted = Interlocked.Exchange(ref _captureSelections[1], 0);
             var captureRejected = Interlocked.Exchange(ref _captureSelections[2], 0);
             Interlocked.Exchange(ref _reportedCaptureRejection, 0);
-            var discardedBytes = Interlocked.Exchange(ref _discardedVertexBytes, 0);
-            var discardedCaptureTicks = Interlocked.Exchange(ref _discardedVertexCaptureTicks, 0);
-            var earlyReuses = Interlocked.Exchange(ref _earlyVertexReuses, 0);
-            var avoidedBytes = Interlocked.Exchange(ref _avoidedVertexBytes, 0);
-            var reuseCheckTicks = Interlocked.Exchange(ref _vertexReuseCheckTicks, 0);
             var phaseTicks = new long[_snapshotPhaseTicks.Length];
             var phaseCalls = new long[_snapshotPhaseCalls.Length];
             for (var index = 0; index < phaseTicks.Length; index++)
@@ -243,22 +201,15 @@ internal static class DcbSubmissionProfile
                 $"max_queue_pump_ms={ToMilliseconds(maxQueuePumpTicks):F3}");
             Console.Error.WriteLine(
                 $"[PERF][VERTEX_SNAPSHOT] window={elapsedSeconds:F1}s reused={snapshotReuses} " +
-                $"missing={snapshotMisses} mismatch={snapshotMismatches} discarded_bytes={discardedBytes} " +
-                $"discarded_capture_ms={ToMilliseconds(discardedCaptureTicks):F2} " +
-                $"early_reused={earlyReuses} avoided_bytes={avoidedBytes} reuse_check_ms={ToMilliseconds(reuseCheckTicks):F2} " +
+                $"missing={snapshotMisses} mismatch={snapshotMismatches} " +
                 $"capture_missing={captureMissing} capture_accepted={captureAccepted} capture_rejected={captureRejected}");
             Console.Error.WriteLine(
                 $"[PERF][SNAPSHOT_PREPASS] window={elapsedSeconds:F1}s total_ms={ToMilliseconds(snapshotTicks):F2} " +
                 $"packet_other_ms={ToMilliseconds(SnapshotRemainder(snapshotTicks, phaseTicks)):F2} " +
-                $"index_capture_ms={ToMilliseconds(phaseTicks[0]):F2}/n{phaseCalls[0]} " +
-                $"shader_state_ms={ToMilliseconds(phaseTicks[1]):F2}/n{phaseCalls[1]} " +
-                $"index_scan_ms={ToMilliseconds(phaseTicks[2]):F2}/n{phaseCalls[2]} " +
-                $"evaluation_ms={ToMilliseconds(phaseTicks[3]):F2}/n{phaseCalls[3]} " +
-                $"retained_copy_ms={ToMilliseconds(phaseTicks[4]):F2}/n{phaseCalls[4]} retained_bytes={retainedBytes} " +
-                $"payload_nested_ms={ToMilliseconds(phaseTicks[5]):F2}/n{phaseCalls[5]} " +
-                $"registers_ms={ToMilliseconds(phaseTicks[6]):F2}/n{phaseCalls[6]} " +
-                $"cleanup_ms={ToMilliseconds(phaseTicks[7]):F2}/n{phaseCalls[7]} " +
-                $"header_lookup_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.HeaderLookup]):F2}/n{phaseCalls[(int)SnapshotPhase.HeaderLookup]}");
+                $"index_capture_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.IndexCapture]):F2}/n{phaseCalls[(int)SnapshotPhase.IndexCapture]} " +
+                $"evaluation_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.Evaluation]):F2}/n{phaseCalls[(int)SnapshotPhase.Evaluation]} " +
+                $"retained_copy_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.RetainedCopy]):F2}/n{phaseCalls[(int)SnapshotPhase.RetainedCopy]} retained_bytes={retainedBytes} " +
+                $"registers_ms={ToMilliseconds(phaseTicks[(int)SnapshotPhase.Registers]):F2}/n{phaseCalls[(int)SnapshotPhase.Registers]}");
         }
         finally
         {

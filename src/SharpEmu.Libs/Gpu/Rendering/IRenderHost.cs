@@ -116,7 +116,7 @@ public interface IRenderHost
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 
-    void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings);
+    void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input);
 
     void BindIndexBuffer(BufferBinding binding, IndexType type);
 

@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -19,8 +20,12 @@ using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
+using ImageResourceClass = SharpEmu.Libs.Gpu.Rendering.ImageResourceClass;
+using PlanImageResourceClass = SharpEmu.ShaderCompiler.Resources.ImageResourceClass;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
 
@@ -79,17 +84,24 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             _vulkan.Vk.CmdClearDepthStencilImage(presenter.Command, attachment.Backing.Handle, ImageLayout.TransferDstOptimal, &initial, 1, &range);
             presenter.RenderHost.ResetBindings();
 
-            var program = new AgcExports.CompiledStageProgram
+            var storageImage = new ImageResource { ResourceClass = PlanImageResourceClass.Storage, NumericClass = ImageNumericClass.Uint, Dimension = ImageDimension.Dim2DArray, Read = true, Written = true };
+            var sampledImage = new ImageResource { ResourceClass = PlanImageResourceClass.Sampled, NumericClass = ImageNumericClass.Uint, Dimension = ImageDimension.Dim2DArray, Read = true };
+            var info = new ShaderResourceInfo { Images = sampledAlias ? [sampledImage, storageImage] : [storageImage] };
+            var storageBinding = BindingLayout.NativeBindingIndex(ShaderStage.Compute, ImageDescriptorBinding.ForImage(storageImage)!.Value);
+            var program = new ShaderProgramInfo
             {
-                Shader = new VulkanCompiledGuestShader(CreateStencilIncrementShader(sampledAlias ? 2u : 1u)),
                 Stage = ShaderStageKind.Compute,
                 Images = sampledAlias
                     ? [new ImageResourceInfo(ImageResourceClass.Sampled, false), new ImageResourceInfo(ImageResourceClass.Storage, true)]
                     : [new ImageResourceInfo(ImageResourceClass.Storage, true)],
-                Textures = sampledAlias ? [texture with { IsStorage = false, Shape = shape with { Storage = false } }, texture] : [texture],
+                Resources = new SpecializedResourceInfo { Info = info },
+                Bindings = BindingLayout.Allocate(info, [], usesGlobalDataShare: false, usesFlattenedTable: false, usesShaderBase: false),
             };
-            var stage = new ShaderStageResources(program, new ResourceSnapshot());
+            var words = texture.Descriptor!;
+            var stage = new ShaderStageResources(program, new ResourceSnapshot { Images = sampledAlias ? [words, words] : [words] });
             var input = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1, Stage = stage };
+            var pipelineHost = (IShaderPipelineHost)presenter.Instance;
+            var module = pipelineHost.CreateShaderModule(new VulkanCompiledGuestShader(CreateStencilIncrementShader(storageBinding)), ShaderStage.Compute, 0, 1);
             for (var dispatchIndex = 0; dispatchIndex < 2; dispatchIndex++)
             {
                 using (presenter.RenderHost.BeginPreparation())
@@ -111,7 +123,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
                     if (recordDispatch)
                     {
-                        var pipeline = ((AgcExports.IHostPipelineFactory)presenter.Instance).CreateComputePipeline(input, new ShaderProgram(1));
+                        var pipeline = pipelineHost.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = new ShaderProgram(1, module), Stage = program });
                         presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]);
                         if (sampledAlias)
                             Assert.Same(working, GetFieldValue(textures.GetValue(0)!, "CachedImage"));

@@ -76,6 +76,18 @@ internal static class RenderPhaseProfile
         DrawVertexShaderSetup,
         DrawVertexEvaluation,
         DrawBindingAssembly,
+        ProgramPreparation,
+        ProgramSourceRead,
+        VertexInputResolution,
+        PixelInputResolution,
+        ProgramCacheLookup,
+        ProgramPermutationLookup,
+        ProgramResourceAssembly,
+        ResourceMaterialization,
+        ProgramCompile,
+        PipelineCreation,
+        DescriptorPreparation,
+        DescriptorCommit,
         Draw,
         /// <summary>Closing and submitting the batched guest command buffer.</summary>
         Flush,
@@ -135,7 +147,7 @@ internal static class RenderPhaseProfile
             "1",
             StringComparison.Ordinal);
 
-    private static readonly bool FrameTraceEnabled =
+    internal static readonly bool FrameTraceEnabled =
         Enabled &&
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"),
@@ -357,6 +369,8 @@ internal static class RenderPhaseProfile
     // Cache calls on other threads must not enter the render-thread counters.
     internal static Scope MeasureDetail(Phase phase) =>
         _scopeDepth > 0 ? Measure(phase) : default;
+
+    internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;
 
     /// <summary>
     /// Closes out the running phase and switches to <paramref name="next"/>,

@@ -230,7 +230,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         TouchBuffer(buffer);
-        _ = SynchronizeBuffer(buffer, guestAddress, size, isWritten, isTexelBuffer);
+        // A persistent upload must track the next CPU write instead of uploading unchanged hot pages.
+        // Streaming keeps hot pages writable; the fallback must restore protection before copying.
+        _ = SynchronizeBuffer(buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages: false);
         if (isWritten)
         {
             _gpuModifiedRanges.Add(guestAddress, size);
@@ -503,7 +505,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish)
             {
-                _ = SynchronizeBuffer(buffer, start, finish - start, false, false);
+                // Device-address reads reuse persistent buffers; track writes after each upload.
+                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
             }
         }
     }
@@ -1057,9 +1060,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return bufferIdentifier;
     }
 
-    private bool SynchronizeBuffer(GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer)
+    private bool SynchronizeBuffer(GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer,
+        bool preserveCpuWriteHotPages = true)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
+        // The locked query observes completed writes; a later write remains dirty for the next obtain.
+        if (!preserveCpuWriteHotPages && !isWritten && !isTexelBuffer && !_tracker.HasCpuDirtyPages(guestAddress, size))
+        {
+            return false;
+        }
         var copies = new List<BufferCopy>();
         var totalSize = 0UL;
         GpuBuffer? source = null;
@@ -1072,7 +1081,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
                 totalSize += bytes;
             },
-            () => source = UploadCopies(buffer, copies, totalSize, guestAddress, size));
+            () => source = UploadCopies(buffer, copies, totalSize, guestAddress, size),
+            preserveCpuWriteHotPages);
         if (source != null)
         {
             var command = _scheduler.Current;

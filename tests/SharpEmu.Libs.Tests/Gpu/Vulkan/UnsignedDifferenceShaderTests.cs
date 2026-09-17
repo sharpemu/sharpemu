@@ -3,10 +3,12 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -26,12 +28,7 @@ public sealed class UnsignedDifferenceShaderTests(HeadlessVulkanFixture fixture,
     public void SumOfAbsoluteDifferences_MatchesUnsignedBoundaryResultsOnTheDevice()
     {
         var vulkan = fixture.Vulkan;
-        if (!GatePrerequisites.Ready(vulkan)) return;
-        if (!vulkan.ShaderInt64)
-        {
-            Assert.False(ReferenceShaders.Required, "The translated shader test requires shaderInt64.");
-            return;
-        }
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
 
         uint[] operands = [0, 1, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFE, uint.MaxValue];
         uint[] accumulators = [0, 0x8000_0000, uint.MaxValue];
@@ -54,16 +51,15 @@ public sealed class UnsignedDifferenceShaderTests(HeadlessVulkanFixture fixture,
             recordIndex++;
         }
 
-        var shader = CompileBoundaryShader(inputBytes.Length, (uint)recordCount);
+        var request = CreateBoundaryRequest((uint)recordCount);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using (var harness = new ImageTestHarness(vulkan))
-        using (var runner = new TilerComputeRunner(harness))
+        using (var runner = new LayoutComputeRunner(harness, request, shader.Spirv))
         {
-            var pipeline = runner.CreatePipeline(shader, []);
-            var records = harness.Upload(inputBytes);
-            var unusedArguments = harness.Upload(new byte[TileTransferArguments.Size]);
-            // The shared runner's first three push words supply the compute thread limits.
-            var limits = new TileTransferArguments { SourceBase = (uint)recordCount, DestinationBase = 1, Width = 1 };
-            harness.Run(() => runner.Dispatch(pipeline, records, records, unusedArguments, 0, limits, 1, 1, 1));
+            var records = runner.CreateBuffer(inputBytes);
+            uint[] userData = [(uint)(BufferAddress & uint.MaxValue), (uint)(BufferAddress >> 32), (uint)inputBytes.Length, 0];
+            var bindings = new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [records] };
+            harness.Run(() => runner.Dispatch(userData, bindings, 1));
             var actualBytes = harness.ReadBack(records.Handle, 0, (ulong)inputBytes.Length);
             Assert.Equal(expectedBytes, actualBytes);
             harness.AssertNoValidationMessages();
@@ -73,7 +69,7 @@ public sealed class UnsignedDifferenceShaderTests(HeadlessVulkanFixture fixture,
         output.WriteLine($"Verified {recordCount} unsigned boundary cases on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
-    private static byte[] CompileBoundaryShader(int bufferBytes, uint threadCount)
+    private static ShaderCompileRequest CreateBoundaryRequest(uint threadCount)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);
         uint[] words = [0xD15D_000F, 0x10Cu | (0x10Du << 9) | (0x10Eu << 18), 0xBF81_0000];
@@ -102,15 +98,13 @@ public sealed class UnsignedDifferenceShaderTests(HeadlessVulkanFixture fixture,
                 new Gen5BufferMemoryControl(1, 10, 15, 0, 12, false, true, false, false)),
             decoded.Instructions[1] with { Pc = 28 },
         ]);
-        var scalars = new uint[256];
-        scalars[0] = (uint)(BufferAddress & uint.MaxValue);
-        scalars[1] = (uint)(BufferAddress >> 32);
-        scalars[2] = (uint)bufferBytes;
-        var binding = new Gen5GlobalMemoryBinding(0, BufferAddress, [4, 20], [], 0, false, (ulong)bufferBytes) { Writable = true };
-        var state = new Gen5ShaderState(program, scalars[..4], null);
-        var evaluation = new Gen5ShaderEvaluation(scalars, scalars, [], [binding]);
-        Assert.True(Gen5SpirvTranslator.TryCompileComputeShader(state, evaluation, threadCount, 1, 1,
-            out var compiled, out var compileError), compileError);
-        return compiled.Spirv;
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, userDataCount: 4);
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = threadCount,
+            ThreadCountX = threadCount,
+            ThreadCountY = 1,
+            ThreadCountZ = 1,
+        };
     }
 }

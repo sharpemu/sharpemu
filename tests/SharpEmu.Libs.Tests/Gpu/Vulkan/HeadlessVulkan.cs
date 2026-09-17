@@ -48,7 +48,20 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         "VK_KHR_dynamic_rendering",
         "VK_EXT_extended_dynamic_state",
         "VK_EXT_extended_dynamic_state2",
+        "VK_KHR_push_descriptor",
     ];
+
+    // The push descriptor limit of the device; the render host pushes sets that fit it.
+    public uint MaxPushDescriptors
+    {
+        get
+        {
+            var pushDescriptors = new PhysicalDevicePushDescriptorPropertiesKHR { SType = StructureType.PhysicalDevicePushDescriptorPropertiesKhr };
+            var properties = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &pushDescriptors };
+            Vk.GetPhysicalDeviceProperties2(Physical, &properties);
+            return pushDescriptors.MaxPushDescriptors;
+        }
+    }
 
     public Vk Vk { get; }
 

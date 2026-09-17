@@ -6,6 +6,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -51,7 +52,9 @@ public static partial class AgcExports
         ulong indexAddress,
         uint indexCount,
         uint instanceCount,
-        (uint Offset, uint Value)[] shaderRegisters)
+        (uint Offset, uint Value)[] shaderRegisters,
+        SubmittedVertexData? vertexData = null,
+        ulong exportShaderAddress = 0)
     {
         var capture = new GeometryCaptureFingerprint(
             indexSize,
@@ -64,7 +67,7 @@ public static partial class AgcExports
             null,
             new Dictionary<ulong, SubmittedVertexSnapshot>
             {
-                [packetAddress] = new SubmittedVertexSnapshot(0, [], capture),
+                [packetAddress] = new SubmittedVertexSnapshot(exportShaderAddress, vertexData, capture),
             });
     }
 
@@ -145,7 +148,7 @@ public static partial class AgcExports
         private readonly SubmittedGpuState _gpuState;
         private SubmittedDcbState? _current;
         private int _currentQueueId;
-        private readonly ShaderProgramProvider? _programs;
+        private readonly ShaderPipelineCache? _pipelines;
         private readonly RenderExecutor? _executor;
 
         internal CommandStreamTranslation(ICpuMemory memory, ICommandStreamHost host)
@@ -153,15 +156,28 @@ public static partial class AgcExports
             _host = host;
             _context = new CpuContext(memory, Generation.Gen5);
             _gpuState = _submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState());
-            if (host is IRenderHost renderHost && host is IHostPipelineFactory pipelines)
+            if (host is IRenderHost renderHost && host is IShaderPipelineHost pipelineHost)
             {
-                _programs = new ShaderProgramProvider(_context, pipelines);
-                _executor = new RenderExecutor(renderHost, _programs);
+                _pipelines = new ShaderPipelineCache(_context, pipelineHost, GuestGpu.Current, CreateShaderHeaderRegistry(_context));
+                _executor = new RenderExecutor(renderHost, _pipelines);
             }
         }
 
         // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
         internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
+
+        internal SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
+        {
+            var snapshot = _current?.CurrentVertexSnapshot;
+            if (snapshot?.Data is not { } data || snapshot.ExportShaderAddress != input.Stage.ShaderBase || !data.Matches(input))
+            {
+                DcbSubmissionProfile.RecordVertexSnapshot(snapshot is not null, matched: false);
+                return null;
+            }
+
+            DcbSubmissionProfile.RecordVertexSnapshot(available: true, matched: true);
+            return data;
+        }
 
         private RegisterBanks RequireTypedRegisters(SubmittedDcbState state) =>
             state.TypedRegisters ?? throw _host.Fatal($"The queue state has no typed register banks: queue={state.QueueName} submission={state.ActiveSubmissionId}.");
@@ -191,7 +207,6 @@ public static partial class AgcExports
             RecordKnownColorTargets(state, banks);
             state.FrameDrawCount++;
             state.SawIndexedDraw |= indexed;
-            _programs!.CurrentState = state;
             var drawStarted = DcbParseProfile.Begin();
             try
             {
@@ -219,20 +234,6 @@ public static partial class AgcExports
         {
             var state = RequireCurrent();
             state.RetainedTargetlessDraw = new RetainedTargetlessDraw(banks.Clone(), arguments);
-        }
-
-        private static (uint X, uint Y, uint Z) ResolveDispatchGroups(ComputeStageRegisters compute, uint endX, uint endY, uint endZ, uint dispatchInitiator)
-        {
-            const uint useThreadDimensions = 1u << 5;
-            if ((dispatchInitiator & useThreadDimensions) == 0)
-            {
-                return (endX, endY, endZ);
-            }
-
-            return (
-                RenderExecutor.GroupsFromThreads(endX, compute.ThreadsX & 0xFFFFu),
-                RenderExecutor.GroupsFromThreads(endY, compute.ThreadsY & 0xFFFFu),
-                RenderExecutor.GroupsFromThreads(endZ, compute.ThreadsZ & 0xFFFFu));
         }
 
         public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots, GpuCommandInterpreter interpreter)
@@ -358,8 +359,6 @@ public static partial class AgcExports
             {
                 var banks = RequireTypedRegisters(state);
                 state.FrameDispatchCount++;
-                _programs!.CurrentState = state;
-                _programs.PendingDispatchGroups = ResolveDispatchGroups(banks.Shader.Compute, endX, endY, endZ, dispatchInitiator);
                 var executorStarted = DcbParseProfile.Begin();
                 try
                 {
@@ -392,7 +391,6 @@ public static partial class AgcExports
             }
 
             var banks = retained.Banks;
-            _programs!.CurrentState = state;
             banks.Context.ColorTargets[0] = words;
             banks.Context.RenderTargetMask = 0xF;
             var arguments = retained.Arguments;

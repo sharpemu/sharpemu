@@ -11,6 +11,7 @@ using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
 using Silk.NET.Vulkan;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 
@@ -266,16 +267,22 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public byte[]? LastTransient { get; private set; }
 
-    public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings) =>
+    public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input) =>
         Calls.Add($"bind_vertex {string.Join(",", bindings.ToArray().Select(b => $"{b.Handle:X}:{b.Offset:X}"))}");
 
     public void BindIndexBuffer(BufferBinding binding, IndexType type) => Calls.Add($"bind_index {binding.Handle:X}:{binding.Offset:X} {type}");
 
     public bool FailPrepareBindings { get; set; }
 
+    public Func<ShaderStageResources, Exception?>? PreparationFailure { get; set; }
+
     public IPreparedBindings PrepareBindings(ShaderStageResources stage)
     {
         Assert.NotEqual(0, PreparationDepth);
+        if (PreparationFailure?.Invoke(stage) is { } failure)
+        {
+            throw failure;
+        }
         if (FailPrepareBindings)
         {
             throw Fatal($"The bindings cannot be prepared: stage={stage.Program?.Stage}.");
@@ -414,20 +421,34 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         in RenderingState rendering,
         PrimitiveTopology topology,
         bool primitiveRestartEnabled,
+        bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
         Calls.Add($"create_graphics_pipeline colors={colors.Length} depth={depth.HasTarget} topology={topology} restart={primitiveRestartEnabled}");
+        DisableBlendingRequests.Add(disableBlending);
         PipelineRenderings.Add(rendering);
         PipelineRequests.Add((topology, primitiveRestartEnabled, pixelInput is not null));
         return new PipelineHandle(0xA1, 0xB1, false);
     }
 
-    public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator)
+    public List<bool> DisableBlendingRequests { get; } = new();
+
+    public (uint X, uint Y, uint Z) LastDispatchDimensions { get; private set; }
+
+    public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
         var dispatchThreadDimensions = (dispatchInitiator & (1u << 5)) != 0;
         Calls.Add($"get_compute_program threadDimensions={dispatchThreadDimensions}");
         LastDispatchThreadDimensions = dispatchThreadDimensions;
+        LastDispatchDimensions = (dimensionX, dimensionY, dimensionZ);
+        if (dispatchThreadDimensions)
+        {
+            Compute.Input.DispatchThreadsX = dimensionX;
+            Compute.Input.DispatchThreadsY = dimensionY;
+            Compute.Input.DispatchThreadsZ = dimensionZ;
+        }
+
         return Compute;
     }
 

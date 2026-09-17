@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -48,7 +49,7 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator);
+        var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
         if (computeProgram.Consumed)
         {
             return;
@@ -65,13 +66,6 @@ public sealed partial class RenderExecutor
         }
 
         var input = computeProgram.Input;
-        if (useThreadDimensions)
-        {
-            input.DispatchThreadsX = groupsX;
-            input.DispatchThreadsY = groupsY;
-            input.DispatchThreadsZ = groupsZ;
-        }
-
         var program = input.Stage.Program ?? throw _host.Fatal($"The compute program is missing: shader=0x{compute.Address:X16}.");
         if (RenderTrace.Enabled)
         {

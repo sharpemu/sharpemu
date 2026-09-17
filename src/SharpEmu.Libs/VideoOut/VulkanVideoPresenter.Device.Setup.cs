@@ -5,6 +5,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 using System.Text;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Core;
@@ -551,9 +552,14 @@ internal static unsafe partial class VulkanVideoPresenter
         private void LoadComputeDeviceLimits()
         {
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var properties);
+            var pushDescriptorProperties = new PhysicalDevicePushDescriptorPropertiesKHR
+            {
+                SType = StructureType.PhysicalDevicePushDescriptorPropertiesKhr,
+            };
             var subgroupSizeControl = new PhysicalDeviceSubgroupSizeControlProperties
             {
                 SType = StructureType.PhysicalDeviceSubgroupSizeControlProperties,
+                PNext = &pushDescriptorProperties,
             };
             var subgroup = new PhysicalDeviceSubgroupProperties
             {
@@ -567,6 +573,8 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
             SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
+            _maxPushDescriptors = pushDescriptorProperties.MaxPushDescriptors;
+            _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];
             _maxComputeWorkGroupCountZ = properties.Limits.MaxComputeWorkGroupCount[2];
@@ -667,9 +675,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (!supportedFeatures.ShaderInt64)
             {
-                Console.Error.WriteLine(
-                    "[LOADER][WARN] GPU does not support shaderInt64 " +
-                    "translated shaders using 64-bit integers will fail.");
+                throw SubmissionScheduler.Fatal(
+                    "The device lacks the shaderInt64 feature, which the device-address programs need.");
             }
 
             if (!supportedFeatures.VertexPipelineStoresAndAtomics || !supportedFeatures.FragmentStoresAndAtomics)
@@ -786,7 +793,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     "translated shaders performing out-of-bounds image access may cause device loss.");
             }
 
+            if (!IsDeviceExtensionAvailable(PushDescriptorExtensionName))
+            {
+                throw SubmissionScheduler.Fatal($"The device lacks a required rendering feature: device={deviceName} extension={PushDescriptorExtensionName}.");
+            }
+
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
+            var pushDescriptorExtension = (byte*)SilkMarshal.StringToPtr(PushDescriptorExtensionName);
             var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
             var robustness2Extension = (byte*)SilkMarshal.StringToPtr("VK_EXT_robustness2");
             var portabilitySubsetExtension = (byte*)SilkMarshal.StringToPtr(PortabilitySubsetExtensionName);
@@ -798,9 +811,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthClipEnableExtension = (byte*)SilkMarshal.StringToPtr(DepthClipEnableExtensionName);
             try
             {
-                var extensions = stackalloc byte*[10];
+                var extensions = stackalloc byte*[11];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
+                extensions[extensionCount++] = pushDescriptorExtension;
                 extensions[extensionCount++] = dynamicRenderingExtension;
                 extensions[extensionCount++] = extendedDynamicStateExtension;
                 extensions[extensionCount++] = extendedDynamicState2Extension;
@@ -947,6 +961,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
                 SilkMarshal.Free((nint)depthClipControlExtension);
                 SilkMarshal.Free((nint)depthClipEnableExtension);
+                SilkMarshal.Free((nint)pushDescriptorExtension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
@@ -954,6 +969,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateScheduler();
             CreateBufferCache();
             CreateImageCache();
+            _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
             CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
@@ -981,7 +997,12 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (_pipelineCachePath is not null && File.Exists(_pipelineCachePath))
                 {
-                    initialData = File.ReadAllBytes(_pipelineCachePath);
+                    if (!PipelineCacheSignature.TryUnwrap(DriverCacheSignature(), File.ReadAllBytes(_pipelineCachePath), out initialData))
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][INFO] Vulkan pipeline cache invalidated: path={_pipelineCachePath} reason=signature-or-hash-mismatch");
+                        initialData = [];
+                    }
                 }
             }
             catch (Exception exception)
@@ -1025,6 +1046,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 Console.Error.WriteLine(
                     $"[LOADER][INFO] Vulkan pipeline cache ready: path={_pipelineCachePath} initial={initialData.Length} bytes");
             }
+        }
+
+        // The build and device the saved cache belongs to; a different one invalidates the file.
+        private string DriverCacheSignature()
+        {
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var properties);
+            var uuid = new byte[PipelineCacheSignature.UuidSize];
+            for (var index = 0; index < uuid.Length; index++)
+            {
+                uuid[index] = properties.PipelineCacheUuid[index];
+            }
+
+            return PipelineCacheSignature.Build(properties.VendorID, properties.DeviceID, properties.DriverVersion, uuid);
         }
 
         private Result TryCreatePipelineCache(byte[] initialData, out PipelineCache pipelineCache)
@@ -1147,7 +1181,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var temporaryPath = _pipelineCachePath + $".{Environment.ProcessId}.tmp";
-                File.WriteAllBytes(temporaryPath, data);
+                File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
                 File.Move(temporaryPath, _pipelineCachePath, overwrite: true);
                 _pipelineCacheDirty = false;
                 _lastPipelineCacheSaveTick = Environment.TickCount64;

@@ -1,8 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -12,43 +13,28 @@ public sealed class Gen5StorageImageSwizzleCacheTests
     [Theory]
     [InlineData("ImageStore")]
     [InlineData("ImageStoreMip")]
-    public void StructuralFingerprintSeparatesStorageImageSwizzles(string opcode)
+    public void SpecializationSeparatesStorageImageSwizzles(string opcode)
     {
-        var identity = CreateEvaluation(
-            Gen5ShaderTranslator.IdentityImageDstSelect,
-            opcode);
-        var yzwx = CreateEvaluation(0x9F5u, opcode);
-
-        Assert.NotEqual(
-            AgcExports.ComputeShaderStructuralFingerprint(identity),
-            AgcExports.ComputeShaderStructuralFingerprint(yzwx));
+        var identity = CreateSpecialization(Gen5ShaderTranslator.IdentityImageDstSelect, opcode);
+        var rotated = CreateSpecialization(0x9F5u, opcode);
+        Assert.NotEqual(identity, rotated);
+        Assert.Equal(Gen5ShaderTranslator.IdentityImageDstSelect, Assert.Single(identity.Images).ShaderSwizzle);
+        Assert.Equal(0x9F5u, Assert.Single(rotated.Images).ShaderSwizzle);
     }
 
-    private static Gen5ShaderEvaluation CreateEvaluation(
-        uint dstSelect,
-        string opcode)
+    private static ResourceSpecialization CreateSpecialization(uint destinationSelect, string opcode)
     {
-        var control = new Gen5ImageControl(
-            Dmask: 0xF,
-            VectorAddress: 0,
-            AddressRegisters: [0, 1],
-            VectorData: 4,
-            ScalarResource: 8,
-            ScalarSampler: 16,
-            Dimension: 1,
-            IsArray: false,
-            Glc: false,
-            Slc: false,
-            A16: false,
-            D16: false);
-        var descriptor = new uint[8];
-        descriptor[1] = 71u << 20;
-        descriptor[3] = (9u << 28) | dstSelect;
-        var scalarRegisters = new uint[256];
-        return new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [new Gen5ImageBinding(0, opcode, control, descriptor, [], null)],
-            []);
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.Image(0, opcode, resourceRegister: 8), ResourceTestProgram.EndProgram(8));
+        var plan = ResourceTestProgram.Extract(program, userDataCount: 16);
+        var userData = new uint[16];
+        userData[8] = 0x20;
+        userData[9] = 71u << 20;
+        userData[11] = (9u << 28) | destinationSelect;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData),
+            ref snapshot, ref specialization, out var failure), failure.ToString());
+        return specialization;
     }
 }

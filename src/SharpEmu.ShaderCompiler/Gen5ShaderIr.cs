@@ -34,14 +34,6 @@ public enum Gen5OperandKind
     LiteralConstant,
 }
 
-public enum Gen5ShaderResourceKind
-{
-    ReadOnlyTexture,
-    ReadWriteTexture,
-    Sampler,
-    ConstantBuffer,
-}
-
 public enum Gen5PixelOutputKind
 {
     Float,
@@ -142,78 +134,11 @@ public readonly record struct Gen5PixelOutputBinding(
     }
 }
 
-public readonly record struct Gen5ShaderResourceMapping(
-    Gen5ShaderResourceKind Kind,
-    uint Slot,
-    uint OffsetDwords,
-    bool SizeFlag);
-
-public sealed record Gen5ShaderMetadata(
-    uint ExtendedUserDataSizeDwords,
-    uint ShaderResourceTableSizeDwords,
-    IReadOnlyDictionary<uint, uint> DirectResources,
-    IReadOnlyList<Gen5ShaderResourceMapping> Resources);
-
 public readonly record struct Gen5ComputeSystemRegisters(
     uint? WorkGroupXRegister,
     uint? WorkGroupYRegister,
     uint? WorkGroupZRegister,
-    uint? ThreadGroupSizeRegister)
-{
-    public bool TryGetExpression(uint scalarRegister, out string expression)
-    {
-        if (WorkGroupXRegister == scalarRegister)
-        {
-            expression = "gl_WorkGroupID.x";
-            return true;
-        }
-
-        if (WorkGroupYRegister == scalarRegister)
-        {
-            expression = "gl_WorkGroupID.y";
-            return true;
-        }
-
-        if (WorkGroupZRegister == scalarRegister)
-        {
-            expression = "gl_WorkGroupID.z";
-            return true;
-        }
-
-        if (ThreadGroupSizeRegister == scalarRegister)
-        {
-            expression = "(gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z)";
-            return true;
-        }
-
-        expression = string.Empty;
-        return false;
-    }
-
-    public void ClearStaticValues(Span<uint> scalarRegisters)
-    {
-        ClearStaticValue(scalarRegisters, WorkGroupXRegister);
-        ClearStaticValue(scalarRegisters, WorkGroupYRegister);
-        ClearStaticValue(scalarRegisters, WorkGroupZRegister);
-        ClearStaticValue(scalarRegisters, ThreadGroupSizeRegister);
-    }
-
-    private static void ClearStaticValue(Span<uint> scalarRegisters, uint? scalarRegister)
-    {
-        if (scalarRegister is { } register && register < scalarRegisters.Length)
-        {
-            scalarRegisters[(int)register] = 0;
-        }
-    }
-}
-
-public sealed record Gen5ShaderState(
-    Gen5ShaderProgram Program,
-    IReadOnlyList<uint> UserData,
-    Gen5ShaderMetadata? Metadata,
-    Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
-    uint UserDataScalarRegisterBase = 0,
-    uint ShaderChecksum = 0);
+    uint? ThreadGroupSizeRegister);
 
 public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
 {
@@ -285,6 +210,8 @@ public sealed record Gen5GlobalMemoryControl(
     bool Slc,
     bool UsesFlatAddress = false) : Gen5InstructionControl;
 
+// A typed access carries the unified format from the instruction; a formatted
+// untyped access reads the descriptor format when it executes.
 public sealed record Gen5BufferMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -294,7 +221,9 @@ public sealed record Gen5BufferMemoryControl(
     bool IndexEnabled,
     bool OffsetEnabled,
     bool Glc,
-    bool Slc) : Gen5InstructionControl;
+    bool Slc,
+    bool Typed = false,
+    uint TypedFormat = 0) : Gen5InstructionControl;
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -368,75 +297,6 @@ public sealed record Gen5DataShareControl(
     public uint SingleOffsetBytes => Offset0 | (Offset1 << 8);
 }
 
-public sealed record Gen5ImageBinding(
-    uint Pc,
-    string Opcode,
-    Gen5ImageControl Control,
-    IReadOnlyList<uint> ResourceDescriptor,
-    IReadOnlyList<uint> SamplerDescriptor,
-    uint? MipLevel)
-{
-    public bool HasDynamicMip => Opcode is "ImageLoadMip" or "ImageStoreMip" && MipLevel is null;
-}
-
-// Data arrays may be rented from ArrayPool (oversized): always slice with
-// DataLength, never Data.Length. Ownership transfers to the presenter, which
-// returns pooled arrays after uploading them into host-visible buffers.
-// Size is the guest extent the shader may touch; Data holds a copy only when the backend snapshots.
-public sealed record Gen5GlobalMemoryBinding(
-    uint ScalarAddress,
-    ulong BaseAddress,
-    IReadOnlyList<uint> InstructionPcs,
-    byte[] Data,
-    int DataLength,
-    bool DataPooled,
-    ulong Size)
-{
-    public bool Writable { get; set; }
-
-    // Writable describes shader access and is also used to decide whether a
-    // compute dispatch has observable work. A statically reachable resource
-    // can nevertheless be unbound for the current scalar path; the evaluator
-    // supplies zero-filled storage for Vulkan in that case. Such synthetic
-    // storage must remain shader-writable, but must never be copied to the
-    // descriptor's unmapped guest address.
-    public bool WriteBackToGuest { get; set; } = true;
-}
-
-// One attribute per distinct guest stream view. AliasPcs carries the other
-// fetch instructions that read the same view: uber-shaders fetch a stream from
-// every material branch, and the scalar evaluator visits one instruction on
-// several CFG paths. Both must resolve to this binding's single location,
-// because Metal caps a vertex function at 31 attributes and one location per
-// fetch instruction overruns that on UE's larger vertex shaders.
-public sealed record Gen5VertexInputBinding(
-    uint Pc,
-    uint Location,
-    uint ComponentCount,
-    uint DataFormat,
-    uint NumberFormat,
-    ulong BaseAddress,
-    uint Stride,
-    uint OffsetBytes,
-    byte[] Data,
-    int DataLength,
-    bool DataPooled,
-    bool PerInstance = false,
-    IReadOnlyList<uint>? AliasPcs = null);
-
-public sealed record Gen5ShaderEvaluation(
-    IReadOnlyList<uint> InitialScalarRegisters,
-    IReadOnlyList<uint> ScalarRegisters,
-    IReadOnlyList<Gen5ImageBinding> ImageBindings,
-    IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
-    Gen5ComputeSystemRegisters? ComputeSystemRegisters = null,
-    IReadOnlySet<uint>? RuntimeScalarRegisters = null,
-    IReadOnlyList<Gen5VertexInputBinding>? VertexInputs = null)
-{
-    public long VertexCaptureTicks { get; init; }
-    public bool ReusedVertexInputs { get; init; }
-}
-
 public sealed record Gen5ShaderInstruction(
     uint Pc,
     Gen5ShaderEncoding Encoding,
@@ -454,46 +314,6 @@ public sealed record Gen5ShaderProgram(
     private const int PixelColorMaskBits = 4;
     private readonly uint _pixelColorExportMasks = ComputePixelColorExportMasks(Instructions);
     private readonly uint _parameterExportMask = ComputeParameterExportMask(Instructions);
-    private const int ScalarRegisterCount = 256;
-    private IReadOnlySet<uint>? _runtimeScalarRegisters;
-    private IReadOnlyDictionary<uint, uint>? _alternateResourceEntries;
-
-    // Cache branch entries whose resource instructions are skipped by a forward jump.
-    internal IReadOnlyDictionary<uint, uint> AlternateResourceEntries =>
-        _alternateResourceEntries ??= FindAlternateResourceEntries();
-
-    private IReadOnlyDictionary<uint, uint> FindAlternateResourceEntries()
-    {
-        var entries = new Dictionary<uint, uint>();
-        var skippedRanges = new List<(uint Start, long End)>();
-        foreach (var instruction in Instructions)
-        {
-            if (instruction.Opcode == "SBranch" && instruction.Words.Count != 0)
-            {
-                var end = (long)instruction.Pc + instruction.Words.Count * 4 +
-                    unchecked((short)instruction.Words[0]) * 4;
-                if (end > instruction.Pc) skippedRanges.Add((instruction.Pc, end));
-            }
-        }
-
-        foreach (var instruction in Instructions)
-        {
-            if (!instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) ||
-                instruction.Words.Count == 0) continue;
-            var target = (long)instruction.Pc + instruction.Words.Count * 4 +
-                unchecked((short)instruction.Words[0]) * 4;
-            if (target <= instruction.Pc || target > uint.MaxValue) continue;
-            if (skippedRanges.Any(range => instruction.Pc < range.Start &&
-                target > range.Start && target < range.End &&
-                Instructions.Any(candidate => candidate.Pc >= target && candidate.Pc < range.End &&
-                    candidate.Control is Gen5ImageControl or Gen5BufferMemoryControl or Gen5GlobalMemoryControl)))
-            {
-                entries.Add(instruction.Pc, (uint)target);
-            }
-        }
-
-        return entries;
-    }
 
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
@@ -537,51 +357,4 @@ public sealed record Gen5ShaderProgram(
         Instructions
             .Select(instruction => instruction.Control)
             .OfType<Gen5ImageControl>();
-
-    /// <summary>
-    /// The set of scalar registers the program reads or writes as runtime
-    /// values. It depends only on the (cached) decoded program, so it is
-    /// computed once and shared read-only across every draw that uses this
-    /// shader — the evaluator previously rebuilt this HashSet by scanning
-    /// every instruction on every draw, one of the largest per-draw
-    /// allocation and CPU sources.
-    /// </summary>
-    public IReadOnlySet<uint> RuntimeScalarRegisters =>
-        _runtimeScalarRegisters ??= ComputeRuntimeScalarRegisters();
-
-    private IReadOnlySet<uint> ComputeRuntimeScalarRegisters()
-    {
-        var registers = new HashSet<uint>();
-        foreach (var instruction in Instructions)
-        {
-            foreach (var operand in instruction.Sources)
-            {
-                if (operand.Kind == Gen5OperandKind.ScalarRegister &&
-                    operand.Value < ScalarRegisterCount)
-                {
-                    registers.Add(operand.Value);
-                }
-            }
-
-            foreach (var operand in instruction.Destinations)
-            {
-                if (operand.Kind == Gen5OperandKind.ScalarRegister &&
-                    operand.Value < ScalarRegisterCount)
-                {
-                    registers.Add(operand.Value);
-                }
-            }
-
-            if (instruction.Control is Gen5ScalarMemoryControl
-                {
-                    DynamicOffsetRegister: { } offsetRegister,
-                } &&
-                offsetRegister < ScalarRegisterCount)
-            {
-                registers.Add(offsetRegister);
-            }
-        }
-
-        return registers;
-    }
 }

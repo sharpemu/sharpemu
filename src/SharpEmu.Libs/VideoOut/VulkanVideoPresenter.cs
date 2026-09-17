@@ -228,21 +228,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
 
-        private sealed class TranslatedDrawResources
+        // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
+        private sealed class SubmissionUploadResources
         {
             public string DebugName = "SharpEmu translated";
-            public PipelineLayout PipelineLayout;
-            public Pipeline Pipeline;
-            public bool PipelineCached;
-            public bool DescriptorLayoutCached;
-            public DescriptorSetLayout DescriptorSetLayout;
-            public DescriptorPool DescriptorPool;
-            public DescriptorSet DescriptorSet;
             public TextureResource[] Textures = [];
-            public GlobalBufferResource[] GlobalMemoryBuffers = [];
-            // Layout keys are needed twice per draw (pipeline lookup and
-            // descriptor-layout lookup); cache the built strings.
-            public string? ResourceLayoutKey;
             // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
             public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
         }
@@ -310,13 +300,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void ProcessDeferredTextureDestroys()
         {
-            while (_deferredResourceDestroys.TryPeek(out var resourceEntry) &&
-                   resourceEntry.RetireTimeline <= _completedTimeline)
-            {
-                _deferredResourceDestroys.Dequeue();
-                DestroyTranslatedDrawResources(resourceEntry.Resources);
-            }
-
             while (_deferredGuestImageVersionDestroys.TryPeek(out var imageEntry) &&
                    imageEntry.RetireTimeline <= _completedTimeline)
             {

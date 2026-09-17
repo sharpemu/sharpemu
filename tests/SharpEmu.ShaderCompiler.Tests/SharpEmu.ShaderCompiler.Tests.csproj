@@ -12,6 +12,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
+    <!-- The resource-plan equivalence test drives the Metal fixture programs through
+         both resolvers; the fixtures stay owned by the Metal suite. -->
+    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Metal.Tests\SharpEmu.ShaderCompiler.Metal.Tests.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The device tests reuse the resource-plan program builders. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 
   <ItemGroup>

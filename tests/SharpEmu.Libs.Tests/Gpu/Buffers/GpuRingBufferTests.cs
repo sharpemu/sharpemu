@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -62,7 +63,7 @@ public sealed class GpuRingBufferTests : IClassFixture<HeadlessVulkanFixture>
             Assert.True(ring.TryMap(0xC00, out var third, 0, allowWait: false));
             Assert.Equal(0UL, third);
             ring.Commit();
-            Assert.Contains($"wait {tick}", worker.Device.Log);
+            Assert.True(worker.Scheduler.IsTickComplete(tick));
 
             Assert.False(ring.TryMap(0x2000, out _));
             worker.Scheduler.Shutdown();
@@ -102,10 +103,12 @@ public sealed class GpuRingBufferTests : IClassFixture<HeadlessVulkanFixture>
         });
     }
 
-    [Fact]
-    public void PreparedBindingSurvivesRetirementBeforeItsConsumer()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PreparedBindingSurvivesRetirementBeforeItsConsumer(bool retainUpcomingAllocations)
     {
-        if (_vulkan is null) return;
+        if (!GatePrerequisites.Ready(_vulkan)) return;
         using var worker = new CacheWorker(_vulkan);
         using var ring = new GpuRingBuffer(_vulkan.DeviceInfo, worker.Scheduler, GpuBufferUsage.Stream, 0x1000);
         using var readback = new GpuBuffer(_vulkan.DeviceInfo, worker.Scheduler, GpuBufferUsage.Download,
@@ -114,8 +117,9 @@ public sealed class GpuRingBufferTests : IClassFixture<HeadlessVulkanFixture>
         {
             worker.Scheduler.Begin(new SubmissionContext());
             var original = Enumerable.Repeat((byte)0x37, 0x1000).ToArray();
+            var upcomingRetention = retainUpcomingAllocations ? ring.RetainUpcomingAllocations() : null;
             var offset = ring.Copy(original);
-            using var retention = ring.RetainContents();
+            using var retention = upcomingRetention ?? ring.RetainContents();
             worker.Scheduler.Finish();
 
             if (ring.TryMap(0x1000, out var replacement, allowWait: false))
@@ -131,8 +135,70 @@ public sealed class GpuRingBufferTests : IClassFixture<HeadlessVulkanFixture>
             Assert.Equal(original[..0x100], readback.Mapped[..0x100].ToArray());
             retention.Dispose();
             retention.Dispose();
+            worker.Scheduler.Finish();
             Assert.True(ring.TryMap(0x1000, out var reused, allowWait: false));
             Assert.Equal(0UL, reused);
+            worker.Scheduler.Shutdown();
+        });
+    }
+
+    [Fact]
+    public void UpcomingRetention_TracksTheConsumerAfterTheUploadTickRetires()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var worker = new CacheWorker(_vulkan);
+        using var ring = new GpuRingBuffer(_vulkan.DeviceInfo, worker.Scheduler, GpuBufferUsage.Stream, 0x1000);
+        using var readback = new GpuBuffer(_vulkan.DeviceInfo, worker.Scheduler, GpuBufferUsage.Download,
+            0, GpuBuffer.AllFlags, 0x100);
+        worker.Run(() =>
+        {
+            worker.Scheduler.Begin(new SubmissionContext());
+            using var retention = ring.RetainUpcomingAllocations();
+            var original = Enumerable.Repeat((byte)0x37, 0x1000).ToArray();
+            var offset = ring.Copy(original);
+            worker.Scheduler.Finish();
+            readback.CopyFrom(worker.Scheduler.Current, ring, offset, 0, 0x100,
+                AccessFlags.HostWriteBit, AccessFlags.None, AccessFlags.MemoryReadBit, AccessFlags.HostReadBit);
+            retention.Dispose();
+            Assert.False(ring.TryMap(0x1000, out _, allowWait: false));
+            worker.Scheduler.Finish();
+            readback.Invalidate(0, 0x100);
+            Assert.Equal(original[..0x100], readback.Mapped[..0x100].ToArray());
+            Assert.True(ring.TryMap(0x1000, out _, allowWait: false));
+            worker.Scheduler.Shutdown();
+        });
+    }
+
+    [Fact]
+    public void UpcomingRetention_PreservesGpuWaitsAndProtectsNewAllocations()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var worker = new CacheWorker(_vulkan);
+        using var ring = new GpuRingBuffer(_vulkan.DeviceInfo, worker.Scheduler, GpuBufferUsage.Stream, 0x1000);
+        worker.Run(() =>
+        {
+            worker.Scheduler.Begin(new SubmissionContext());
+            ring.Copy(new byte[0x1000]);
+            using var first = ring.RetainUpcomingAllocations();
+            Assert.False(ring.TryMap(0x1000, out _, allowWait: false));
+            worker.Scheduler.Finish();
+            Assert.True(ring.TryMap(0x1000, out var offset, allowWait: false));
+            Assert.Equal(0UL, offset);
+            ring.Commit();
+            worker.Scheduler.Finish();
+
+            using var second = ring.RetainUpcomingAllocations();
+            Assert.False(ring.TryMap(0x1000, out _, allowWait: false));
+            first.Dispose();
+            first.Dispose();
+            worker.Scheduler.Finish();
+            Assert.True(ring.TryMap(0x1000, out _, allowWait: false));
+            ring.Commit();
+            worker.Scheduler.Finish();
+            Assert.False(ring.TryMap(0x1000, out _, allowWait: false));
+            second.Dispose();
+            worker.Scheduler.Finish();
+            Assert.True(ring.TryMap(0x1000, out _, allowWait: false));
             worker.Scheduler.Shutdown();
         });
     }

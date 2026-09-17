@@ -1,28 +1,20 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
-using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
-using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
     // This partial preserves submitted guest geometry until translated draws execute.
-
-    private static readonly bool _traceVertexRanges = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VERTEX_RANGES"),
-        "1",
-        StringComparison.Ordinal);
-
-    private static int _tracedVertexRangeCount;
 
     // Keep submitted geometry stable after the guest reuses its memory.
     // Set either variable to 0 only for a comparison test.
@@ -53,7 +45,7 @@ public static partial class AgcExports
 
     private sealed record SubmittedVertexSnapshot(
         ulong ExportShaderAddress,
-        IReadOnlyList<Gen5VertexInputBinding> Bindings,
+        SubmittedVertexData? Data,
         GeometryCaptureFingerprint Capture);
 
     private const uint ShaderRegisterWindowLength = 8;
@@ -94,192 +86,6 @@ public static partial class AgcExports
             captureState.InstanceCount,
             RecordShaderRegisters(captureState.ShRegisters));
 
-    private static AgcIndexHelpers.ProsperoIndexType GetProsperoIndexType(SubmittedDcbState state) =>
-        // IndexSize is latched from ItIndexType and from UC VGT_INDEX_TYPE
-        // writes. Do not fall back to a stale UC value when IndexSize is 0 —
-        // that mis-classified 16-bit draws as index8 and blanked meshes.
-        AgcIndexHelpers.Decode(state.IndexSize);
-
-    /// <summary>
-    /// ResolveVertexOffset for the common UC path: GE_INDX_OFFSET is the
-    /// DrawIndexed vertexOffset / DrawAuto firstVertex. Embedded-fetch SGPR
-    /// fallback is not required when the game latches this register (GTA UI).
-    /// </summary>
-    private static int GetBaseVertex(SubmittedDcbState state) =>
-        state.TypedRegisters is { } registers
-            ? unchecked((int)registers.UserConfig.IndexOffset)
-            : state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
-            ? unchecked((int)indexOffset)
-            : 0;
-
-    private static bool UsesCachedGpuIndices(SubmittedDcbState state, uint count)
-    {
-        var type = GetProsperoIndexType(state);
-        if (type == AgcIndexHelpers.ProsperoIndexType.Index8 || state.IndexBufferAddress == 0 || count == 0)
-        {
-            return false;
-        }
-
-        var stride = (uint)AgcIndexHelpers.GetGuestStrideBytes(type);
-        var address = checked(state.IndexBufferAddress + (ulong)state.DrawIndexOffset * stride);
-        return GuestGpuMemoryHook.Current?.Buffers is GuestBufferCache cache &&
-            cache.HasGpuDirtyPages(address, (ulong)count * stride);
-    }
-
-    private static bool TryGetRequiredVertexRecordCount(
-        CpuContext ctx,
-        SubmittedDcbState state,
-        uint drawCount,
-        bool indexed,
-        out uint recordCount)
-    {
-        var baseVertex = (uint)Math.Max(GetBaseVertex(state), 0);
-        recordCount = Math.Max(
-            baseVertex + drawCount,
-            Math.Max(state.InstanceCount, 1u));
-        if (!indexed)
-        {
-            return true;
-        }
-
-        if (state.IndexBufferAddress == 0 || drawCount == 0)
-        {
-            return false;
-        }
-
-        // Do not use stale CPU indices to calculate the required vertex range.
-        if (UsesCachedGpuIndices(state, drawCount))
-        {
-            return false;
-        }
-
-        var indexType = GetProsperoIndexType(state);
-        var bytesPerIndex = AgcIndexHelpers.GetGuestStrideBytes(indexType);
-        var byteOffset = checked((ulong)state.DrawIndexOffset * (uint)bytesPerIndex);
-        var address = state.IndexBufferAddress + byteOffset;
-        var retained = state.CurrentIndexSnapshot;
-        var retainedByteCount = checked((int)(drawCount * (uint)bytesPerIndex));
-        if (retained is not null &&
-            retained.SourceAddress == address &&
-            retained.IndexCount == drawCount &&
-            retained.IndexStride == bytesPerIndex &&
-            retained.Data.Length >= retainedByteCount)
-        {
-            var retainedMaxIndex = 0u;
-            var retainedSawIndex = false;
-            var retainedSpan = retained.Data.AsSpan(0, retainedByteCount);
-            for (var index = 0; index < drawCount; index++)
-            {
-                var offset = checked((int)index * bytesPerIndex);
-                uint value = indexType switch
-                {
-                    AgcIndexHelpers.ProsperoIndexType.Index32 =>
-                        BinaryPrimitives.ReadUInt32LittleEndian(
-                            retainedSpan.Slice(offset, sizeof(uint))),
-                    AgcIndexHelpers.ProsperoIndexType.Index8 => retainedSpan[offset],
-                    _ => BinaryPrimitives.ReadUInt16LittleEndian(
-                        retainedSpan.Slice(offset, sizeof(ushort))),
-                };
-                var restart = indexType switch
-                {
-                    AgcIndexHelpers.ProsperoIndexType.Index32 => uint.MaxValue,
-                    AgcIndexHelpers.ProsperoIndexType.Index8 => 0xFFu,
-                    _ => ushort.MaxValue,
-                };
-                if (value == restart)
-                {
-                    continue;
-                }
-
-                retainedMaxIndex = Math.Max(retainedMaxIndex, value);
-                retainedSawIndex = true;
-            }
-
-            var retainedRecords = retainedSawIndex
-                ? baseVertex + retainedMaxIndex + 1
-                : Math.Max(baseVertex + 1, 1u);
-            recordCount = Math.Max(retainedRecords, Math.Max(state.InstanceCount, 1u));
-            return true;
-        }
-
-        const int chunkBytes = 64 * 1024;
-        var scratch = GuestDataPool.Shared.Rent(chunkBytes);
-        var remaining = drawCount;
-        var maxIndex = 0u;
-        var sawIndex = false;
-        try
-        {
-            while (remaining != 0)
-            {
-                var chunkIndices = (int)Math.Min(
-                    remaining,
-                    (uint)(chunkBytes / bytesPerIndex));
-                var bytes = chunkIndices * bytesPerIndex;
-                var span = scratch.AsSpan(0, bytes);
-                if (!ctx.Memory.TryRead(address, span) &&
-                    !KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, span))
-                {
-                    return false;
-                }
-
-                for (var index = 0; index < chunkIndices; index++)
-                {
-                    uint value = indexType switch
-                    {
-                        AgcIndexHelpers.ProsperoIndexType.Index32 =>
-                            BinaryPrimitives.ReadUInt32LittleEndian(
-                                span.Slice(index * sizeof(uint), sizeof(uint))),
-                        AgcIndexHelpers.ProsperoIndexType.Index8 => span[index],
-                        _ => BinaryPrimitives.ReadUInt16LittleEndian(
-                            span.Slice(index * sizeof(ushort), sizeof(ushort))),
-                    };
-                    var restart = indexType switch
-                    {
-                        AgcIndexHelpers.ProsperoIndexType.Index32 => uint.MaxValue,
-                        AgcIndexHelpers.ProsperoIndexType.Index8 => 0xFFu,
-                        _ => ushort.MaxValue,
-                    };
-                    if (value == restart)
-                    {
-                        // Primitive-restart markers do not address vertex data.
-                        continue;
-                    }
-
-                    maxIndex = Math.Max(maxIndex, value);
-                    sawIndex = true;
-                }
-
-                address += (uint)bytes;
-                remaining -= (uint)chunkIndices;
-            }
-        }
-        finally
-        {
-            GuestDataPool.Shared.Return(scratch);
-        }
-
-        var indexedRecords = sawIndex && maxIndex != uint.MaxValue
-            ? baseVertex + maxIndex + 1
-            : Math.Max(baseVertex + 1, 1u);
-        recordCount = Math.Max(indexedRecords, Math.Max(state.InstanceCount, 1u));
-        if (_traceVertexRanges &&
-            Interlocked.Increment(ref _tracedVertexRangeCount) <= 512)
-        {
-            var indexBits = indexType switch
-            {
-                AgcIndexHelpers.ProsperoIndexType.Index32 => 32,
-                AgcIndexHelpers.ProsperoIndexType.Index8 => 8,
-                _ => 16,
-            };
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] agc.vertex_range indexed=1 draw_count={drawCount} " +
-                $"max_index={(sawIndex ? maxIndex : 0)} base_vertex={baseVertex} " +
-                $"records={recordCount} instances={state.InstanceCount} " +
-                $"index_size={indexBits} index_addr=0x{state.IndexBufferAddress:X16} " +
-                $"offset={state.DrawIndexOffset}");
-        }
-        return true;
-    }
 
 
     private const long MaximumRetainedIndexBytesPerSubmission = 64L * 1024 * 1024;
@@ -455,7 +261,6 @@ public static partial class AgcExports
                     captureState,
                     packetAddress,
                     indexCount,
-                    indexed: true,
                     capture,
                     vertexSnapshots,
                     ref retainedVertexBytes);
@@ -469,7 +274,6 @@ public static partial class AgcExports
                     captureState,
                     packetAddress,
                     vertexCount,
-                    indexed: false,
                     CreateCaptureFingerprint(captureState, 0, vertexCount),
                     vertexSnapshots,
                     ref retainedVertexBytes);
@@ -559,219 +363,53 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong packetAddress,
         uint drawCount,
-        bool indexed,
         GeometryCaptureFingerprint capture,
         Dictionary<ulong, SubmittedVertexSnapshot>? snapshots,
         ref long retainedBytes)
     {
-        if (!Gen5ShaderScalarEvaluator.CaptureVertexInputData ||
-            snapshots is null ||
-            drawCount == 0 ||
-            !TryGetShaderAddress(
-                state.ShRegisters,
-                SpiShaderPgmLoEs,
-                SpiShaderPgmHiEs,
-                out var exportShaderAddress))
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend ||
+            snapshots is null || drawCount == 0 ||
+            !TryGetShaderAddress(state.ShRegisters, SpiShaderPgmLoEs, SpiShaderPgmHiEs, out var exportShaderAddress))
         {
             return;
         }
 
-        ulong exportShaderHeader;
-        uint exportShaderChecksum;
-        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.HeaderLookup))
+        if (GetShaderHeaderAddress(exportShaderAddress) == 0) return;
+        var shader = CreateShaderHeaderRegistry(ctx).Require(exportShaderAddress, "vertex snapshot");
+        state.ShRegisters.TryGetValue(GsUserDataRegister - 1, out var resourceWord);
+        var declaredCount = GeometryResource2.Decode(resourceWord).UserScalarCount;
+        var writtenCount = 0;
+        var userData = new uint[UserScalarRegisters.Capacity];
+        // The executor resolves export fetches from the geometry user-data bank.
+        for (var index = 0; index < userData.Length; index++)
         {
-            lock (_submitTraceGate)
+            if (state.ShRegisters.TryGetValue(GsUserDataRegister + (uint)index, out userData[index]))
             {
-                _shaderHeadersByCode.TryGetValue(exportShaderAddress, out exportShaderHeader);
+                writtenCount = index + 1;
             }
-            state.ShRegisters.TryGetValue(SpiShaderPgmChksumGs, out exportShaderChecksum);
         }
 
-        Gen5ShaderState exportState;
-        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.ShaderState))
+        var userDataCount = declaredCount == 0 ? writtenCount : declaredCount;
+        if (userDataCount > userData.Length)
         {
-            if (!Gen5ShaderTranslator.TryCreateState(
-                    ctx,
-                    exportShaderAddress,
-                    exportShaderHeader,
-                    state.ShRegisters,
-                    SelectExportUserDataRegister(state.ShRegisters),
-                    out exportState,
-                    out _,
-                    userDataScalarRegisterBase: NggUserDataScalarRegisterBase,
-                    shaderChecksum: exportShaderChecksum))
-            {
-                return;
-            }
+            throw Gpu.Scheduling.SubmissionScheduler.Fatal($"The vertex program declares too many user registers: shader=0x{exportShaderAddress:X16} count={userDataCount}.");
         }
-        uint recordCount;
-        using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexScan))
-        {
-            if (!TryGetRequiredVertexRecordCount(
-                    ctx,
-                    state,
-                    drawCount,
-                    indexed,
-                    out recordCount))
-            {
-                return;
-            }
-        }
-        Gen5ShaderEvaluation evaluation;
+
+        VertexInputInfo input;
         using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Evaluation))
         {
-            if (!Gen5ShaderScalarEvaluator.TryEvaluate(
-                    ctx,
-                    exportState,
-                    out evaluation,
-                    out _,
-                    resolveVertexInputs: true,
-                    requiredVertexRecordCount: recordCount,
-                    captureVertexInputsOnly: true,
-                    profileStage: Gen5ShaderEvaluationStage.Vertex))
-            {
-                return;
-            }
-        }
-        DcbSubmissionProfile.RecordSnapshotPhase(DcbSubmissionProfile.SnapshotPhase.PayloadCapture, evaluation.VertexCaptureTicks);
-
-        try
-        {
-            if (evaluation.VertexInputs is not { Count: > 0 } inputs)
-            {
-                return;
-            }
-
-            using var copyProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.RetainedCopy);
-            if (!TryCopySubmittedVertexInputs(
-                    inputs,
-                    MaximumRetainedVertexBytesPerSubmission - retainedBytes,
-                    out var retainedInputs,
-                    out var snapshotBytes))
-            {
-                return;
-            }
-
-            snapshots[packetAddress] = new SubmittedVertexSnapshot(
-                exportShaderAddress,
-                retainedInputs,
-                capture);
-            retainedBytes += snapshotBytes;
-            DcbSubmissionProfile.RecordRetainedVertexBytes(snapshotBytes);
-        }
-        finally
-        {
-            using var cleanupProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Cleanup);
-            ReturnPooledEvaluationArrays(evaluation);
-        }
-    }
-
-    internal static bool TryCopySubmittedVertexInputs(
-        IReadOnlyList<Gen5VertexInputBinding> inputs,
-        long maximumBytes,
-        out Gen5VertexInputBinding[] retainedInputs,
-        out long retainedBytes)
-    {
-        retainedInputs = [];
-        retainedBytes = 0;
-        if (inputs.Count == 0 || maximumBytes <= 0)
-        {
-            return false;
+            input = VertexInputResolver.ResolveVertexInputs(ctx, shader, userData.AsSpan(0, userDataCount));
         }
 
-        var uniqueLengths = new Dictionary<byte[], int>(
-            System.Collections.Generic.ReferenceEqualityComparer.Instance);
-        foreach (var input in inputs)
-        {
-            var length = Math.Clamp(input.DataLength, 0, input.Data.Length);
-            if (!uniqueLengths.TryGetValue(input.Data, out var existing) ||
-                length > existing)
-            {
-                uniqueLengths[input.Data] = length;
-            }
-        }
-
-        retainedBytes = uniqueLengths.Values.Sum(static length => (long)length);
-        if (retainedBytes == 0 || retainedBytes > maximumBytes)
-        {
-            retainedBytes = 0;
-            return false;
-        }
-
-        var copies = new Dictionary<byte[], byte[]>(
-            System.Collections.Generic.ReferenceEqualityComparer.Instance);
-        foreach (var (source, length) in uniqueLengths)
-        {
-            var copy = new byte[length];
-            source.AsSpan(0, length).CopyTo(copy);
-            copies.Add(source, copy);
-        }
-
-        retainedInputs = new Gen5VertexInputBinding[inputs.Count];
-        for (var index = 0; index < inputs.Count; index++)
-        {
-            var input = inputs[index];
-            var copy = copies[input.Data];
-            retainedInputs[index] = input with
-            {
-                Data = copy,
-                DataLength = Math.Clamp(input.DataLength, 0, copy.Length),
-                DataPooled = false,
-            };
-        }
-
-        return true;
-    }
-
-    private static void ApplySubmittedVertexSnapshot(
-        SubmittedDcbState state,
-        ulong exportShaderAddress,
-        ref Gen5ShaderEvaluation evaluation)
-    {
-        var snapshot = state.CurrentVertexSnapshot;
-        var current = evaluation.VertexInputs;
-        if (snapshot is null ||
-            snapshot.ExportShaderAddress != exportShaderAddress ||
-            current is null ||
-            current.Count != snapshot.Bindings.Count)
-        {
-            DcbSubmissionProfile.RecordVertexSnapshot(snapshot is not null, matched: false);
-            return;
-        }
-
-        for (var index = 0; index < current.Count; index++)
-        {
-            var live = current[index];
-            var retained = snapshot.Bindings[index];
-            if (live.Pc != retained.Pc ||
-                live.Location != retained.Location ||
-                live.BaseAddress != retained.BaseAddress ||
-                live.Stride != retained.Stride ||
-                live.OffsetBytes != retained.OffsetBytes)
-            {
-                DcbSubmissionProfile.RecordVertexSnapshot(available: true, matched: false);
-                return;
-            }
-        }
-
-        if (DcbSubmissionProfile.Enabled)
-        {
-            DcbSubmissionProfile.RecordVertexSnapshot(available: true, matched: true,
-                DcbSubmissionProfile.CountUniqueVertexBytes(current), evaluation.VertexCaptureTicks, evaluation.ReusedVertexInputs);
-        }
-        if (evaluation.ReusedVertexInputs)
+        using var copyProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.RetainedCopy);
+        if (!SubmittedVertexData.TryCapture(ctx.Memory, input,
+                MaximumRetainedVertexBytesPerSubmission - retainedBytes, out var data))
         {
             return;
         }
-        var returned = new HashSet<byte[]>(
-            System.Collections.Generic.ReferenceEqualityComparer.Instance);
-        foreach (var binding in current)
-        {
-            if (binding.DataPooled && returned.Add(binding.Data))
-            {
-                GuestDataPool.Shared.Return(binding.Data);
-            }
-        }
-        evaluation = evaluation with { VertexInputs = snapshot.Bindings };
+
+        snapshots[packetAddress] = new SubmittedVertexSnapshot(exportShaderAddress, data, capture);
+        retainedBytes += data!.ByteCount;
+        DcbSubmissionProfile.RecordRetainedVertexBytes(data.ByteCount);
     }
 }

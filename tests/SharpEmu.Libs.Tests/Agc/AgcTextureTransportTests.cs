@@ -5,38 +5,12 @@ using System.Reflection;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
-using SharpEmu.ShaderCompiler;
-using Silk.NET.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
 public sealed class AgcTextureTransportTests
 {
-    [Fact]
-    public void DescriptorResolvedVolumeShapeProducesACompatibleView()
-    {
-        uint[] words = [0x01488300, 0xC3800000, 0x0000C000, 0x90900FAC, 0, 0x00700000, 0, 0];
-        var control = new Gen5ImageControl(7, 7, [7, 8, 9], 0, 0, 20, 2, false, false, false, false, false);
-        var shaderBinding = new Gen5ImageBinding(0x100, "ImageSampleLz", control, words, [], null);
-        Assert.False(Gen5ShaderTranslator.IsVolumeImageBinding(shaderBinding));
-        const BindingFlags privateStatic = BindingFlags.Static | BindingFlags.NonPublic;
-        object?[] arguments = [words, null];
-        Assert.True((bool)typeof(AgcExports).GetMethod("TryDecodeTextureDescriptor", privateStatic)!
-            .Invoke(null, arguments)!);
-        var bindingType = typeof(AgcExports).GetNestedType("TranslatedImageBinding", BindingFlags.NonPublic)!;
-        var binding = Activator.CreateInstance(bindingType,
-            [arguments[1], false, 0u, Array.Empty<uint>(), false, words, false,
-                Gen5ShaderTranslator.IsVolumeImageBinding(shaderBinding) ? 2u : 1u]);
-        var texture = Assert.IsType<GuestDrawTexture>(typeof(AgcExports)
-            .GetMethod("CreateDescriptorDrawTexture", privateStatic)!.Invoke(null, [binding]));
-        var request = ImageRequestBuilders.Texture(texture.Descriptor!, texture.Shape).Request;
-        Assert.False(texture.Shape.Volume);
-        Assert.Equal(GuestImageType.Color2D, request.Description.Type);
-        Assert.Equal(ImageViewType.Type2D, request.View.Type);
-        Assert.Equal(4u, request.Description.Extent.Width);
-    }
-
     [Theory]
     [InlineData(0u, false)]
     [InlineData(1u, false)]
@@ -52,26 +26,6 @@ public sealed class AgcTextureTransportTests
         var decoder = typeof(AgcExports).GetMethod("TryDecodeTextureDescriptor",
             BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.Equal(expected, Assert.IsType<bool>(decoder.Invoke(null, arguments)));
-    }
-
-    [Fact]
-    public void CreateDescriptorDrawTexture_DoesNotForwardRejectedDescriptorWords()
-    {
-        uint[] words = [0x3E2199EC, 0x3EB013A3, 0xBE8BF388, 0x3ECC176A,
-            0x3E174620, 0x3EB4CEAE, 0xBE8301DA, 0x3ED406CD];
-        const BindingFlags privateStatic = BindingFlags.Static | BindingFlags.NonPublic;
-        var fallback = typeof(AgcExports).GetMethod("CreateFallbackTextureDescriptor", privateStatic)!
-            .Invoke(null, [words, 1u]);
-        var bindingType = typeof(AgcExports).GetNestedType("TranslatedImageBinding", BindingFlags.NonPublic)!;
-        var binding = Activator.CreateInstance(bindingType,
-            [fallback, false, 0u, Array.Empty<uint>(), false, words, false, 1u]);
-        var texture = Assert.IsType<GuestDrawTexture>(typeof(AgcExports)
-            .GetMethod("CreateDescriptorDrawTexture", privateStatic)!.Invoke(null, [binding]));
-
-        Assert.Equal(0UL, texture.Address);
-        Assert.NotNull(texture.Descriptor);
-        Assert.Empty(texture.Descriptor);
-        _ = ImageRequestBuilders.Texture(texture.Descriptor, texture.Shape);
     }
 
     [Theory]

@@ -8,7 +8,9 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
@@ -107,6 +109,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"[LOADER][PERF] command_stream submissions={_commandStream.SubmissionsStarted} " +
                     $"slices={_commandStream.SlicesRun} blocked_retries={_commandStream.BlockedRetries} " +
                     $"outcome={outcome} fatal=0");
+                Console.Error.WriteLine($"[LOADER][PERF] {ShaderCacheCounters.Summary()}");
                 _relay.StopAcceptingWork();
                 _relay.RunPendingCommands();
                 try

@@ -1025,12 +1025,15 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Opcode == "SGetpcB64")
             {
-                var pc = _state.Program.Address +
-                    instruction.Pc +
-                    (ulong)(instruction.Words.Count * sizeof(uint));
-                StoreScalar(destination, FormatUInt((uint)pc));
-                StoreScalar(destination + 1, FormatUInt((uint)(pc >> 32)));
-                return true;
+                {
+                    // The shader base is pushed per draw; the program offset is added to it.
+                    var (baseLow, baseHigh) = ShaderBaseWords();
+                    var offset = instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint));
+                    var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
+                    StoreScalar(destination, $"(uint){address}");
+                    StoreScalar(destination + 1, $"(uint)({address} >> 32)");
+                    return true;
+                }
             }
 
             if (instruction.Opcode == "SBcnt1I32B64")

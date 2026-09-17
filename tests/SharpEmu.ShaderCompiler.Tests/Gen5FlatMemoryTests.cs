@@ -4,6 +4,8 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -80,24 +82,10 @@ public sealed class Gen5FlatMemoryTests
         Assert.Equal("VSadU32", addition.Opcode);
         Assert.Equal([Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2)], addition.Sources);
         Assert.Equal([Gen5Operand.Vector(3)], addition.Destinations);
-        var scalarRegisters = new uint[256];
-        var state = new Gen5ShaderState(
-            program,
-            [],
-            null);
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
-
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var compiled,
                 out var error),
             error);
@@ -177,21 +165,10 @@ public sealed class Gen5FlatMemoryTests
         var program = DecodeProgram(
             (0x3Eu << 25) | (0xC9u << 17) | (1u << 9) | 256u,
             SEndpgm);
-        var scalarRegisters = new uint[256];
-        var state = new Gen5ShaderState(program, [], null);
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
-
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var compiled,
                 out var error),
             error);
@@ -258,35 +235,16 @@ public sealed class Gen5FlatMemoryTests
             unchecked((uint)ShaderAddress),
             unchecked((uint)(ShaderAddress >> 32)),
         ];
-        var state = new Gen5ShaderState(
-            program,
-            userData,
-            null,
-            UserDataScalarRegisterBase: 12);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(
-                ctx,
-                state,
-                out var evaluation,
-                out var evaluationError),
-            evaluationError);
-
-        var binding = Assert.Single(evaluation.GlobalMemoryBindings);
-        Assert.Equal(12u, binding.ScalarAddress);
-        Assert.Contains(instruction.Pc, binding.InstructionPcs);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var compiled,
-                out var compileError),
-            compileError);
-        Assert.Contains(
-            (ushort)SpirvOp.ISub,
-            ReadSpirvOpcodes(compiled.Spirv));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, userDataBase: 12, userDataCount: 2);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        var range = Assert.Single(plan.DeviceAddressRanges);
+        Assert.Contains(range.MemoryIndices, index => plan.Memory[index].Pc == instruction.Pc);
+        var resolved = Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, ResourceTestProgram.Inputs(userData)));
+        Assert.True(resolved.Planned);
+        Assert.Equal(ShaderAddress, resolved.Base);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compileError), compileError);
+        Assert.Contains((ushort)SpirvOp.ConvertUToPtr, ReadSpirvOpcodes(compiled.Spirv));
     }
 
     private static IReadOnlyList<ushort> ReadSpirvOpcodes(byte[] spirv)

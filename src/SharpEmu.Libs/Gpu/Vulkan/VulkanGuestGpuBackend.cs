@@ -23,104 +23,10 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
 
-    public bool TryCompileVertexShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1)
+    public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;
-        if (!Gen5SpirvTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var compiled,
-                out error,
-                globalBufferBase,
-                totalGlobalBufferCount,
-                imageBindingBase,
-                scalarRegisterBufferIndex,
-                requiredVertexOutputCount,
-                storageBufferOffsetAlignment,
-                VulkanVideoPresenter.GraphicsSubgroupOperationsEnabled))
-        {
-            return false;
-        }
-
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
-        return true;
-    }
-
-    public bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        IReadOnlyList<Gen5PixelOutputBinding> outputs,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        shader = null;
-        if (!Gen5SpirvTranslator.TryCompilePixelShader(
-                state,
-                evaluation,
-                outputs,
-                out var compiled,
-                out error,
-                globalBufferBase,
-                totalGlobalBufferCount,
-                imageBindingBase,
-                scalarRegisterBufferIndex,
-                pixelInputEnable,
-                pixelInputAddress,
-                pixelInputCntl,
-                storageBufferOffsetAlignment,
-                VulkanVideoPresenter.GraphicsSubgroupOperationsEnabled))
-        {
-            return false;
-        }
-
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
-        return true;
-    }
-
-    public bool TryCompileComputeShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int totalGlobalBufferCount = -1,
-        int initialScalarBufferIndex = -1,
-        uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        shader = null;
-        if (!Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                localSizeX,
-                localSizeY,
-                localSizeZ,
-                out var compiled,
-                out error,
-                totalGlobalBufferCount,
-                initialScalarBufferIndex,
-                waveLaneCount,
-                storageBufferOffsetAlignment))
+        if (!Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out error))
         {
             return false;
         }
@@ -166,8 +72,6 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         VulkanVideoPresenter.IsGpuGuestImageAvailable(address, format, numberType);
 
-    public ulong GuestStorageBufferOffsetAlignment =>
-        VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;
 
     public void CountShaderCompilation() =>
         VulkanVideoPresenter.CountSpirvCompilation();

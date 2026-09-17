@@ -17,15 +17,12 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
 {
     private const ulong Base = 0x1_0000_0000;
 
-    [Theory]
-    [InlineData("ImageLoad")]
-    [InlineData("ImageStore")]
-    public void StorageWithoutMipOperandUsesTheAvailableMipRange(string opcode)
+    [Fact]
+    public void StorageWithoutMipOperandUsesTheAvailableMipRange()
     {
         var words = RegisterWords.Texture(0x22AC00000, GuestPixelFormat.Bits8_8_8_8UNorm,
             512, 512, baseLevel: 0, lastLevel: 9, maxMip: 8);
-        var binding = new Gen5ImageBinding(0, opcode, null!, words, [], null);
-        var shape = new ShaderImageShape(false, false, true, binding.HasDynamicMip, TextureNumericClass.Float);
+        var shape = new ShaderImageShape(false, false, true, false, TextureNumericClass.Float);
         var request = ImageRequestBuilders.Texture(words, shape).Request;
         Assert.Equal(9u, request.Description.Resources.Levels);
         Assert.Equal(0u, request.View.BaseLevel);

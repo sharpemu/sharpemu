@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -41,11 +42,19 @@ public sealed partial class RenderExecutor
 
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
+    private readonly bool _strictDrawResources;
+    private readonly HashSet<(ulong ShaderHash, ImageType ImageType, ImageViewType ViewType)> _reportedDrawImageTypeMismatches = [];
 
     public RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines)
+        : this(host, pipelines, Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") == "1")
+    {
+    }
+
+    internal RenderExecutor(IRenderHost host, IShaderPipelineProvider pipelines, bool strictDrawResources)
     {
         _host = host;
         _pipelines = pipelines;
+        _strictDrawResources = strictDrawResources;
     }
 
     private readonly record struct DrawCall(string Name, RecordedOperation Operation, uint Count, uint InstanceCount, uint FirstInstance);

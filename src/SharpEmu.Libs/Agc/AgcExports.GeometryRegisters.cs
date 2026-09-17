@@ -7,7 +7,6 @@ namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
-    private static int _depthRegisterStateTraceCount;
 
     private static void ApplySubmittedRegisters(
         CpuContext ctx,
@@ -61,12 +60,6 @@ public static partial class AgcExports
 
                 if (operation == ItSetContextReg)
                 {
-                    TraceSubmittedDepthRegisterState(
-                        state,
-                        packetAddress,
-                        "direct",
-                        startRegister + index,
-                        value);
                 }
             }
 
@@ -136,24 +129,12 @@ public static partial class AgcExports
                 // Do not retain an old context-register value.
                 state.CxRegisters[registerOffset] = value;
                 state.CompositeDepthSizeXy = null;
-                TraceSubmittedDepthRegisterState(
-                    state,
-                    entryAddress,
-                    "indirect-uc",
-                    registerOffset,
-                    value);
                 continue;
             }
 
             destination[registerOffset] = value;
             if (indirectRegister == RCxRegsIndirect)
             {
-                TraceSubmittedDepthRegisterState(
-                    state,
-                    entryAddress,
-                    "indirect",
-                    registerOffset,
-                    value);
             }
             if (indirectRegister == RUcRegsIndirect)
             {
@@ -204,57 +185,6 @@ public static partial class AgcExports
         // The final NOP payload carries the composite depth extent.
         // Keep it separate so a later standalone write can replace it.
         state.CompositeDepthSizeXy = sizeXy;
-        TraceSubmittedDepthRegisterState(
-            state,
-            packetAddress,
-            "composite",
-            DbDepthSizeXy,
-            sizeXy);
-    }
-
-    private static void TraceSubmittedDepthRegisterState(
-        SubmittedDcbState state,
-        ulong packetAddress,
-        string source,
-        uint registerOffset,
-        uint value)
-    {
-        if (!_traceDepthMetadata ||
-            registerOffset is not (DbZInfo or
-                                    DbZReadBase or
-                                    DbZWriteBase or
-                                    DbZReadBaseHi or
-                                    DbZWriteBaseHi or
-                                    DbDepthSizeXy) ||
-            Interlocked.Increment(ref _depthRegisterStateTraceCount) > 4096)
-        {
-            return;
-        }
-
-        state.CxRegisters.TryGetValue(DbZReadBase, out var readBase);
-        state.CxRegisters.TryGetValue(DbZWriteBase, out var writeBase);
-        state.CxRegisters.TryGetValue(DbZReadBaseHi, out var readBaseHi);
-        state.CxRegisters.TryGetValue(DbZWriteBaseHi, out var writeBaseHi);
-        state.CxRegisters.TryGetValue(DbDepthSizeXy, out var rawSizeXy);
-        var readAddress =
-            ((ulong)(readBaseHi & 0xFFu) << 40) | ((ulong)readBase << 8);
-        var writeAddress =
-            ((ulong)(writeBaseHi & 0xFFu) << 40) | ((ulong)writeBase << 8);
-        var effectiveSizeXy = state.CompositeDepthSizeXy ?? rawSizeXy;
-        var width = (effectiveSizeXy & 0x3FFFu) + 1;
-        var height = ((effectiveSizeXy >> 16) & 0x3FFFu) + 1;
-        var composite = state.CompositeDepthSizeXy is { } compositeSize
-            ? $"0x{compositeSize:X8}"
-            : "none";
-
-        Console.Error.WriteLine(
-            $"[LOADER][TRACE] agc.depth_register_state " +
-            $"queue={state.QueueName} submission={state.ActiveSubmissionId} " +
-            $"packet=0x{packetAddress:X16} source={source} " +
-            $"reg=0x{registerOffset:X3} value=0x{value:X8} " +
-            $"read=0x{readAddress:X16} write=0x{writeAddress:X16} " +
-            $"raw_size=0x{rawSizeXy:X8} composite={composite} " +
-            $"effective={width}x{height}");
     }
 
     internal static Gpu.GpuCommands.Registers.ContextRegisters? GetGraphicsContextForTests(CpuContext context)

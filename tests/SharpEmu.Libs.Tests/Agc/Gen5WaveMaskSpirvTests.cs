@@ -4,23 +4,13 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// Regression tests for how a VCC/EXEC wave mask consumed as a per-lane predicate
-// is lowered to SPIR-V. A wave mask must be tested at the current lane's bit
-// (mask & lane_bit) — exactly as the hardware evaluates the VCndmask condition or
-// a VCC/EXEC branch — not with a whole-word "the 64-bit value is non-zero" test.
-//
-// The two agree for comparison results (only the lane's own bit is ever set), but
-// diverge for the bitwise-complement wave-mask idioms (S_NOT / S_ORN2 / S_ANDN2 /
-// S_NAND / S_NOR), which set the unused upper 63 bits. A whole-word test then
-// reports the lane active even when its bit is clear. Unity's PostProcessing NaN
-// killer combines its channels as `anyNaN | ~allFinite` (S_ORN2_B64); under the
-// whole-word test every valid pixel read as NaN and was replaced with 0, zeroing
-// the whole HDR scene before tone-mapping.
+// Checks lane-specific wave predicates and debug-condition branch translation.
 public sealed class Gen5WaveMaskSpirvTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
@@ -129,28 +119,9 @@ public sealed class Gen5WaveMaskSpirvTests
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
         var ctx = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        var shaderRegisters = new Dictionary<uint, uint>
-        {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
-
-        Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
-                out var error),
-            error);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error),
-            error);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state, evaluation, 1, 1, 1, out var shader, out error),
-            error);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(ctx, ShaderAddress, out var program, out var error), error);
+        var request = ResourceTestProgram.Request(program, userDataCount: 16);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
         return shader.Spirv;
     }
 }

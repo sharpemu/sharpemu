@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -27,10 +28,13 @@ public sealed class Gen5SharedMemoryBarrierTests
         instructions.Add(new(12, Gen5ShaderEncoding.Ds, "DsReadB32", [0u, 0u],
             [Gen5Operand.Vector(0)], [Gen5Operand.Vector(2)], new Gen5DataShareControl(0, 0, false)));
         instructions.Add(new(20, Gen5ShaderEncoding.Sopp, "SEndpgm", [0u], [], [], null));
-        var state = new Gen5ShaderState(new Gen5ShaderProgram(0, instructions), [], null);
-        var evaluation = new Gen5ShaderEvaluation(new uint[256], new uint[256], [], []);
-        Assert.True(Gen5SpirvTranslator.TryCompileComputeShader(state, evaluation, threadCount, 1, 1,
-            out var shader, out var error, waveLaneCount: waveSize), error);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(new Gen5ShaderProgram(0, instructions), userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = waveSize,
+            LocalSizeX = threadCount,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         var barriers = 0;
         var sharedPointerTypes = new HashSet<uint>();
         var sharedPointers = new HashSet<uint>();

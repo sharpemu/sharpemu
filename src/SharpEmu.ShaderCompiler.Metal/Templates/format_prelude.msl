@@ -66,3 +66,67 @@ static inline uint sharpemu_format_convert(uint raw, uint bits, uint nfmt, uint 
     default: return raw;
     }
 }
+
+static inline uint sharpemu_minifloat_encode(uint value, uint bits)
+{
+    uint mantissaBits = bits - 5u;
+    uint shift = 23u - mantissaBits;
+    float f = as_type<float>(value);
+    if (isnan(f))
+    {
+        return (1u << bits) - 1u;
+    }
+    if (!(f > 0.0f))
+    {
+        return 0u;
+    }
+    uint exponent = (value >> 23) & 0xFFu;
+    if (exponent < 113u)
+    {
+        // Below 2^-14 the result is a denormal: the mantissa alone scales the value.
+        return (uint)rint(f * (float)(1u << (14u + mantissaBits)));
+    }
+    // Rounding the dropped mantissa bits may carry into the exponent.
+    uint rounded = value + ((1u << (shift - 1u)) - 1u) + ((value >> shift) & 1u);
+    uint roundedExponent = (rounded >> 23) & 0xFFu;
+    if (roundedExponent >= 143u)
+    {
+        return 31u << mantissaBits;
+    }
+    return ((roundedExponent - 112u) << mantissaBits) | ((rounded >> shift) & ((1u << mantissaBits) - 1u));
+}
+
+static inline uint sharpemu_format_encode(uint value, uint bits, uint nfmt, uint dfmt)
+{
+    if (bits >= 32u)
+    {
+        return value;
+    }
+    uint mask = (1u << bits) - 1u;
+    uint signedMaximum = mask >> 1u;
+    float f = as_type<float>(value);
+    // NaN stores as zero in the normalized and scaled formats.
+    float finite = isnan(f) ? 0.0f : f;
+    switch (nfmt)
+    {
+    case 0u: return (uint)rint(clamp(finite, 0.0f, 1.0f) * (float)mask);
+    case 1u: return (uint)(int)rint(clamp(finite, -1.0f, 1.0f) * (float)signedMaximum) & mask;
+    case 2u: return (uint)rint(clamp(finite, 0.0f, (float)mask));
+    case 3u: return (uint)(int)rint(clamp(finite, -(float)signedMaximum - 1.0f, (float)signedMaximum)) & mask;
+    case 4u: return min(value, mask);
+    case 5u: return (uint)clamp((int)value, -(int)signedMaximum - 1, (int)signedMaximum) & mask;
+    case 7u:
+    {
+        if (dfmt == 6u || dfmt == 7u)
+        {
+            return sharpemu_minifloat_encode(value, bits);
+        }
+        if (bits == 16u)
+        {
+            return (uint)as_type<ushort>((half)f);
+        }
+        return value & mask;
+    }
+    default: return value & mask;
+    }
+}

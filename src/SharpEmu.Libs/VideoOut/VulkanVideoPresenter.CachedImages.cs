@@ -112,6 +112,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public uint Height;
         public uint RowLength;
         public uint DestinationSelect;
+        // One view per mip level for a storage image the program indexes by mip; empty otherwise.
+        public ImageView[] MipViews = [];
     }
 
     private sealed partial class Presenter

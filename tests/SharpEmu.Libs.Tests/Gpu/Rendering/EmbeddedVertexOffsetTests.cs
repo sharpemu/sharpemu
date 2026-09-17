@@ -1,69 +1,73 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Reflection;
-using SharpEmu.Libs.Agc;
-using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
-using SharpEmu.ShaderCompiler;
-using SharpEmu.ShaderCompiler.Metal;
-using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Rendering.RenderExecutorFixtures;
+using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 
+// The embedded vertex and instance offsets reach the draw from the user data of the registers the detector named.
 [Collection(SchedulingStateCollection.Name)]
 public sealed class EmbeddedVertexOffsetTests
 {
-    private static readonly Gen5ShaderInstruction OffsetAddition = new(0, Gen5ShaderEncoding.Vop3, "VSadU32", [0, 0],
-        [Gen5Operand.Scalar(18), Gen5Operand.Source(128), Gen5Operand.Vector(5)], [Gen5Operand.Vector(5)], null);
-    private static readonly Gen5ShaderInstruction VertexFetch = new(8, Gen5ShaderEncoding.Mubuf, "BufferLoadFormatXyzw", [0, 0], [], [],
-        new Gen5BufferMemoryControl(4, 5, 0, 0, 0, true, false, false, false));
-    private static readonly Gen5ShaderInstruction ProgramEnd = new(16, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
+    private const uint UserDataBase = 8;
+    private const int VertexOffsetRegister = 18;
+    private const int InstanceOffsetRegister = 19;
+    private const uint Format32x4Float = 77;
 
-    private static Gen5VertexInputBinding CreateVertexInputBinding(uint address = 8, bool perInstance = false) =>
-        new(address, 0, 4, 10, 0, VertexBase, 16, 4, [], 1024, false, perInstance);
+    private static VertexAttributeResource Attribute(int attributeId, int bufferIndex, uint offsetBytes) =>
+        new(new BufferDescriptorWords(unchecked((uint)VertexBase), (uint)(VertexBase >> 32) | (16u << 16), 64, (Format32x4Float << 12) | 0xFAC), 0, 4, attributeId, 0, bufferIndex, offsetBytes);
 
-    private static Gen5ShaderState CreateShaderState(params Gen5ShaderInstruction[] instructions) =>
-        new(new Gen5ShaderProgram(0, instructions.Length == 0 ? [OffsetAddition, VertexFetch, ProgramEnd] : instructions),
-            new uint[12], null, UserDataScalarRegisterBase: 8);
-
-    private static Gen5ShaderEvaluation CreateShaderEvaluation(int offset, IReadOnlyList<Gen5VertexInputBinding>? inputs = null)
+    private static VertexInputInfo VertexInput(int vertexOffset, int vertexRegister = VertexOffsetRegister, int instanceRegister = ShaderProgramInfo.NoScalarRegister, uint instanceOffset = 0, bool fetchEmbedded = true)
     {
-        var scalars = new uint[256];
-        scalars[10] = 99;
-        scalars[18] = unchecked((uint)offset);
-        return new Gen5ShaderEvaluation(scalars, scalars, [], [], VertexInputs: inputs ?? [CreateVertexInputBinding()]);
-    }
-
-    private static VertexInputInfo CreateProductionVertexInput(Gen5ShaderState state, Gen5ShaderEvaluation evaluation)
-    {
-        var provider = typeof(AgcExports).GetNestedType("ShaderProgramProvider", BindingFlags.NonPublic)!;
-        var createStage = provider.GetMethod("CreateStageProgram", BindingFlags.Static | BindingFlags.NonPublic)!;
-        var stage = (AgcExports.CompiledStageProgram)createStage.Invoke(null,
-            [ShaderStageKind.Vertex, 0UL, new VulkanCompiledGuestShader([]), state, evaluation,
-             Array.Empty<GuestDrawTexture>(), evaluation.VertexInputs!, 0, 0, 0, -1, false, null])!;
-        var createInput = provider.GetMethod("CreateVertexInput", BindingFlags.Static | BindingFlags.NonPublic)!;
-        return (VertexInputInfo)createInput.Invoke(null, [stage, evaluation])!;
+        var userData = new uint[12];
+        userData[VertexOffsetRegister - UserDataBase] = unchecked((uint)vertexOffset);
+        userData[InstanceOffsetRegister - UserDataBase] = instanceOffset;
+        var program = Program(ShaderStageKind.Vertex, userDataBase: UserDataBase, vertexOffsetScalar: vertexRegister, instanceOffsetScalar: instanceRegister);
+        return new VertexInputInfo
+        {
+            Buffers = [new VertexInputBuffer(VertexBase, 16, 64)],
+            Attributes = [Attribute(0, 0, 4)],
+            FetchEmbedded = fetchEmbedded,
+            Stage = new ShaderStageResources(program, new ResourceSnapshot { UserData = userData }, VertexShader),
+        };
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(8)]
     [InlineData(-8)]
-    public void ProductionProvider_UsesTheAbsoluteScalarRegisterAndRelativeUserData(int offset)
+    public void VertexOffset_ComesFromTheUserDataOfTheDetectedRegister(int offset)
     {
-        var input = CreateProductionVertexInput(CreateShaderState(), CreateShaderEvaluation(offset));
-        Assert.Equal(18, input.Stage.Program!.VertexOffsetScalarRegister);
-        Assert.Equal(unchecked((uint)offset), input.Stage.Resources.UserData[10]);
+        var input = VertexInput(offset);
+
+        Assert.Equal(VertexOffsetRegister, input.Stage.Program!.VertexOffsetScalarRegister);
+        Assert.Equal(unchecked((uint)offset), input.Stage.Resources.UserData[VertexOffsetRegister - UserDataBase]);
         Assert.Equal(offset, RenderExecutor.ResolveVertexOffset(0, input));
         Assert.Equal(new VertexInputBuffer(VertexBase, 16, 64), Assert.Single(input.Buffers));
-        var program = Assert.IsType<AgcExports.CompiledStageProgram>(input.Stage.Program);
-        Assert.Equal(4u, Assert.Single(program.VertexAttributes).OffsetBytes);
+        Assert.Equal(4u, Assert.Single(input.Attributes).OffsetBytes);
+    }
+
+    [Fact]
+    public void FixedFunctionFetch_LeavesTheDrawArgumentAlone()
+    {
+        var input = VertexInput(8, fetchEmbedded: false);
+
+        Assert.Equal(5, RenderExecutor.ResolveVertexOffset(5, input));
+        Assert.Equal(0, RenderExecutor.ResolveVertexOffset(0, input));
+        Assert.Equal(0u, RenderExecutor.ResolveInstanceOffset(input));
+    }
+
+    [Fact]
+    public void NonZeroIndexOffsetRegister_WinsOverTheEmbeddedOffset()
+    {
+        var input = VertexInput(8);
+
+        Assert.Equal(5, RenderExecutor.ResolveVertexOffset(5, input));
     }
 
     [Theory]
@@ -73,19 +77,18 @@ public sealed class EmbeddedVertexOffsetTests
     [InlineData(false, false, 8, 7, 2, 9)]
     [InlineData(false, true, 8, 7, 2, 2)]
     [InlineData(true, true, 8, 7, -3, -3)]
-    public void ProductionOffset_ReachesTheDrawWithoutChangingBufferOrAttributeOffsets(
+    public void Offset_ReachesTheDrawWithoutChangingBufferOrAttributeOffsets(
         bool indexed, bool indirect, int scalarOffset, uint registerOffset, int argumentOffset, int expectedOffset)
     {
         using var fatal = new FatalScope();
         var host = new RecordingRenderHost();
-        var vertexInput = CreateProductionVertexInput(CreateShaderState(), CreateShaderEvaluation(scalarOffset));
         var defaults = Programs();
         var provider = new FakePipelineProvider
         {
             Graphics = new GraphicsPrograms
             {
                 Vertex = defaults.Vertex, Pixel = defaults.Pixel,
-                VertexInput = vertexInput, PixelInput = defaults.PixelInput,
+                VertexInput = VertexInput(scalarOffset), PixelInput = defaults.PixelInput,
             },
         };
         var banks = Banks();
@@ -108,97 +111,11 @@ public sealed class EmbeddedVertexOffsetTests
     }
 
     [Fact]
-    public void FixedFunctionFetch_KeepsBothShaderBackendsUnchanged()
+    public void InstanceOffset_ComesFromItsOwnRegisterAndKeepsTheVertexOffset()
     {
-        var state = CreateShaderState();
-        var evaluation = CreateShaderEvaluation(8);
-        Assert.True(Gen5SpirvTranslator.TryCompileVertexShader(state, evaluation, out var vulkan, out var vulkanError), vulkanError);
-        Assert.NotEmpty(vulkan.Spirv);
-        Assert.True(Gen5MslTranslator.TryCompileVertexShader(state, evaluation, out var metal, out var metalError), metalError);
-        Assert.Contains("sharpemu_vin.in0", metal.Source);
-        Assert.Contains("max(s[18], 0u)", metal.Source);
-    }
+        var input = VertexInput(8, instanceRegister: InstanceOffsetRegister, instanceOffset: 3);
 
-    [Theory]
-    [InlineData("index_read_before")]
-    [InlineData("index_read_after")]
-    [InlineData("second_addition")]
-    [InlineData("scalar_written")]
-    [InlineData("nonzero_difference")]
-    [InlineData("modified_addition")]
-    [InlineData("branch")]
-    [InlineData("execution_mask")]
-    [InlineData("saved_execution_mask")]
-    [InlineData("relative_register")]
-    [InlineData("fetch_before_addition")]
-    [InlineData("unresolved_fetch")]
-    [InlineData("instance_fetch")]
-    [InlineData("mixed_vertex_fetch")]
-    [InlineData("wrong_user_data_base")]
-    [InlineData("short_user_data")]
-    public void UnprovenOffsets_KeepTheExistingPath(string scenario)
-    {
-        var state = CreateShaderState();
-        Gen5VertexInputBinding[] inputs = [CreateVertexInputBinding()];
-        var readIndex = new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Vop1, "VMovB32", [],
-            [Gen5Operand.Vector(5)], [Gen5Operand.Vector(12)], null);
-        state = scenario switch
-        {
-            "index_read_before" => CreateShaderState(readIndex, OffsetAddition, VertexFetch, ProgramEnd),
-            "index_read_after" => CreateShaderState(OffsetAddition, VertexFetch, readIndex, ProgramEnd),
-            "second_addition" => CreateShaderState(OffsetAddition, OffsetAddition with { Pc = 4 }, VertexFetch, ProgramEnd),
-            "scalar_written" => CreateShaderState(new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Smem, "SLoadDwordx4", [], [],
-                [Gen5Operand.Scalar(16)], new Gen5ScalarMemoryControl(4, 0, null)), OffsetAddition, VertexFetch, ProgramEnd),
-            "nonzero_difference" => CreateShaderState(OffsetAddition with { Sources = [Gen5Operand.Scalar(18), Gen5Operand.Source(129), Gen5Operand.Vector(5)] }, VertexFetch, ProgramEnd),
-            "modified_addition" => CreateShaderState(OffsetAddition with { Control = new Gen5Vop3Control(0, 1, 0, false, 0, null) }, VertexFetch, ProgramEnd),
-            "branch" => CreateShaderState(OffsetAddition, VertexFetch, ProgramEnd with { Opcode = "SCbranchExecz" }),
-            "execution_mask" => CreateShaderState(ProgramEnd with { Opcode = "VCmpxEqU32" }, OffsetAddition, VertexFetch, ProgramEnd),
-            "saved_execution_mask" => CreateShaderState(ProgramEnd with { Opcode = "SAndSaveexecB64" }, OffsetAddition, VertexFetch, ProgramEnd),
-            "relative_register" => CreateShaderState(OffsetAddition, VertexFetch, ProgramEnd with { Opcode = "VMovrelsB32" }),
-            "fetch_before_addition" => CreateShaderState(VertexFetch, OffsetAddition, ProgramEnd),
-            "wrong_user_data_base" => state with { UserDataScalarRegisterBase = 0 },
-            "short_user_data" => state with { UserData = new uint[10] },
-            _ => state,
-        };
-        inputs = scenario switch
-        {
-            "unresolved_fetch" => [CreateVertexInputBinding(24)],
-            "instance_fetch" => [CreateVertexInputBinding(perInstance: true)],
-            "mixed_vertex_fetch" => [CreateVertexInputBinding(), CreateVertexInputBinding(24)],
-            _ => inputs,
-        };
-        Assert.False(Gen5ShaderTranslator.TryGetEmbeddedVertexOffsetRegister(state, inputs, out var scalarRegister));
-        Assert.Equal(-1, scalarRegister);
-        Assert.Equal(-1, CreateProductionVertexInput(state, CreateShaderEvaluation(8, inputs)).Stage.Program!.VertexOffsetScalarRegister);
-    }
-
-    [Fact]
-    public void AliasedFetches_RequireEveryFetchToUseTheFixedFunctionInput()
-    {
-        var state = CreateShaderState(OffsetAddition, VertexFetch, VertexFetch with { Pc = 16 }, ProgramEnd with { Pc = 24 });
-        Assert.True(Gen5ShaderTranslator.TryGetEmbeddedVertexOffsetRegister(state, [CreateVertexInputBinding() with { AliasPcs = [16] }], out var scalarRegister));
-        Assert.Equal(18, scalarRegister);
-        Assert.False(Gen5ShaderTranslator.TryGetEmbeddedVertexOffsetRegister(state, [CreateVertexInputBinding()], out _));
-    }
-
-    [Fact]
-    public void InstanceInputs_KeepTheirOwnRateAndDoNotSupplyAVertexOffset()
-    {
-        var instanceFetch = VertexFetch with
-        {
-            Pc = 16,
-            Control = new Gen5BufferMemoryControl(4, 8, 12, 0, 0, true, false, false, false),
-        };
-        var state = CreateShaderState(OffsetAddition, VertexFetch, instanceFetch, ProgramEnd with { Pc = 24 });
-        var evaluation = CreateShaderEvaluation(8,
-            [CreateVertexInputBinding(), CreateVertexInputBinding(16, perInstance: true) with { Location = 1 }]);
-        var input = CreateProductionVertexInput(state, evaluation);
         Assert.Equal(8, RenderExecutor.ResolveVertexOffset(0, input));
-        Assert.Equal(0u, RenderExecutor.ResolveInstanceOffset(input));
-        var program = Assert.IsType<AgcExports.CompiledStageProgram>(input.Stage.Program);
-        Assert.False(program.VertexAttributes[0].PerInstance);
-        Assert.True(program.VertexAttributes[1].PerInstance);
-        Assert.Equal(2, input.Buffers.Length);
-        Assert.Equal(input.Buffers[0], input.Buffers[1]);
+        Assert.Equal(3u, RenderExecutor.ResolveInstanceOffset(input));
     }
 }

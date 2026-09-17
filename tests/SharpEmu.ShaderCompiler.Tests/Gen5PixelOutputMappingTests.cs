@@ -4,6 +4,9 @@
 using System.Buffers.Binary;
 using System.Text;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -11,11 +14,38 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5PixelOutputMappingTests
 {
+    [Theory]
+    [InlineData(0u, 7u, false)]
+    [InlineData(1u, 2u, false)]
+    [InlineData(0u, 0u, false)]
+    [InlineData(1u, 0u, true)]
+    [InlineData(0u, 1u, true)]
+    public void BothEmittersRequireUniqueContiguousHostLocations(uint firstLocation, uint secondLocation, bool valid)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs =
+            [
+                new(0, firstLocation, Gen5PixelOutputKind.Float),
+                new(3, secondLocation, Gen5PixelOutputKind.Float),
+            ],
+        };
+        Assert.Equal(valid, Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError));
+        Assert.Equal(valid, Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
+        if (!valid)
+        {
+            Assert.Contains("host locations", spirvError);
+            Assert.Contains("host locations", metalError);
+        }
+    }
+
     [Fact]
     public void IdentityOutputDoesNotAddComponentShuffle()
     {
         var instructions = ReadInstructions(
-            Compile(Gen5ColorComponentMapping.Identity));
+            CompilePixelProgram(Gen5ColorComponentMapping.Identity));
 
         Assert.DoesNotContain(
             instructions,
@@ -26,7 +56,7 @@ public sealed class Gen5PixelOutputMappingTests
     public void BgraOutputShufflesGuestComponentsToPhysicalOrder()
     {
         var instructions = ReadInstructions(
-            Compile(new Gen5ColorComponentMapping(0xC6)));
+            CompilePixelProgram(new Gen5ColorComponentMapping(0xC6)));
         var shuffle = Assert.Single(
             instructions,
             instruction => instruction.Opcode == SpirvOp.VectorShuffle);
@@ -38,7 +68,7 @@ public sealed class Gen5PixelOutputMappingTests
     public void BgraPartialExportPreservesPhysicalComponents()
     {
         var instructions = ReadInstructions(
-            Compile(new Gen5ColorComponentMapping(0xC6), enableMask: 0x1));
+            CompilePixelProgram(new Gen5ColorComponentMapping(0xC6), enableMask: 0x1));
         var preservedComponents = instructions
             .Where(instruction => instruction.Opcode == SpirvOp.CompositeExtract)
             .Select(instruction => instruction.Operands[^1])
@@ -51,7 +81,7 @@ public sealed class Gen5PixelOutputMappingTests
     public void NullValidMaskExportControlsFragmentValidity()
     {
         var instructions = ReadInstructions(
-            Compile(
+            CompilePixelProgram(
                 Gen5ColorComponentMapping.Identity,
                 target: 9,
                 outputs: []));
@@ -90,7 +120,7 @@ public sealed class Gen5PixelOutputMappingTests
             [Gen5Operand.Scalar(0)],
             null);
         var instructions = ReadInstructions(
-            Compile(
+            CompilePixelProgram(
                 Gen5ColorComponentMapping.Identity,
                 prefix: [moveVcc]));
 
@@ -129,7 +159,7 @@ public sealed class Gen5PixelOutputMappingTests
             [Gen5Operand.Scalar(0)],
             null);
         var instructions = ReadInstructions(
-            Compile(
+            CompilePixelProgram(
                 Gen5ColorComponentMapping.Identity,
                 prefix: [moveVcc],
                 enableGraphicsSubgroupOperations: false));
@@ -150,7 +180,7 @@ public sealed class Gen5PixelOutputMappingTests
                     (uint)SpirvBuiltIn.SubgroupLocalInvocationId);
     }
 
-    private static byte[] Compile(
+    private static byte[] CompilePixelProgram(
         Gen5ColorComponentMapping componentMapping,
         uint enableMask = 0xF,
         uint target = 0,
@@ -180,30 +210,23 @@ public sealed class Gen5PixelOutputMappingTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(
-                0x1_0000_D000,
-                [.. prefixInstructions, export, end]),
-            [],
-            null);
-        var evaluation = new Gen5ShaderEvaluation(
-            new uint[256],
-            new uint[256],
-            [],
-            []);
-
-        Assert.True(
-            Gen5SpirvTranslator.TryCompilePixelShader(
-                state,
-                evaluation,
-                outputs ?? [new Gen5PixelOutputBinding(
+        var program = new Gen5ShaderProgram(0x1_0000_D000, [.. prefixInstructions, export, end]);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs = outputs ?? [new Gen5PixelOutputBinding(
                     0,
                     0,
                     Gen5PixelOutputKind.Float,
                     componentMapping)],
+            EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
+        };
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var shader,
-                out var error,
-                enableGraphicsSubgroupOperations: enableGraphicsSubgroupOperations),
+                out var error),
             error);
         return shader.Spirv;
     }

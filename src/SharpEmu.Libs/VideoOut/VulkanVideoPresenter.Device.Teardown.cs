@@ -30,23 +30,7 @@ internal static unsafe partial class VulkanVideoPresenter
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
             DestroyRenderPipelines();
-            foreach (var layout in _descriptorLayouts.Values)
-            {
-                _vk.DestroyPipelineLayout(_device, layout.PipelineLayout, null);
-                if (layout.DescriptorSetLayout.Handle != 0)
-                {
-                    _vk.DestroyDescriptorSetLayout(
-                        _device,
-                        layout.DescriptorSetLayout,
-                        null);
-                }
-            }
-            _descriptorLayouts.Clear();
-            while (_recycledDescriptorPools.TryPop(out var recycledDescriptorPool))
-            {
-                _vk.DestroyDescriptorPool(_device, recycledDescriptorPool, null);
-            }
-            _shaderDigests.Clear();
+            _descriptorHeap.Dispose();
             _imageCache.Dispose();
             _samplerStore.Dispose();
             _bufferCache.Dispose();

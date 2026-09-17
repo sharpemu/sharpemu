@@ -96,6 +96,30 @@ internal readonly record struct TextureCacheLookupIdentity(
     TextureContentIdentity Content,
     GuestSampler Sampler);
 
+internal enum GuestStageKind
+{
+    Vertex,
+    Pixel,
+    Compute,
+}
+
+// One merged device-address range of a draw: its first page, page count and the uploaded buffer.
+internal readonly record struct GuestAddressRange(uint FirstPage, uint PageCount, int BufferIndex);
+
+// What each field of one stage's argument buffer names among the draw's buffers and textures.
+internal sealed record GuestStageBindings(
+    GuestStageKind Stage,
+    int[] BufferIndices,
+    int[] ImageElements,
+    GuestSampler[] Samplers,
+    uint[] ShaderData,
+    uint[]? PushData,
+    uint[] FlattenedTable,
+    GuestAddressRange[] AddressRanges,
+    bool UsesGlobalDataShare,
+    bool UsesDeviceAddresses,
+    ulong ProgramHash);
+
 // Size is the guest extent; Data carries bytes only for host-owned buffers and snapshot backends.
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,

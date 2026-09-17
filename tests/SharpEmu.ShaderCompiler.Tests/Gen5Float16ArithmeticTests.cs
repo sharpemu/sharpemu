@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -31,21 +32,11 @@ public sealed class Gen5Float16ArithmeticTests
             ["VAddF16", "VSubF16", "VSubrevF16", "VMulF16", "VMaxF16", "VMinF16", "SEndpgm"],
             program.Instructions.Select(instruction => instruction.Opcode));
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
 
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var shader,
                 out var error),
             error);

@@ -4,13 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// End-to-end pipeline tests: synthetic GFX10 program -> decode -> scalar evaluation -> SPIR-V.
-// Each test asserts the expected OpAtomic* instructions land in the emitted module.
+// Checks atomic instructions after decoding and resource-plan compilation.
 public sealed class Gen5SpirvAtomicTranslationTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
@@ -21,7 +22,7 @@ public sealed class Gen5SpirvAtomicTranslationTests
     {
         // BUFFER_ATOMIC_UMAX v1, BUFFER_ATOMIC_CMPSWAP v[1:2], BUFFER_ATOMIC_INC v1,
         // all against the V# in s[0:3].
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [
                 0xE0E04008, 0x80000100,
                 0xE0C44000, 0x80000100,
@@ -38,7 +39,7 @@ public sealed class Gen5SpirvAtomicTranslationTests
     public void DataShareAtomics_EmitAtomicOpcodes()
     {
         // DS_ADD_RTN_U32 v3, v0, v1; DS_CMPST_RTN_B32 v3, v0, v1, v2; DS_MAX_U32 v0, v1.
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [
                 0xD8800000, 0x03000100,
                 0xD8C00000, 0x03020100,
@@ -65,7 +66,7 @@ public sealed class Gen5SpirvAtomicTranslationTests
     [Fact]
     public void DataShareWaveCounters_EmitOneWaveAtomicAndBroadcast()
     {
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [
                 0xD8FA0014, 0x07000000,
                 0xD8F60014, 0x08000000,
@@ -83,15 +84,14 @@ public sealed class Gen5SpirvAtomicTranslationTests
     [Fact]
     public void DataShareWaveCounters_InVertexStageUseWaveCountAndBroadcast()
     {
-        var opcodes = CompileVertex(
+        var opcodes = CompileVertexOpcodes(
             [
                 0xD8FA0014, 0x07000000,
                 0xD8F60014, 0x08000000,
             ]);
 
-        // Graphics stages use private LDS because Vulkan does not permit
-        // Workgroup storage there. They must still apply the counter once per
-        // active wave and broadcast its old value to every active lane.
+        // Private graphics storage applies the counter once per active wave.
+        // Each active lane receives the value from before the update.
         Assert.Contains((ushort)SpirvOp.GroupNonUniformBallot, opcodes);
         Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
         Assert.Contains((ushort)SpirvOp.GroupNonUniformShuffle, opcodes);
@@ -105,12 +105,14 @@ public sealed class Gen5SpirvAtomicTranslationTests
     public void ImageAtomicAdd_EmitsTexelPointerAndAtomicAdd()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc against an R32ui T#.
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [0xF0442100, 0x00010200],
             new Dictionary<uint, uint>
             {
-                // Descriptor word1 dataFormat (bits 28:20) = 20 selects R32ui/Uint.
+                // A one-pixel unsigned image with identity component selection.
+                [4] = (uint)(BufferAddress >> 8),
                 [5] = 20u << 20,
+                [7] = (9u << 28) | 0xFACu,
             });
 
         Assert.Contains((ushort)SpirvOp.ImageTexelPointer, opcodes);
@@ -126,85 +128,49 @@ public sealed class Gen5SpirvAtomicTranslationTests
         [3] = 0,
     };
 
-    private static HashSet<ushort> CompileCompute(
+    private static HashSet<ushort> CompileComputeOpcodes(
         uint[] programWords,
-        Dictionary<uint, uint> userDataSgprs) =>
-        CollectOpcodes(CompileComputeSpirv(programWords, userDataSgprs));
+        Dictionary<uint, uint> userDataRegisters) =>
+        CollectOpcodes(CompileComputeSpirv(programWords, userDataRegisters));
 
     private static byte[] CompileComputeSpirv(
         uint[] programWords,
-        Dictionary<uint, uint> userDataSgprs)
+        Dictionary<uint, uint> userDataRegisters)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
-        var ctx = new CpuContext(memory, Generation.Gen5);
+        var context = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        // COMPUTE_PGM_RSRC2 advertises 16 user SGPRs; the user data words at
-        // COMPUTE_USER_DATA_0 + index seed s[0..15] for the scalar evaluator.
-        var shaderRegisters = new Dictionary<uint, uint>
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ShaderAddress, out var program, out var error), error);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, 16);
+        var userData = new uint[16];
+        foreach (var (registerIndex, value) in userDataRegisters)
         {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
-        foreach (var (sgpr, value) in userDataSgprs)
-        {
-            shaderRegisters[Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister + sgpr] = value;
+            userData[registerIndex] = value;
         }
 
-        Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
-                out var error),
-            error);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error),
-            error);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out error),
-            error);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData),
+            ref snapshot, ref specialization, out var failure), failure.ToString());
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, 16),
+            BindingLayout.UsesGlobalDataShare(program),
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+            BindingLayout.ReadsShaderBase(program), 0);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
         return shader.Spirv;
     }
 
-    private static HashSet<ushort> CompileVertex(uint[] programWords)
+    private static HashSet<ushort> CompileVertexOpcodes(uint[] programWords)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
-        var ctx = new CpuContext(memory, Generation.Gen5);
+        var context = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        var shaderRegisters = new Dictionary<uint, uint>
-        {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
-
-        Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
-                out var error),
-            error);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error),
-            error);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var shader,
-                out error),
-            error);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ShaderAddress, out var program, out var error), error);
+        var request = ResourceTestProgram.Request(program, ShaderStage.Vertex, userDataCount: 16);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
         return CollectOpcodes(shader.Spirv);
     }
 

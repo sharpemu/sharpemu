@@ -8,7 +8,7 @@ using Silk.NET.Vulkan;
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 // A compiled shader module the pipeline provider hands back; zero means no program.
-public readonly record struct ShaderProgram(ulong Id)
+public readonly record struct ShaderProgram(ulong Id, ulong Module = 0)
 {
     public bool IsValid => Id != 0;
 }
@@ -34,6 +34,9 @@ public sealed class GraphicsPrograms
     public SolidColorClear? SolidClear { get; init; }
 
     public VertexPositionStream? PositionStream { get; init; }
+
+    // Blending is off for a fill the provider recognised as an overwrite.
+    public bool DisableBlending { get; init; }
 }
 
 public sealed class ComputeProgram
@@ -68,10 +71,18 @@ public interface IShaderPipelineProvider
         in RenderingState rendering,
         PrimitiveTopology topology,
         bool primitiveRestartEnabled,
+        bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram);
 
-    ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator);
+    // The dispatch dimensions are groups, or threads when the initiator counts threads.
+    ComputeProgram GetComputeProgram(
+        ComputeStageRegisters compute,
+        ShaderInterfaceRegisters shaderInterface,
+        uint dispatchInitiator,
+        uint dimensionX,
+        uint dimensionY,
+        uint dimensionZ);
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 }

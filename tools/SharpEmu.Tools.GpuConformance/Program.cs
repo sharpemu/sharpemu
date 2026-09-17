@@ -28,11 +28,11 @@
 
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
+using SharpEmu.ShaderCompiler.Resources;
 
 const uint Sentinel = 0xCAFEBABE;
 
-// Must match the 64-byte global-memory binding ShaderDump constructs for the
-// exec program.
+// The synthetic program writes into one 64-byte buffer descriptor.
 const ulong BufferSize = 64;
 
 var expectedFma = BitConverter.SingleToUInt32Bits(
@@ -232,11 +232,14 @@ unsafe
         vk.CreateDescriptorSetLayout(device, in setLayoutInfo, null, out var setLayout),
         "vkCreateDescriptorSetLayout");
 
+    var pushConstantRange = new PushConstantRange(ShaderStageFlags.ComputeBit, 0, PushData.ByteSize);
     var pipelineLayoutInfo = new PipelineLayoutCreateInfo
     {
         SType = StructureType.PipelineLayoutCreateInfo,
         SetLayoutCount = 1,
         PSetLayouts = &setLayout,
+        PushConstantRangeCount = 1,
+        PPushConstantRanges = &pushConstantRange,
     };
     Check(
         vk.CreatePipelineLayout(device, in pipelineLayoutInfo, null, out var pipelineLayout),
@@ -332,6 +335,14 @@ unsafe
         in descriptorSet,
         0,
         null);
+    // The fixture uses zero user data and a buffer view with no byte bias.
+    Span<uint> pushWords = stackalloc uint[(int)PushData.DwordCount];
+    pushWords.Clear();
+    fixed (uint* pushPointer = pushWords)
+    {
+        vk.CmdPushConstants(commandBuffer, pipelineLayout, ShaderStageFlags.ComputeBit,
+            0, PushData.ByteSize, pushPointer);
+    }
     vk.CmdDispatch(commandBuffer, 1, 1, 1);
     var barrier = new MemoryBarrier
     {

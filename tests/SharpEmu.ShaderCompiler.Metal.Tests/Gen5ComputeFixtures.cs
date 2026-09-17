@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
 
@@ -12,11 +13,7 @@ internal sealed record Gen5ComputeFixture(
     uint StoreScalarResourceBase,
     int StoreBackingBytes);
 
-/// <summary>
-/// Hand-assembled Gen5 (gfx10) programs plus the decode -> (state, evaluation) -> MSL
-/// pipeline the tests drive. Programs are synthetic by construction — shader binaries
-/// captured from games are copyrighted content and must never land in fixtures.
-/// </summary>
+// Synthetic instruction programs for decoder and compile-request tests.
 internal static class Gen5ComputeFixtures
 {
     public const ulong ProgramAddress = 0x100000;
@@ -128,7 +125,35 @@ internal static class Gen5ComputeFixtures
         StoreScalarResourceBase: 8,
         StoreBackingBytes: 16);
 
-    public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop, Lds];
+    // Typed load: the instruction's two 32-bit floats win over the descriptor's four
+    // unorm bytes in s11, so the two raw dwords at offset 0 land at offsets 16 and 20.
+    public static readonly Gen5ComputeFixture TypedLoad = new(
+        "typed-load",
+        [
+            0xBE8B03FF, 0x00038FAC, // s_mov_b32 s11, 0x38FAC (descriptor format 56, swizzle xyzw)
+            0xEA010000, 0x80020200, // tbuffer_load_format_xy v[2:3], off, s[8:11], 0 format:64
+            0xE0700010, 0x80020200, // buffer_store_dword v2, off, s[8:11], 0 offset:16
+            0xE0700014, 0x80020300, // buffer_store_dword v3, off, s[8:11], 0 offset:20
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 32);
+
+    // Typed store with format 8_8 unorm: 1.0 in v2 stores 0xFF at offset 16 and 0.5 in v3
+    // stores 0x80 at offset 17; the other two bytes of that dword keep their value.
+    public static readonly Gen5ComputeFixture TypedStore = new(
+        "typed-store",
+        [
+            0xBE8B03FF, 0x00038FAC, // s_mov_b32 s11, 0x38FAC (descriptor format 56, swizzle xyzw)
+            0x7E0402FF, 0x3F800000, // v_mov_b32 v2, 1.0
+            0x7E0602FF, 0x3F000000, // v_mov_b32 v3, 0.5
+            0xE8750010, 0x80020200, // tbuffer_store_format_xy v[2:3], off, s[8:11], 0 format:14 offset:16
+            0xBF810000,             // s_endpgm
+        ],
+        StoreScalarResourceBase: 8,
+        StoreBackingBytes: 32);
+
+    public static readonly Gen5ComputeFixture[] All = [Fmac, Muls, ExecStore, Loop, Lds, TypedLoad, TypedStore];
 
     // Minimal pixel program: two interpolated attribute channels plus two
     // inline constants exported to MRT0 (done+vm).
@@ -152,124 +177,72 @@ internal static class Gen5ComputeFixtures
         0xBF810000,             // s_endpgm
     ];
 
-    public static Gen5MslShader CompileVertexOrThrow(int requiredVertexOutputCount = 0)
-    {
-        var memory = new FakeGuestMemory();
-        memory.AddRegion(ProgramAddress, VertexWords);
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
-        {
-            throw new InvalidOperationException($"[vertex] decode failed: {decodeError}");
-        }
-
-        var state = new Gen5ShaderState(program!, new uint[16], Metadata: null);
-        var evaluation = new Gen5ShaderEvaluation(
-            new uint[128],
-            new uint[128],
-            Array.Empty<Gen5ImageBinding>(),
-            Array.Empty<Gen5GlobalMemoryBinding>());
-        if (!Gen5MslTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var shader,
-                out var compileError,
-                requiredVertexOutputCount: requiredVertexOutputCount))
-        {
-            throw new InvalidOperationException($"[vertex] MSL emit failed: {compileError}");
-        }
-
-        return shader;
-    }
+    public static Gen5MslShader CompileVertexOrThrow(int requiredVertexOutputCount = 0) =>
+        CompileStageRequestOrThrow(VertexWords, ShaderStage.Vertex, requiredVertexOutputCount);
 
     public static Gen5MslShader CompilePixelOrThrow(
         Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
         Gen5ColorComponentMapping componentMapping = default)
     {
-        var memory = new FakeGuestMemory();
-        memory.AddRegion(ProgramAddress, PixelWords);
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
+        var program = DecodeOrThrow(new Gen5ComputeFixture("pixel", PixelWords, 0, 0));
+        var request = RequestOrThrow(program, ShaderStage.Pixel,
+            pixelOutputs: [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)]);
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
-            throw new InvalidOperationException($"[pixel] decode failed: {decodeError}");
+            throw new InvalidOperationException($"[pixel] MSL request emit failed: {error}");
         }
+        return shader;
+    }
 
-        var state = new Gen5ShaderState(program!, new uint[16], Metadata: null);
-        var evaluation = new Gen5ShaderEvaluation(
-            new uint[128],
-            new uint[128],
-            Array.Empty<Gen5ImageBinding>(),
-            Array.Empty<Gen5GlobalMemoryBinding>());
-        if (!Gen5MslTranslator.TryCompilePixelShader(
-                state,
-                evaluation,
-                [new Gen5PixelOutputBinding(0, 0, outputKind, componentMapping)],
-                out var shader,
-                out var compileError))
+    // The request path: the fixture's own resource plan, default specialization and layout.
+    private const ulong RequestHash = 0x5348_4152_5045_4D55;
+    private const uint UserDataCount = 16;
+
+    public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
+        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null)
+    {
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(
+            resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
+            BindingLayout.UsesGlobalDataShare(program),
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+            BindingLayout.ReadsShaderBase(program));
+        return new ShaderCompileRequest(plan, resources, layout)
         {
-            throw new InvalidOperationException($"[pixel] MSL emit failed: {compileError}");
+            WaveSize = waveLaneCount,
+            LocalSizeX = stage == ShaderStage.Compute ? localSizeX : 1,
+            PixelOutputs = pixelOutputs ?? (stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : []),
+            RequiredVertexOutputCount = requiredVertexOutputCount,
+        };
+    }
+
+    public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32)
+    {
+        var request = RequestOrThrow(DecodeOrThrow(fixture), ShaderStage.Compute, waveLaneCount, localSizeX);
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
+        {
+            throw new InvalidOperationException($"[{fixture.Name}] MSL request emit failed: {error}");
         }
 
         return shader;
     }
 
-    /// <summary>Drives the real decoder and the MSL emitter for one fixture.</summary>
-    public static Gen5MslShader CompileOrThrow(Gen5ComputeFixture fixture) =>
-        CompileOrThrow(fixture, waveLaneCount: 32, localSizeX: 32);
-
-    public static Gen5MslShader CompileOrThrow(
-        Gen5ComputeFixture fixture,
-        uint waveLaneCount,
-        uint localSizeX)
+    public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0)
     {
-        var program = DecodeOrThrow(fixture);
-
-        // Buffer stores need a global-memory binding; the emitter resolves them
-        // by instruction PC, so collect memory-access PCs from the decoded
-        // program itself.
-        var accessPcs = new List<uint>();
-        foreach (var instruction in program.Instructions)
+        var memory = new FakeGuestMemory();
+        memory.AddRegion(ProgramAddress, words);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        if (!Gen5ShaderTranslator.TryDecodeProgram(ctx, ProgramAddress, out var program, out var decodeError))
         {
-            if (instruction.Control is Gen5BufferMemoryControl or Gen5GlobalMemoryControl)
-            {
-                accessPcs.Add(instruction.Pc);
-            }
+            throw new InvalidOperationException($"[{stage}] decode failed: {decodeError}");
         }
 
-        var globalBindings = accessPcs.Count != 0
-            ? new[]
-            {
-                new Gen5GlobalMemoryBinding(
-                    fixture.StoreScalarResourceBase,
-                    0UL,
-                    accessPcs,
-                    new byte[Math.Max(fixture.StoreBackingBytes, 4)],
-                    Math.Max(fixture.StoreBackingBytes, 4),
-                    DataPooled: false,
-                    (ulong)Math.Max(fixture.StoreBackingBytes, 4))
-                {
-                    Writable = true,
-                },
-            }
-            : Array.Empty<Gen5GlobalMemoryBinding>();
-
-        var state = new Gen5ShaderState(program, new uint[16], Metadata: null);
-        var evaluation = new Gen5ShaderEvaluation(
-            new uint[128],
-            new uint[128],
-            Array.Empty<Gen5ImageBinding>(),
-            globalBindings);
-
-        if (!Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                localSizeX,
-                1,
-                1,
-                out var shader,
-                out var compileError,
-                waveLaneCount: waveLaneCount))
+        var request = RequestOrThrow(program!, stage, requiredVertexOutputCount: requiredVertexOutputCount);
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
-            throw new InvalidOperationException($"[{fixture.Name}] MSL emit failed: {compileError}");
+            throw new InvalidOperationException($"[{stage}] MSL request emit failed: {error}");
         }
 
         return shader;
