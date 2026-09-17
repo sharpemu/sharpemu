@@ -261,6 +261,8 @@ public static partial class Gen5MslTranslator
                     $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
                     $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
+                "VMulI32I24" =>
+                    EmitSignedMultiply24(instruction),
                 // The SPIR-V translator treats the U24 multiply as a full 32-bit
                 // multiply (only the Hi/Mad forms mask); mirror it exactly.
                 "VMulLoU32" or "VMulLoI32" or "VMulU32U24" =>
@@ -443,6 +445,14 @@ public static partial class Gen5MslTranslator
 
             StoreVector(destination, result);
             return true;
+        }
+
+        private string EmitSignedMultiply24(Gen5ShaderInstruction instruction)
+        {
+            var signedLeft = $"(as_type<int>(({RawSource(instruction, 0)}) << 8u) >> 8)";
+            var signedRight = $"(as_type<int>(({RawSource(instruction, 1)}) << 8u) >> 8)";
+            // Unsigned multiplication preserves the low result bits on overflow.
+            return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
         }
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)

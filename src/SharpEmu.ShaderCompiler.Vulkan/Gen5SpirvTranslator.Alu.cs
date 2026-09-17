@@ -469,6 +469,16 @@ public static partial class Gen5SpirvTranslator
                 case "VSubbrevU32":
                     result = EmitSubtractWithBorrow(instruction, reverse: true);
                     break;
+                case "VMulI32I24":
+                {
+                    var signedLeft = _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 0)), UInt(0), UInt(24));
+                    var signedRight = _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 1)), UInt(0), UInt(24));
+                    result = _module.AddInstruction(SpirvOp.IMul, _uintType,
+                        Bitcast(_uintType, signedLeft), Bitcast(_uintType, signedRight));
+                    break;
+                }
                 case "VMulLoU32":
                 case "VMulLoI32":
                 case "VMulU32U24":
