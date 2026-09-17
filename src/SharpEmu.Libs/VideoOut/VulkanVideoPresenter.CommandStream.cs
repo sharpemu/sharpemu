@@ -21,6 +21,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
     public static void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
     {
+        SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.PresenterEntered,
+            queue, submissionId, address, dwordCount);
         lock (_gate)
         {
             if (_closed || HostSessionControl.IsShutdownRequested || Volatile.Read(ref _presenterCloseRequested))

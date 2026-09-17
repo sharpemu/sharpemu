@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Agc;
@@ -49,6 +50,7 @@ public static partial class AgcExports
             $"dwords={dwordCount} end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
+        SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered, 0, 0, commandAddress, dwordCount);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         var setupEndTicks = profileEnabled
             ? System.Diagnostics.Stopwatch.GetTimestamp()
@@ -65,7 +67,11 @@ public static partial class AgcExports
             }
 
             // The prepass shadows geometry state in submit order; the worker owns the interpreter's banks.
+            SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureStarted,
+                0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
             var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
+            SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureFinished,
+                0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
             if (profileEnabled)
             {
                 snapshotEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -129,6 +135,8 @@ public static partial class AgcExports
             $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
             $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
+        SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered,
+            ownerHandle, 0, commandAddress, dwordCount);
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.CommandSubmissionGate)
@@ -272,7 +280,11 @@ public static partial class AgcExports
                         $"addr=0x{commandAddress:X16} dwords={dwordCount}");
                 }
 
+                SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureStarted,
+                    0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
                 var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
+                SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureFinished,
+                    0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
                 if (!TrySubmitCommandStream(
                     ctx.Memory,
                     0,
@@ -305,7 +317,11 @@ public static partial class AgcExports
 
         try
         {
+            SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendEntered,
+                queue, submissionId, address, dwordCount);
             GuestGpu.Current.SubmitCommandStream(memory, queue, address, dwordCount, submissionId, geometrySnapshots);
+            SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.BackendReturned,
+                queue, submissionId, address, dwordCount);
             return true;
         }
         catch (OperationCanceledException)

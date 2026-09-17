@@ -58,6 +58,7 @@ public sealed unsafe partial class DirectExecutionBackend
             _guestThreadFlowProfile.StartSession();
             SharpEmu.Libs.Diagnostics.SemaphoreSignalProfile.StartSession();
             SharpEmu.Libs.Diagnostics.MutexHandoffProfile.StartSession();
+            SharpEmu.Libs.VideoOut.SubmissionFlowProfile.StartSession();
         }
     }
 
@@ -68,6 +69,7 @@ public sealed unsafe partial class DirectExecutionBackend
         {
             var signals = SharpEmu.Libs.Diagnostics.SemaphoreSignalProfile.Close();
             var mutexes = SharpEmu.Libs.Diagnostics.MutexHandoffProfile.Close();
+            SharpEmu.Libs.VideoOut.SubmissionFlowProfile.WriteTrace(output);
             try
             {
                 _guestThreadFlowProfile.WriteTrace(output);

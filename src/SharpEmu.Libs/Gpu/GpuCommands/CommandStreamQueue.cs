@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
+
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
 public enum IdleOutcome
@@ -189,6 +191,9 @@ public sealed class CommandStreamQueue
 
         _queues[submission.QueueId].AddLast(submission);
         _submissionCount++;
+        if (submission.Kind != CommandSubmissionKind.FlipPreparation)
+            SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.Enqueued, submission.QueueId,
+                submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
         Monitor.PulseAll(_gate);
     }
 
@@ -343,6 +348,9 @@ public sealed class CommandStreamQueue
             _nextQueue = (selected + 1) % QueueCount;
             _processing = true;
             _processingThread = Thread.CurrentThread;
+            if (!submission.Started && submission.Kind != CommandSubmissionKind.FlipPreparation)
+                SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.ProcessingStarted, submission.QueueId,
+                    submission.SubmissionId, submission.Address, submission.DwordCount, _submissionCount);
         }
 
         bool complete;

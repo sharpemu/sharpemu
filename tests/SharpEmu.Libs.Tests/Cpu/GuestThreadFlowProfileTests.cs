@@ -30,6 +30,7 @@ public sealed class GuestThreadFlowProfileTests
         profile.Close();
         SemaphoreSignalProfile.Close();
         MutexHandoffProfile.Close();
+        SubmissionFlowProfile.WriteTrace(TextWriter.Null);
         backendType.GetMethod("StartGuestFlowTraces", instancePrivate)!.Invoke(backend, null);
         profile.Record(CreateEvent(2));
         Assert.Equal(CreateEvent(2), Assert.Single(profile.Close().Events));
@@ -37,6 +38,10 @@ public sealed class GuestThreadFlowProfileTests
         MutexHandoffProfile.Record(1, "Granted", 0x100, 0x200);
         Assert.Equal(RenderPhaseProfile.FrameTraceEnabled ? 1 : 0, SemaphoreSignalProfile.Close().Events.Length);
         Assert.Equal(RenderPhaseProfile.FrameTraceEnabled ? 1 : 0, MutexHandoffProfile.Close().Events.Length);
+        SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.SubmitEntered);
+        using var submissionOutput = new StringWriter();
+        SubmissionFlowProfile.WriteTrace(submissionOutput);
+        Assert.Equal(RenderPhaseProfile.FrameTraceEnabled, submissionOutput.ToString().Contains("[PERF][SUBMISSION_FLOW_TRACE]"));
     }
 
     [Theory]
@@ -123,6 +128,8 @@ public sealed class GuestThreadFlowProfileTests
             SemaphoreSignalProfile.Begin(0x83, 1);
             MutexHandoffProfile.StartSession();
             MutexHandoffProfile.Record(1, "Granted", 0x100, 0x200);
+            SubmissionFlowProfile.StartSession();
+            SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.SubmitEntered);
             Console.SetError(output);
             backend.RequestHostShutdown("trace-test");
             Assert.Contains("[PERF][GUEST_FLOW_TRACE]", output.ToString());
@@ -135,6 +142,8 @@ public sealed class GuestThreadFlowProfileTests
                 output.ToString().Split("[PERF][SEMAPHORE_SIGNAL_TRACE]").Length - 1);
             Assert.Equal(RenderPhaseProfile.FrameTraceEnabled ? 1 : 0,
                 output.ToString().Split("[PERF][MUTEX_HANDOFF_TRACE]").Length - 1);
+            Assert.Equal(RenderPhaseProfile.FrameTraceEnabled ? 1 : 0,
+                output.ToString().Split("[PERF][SUBMISSION_FLOW_TRACE]").Length - 1);
             Assert.Empty(MutexHandoffProfile.Close().Events);
             Assert.Empty(SemaphoreSignalProfile.Close().Events);
             Assert.Empty(profile.Close().Events);

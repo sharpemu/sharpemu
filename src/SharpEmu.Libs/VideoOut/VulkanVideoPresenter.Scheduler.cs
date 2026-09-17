@@ -42,8 +42,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
         internal static void WakeRenderThread()
         {
+            SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.WakeRequested);
             lock (_gate)
             {
+                SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.WakeSignaled);
                 System.Threading.Monitor.PulseAll(_gate);
             }
         }

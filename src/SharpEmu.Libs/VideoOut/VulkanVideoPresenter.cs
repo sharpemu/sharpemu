@@ -265,6 +265,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     VideoOutExports.NotifyPresentationWindowClosed();
                     DisposeVulkan();
                     RenderPhaseProfile.WriteFrameTrace();
+                    SubmissionFlowProfile.WriteTrace();
                 },
                 WaitForRenderWork);
         }
