@@ -21,7 +21,8 @@ public sealed class GuestSpaceOwner : IDisposable
 
     private readonly IHostViewMemory _host;
     private readonly SharedBackingViews _views;
-    private readonly object _lock = new();
+    private readonly object _mappingLock = new();
+    private readonly object[] _protectionLocks = CreateProtectionLocks();
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly SortedList<ulong, OwnedRange> _mapped = new();
     private readonly List<(ulong Address, ulong Size)> _owned = new();
@@ -31,6 +32,9 @@ public sealed class GuestSpaceOwner : IDisposable
     {
         _host = host;
         Granularity = host.Granularity;
+        // Create lookup views before concurrent fault handlers can read the range table.
+        _ = _mapped.Keys;
+        _ = _mapped.Values;
         _views = new SharedBackingViews(host, backingSize);
         if (!_views.IsAvailable)
         {
@@ -66,7 +70,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (_disposed || OverlapsOwnedLocked(address, size) || _host.ReserveHole(address, size) != address)
             {
@@ -89,7 +93,7 @@ public sealed class GuestSpaceOwner : IDisposable
         if (reservationEnd == 0)
             return false;
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             List<(ulong Address, ulong Size)> additions;
             using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationSearch))
@@ -155,7 +159,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        lock (_mappingLock)
         {
             return _owned.Any(range => address >= range.Address && address + size <= range.Address + range.Size);
         }
@@ -168,7 +172,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        lock (_mappingLock)
         {
             return FindFreeRangeIndex(address, size) >= 0;
         }
@@ -182,7 +186,7 @@ public sealed class GuestSpaceOwner : IDisposable
         }
 
         alignment = Math.Max(alignment, GuestPage);
-        lock (_lock)
+        lock (_mappingLock)
         {
             return FindAlignedFreeAddress(searchStart, searchEnd, size, alignment);
         }
@@ -195,7 +199,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             return SetAccessLocked(address, size, protection);
         }
@@ -209,9 +213,95 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using var protectionScope = new ProtectionRangeScope(_protectionLocks, address, size);
+        return SetAccessLocked(address, size, protection);
+    }
+
+    private MappingLockScope EnterMappingLock() => new(_mappingLock, _protectionLocks);
+
+    // Mapping changes own every address lock before they inspect or change the range tables.
+    // Transient protection needs only its address locks and does not allocate reader state.
+    private ref struct MappingLockScope
+    {
+        private readonly object _mappingLock;
+        private ProtectionRangeScope _protectionScope;
+
+        public MappingLockScope(object mappingLock, object[] protectionLocks)
         {
-            return SetAccessLocked(address, size, protection);
+            _mappingLock = mappingLock;
+            var taken = false;
+            try
+            {
+                Monitor.Enter(mappingLock, ref taken);
+                _protectionScope = new ProtectionRangeScope(protectionLocks, 0,
+                    (ulong)protectionLocks.Length << ProtectionBlockShift);
+            }
+            catch
+            {
+                if (taken) Monitor.Exit(mappingLock);
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            _protectionScope.Dispose();
+            Monitor.Exit(_mappingLock);
+        }
+    }
+
+    private const int ProtectionLockCount = 256;
+    private const int ProtectionBlockShift = 22;
+
+    private static object[] CreateProtectionLocks()
+    {
+        var protectionLocks = new object[ProtectionLockCount];
+        for (var index = 0; index < protectionLocks.Length; index++) protectionLocks[index] = new object();
+        return protectionLocks;
+    }
+
+    // Address locks keep views alive and order overlapping protection changes.
+    // Lock collisions only serialize extra ranges; every caller acquires locks in index order.
+    private ref struct ProtectionRangeScope
+    {
+        private readonly object[] _protectionLocks;
+        private readonly int _firstLockIndex;
+        private readonly int _lockCount;
+        private int _acquiredLockCount;
+
+        public ProtectionRangeScope(object[] protectionLocks, ulong address, ulong size)
+        {
+            _protectionLocks = protectionLocks;
+            var firstBlock = address >> ProtectionBlockShift;
+            var lastBlock = (address + size - 1) >> ProtectionBlockShift;
+            _lockCount = (int)Math.Min((ulong)protectionLocks.Length, lastBlock - firstBlock + 1);
+            _firstLockIndex = _lockCount == protectionLocks.Length ? 0 : (int)(firstBlock % (ulong)protectionLocks.Length);
+            _acquiredLockCount = 0;
+            try
+            {
+                while (_acquiredLockCount < _lockCount)
+                {
+                    var taken = false;
+                    try { Monitor.Enter(protectionLocks[GetLockIndex(_acquiredLockCount)], ref taken); }
+                    finally { if (taken) _acquiredLockCount++; }
+                }
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        private readonly int GetLockIndex(int acquisitionIndex)
+        {
+            var wrappedCount = Math.Max(0, _firstLockIndex + _lockCount - _protectionLocks.Length);
+            return acquisitionIndex < wrappedCount ? acquisitionIndex : _firstLockIndex + acquisitionIndex - wrappedCount;
+        }
+
+        public void Dispose()
+        {
+            while (_acquiredLockCount > 0) Monitor.Exit(_protectionLocks[GetLockIndex(--_acquiredLockCount)]);
         }
     }
 
@@ -230,7 +320,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (!TryTakeFreeRange(address, size))
             {
@@ -261,7 +351,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (!HasOnlyRangeKind(address, size, RangeKind.Backed))
             {
@@ -290,7 +380,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (!TryTakeFreeRange(address, size))
             {
@@ -319,7 +409,7 @@ public sealed class GuestSpaceOwner : IDisposable
             return false;
         }
 
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (!HasOnlyRangeKind(address, size, RangeKind.Private))
             {
@@ -363,7 +453,7 @@ public sealed class GuestSpaceOwner : IDisposable
     // Release all mappings and reserved ranges, but keep the backing object for reuse.
     public void ReleaseAddressRanges()
     {
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (_disposed)
             {
@@ -397,7 +487,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public void Dispose()
     {
-        lock (_lock)
+        using (EnterMappingLock())
         {
             if (_disposed)
             {
@@ -405,11 +495,7 @@ public sealed class GuestSpaceOwner : IDisposable
             }
 
             _disposed = true;
-        }
-
-        _views.Dispose();
-        lock (_lock)
-        {
+            _views.Dispose();
             foreach (var (address, size) in _owned)
             {
                 if (!_host.FreeOwnedRange(address, size))
@@ -448,6 +534,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection)
     {
+        if (_disposed) return false;
         var end = address + size;
         var index = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_mapped, address));
         for (; index < _mapped.Count && _mapped.Values[index].Address < end; index++)
@@ -455,9 +542,9 @@ public sealed class GuestSpaceOwner : IDisposable
             var range = _mapped.Values[index];
             var start = Math.Max(address, range.Address);
             var stop = Math.Min(end, range.Address + range.Size);
-            if (start < stop && !_host.ChangeAccess(start, stop - start, protection))
+            if (start < stop)
             {
-                return false;
+                if (!_host.ChangeAccess(start, stop - start, protection)) return false;
             }
         }
 

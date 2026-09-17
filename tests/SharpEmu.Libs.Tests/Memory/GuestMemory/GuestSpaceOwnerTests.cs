@@ -10,7 +10,7 @@ using Op = SharpEmu.Libs.Tests.Memory.GuestMemory.FailingHostViews.Op;
 namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 
 [Collection(GuestMemoryStateCollection.Name)]
-public sealed unsafe class GuestSpaceOwnerTests
+public sealed unsafe partial class GuestSpaceOwnerTests
 {
     private const ulong Page = GuestSpaceOwner.GuestPage;
 
@@ -241,6 +241,32 @@ public sealed unsafe class GuestSpaceOwnerTests
 
         Assert.True(owner.SetAccess(baseAddress, Page, HostPageProtection.ReadWrite));
         Assert.True(owner.UnmapShared(baseAddress, Page));
+    }
+
+    [Fact]
+    public void FailedTransientAccessReleasesLockAndKeepsMapping()
+    {
+        if (!Supported) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var address = AcquireRange(owner, host, HoleSize(host));
+        Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
+        *(ulong*)address = Marker;
+
+        host.FailNext(Op.ChangeAccess);
+        Assert.False(owner.SetTransientAccess(address, Page, HostPageProtection.NoAccess));
+        Assert.Equal(Marker, *(ulong*)address);
+        var protectionApplied = false;
+        var retry = new Thread(() => protectionApplied = owner.SetTransientAccess(address, Page, HostPageProtection.ReadOnly))
+        {
+            IsBackground = true,
+        };
+        retry.Start();
+        Assert.True(retry.Join(TimeSpan.FromSeconds(10)), "The failed protection call retained the owner lock.");
+        Assert.True(protectionApplied);
+        Assert.Equal(Marker, *(ulong*)address);
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite));
+        Assert.True(owner.UnmapShared(address, Page));
     }
 
     [Fact]

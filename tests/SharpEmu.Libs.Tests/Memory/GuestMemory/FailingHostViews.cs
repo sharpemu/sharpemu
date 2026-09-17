@@ -41,6 +41,8 @@ internal sealed class FailingHostViews : IHostViewMemory
 
     public Action<ulong, ulong>? BeforeReserveHole { get; set; }
 
+    public Action<ulong, ulong>? BeforeChangeAccess { get; set; }
+
     public ulong PageSize => _inner.PageSize;
 
     public ulong Granularity => _inner.Granularity;
@@ -105,26 +107,32 @@ internal sealed class FailingHostViews : IHostViewMemory
     public bool ReleasePrivate(ulong address, ulong size) =>
         !ShouldFail(Op.ReleasePrivate) && _inner.ReleasePrivate(address, size);
 
-    public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) =>
-        !ShouldFail(Op.ChangeAccess) && _inner.ChangeAccess(address, size, protection);
+    public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection)
+    {
+        BeforeChangeAccess?.Invoke(address, size);
+        return !ShouldFail(Op.ChangeAccess) && _inner.ChangeAccess(address, size, protection);
+    }
 
     public bool FreeOwnedRange(ulong address, ulong size) =>
         !ShouldFail(Op.FreeOwnedRange) && _inner.FreeOwnedRange(address, size);
 
     private bool ShouldFail(Op op)
     {
-        Log.Add(op);
-        if (_failOp != op)
+        lock (Log)
         {
-            return false;
-        }
+            Log.Add(op);
+            if (_failOp != op)
+            {
+                return false;
+            }
 
-        if (_failAfter-- > 0)
-        {
-            return false;
-        }
+            if (_failAfter-- > 0)
+            {
+                return false;
+            }
 
-        _failOp = null;
-        return true;
+            _failOp = null;
+            return true;
+        }
     }
 }
