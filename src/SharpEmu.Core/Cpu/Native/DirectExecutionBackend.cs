@@ -3823,9 +3823,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		using (LockGate("TryStartThread"))
 		{
 			_guestThreads[request.ThreadHandle] = thread;
-			ProfileGuestThreadReady(thread);
-			_readyGuestThreads.Enqueue(thread);
-			Interlocked.Increment(ref _readyGuestThreadCount);
+			EnqueueReadyGuestThreadLocked(thread);
 		}
 		Console.Error.WriteLine(
 			$"[LOADER][INFO] Scheduled guest thread '{thread.Name}' handle=0x{thread.ThreadHandle:X16} " +
@@ -3833,10 +3831,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"host_priority={MapGuestThreadPriority(thread.Priority)} affinity=0x{thread.AffinityMask:X}");
 		LoadProgressDiagnostics.ArmIfNorthAudioThread(thread.Name);
 		Pump(creatorContext, "pthread_create");
-		// Pump is suppressed while another cooperative dispatch is active. The
-		// background dispatcher would eventually observe this thread, but an
-		// immediate authoritative drain avoids making thread creation depend on
-		// the approximate ready-count polling hint.
+		// Thread creation can dispatch even when another caller owns Pump.
 		DispatchReadyGuestThreads();
 		return true;
 	}
@@ -4022,9 +4017,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				ProfileGuestThreadReady(thread);
-				_readyGuestThreads.Enqueue(thread);
-				Interlocked.Increment(ref _readyGuestThreadCount);
+				EnqueueReadyGuestThreadLocked(thread);
 				wakeCount++;
 			}
 		}
@@ -4142,9 +4135,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
 				thread.BlockDeadlineTimestamp = 0;
-				ProfileGuestThreadReady(thread);
-				_readyGuestThreads.Enqueue(thread);
-				Interlocked.Increment(ref _readyGuestThreadCount);
+				EnqueueReadyGuestThreadLocked(thread);
 				wakeCount++;
 			}
 		}
@@ -4942,9 +4933,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				target.State = GuestThreadRunState.Ready;
 				target.BlockReason = null;
 				target.BlockDeadlineTimestamp = 0;
-				ProfileGuestThreadReady(target);
-				_readyGuestThreads.Enqueue(target);
-				Interlocked.Increment(ref _readyGuestThreadCount);
+				EnqueueReadyGuestThreadLocked(target);
 			}
 		}
 
@@ -5759,9 +5748,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
 							thread.BlockDeadlineTimestamp = 0;
-							ProfileGuestThreadReady(thread);
-							_readyGuestThreads.Enqueue(thread);
-							Interlocked.Increment(ref _readyGuestThreadCount);
+							EnqueueReadyGuestThreadLocked(thread);
 						}
 						break;
 					default:
@@ -5783,6 +5770,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Volatile.Write(ref thread.HostThreadId, 0);
 			GuestThreadExecution.RestoreGuestThread(previousGuestThreadHandle);
 			LastError = previousLastError;
+			// Finish slice accounting before another executor can start this thread.
+			ProfileGuestThreadRunStopped(thread);
 			lock (_guestThreadGate)
 			{
 				if (ReferenceEquals(thread.HostThread, Thread.CurrentThread))
@@ -5797,8 +5786,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					pendingAfterExecutorRelease = pending;
 				}
 			}
-			ProfileGuestThreadRunStopped(thread);
-
 			if (pendingAfterExecutorRelease is { } pendingException &&
 				!TryRaiseGuestException(
 					thread.Context,
@@ -5820,6 +5807,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out PendingGuestException pending)
 	{
 		thread.ExecutorActive = false;
+		if (thread.State == GuestThreadRunState.Ready)
+		{
+			// A wake can arrive before the previous executor releases this thread.
+			Monitor.PulseAll(_guestThreadGate);
+		}
 		if (thread.State == GuestThreadRunState.Blocked &&
 			!thread.ExceptionDeliveryActive &&
 			TryRemovePendingGuestExceptionLocked(thread.ThreadHandle, out pending))
@@ -6841,19 +6833,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_stallWatchdogThread = null;
 	}
 
-	// A guest thread only gets dispatched to a native thread when some running
-	// guest thread calls Pump (which happens inside blocking HLE primitives:
-	// waits, usleep, pthread_create, entry_return). That leaves a starvation
-	// hole: a guest thread that spins on a non-blocking HLE call (e.g.
-	// sceAudioOutOutput) never pumps, so any thread that was made Ready — for
-	// example a job worker woken by sceKernelSetEventFlag — sits in the ready
-	// queue forever. Import progress keeps advancing (the spin), so the stall
-	// watchdog never fires either, and the whole game deadlocks with 0 draws.
-	//
-	// This background dispatcher closes the hole: it drains the ready queue on
-	// a short interval regardless of whether any guest thread pumps. It is
-	// deliberately self-contained (it does not touch Pump or the pump-depth
-	// guard) so it cannot alter the existing cooperative dispatch path.
+	// Ready work must not depend on another guest import to start execution.
 	private void StartReadyThreadDispatcher()
 	{
 		if (_readyDispatchThread != null)
@@ -6870,15 +6850,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			while (!_readyDispatchStop)
 			{
-				Thread.Sleep(1);
-				if (_readyDispatchStop)
+				GuestThreadState? readyThread;
+				lock (_guestThreadGate)
 				{
-					break;
+					if (_readyDispatchStop) break;
+					if (!TryClaimReadyGuestThreadLocked(out readyThread))
+					{
+						// Queue checks and notifications share this gate to prevent lost wakes.
+						// A timed wait is needed only for the optional diagnostic snapshots.
+						Monitor.Wait(_guestThreadGate, logSnapshots ? 1000 : Timeout.Infinite);
+					}
 				}
-				// The count is a fast diagnostic hint, while the queue/state pair under
-				// _guestThreadGate is authoritative. Always attempt a locked drain so a
-				// stale hint cannot strand a runnable continuation.
-				DispatchReadyGuestThreads();
+				if (readyThread is not null)
+				{
+					ScheduleGuestThreadExecution(readyThread, "ready-dispatch");
+				}
 				if (logSnapshots && Stopwatch.GetTimestamp() >= nextSnapshotTimestamp)
 				{
 					lock (_guestThreadGate)
@@ -6911,7 +6897,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private void StopReadyThreadDispatcher()
 	{
-		_readyDispatchStop = true;
+		lock (_guestThreadGate)
+		{
+			_readyDispatchStop = true;
+			Monitor.PulseAll(_guestThreadGate);
+		}
 		Thread? readyDispatchThread = _readyDispatchThread;
 		if (readyDispatchThread == null)
 		{
@@ -6921,13 +6911,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			try
 			{
-				readyDispatchThread.Join(300);
+				readyDispatchThread.Join();
 			}
 			catch
 			{
 			}
 		}
 		_readyDispatchThread = null;
+	}
+
+	private void EnqueueReadyGuestThreadLocked(GuestThreadState thread)
+	{
+		ProfileGuestThreadReady(thread);
+		_readyGuestThreads.Enqueue(thread);
+		Interlocked.Increment(ref _readyGuestThreadCount);
+		Monitor.PulseAll(_guestThreadGate);
 	}
 
 	// Dequeue every currently-ready guest thread and start a native thread for
