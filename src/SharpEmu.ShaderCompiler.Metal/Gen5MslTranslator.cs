@@ -897,6 +897,9 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             switch (instruction.Opcode)
             {
+                // No shader trap handler is installed, so S_TRAP has no effect.
+                case "STrap":
+                    return true;
                 case "SNop":
                 case "SWaitcnt":
                 case "SInstPrefetch":

@@ -1345,6 +1345,11 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            // No shader trap handler is installed, so S_TRAP has no effect.
+            if (instruction.Opcode == "STrap")
+            {
+                return true;
+            }
             if (instruction.Opcode is
                 "SNop" or
                 "SWaitcnt" or
