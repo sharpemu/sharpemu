@@ -112,6 +112,41 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void RegisterPacketCopiesValuesAcrossBackingViews()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var sourceViewAddress = Hold(memory, host);
+        var destinationViewAddress = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(sourceViewAddress, Segment, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryMapBacked(sourceViewAddress + Segment, Segment, 2 * Segment, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryMapBacked(destinationViewAddress, Segment, 4 * Segment, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryMapBacked(destinationViewAddress + Segment, Segment, 6 * Segment, GuestPageProtection.Read, out _));
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = destinationViewAddress + 0x100;
+        var packetAddress = destinationViewAddress + Segment - 24;
+        var sourceAddress = sourceViewAddress + Segment - 8;
+        byte[] values = Enumerable.Range(1, 16).Select(value => (byte)value).ToArray();
+        Assert.True(memory.TryWrite(sourceAddress, values));
+        Assert.True(context.TryWriteUInt64(commandBufferAddress + 0x10, packetAddress));
+        Assert.True(context.TryWriteUInt64(commandBufferAddress + 0x18, destinationViewAddress + 2 * Segment));
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 0x40;
+        context[CpuRegister.Rdx] = sourceAddress;
+        context[CpuRegister.Rcx] = 4;
+
+        Assert.Equal(0, SharpEmu.Libs.Agc.AgcExports.CbSetShRegisterRangeDirect(context));
+
+        Assert.Equal(packetAddress + 8, context[CpuRegister.Rax]);
+        var copiedValues = new byte[16];
+        Assert.True(memory.TryRead(packetAddress + 16, copiedValues));
+        Assert.Equal(values, copiedValues);
+        Assert.True(context.TryReadUInt64(commandBufferAddress + 0x10, out var commandCursor));
+        Assert.Equal(packetAddress + 32, commandCursor);
+    }
+
+    [Fact]
     public void ViewsShareBackingAndKeepContentsAfterRemapping()
     {
         if (!Supported) return;
