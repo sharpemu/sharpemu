@@ -298,10 +298,13 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
     }
 
     [Theory]
-    [InlineData(ShaderStageKind.Vertex)]
-    [InlineData(ShaderStageKind.Pixel)]
-    [InlineData(ShaderStageKind.Compute)]
-    public void PrepareBindings_RejectsDrawImageTypesButKeepsComputeViewChecksFatal(ShaderStageKind stage)
+    [InlineData(ShaderStageKind.Vertex, 1u)]
+    [InlineData(ShaderStageKind.Pixel, 1u)]
+    [InlineData(ShaderStageKind.Compute, 1u)]
+    [InlineData(ShaderStageKind.Vertex, 64u)]
+    [InlineData(ShaderStageKind.Pixel, 64u)]
+    [InlineData(ShaderStageKind.Compute, 64u)]
+    public void PrepareBindings_ReplacesAnIncompatibleImageType(ShaderStageKind stage, uint width)
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -312,14 +315,14 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         {
             Images = [new ImageResource
             {
-                Dimension = ImageDimension.Dim1D,
+                Dimension = ImageDimension.Dim2D,
                 ResourceClass = global::SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Sampled,
                 NumericClass = ImageNumericClass.Float,
                 Read = true,
             }],
         };
         var program = FixedProgramProvider.EmptyProgram(stage, 0x1234, info);
-        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, 1, 1);
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, width, 1);
         var snapshot = new ResourceSnapshot { Images = [words] };
         presenter.Run(() =>
         {
@@ -328,23 +331,16 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
             var description = request.Description;
             description.Type = GuestImageType.Color1D;
             var identifier = harness.Images.InsertImageForTest(description);
-            Assert.Equal(identifier, harness.Images.FindImage(ref request));
             var image = harness.Images.GetImage(identifier);
             Assert.Equal(ImageType.Type1D, image.Backing.ImageType);
             Assert.Equal(ImageViewType.Type2D, request.View.Type);
             Assert.False(image.SupportsViewType(request.View));
-            if (stage == ShaderStageKind.Compute)
-            {
-                var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
-                var failure = Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.BindResources(prepared));
-                Assert.Contains("typeValid=False", failure.Message);
-            }
-            else
-            {
-                var failure = Assert.Throws<DrawImageTypeMismatchException>(() =>
-                    presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot)));
-                Assert.Contains("imageType=0 viewType=1", failure.Message);
-            }
+            var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+            presenter.RenderHost.BindResources(prepared);
+            var replacementIdentifier = harness.Images.FindImage(ref request);
+            Assert.NotEqual(identifier, replacementIdentifier);
+            Assert.Equal(ImageType.Type2D, harness.Images.GetImage(replacementIdentifier).Backing.ImageType);
+            Assert.True(harness.Images.GetImage(replacementIdentifier).SupportsViewType(request.View));
         });
         presenter.Run(presenter.RenderHost.ResetBindings);
         harness.Finish();

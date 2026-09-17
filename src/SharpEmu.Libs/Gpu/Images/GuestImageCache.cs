@@ -162,6 +162,19 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 ReleaseImage(result);
                 result = ResourceSlotIdentifier.Invalid;
             }
+            else if (!resolved.SupportsViewType(request.View) &&
+                     resolved.Description.Extent.Height == 1 && resolved.Description.Extent.Depth == 1 &&
+                     ((resolved.Backing.ImageType == ImageType.Type1D &&
+                       request.View.Type is ImageViewType.Type2D or ImageViewType.Type2DArray) ||
+                      (resolved.Backing.ImageType == ImageType.Type2D &&
+                       request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray)))
+            {
+                // Keep all cached subresources when an overlap needs a different dimensional type.
+                var replacement = resolved.Description;
+                replacement.Type = request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray
+                    ? GuestImageType.Color1D : GuestImageType.Color2D;
+                result = GrowImage(replacement, result);
+            }
         }
 
         if (!result.IsValid)

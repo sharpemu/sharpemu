@@ -206,8 +206,14 @@ public sealed partial class GuestImageCache
 
         var sourceDepth = source.Description.IsDepth;
         var destinationDepth = destination.Description.IsDepth;
-        var directCopy = source.Backing.Format == destination.Backing.Format ||
-                         (!sourceDepth && !destinationDepth && ViewFormatRules.BlockBytes(source.Backing.Format) == ViewFormatRules.BlockBytes(destination.Backing.Format));
+        var sourceType = source.Backing.ImageType;
+        var destinationType = destination.Backing.ImageType;
+        var compatibleTypes = sourceType == destinationType ||
+                              (sourceType == ImageType.Type2D && destinationType == ImageType.Type3D) ||
+                              (sourceType == ImageType.Type3D && destinationType == ImageType.Type2D);
+        var directCopy = compatibleTypes &&
+                         (source.Backing.Format == destination.Backing.Format ||
+                          (!sourceDepth && !destinationDepth && ViewFormatRules.BlockBytes(source.Backing.Format) == ViewFormatRules.BlockBytes(destination.Backing.Format)));
         if (directCopy)
         {
             destination.CopyFrom(source);
