@@ -27,6 +27,7 @@ public static partial class VideoOutExports
     private const int OrbisVideoOutErrorInvalidEventQueue = unchecked((int)0x8029000C);
     private const int OrbisVideoOutErrorInvalidEvent = unchecked((int)0x8029000D);
     private const int OrbisVideoOutErrorUnsupportedOutputMode = unchecked((int)0x80290016);
+    private const int OrbisVideoOutErrorUnavailableOutputMode = unchecked((int)0x80290019);
     private const int OrbisVideoOutErrorInvalidOption = unchecked((int)0x8029001A);
     private const int SceVideoOutBusTypeMain = 0;
     private const int SceVideoOutBufferAttributeOptionNone = 0;
@@ -48,6 +49,8 @@ public static partial class VideoOutExports
     private const int MaxLatencyHistoryEntries = 256;
     private const ulong SceVideoOutOutputModeDefault = 1;
     private const ulong SceVideoOutOutputMode119_88Hz = 0xF;
+    private const ulong SceVideoOutRefreshRate59_94Hz = 3;
+    private const ulong SceVideoOutRefreshRate119_88Hz = 13;
     private const ulong SceVideoOutPixelFormatA8R8G8B8Srgb = 0x80000000;
     private const ulong SceVideoOutPixelFormatA8B8G8R8Srgb = 0x80002200;
     private const ulong SceVideoOutPixelFormatA2R10G10B10 = 0x88060000;
@@ -415,7 +418,11 @@ public static partial class VideoOutExports
         LibraryName = "libSceVideoOut")]
     public static int VideoOutConfigureOutput(CpuContext ctx)
     {
+        var supported = VideoOutIsOutputSupported(ctx);
+        if (supported < 0) return supported;
+        if (supported == 0) return OrbisVideoOutErrorUnavailableOutputMode;
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        // The only advertised configuration is the current default output.
         return TryGetPort(handle, out _)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : OrbisVideoOutErrorInvalidHandle;
@@ -466,7 +473,11 @@ public static partial class VideoOutExports
         var resolutionClass = port.OutputWidth >= 3840 || port.OutputHeight >= 2160 ? 2 : 1;
         BinaryPrimitives.WriteInt32LittleEndian(status[0x00..0x04], resolutionClass);
         BinaryPrimitives.WriteInt32LittleEndian(status[0x04..0x08], 1);
-        BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..0x10], port.RefreshRate);
+        // The status uses a refresh-rate code, not the frequency used for pacing.
+        var refreshRateCode = port.RefreshRate >= 119
+            ? SceVideoOutRefreshRate119_88Hz
+            : SceVideoOutRefreshRate59_94Hz;
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..0x10], refreshRateCode);
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
