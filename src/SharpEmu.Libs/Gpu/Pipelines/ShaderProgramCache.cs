@@ -181,6 +181,7 @@ internal sealed class ShaderProgramCache
             key = new ProgramKey(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize, _staticState.ToArray());
             _programs.TryGetValue(key, out entry);
         }
+        var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
         {
             RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
@@ -202,9 +203,10 @@ internal sealed class ShaderProgramCache
 
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
+        var captureIndirectImageFailure = ShaderPermutationDump.CreateFailureCapture(source);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
-            if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out var materializationFailure))
+            if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out var materializationFailure, captureIndirectImageFailure))
             {
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
@@ -232,7 +234,7 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor);
+        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached);
         entry.Permutations.Add(permutation);
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
@@ -371,7 +373,9 @@ internal sealed class ShaderProgramCache
         StageCompileOptions options,
         ProgramSourceEntry entry,
         ResourceSpecialization specialization,
-        uint pushDataCursor)
+        uint pushDataCursor,
+        ProgramKey key,
+        bool sourceWasCached)
     {
         var program = entry.Program;
         var plan = entry.Plan;
@@ -395,6 +399,9 @@ internal sealed class ShaderProgramCache
         }
 
         var request = BuildRequest(source, options, entry, resources, layout);
+        var permutationDump = ShaderPermutationDump.WriteInputs(
+            source, key, sourceWasCached, _programs.Keys, entry.Permutations,
+            specialization, request, pushDataCursor, _nextProgramId + 1);
         if (!_compiler.TryCompileProgram(request, out var compiled, out var error) || compiled is null)
         {
             throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
@@ -412,6 +419,7 @@ internal sealed class ShaderProgramCache
         }
 
         _compiler.CountShaderCompilation();
+        ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
