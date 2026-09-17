@@ -9,6 +9,42 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 public sealed class PageMaskTests
 {
     [Fact]
+    public void RangeQueryPreservesBitsAndUsesExclusiveEnd()
+    {
+        var mask = new PageMask();
+        Assert.False(mask.AnyInRange(0, TrackerLayout.PagesPerBlock));
+        for (var pageIndex = 0; pageIndex < TrackerLayout.PagesPerBlock; pageIndex++)
+        {
+            mask.Set(pageIndex);
+            Assert.True(mask.AnyInRange(pageIndex, pageIndex + 1));
+            Assert.True(mask.AnyInRange(0, TrackerLayout.PagesPerBlock));
+            Assert.False(mask.AnyInRange(0, pageIndex));
+            Assert.False(mask.AnyInRange(pageIndex + 1, TrackerLayout.PagesPerBlock));
+            Assert.True(mask.Get(pageIndex));
+            mask.Unset(pageIndex);
+            Assert.True(mask.None);
+        }
+        mask.Fill();
+        for (var pageIndex = 0; pageIndex < TrackerLayout.PagesPerBlock; pageIndex++)
+            Assert.True(mask.AnyInRange(pageIndex, pageIndex + 1));
+    }
+
+    [Fact]
+    public void RangeQueryMatchesCopiedMasksAcrossAllPageBoundaries()
+    {
+        var mask = new PageMask();
+        foreach (var page in new[] { 0, 63, 64, 127, 512, 700, 1023 }) mask.Set(page);
+        for (var start = 0; start <= TrackerLayout.PagesPerBlock; start++)
+        {
+            for (var end = start; end <= TrackerLayout.PagesPerBlock; end++)
+                Assert.Equal(new PageMask(mask, start, end).Any, mask.AnyInRange(start, end));
+        }
+        Assert.False(mask.AnyInRange(0, TrackerLayout.PagesPerBlock + 1));
+        Assert.False(mask.AnyInRange(-1, 1));
+        Assert.False(mask.AnyInRange(10, 9));
+    }
+
+    [Fact]
     public void SetAndGet_TrackSingleBits()
     {
         var mask = new PageMask();

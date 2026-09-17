@@ -39,7 +39,7 @@ public sealed class TrackedRegion
     public bool IsModified(WriteOrigin side, ulong offset, ulong size)
     {
         var (start, end) = GetPageRange(BaseAddress + offset, size);
-        return new PageMask(GetDirtyMask(side), start, end).Any;
+        return GetDirtyMask(side).AnyInRange(start, end);
     }
 
     public bool IsCpuWriteHot(ulong offset, ulong size)

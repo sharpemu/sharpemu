@@ -47,6 +47,16 @@ public struct PageMask
 
     public bool None => !Any;
 
+    public bool AnyInRange(int startPage, int endPage)
+    {
+        if (startPage < 0 || endPage > Bits || startPage >= endPage) return false;
+        for (var wordIndex = startPage / WordBits; wordIndex <= (endPage - 1) / WordBits; wordIndex++)
+        {
+            if ((_words[wordIndex] & RangeWord(wordIndex, startPage, endPage)) != 0) return true;
+        }
+        return false;
+    }
+
     public bool Get(int index) => (_words[index / WordBits] & (1UL << (index % WordBits))) != 0;
 
     public void Set(int index) => _words[index / WordBits] |= 1UL << (index % WordBits);
