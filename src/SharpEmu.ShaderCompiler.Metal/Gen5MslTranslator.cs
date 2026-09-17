@@ -1429,8 +1429,13 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "DsReadB32":
+                case "DsReadAddtidB32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
+                    if (instruction.Opcode == "DsReadAddtidB32")
+                    {
+                        address = Temp("uint", $"({address} & 0xFFFFu) + (sharpemu_lane << 2u)");
+                    }
                     StoreVector(
                         instruction.Destinations[0].Value,
                         $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");

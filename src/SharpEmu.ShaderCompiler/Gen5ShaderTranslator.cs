@@ -1215,6 +1215,7 @@ public static partial class Gen5ShaderTranslator
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
             0xB0 => "DsWriteAddtidB32",
+            0xB1 => "DsReadAddtidB32",
             0xDE => "DsWriteB96",
             0xDF => "DsWriteB128",
             0xFE => "DsReadB96",
@@ -2055,7 +2056,7 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 16) & 1) != 0);
                 sources = opcode switch
                 {
-                    "DsAppend" or "DsConsume" => [Gen5Operand.Scalar(124)],
+                    "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
                     "DsWriteB32" => [
                         Gen5Operand.Vector(vectorAddress),
@@ -2110,7 +2111,7 @@ public static partial class Gen5ShaderTranslator
                     "DsAppend" or "DsConsume" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
-                    "DsReadB32" or "DsSwizzleB32" => [
+                    "DsReadB32" or "DsReadAddtidB32" or "DsSwizzleB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsReadB64" or "DsRead2B32" or "DsRead2St64B32" => [

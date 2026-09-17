@@ -1542,6 +1542,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsReadB32":
+                case "DsReadAddtidB32":
                 {
                     if (instruction.Destinations.Count < 1 ||
                         instruction.Sources.Count < 1)
@@ -1551,6 +1552,10 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     var address = GetRawSource(instruction, 0);
+                    if (instruction.Opcode == "DsReadAddtidB32")
+                    {
+                        address = IAdd(BitwiseAnd(address, UInt(0xFFFF)), ShiftLeftLogical(GuestWaveLane(), UInt(2)));
+                    }
                     var value = Load(
                         _uintType,
                         LdsPointer(address, control.SingleOffsetBytes));
@@ -5371,7 +5376,7 @@ public static partial class Gen5SpirvTranslator
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
              _request.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32"));
+                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
