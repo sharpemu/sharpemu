@@ -240,9 +240,12 @@ public sealed class PerGameSettings
     private static HashSet<string> NormalizeEnvironmentEntries(IEnumerable<string> entries)
     {
         var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (StrictComputeSettings.IsEnabled(entries)) normalized.Add(StrictComputeSettings.VariableName);
         foreach (var entry in entries)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            // An explicit zero differs from the enabled default for this switch.
+            if (string.Equals(parts[0], StrictComputeSettings.VariableName, StringComparison.OrdinalIgnoreCase)) continue;
             if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))
             {
                 continue;

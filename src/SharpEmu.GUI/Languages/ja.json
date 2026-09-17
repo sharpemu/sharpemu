@@ -1,5 +1,6 @@
 {
   "_languageName": "日本語",
+  "Options.Env.StrictCompute.Desc": "計算と描画のシェーダー拒否時に停止します（既定）。\n無効にすると該当処理をスキップします。画像の欠落、エラー、停止が発生する場合があります。変更後はゲームを再起動してください。",
   "Options.Env.PerformanceProfile.Desc": "次回のゲーム起動から処理時間とFPSを記録します。\nパフォーマンスが低下する場合があります。",
   "Options.Env.PerformanceFrameTrace.Desc": "直近4,096件の表示間隔を保持し、終了時にログへ書き込みます。\nパフォーマンス計測が必要です。記録を保存するにはゲームを通常の手順で終了してください。",
   "Options.OverlayEnabled.Label": "パフォーマンス表示",

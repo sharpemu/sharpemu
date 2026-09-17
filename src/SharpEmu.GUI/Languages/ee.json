@@ -1,5 +1,6 @@
 {
   "_languageName": "Eesti",
+  "Options.Env.StrictCompute.Desc": "Peata arvutus- ja joonistusvarjutajate tagasilükkamisel (vaikimisi).\nLülita välja, et mõjutatud töö vahele jätta. Võimalikud on puuduvad pildid, vead või hangumine. Pärast muudatust taaskäivita mäng.",
   "Options.Env.PerformanceProfile.Desc": "Logi jõudlusajad ja FPS alates järgmisest mängu käivitamisest.\nSee võib jõudlust vähendada.",
   "Options.Env.PerformanceFrameTrace.Desc": "Säilita viimased 4096 esitamisintervalli ja kirjuta need sulgemisel logisse.\nVajab jõudluse profileerimist. Jälje salvestamiseks sulge mäng tavapäraselt.",
   "Options.OverlayEnabled.Label": "Jõudlusnäidik",

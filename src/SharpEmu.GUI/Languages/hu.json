@@ -1,5 +1,6 @@
 {
   "_languageName": "Hungarian",
+  "Options.Env.StrictCompute.Desc": "Leállás a számítási és rajzolási shaderek elutasításakor (alapértelmezett).\nKikapcsolva az érintett munka kimarad. Hiányzó képek, hibák vagy lefagyás fordulhat elő. Módosítás után indítsd újra a játékot.",
   "Options.Env.PerformanceProfile.Desc": "Teljesítményidők és FPS naplózása a játék következő indításától.\nEz csökkentheti a teljesítményt.",
   "Options.Env.PerformanceFrameTrace.Desc": "Az utolsó 4096 megjelenítési intervallum megőrzése és naplóba írása kilépéskor.\nTeljesítményprofilozást igényel. A nyomkövetés mentéséhez zárd be a játékot szabályosan.",
   "Options.OverlayEnabled.Label": "Teljesítménykijelzés",

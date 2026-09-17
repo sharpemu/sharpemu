@@ -978,6 +978,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
+                                          Label="SHARPEMU_STRICT_COMPUTE"
+                                          Description="{Binding [Options.Env.StrictCompute.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameStrictComputeToggle" Classes="optionToggle" />
+                        </local:SettingRow>
+                        <local:SettingRow Classes="optionRow"
                                           Label="SHARPEMU_RENDERDOC"
                                           Description="{Binding [Options.Env.RenderDoc.Desc],
                                                                 Source={x:Static local:Localization.Instance},
@@ -1543,6 +1550,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="PerformanceFrameTraceRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"
                                         Description="{Binding [Options.Env.PerformanceFrameTrace.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="PerformanceFrameTraceToggle" Classes="optionToggle" />
+                      </local:SettingRow>
+
+                      <local:SettingRow Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_STRICT_COMPUTE"
+                                        Description="{Binding [Options.Env.StrictCompute.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="StrictComputeToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="EnvRenderDocRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_RENDERDOC"

@@ -1,5 +1,6 @@
 {
   "_languageName": "English",
+  "Options.Env.StrictCompute.Desc": "Stop on shader rejection checks for compute and draws (default).\nTurn off to skip affected work. Missing images, errors, or stalls can occur. Restart the game after a change.",
   "Options.Env.PerformanceProfile.Desc": "Log performance timings and FPS from the next game launch.\nThis can reduce performance.",
   "Options.Env.PerformanceFrameTrace.Desc": "Keep the last 4,096 presentation intervals and write them to the log at shutdown.\nRequires performance profiling. Close the game normally to save the trace.",
   "Options.OverlayEnabled.Label": "Performance display",

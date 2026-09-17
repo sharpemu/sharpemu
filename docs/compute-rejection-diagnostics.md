@@ -10,12 +10,16 @@ and graphics draws. The existing variable name is retained; there is no separate
 `SHARPEMU_STRICT_DRAW` switch. Restart the game after a change. The pipeline cache and
 draw executor read the value when created.
 
-- Unset or `0`: skip the affected dispatch or draw.
-- `1`: stop on the rejection so that the failure can be diagnosed.
+- Unset or `1`: stop on the rejection so that the failure can be diagnosed (default).
+- `0`: skip the affected dispatch or draw. Only this value enables skipping.
+
+The GUI provides this switch under **Environment > Debug**, globally and per game.
+It is on by default. Turning it off saves an explicit `0`; an inherited process
+environment value does not override the GUI choice. Other values retain strict mode.
 
 ## Complete skip list
 
-With the switch unset or `0`, these are the only handled rejection categories:
+With the switch set to `0`, these are the only handled rejection categories:
 
 | Rejection | Detection point | Operation skipped |
 | --- | --- | --- |
@@ -69,7 +73,7 @@ Enable strict testing in PowerShell:
 $env:SHARPEMU_STRICT_COMPUTE = '1'
 ```
 
-Return to skip mode:
+Explicitly enable skip mode:
 
 ```powershell
 $env:SHARPEMU_STRICT_COMPUTE = '0'

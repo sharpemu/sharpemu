@@ -24,6 +24,8 @@ public sealed class GraphicsRejectionPolicyTests
     [InlineData(null, true)]
     [InlineData("0", true)]
     [InlineData("1", true)]
+    [InlineData("invalid", false)]
+    [InlineData("invalid", true)]
     public void GraphicsCompilationUsesTheSameStrictSwitch(string? setting, bool pixelActive)
     {
         var previous = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE");
@@ -41,12 +43,12 @@ public sealed class GraphicsRejectionPolicyTests
             GraphicsPrograms Lookup() => cache.GetGraphicsPrograms(
                 new VertexStageRegisters { ExportAddress = VertexAddress }, new PixelStageRegisters { Address = PixelAddress },
                 new ShaderInterfaceRegisters(), new ContextRegisters(), [], pixelActive);
-            if (setting == "1")
+            if (setting != "0")
                 Assert.Contains("cannot be compiled", Assert.Throws<SchedulerFatalException>(() => Lookup()).Message);
             else Assert.False(Lookup().Available);
             Assert.Empty(guest.Host.Modules);
             Assert.Empty(guest.Host.GraphicsPipelines);
-            if (setting != "1")
+            if (setting == "0")
             {
                 guest.Compiler.Rejection = null;
                 Assert.True(Lookup().Available);

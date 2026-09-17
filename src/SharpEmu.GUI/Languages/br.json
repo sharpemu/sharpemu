@@ -1,5 +1,6 @@
 {
   "_languageName": "Português (Brasil)",
+  "Options.Env.StrictCompute.Desc": "Parar nas rejeições de shaders de cálculo e desenho (padrão).\nDesative para ignorar o trabalho afetado. Podem ocorrer imagens ausentes, erros ou travamentos. Reinicie o jogo após uma alteração.",
   "Options.Env.PerformanceProfile.Desc": "Registre os tempos de desempenho e FPS a partir da próxima execução do jogo.\nIsso pode reduzir o desempenho.",
   "Options.Env.PerformanceFrameTrace.Desc": "Guarde os últimos 4.096 intervalos de apresentação e grave-os no log ao encerrar.\nRequer o perfil de desempenho. Feche o jogo normalmente para salvar o rastreamento.",
   "Options.OverlayEnabled.Label": "Indicador de desempenho",

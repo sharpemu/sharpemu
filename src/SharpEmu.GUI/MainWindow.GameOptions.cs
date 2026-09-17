@@ -15,6 +15,7 @@ public partial class MainWindow
     [
         "SHARPEMU_PROFILE_PERFORMANCE",
         "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",
+        StrictComputeSettings.VariableName,
         "SHARPEMU_BTHID_UNAVAILABLE",
         "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
         "SHARPEMU_WRITABLE_APP0",
@@ -383,7 +384,9 @@ public partial class MainWindow
         var entries = new List<string>(_gameEnvironmentPassthrough);
         foreach (var (name, toggle) in GameEnvironmentToggles())
         {
-            if (toggle.IsChecked == true)
+            if (name == StrictComputeSettings.VariableName)
+                StrictComputeSettings.SetEnabled(entries, toggle.IsChecked == true);
+            else if (toggle.IsChecked == true)
             {
                 entries.Add(name);
             }
@@ -403,6 +406,7 @@ public partial class MainWindow
 
     private static bool IsEnvironmentEnabled(IEnumerable<string> entries, string name)
     {
+        if (name == StrictComputeSettings.VariableName) return StrictComputeSettings.IsEnabled(entries);
         foreach (var entry in entries)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
@@ -488,6 +492,7 @@ public partial class MainWindow
     [
         ("SHARPEMU_PROFILE_PERFORMANCE", GamePerformanceProfileToggle),
         ("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", GamePerformanceFrameTraceToggle),
+        (StrictComputeSettings.VariableName, GameStrictComputeToggle),
         ("SHARPEMU_BTHID_UNAVAILABLE", GameEnvBthidToggle),
         ("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", GameEnvLoopGuardToggle),
         ("SHARPEMU_WRITABLE_APP0", GameEnvWritableApp0Toggle),

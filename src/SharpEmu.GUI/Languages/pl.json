@@ -1,5 +1,6 @@
 {
   "_languageName": "Polski",
+  "Options.Env.StrictCompute.Desc": "Zatrzymuj przy odrzuceniu shaderów obliczeń i rysowania (domyślnie).\nWyłącz, aby pomijać te operacje. Mogą wystąpić brakujące obrazy, błędy lub zawieszenia. Po zmianie uruchom grę ponownie.",
   "Options.Env.PerformanceProfile.Desc": "Zapisuj czasy wydajności i FPS od następnego uruchomienia gry.\nMoże to obniżyć wydajność.",
   "Options.Env.PerformanceFrameTrace.Desc": "Zachowaj ostatnie 4096 odstępów prezentacji i zapisz je w dzienniku przy zamykaniu.\nWymaga profilowania wydajności. Zamknij grę normalnie, aby zapisać ślad.",
   "Options.OverlayEnabled.Label": "Statystyki wydajności",

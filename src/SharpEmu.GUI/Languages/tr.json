@@ -1,5 +1,6 @@
 {
   "_languageName": "Türkçe",
+  "Options.Env.StrictCompute.Desc": "Hesaplama ve çizim gölgelendiricisi retlerinde durdur (varsayılan).\nEtkilenen işlemleri atlamak için kapat. Eksik görüntüler, hatalar veya takılmalar olabilir. Değişiklikten sonra oyunu yeniden başlatın.",
   "Options.Env.PerformanceProfile.Desc": "Sonraki oyun başlangıcından itibaren performans sürelerini ve FPS değerlerini kaydet.\nBu, performansı düşürebilir.",
   "Options.Env.PerformanceFrameTrace.Desc": "Son 4.096 sunum aralığını sakla ve kapanışta günlüğe yaz.\nPerformans profillemesi gerektirir. İzi kaydetmek için oyunu normal şekilde kapat.",
   "Options.OverlayEnabled.Label": "Performans göstergesi",

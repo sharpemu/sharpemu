@@ -1,5 +1,6 @@
 {
   "_languageName": "Nederlands",
+  "Options.Env.StrictCompute.Desc": "Stop bij shaderafwijzingen voor berekeningen en tekenen (standaard).\nSchakel uit om betrokken werk over te slaan. Ontbrekende beelden, fouten of vastlopers zijn mogelijk. Herstart het spel na een wijziging.",
   "Options.Env.PerformanceProfile.Desc": "Log prestatietijden en FPS vanaf de volgende start van het spel.\nDit kan de prestaties verminderen.",
   "Options.Env.PerformanceFrameTrace.Desc": "Bewaar de laatste 4.096 presentatie-intervallen en schrijf ze bij afsluiten naar het logboek.\nVereist prestatieprofilering. Sluit het spel normaal af om de trace op te slaan.",
   "Options.OverlayEnabled.Label": "Prestatiegegevens",

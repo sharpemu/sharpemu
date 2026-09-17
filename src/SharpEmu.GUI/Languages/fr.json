@@ -1,5 +1,6 @@
 {
   "_languageName": "Français",
+  "Options.Env.StrictCompute.Desc": "Arrêter lors des rejets de shaders pour le calcul et le dessin (par défaut).\nDésactiver pour ignorer le travail concerné. Des images manquantes, des erreurs ou des blocages sont possibles. Redémarrer le jeu après modification.",
   "Options.Env.PerformanceProfile.Desc": "Enregistrer les temps de performance et les FPS au prochain lancement du jeu.\nCela peut réduire les performances.",
   "Options.Env.PerformanceFrameTrace.Desc": "Conserver les 4 096 derniers intervalles de présentation et les écrire dans le journal à la fermeture.\nNécessite le profilage des performances. Fermez le jeu normalement pour enregistrer la trace.",
   "Options.OverlayEnabled.Label": "Affichage des performances",

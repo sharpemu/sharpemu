@@ -74,6 +74,29 @@ public sealed class DrawImageTypeRejectionTests
         Assert.Equal(0, host.PreparationDepth);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("0")]
+    [InlineData("1")]
+    [InlineData("invalid")]
+    public void EnvironmentPolicyStopsByDefault(string? value)
+    {
+        const string variable = "SHARPEMU_STRICT_COMPUTE";
+        var previous = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, value);
+            using var fatal = new FatalScope();
+            var host = new RecordingRenderHost { PreparationFailure = _ => Mismatch() };
+            var executor = new RenderExecutor(host, new FakePipelineProvider());
+            if (value == "0") executor.DrawAuto(1, Banks(), Auto(3));
+            else Assert.Throws<RenderExecutorFatalException>(() => executor.DrawAuto(1, Banks(), Auto(3)));
+            Assert.Equal(0, host.PreparationDepth);
+            Assert.DoesNotContain(host.Calls, call => call.StartsWith("draw"));
+        }
+        finally { Environment.SetEnvironmentVariable(variable, previous); }
+    }
+
     private static DrawImageTypeMismatchException Mismatch() =>
         new(0x1234, 0x213590000, ImageType.Type1D, ImageViewType.Type2D);
 }

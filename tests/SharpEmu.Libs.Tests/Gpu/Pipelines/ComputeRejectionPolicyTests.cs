@@ -24,6 +24,8 @@ public sealed class ComputeRejectionPolicyTests
     [InlineData(null, true)]
     [InlineData("0", true)]
     [InlineData("1", true)]
+    [InlineData("invalid", false)]
+    [InlineData("invalid", true)]
     public void ComputeRejectionUsesTheConfiguredPolicy(string? value, bool rejectPlan)
     {
         var previous = Environment.GetEnvironmentVariable(Variable);
@@ -39,7 +41,7 @@ public sealed class ComputeRejectionPolicyTests
             var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
             var registers = Registers();
             ComputeProgram Lookup() => cache.GetComputeProgram(registers, new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
-            if (value == "1")
+            if (value != "0")
                 Assert.Throws<SchedulerFatalException>(() => Lookup());
             else
             {
@@ -52,7 +54,7 @@ public sealed class ComputeRejectionPolicyTests
             Assert.Empty(guest.Host.Modules);
             Assert.Empty(guest.Host.ComputePipelines);
             Assert.Equal(0, guest.Compiler.Compilations);
-            if (!rejectPlan && value != "1")
+            if (!rejectPlan && value == "0")
             {
                 guest.Compiler.Rejection = null;
                 Assert.True(Lookup().Available);

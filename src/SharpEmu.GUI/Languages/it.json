@@ -1,5 +1,6 @@
 {
   "_languageName": "Italiano",
+  "Options.Env.StrictCompute.Desc": "Arresta in caso di rifiuto degli shader di calcolo e disegno (predefinito).\nDisattiva per saltare il lavoro interessato. Sono possibili immagini mancanti, errori o blocchi. Riavvia il gioco dopo una modifica.",
   "Options.Env.PerformanceProfile.Desc": "Registra tempi di prestazione e FPS dal prossimo avvio del gioco.\nQuesto può ridurre le prestazioni.",
   "Options.Env.PerformanceFrameTrace.Desc": "Conserva gli ultimi 4096 intervalli di presentazione e scrivili nel registro alla chiusura.\nRichiede la profilazione delle prestazioni. Chiudi il gioco normalmente per salvare la traccia.",
   "Options.OverlayEnabled.Label": "Statistiche prestazioni",
