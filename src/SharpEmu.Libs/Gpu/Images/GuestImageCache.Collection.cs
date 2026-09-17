@@ -156,7 +156,9 @@ public sealed partial class GuestImageCache
     internal List<ResourceSlotIdentifier> FindImagesInRangeForTest(ulong address, ulong size, bool pageOverlap)
     {
         using var held = _lock.Hold();
-        return FindImagesInRange(address, size, pageOverlap);
+        var result = new List<ResourceSlotIdentifier>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap)) result.Add(imageIdentifier);
+        return result;
     }
 
     internal int PageOwnerCount(ulong address)

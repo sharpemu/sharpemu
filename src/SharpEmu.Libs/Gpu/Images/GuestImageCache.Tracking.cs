@@ -316,9 +316,9 @@ public sealed partial class GuestImageCache
     }
 
     // Caller holds the lock; the query epoch marks each image once per query.
-    private List<ResourceSlotIdentifier> FindImagesInRange(ulong address, ulong size, bool pageOverlap)
+    private ImageQueryResults FindImagesInRange(ulong address, ulong size, bool pageOverlap)
     {
-        var result = new List<ResourceSlotIdentifier>();
+        var result = new ImageQueryResults();
         if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive))
         {
             return result;
@@ -339,12 +339,13 @@ public sealed partial class GuestImageCache
                 continue;
             }
 
-            owners.ForEach(imageIdentifier =>
+            for (var ownerIndex = 0; ownerIndex < owners.Count; ownerIndex++)
             {
+                var imageIdentifier = owners[ownerIndex];
                 var image = _slots.TryGet(imageIdentifier);
                 if (image == null || image.QueryEpoch == queryEpoch)
                 {
-                    return;
+                    continue;
                 }
 
                 image.QueryEpoch = queryEpoch;
@@ -352,7 +353,7 @@ public sealed partial class GuestImageCache
                 {
                     result.Add(imageIdentifier);
                 }
-            });
+            }
         }
 
         return result;
