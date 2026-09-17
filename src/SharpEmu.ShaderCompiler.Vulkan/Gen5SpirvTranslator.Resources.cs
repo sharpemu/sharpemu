@@ -1113,6 +1113,15 @@ public static partial class Gen5SpirvTranslator
                 case "DsReadB32":
                     StoreV(instruction.Destinations[0].Value, LoadBlockWord(_globalDataShare, GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes)));
                     return true;
+                case "DsReadB64":
+                {
+                    var index = GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes);
+                    StoreV(instruction.Destinations[0].Value, LoadBlockWord(_globalDataShare, index));
+                    StoreV(instruction.Destinations[1].Value, LoadBlockWord(_globalDataShare, IAdd(index, UInt(1))));
+                    return true;
+                }
+                case "DsRead2B64":
+                    return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 {
                     var address = GetRawSource(instruction, 0);
@@ -1129,6 +1138,34 @@ public static partial class Gen5SpirvTranslator
                     error = $"unsupported GDS opcode {opcode}";
                     return false;
             }
+        }
+
+        private bool TryEmitDataShareReadPair64(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 4)
+            {
+                error = "The paired 64-bit read requires an address and four destination registers.";
+                return false;
+            }
+
+            EmitExecConditional(() =>
+            {
+                var address = GetRawSource(instruction, 0);
+                var values = new uint[4];
+                // Capture both values before an overlapping destination changes the address.
+                for (var component = 0; component < values.Length; component++)
+                {
+                    var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
+                    var byteOffset = pairOffset * sizeof(ulong) + (uint)(component % 2) * sizeof(uint);
+                    values[component] = control.Gds
+                        ? LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, byteOffset))
+                        : Load(_uintType, LdsPointer(address, byteOffset));
+                }
+                for (var component = 0; component < values.Length; component++)
+                    StoreV(instruction.Destinations[component].Value, values[component], guardWithExec: false);
+            });
+            return true;
         }
 
         private uint GlobalDataShareIndex(uint address, uint offsetBytes) =>

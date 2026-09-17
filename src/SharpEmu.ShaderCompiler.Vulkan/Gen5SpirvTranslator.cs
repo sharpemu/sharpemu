@@ -1544,16 +1544,15 @@ public static partial class Gen5SpirvTranslator
                     StoreV(instruction.Destinations[0].Value, value);
                     return true;
                 }
+                case "DsReadB64":
                 case "DsReadB96":
                 case "DsReadB128":
                 {
-                    // ds_read_b96 loads 3 consecutive dwords, ds_read_b128 loads
-                    // 4, into dest..dest+N from the address's offset.
-                    var dwordCount = instruction.Opcode == "DsReadB128" ? 4 : 3;
+                    var dwordCount = instruction.Opcode switch { "DsReadB64" => 2, "DsReadB96" => 3, _ => 4 };
                     if (instruction.Destinations.Count < dwordCount ||
                         instruction.Sources.Count < 1)
                     {
-                        error = "missing LDS read128 operand";
+                        error = "missing LDS read operand";
                         return false;
                     }
 
@@ -1569,6 +1568,8 @@ public static partial class Gen5SpirvTranslator
 
                     return true;
                 }
+                case "DsRead2B64":
+                    return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":
                 {

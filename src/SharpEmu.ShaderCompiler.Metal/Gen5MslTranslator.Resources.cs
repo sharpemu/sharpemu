@@ -899,6 +899,16 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
+                case "DsReadB64":
+                {
+                    var index = Temp("uint", GlobalDataShareIndex(RawSource(instruction, 0), control.SingleOffsetBytes));
+                    StoreVector(instruction.Destinations[0].Value, LoadGlobalDataShareWord(index));
+                    StoreVector(instruction.Destinations[1].Value, LoadGlobalDataShareWord($"({index} + 1u)"));
+                    return true;
+                }
+
+                case "DsRead2B64":
+                    return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
@@ -918,6 +928,36 @@ public static partial class Gen5MslTranslator
                     error = $"unsupported GDS opcode {opcode}";
                     return false;
             }
+        }
+
+        private bool TryEmitDataShareReadPair64(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 4)
+            {
+                error = "The paired 64-bit read requires an address and four destination registers.";
+                return false;
+            }
+
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            var address = Temp("uint", RawSource(instruction, 0));
+            var values = new string[4];
+            // Capture both values before an overlapping destination changes the address.
+            for (var component = 0; component < values.Length; component++)
+            {
+                var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
+                var byteOffset = pairOffset * sizeof(ulong) + (uint)(component % 2) * sizeof(uint);
+                values[component] = Temp("uint", control.Gds
+                    ? LoadGlobalDataShareWord(GlobalDataShareIndex(address, byteOffset))
+                    : $"sharpemu_lds[{LdsIndex(address, byteOffset)}]");
+            }
+            for (var component = 0; component < values.Length; component++)
+                StoreVector(instruction.Destinations[component].Value, values[component], guardWithExec: false);
+            _indent--;
+            Line("}");
+            return true;
         }
 
         private static string GlobalDataShareIndex(string address, uint offsetBytes) =>

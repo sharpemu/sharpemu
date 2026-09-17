@@ -1425,10 +1425,11 @@ public static partial class Gen5MslTranslator
                         $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");
                     return true;
                 }
+                case "DsReadB64":
                 case "DsReadB96":
                 case "DsReadB128":
                 {
-                    var dwordCount = instruction.Opcode == "DsReadB128" ? 4 : 3;
+                    var dwordCount = instruction.Opcode switch { "DsReadB64" => 2, "DsReadB96" => 3, _ => 4 };
                     if (instruction.Destinations.Count < dwordCount)
                     {
                         error = "missing LDS read operand";
@@ -1446,6 +1447,8 @@ public static partial class Gen5MslTranslator
 
                     return true;
                 }
+                case "DsRead2B64":
+                    return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":
                 {
