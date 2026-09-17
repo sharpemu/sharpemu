@@ -882,6 +882,9 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
 
+                case "DsWrite2B64":
+                case "DsWrite2St64B64":
+                    return TryEmitDataShareWritePair64(instruction, control, out error);
                 case "DsWrite2B32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
@@ -928,6 +931,37 @@ public static partial class Gen5MslTranslator
                     error = $"unsupported GDS opcode {opcode}";
                     return false;
             }
+        }
+
+        private bool TryEmitDataShareWritePair64(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            var offsetStride = instruction.Opcode == "DsWrite2St64B64" ? 512u : 8u;
+            if (instruction.Sources.Count < 5)
+            {
+                error = "The paired 64-bit write requires an address and two source-register pairs.";
+                return false;
+            }
+
+            Line("if (exec)");
+            Line("{");
+            _indent++;
+            var address = Temp("uint", RawSource(instruction, 0));
+            // Equal offsets select only the first source pair.
+            var componentCount = control.Offset0 == control.Offset1 ? 2 : 4;
+            for (var component = 0; component < componentCount; component++)
+            {
+                var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
+                var byteOffset = pairOffset * offsetStride + (uint)(component % 2) * sizeof(uint);
+                var value = RawSource(instruction, component + 1);
+                if (control.Gds)
+                    StoreGlobalDataShareWord(GlobalDataShareIndex(address, byteOffset), value);
+                else
+                    Line($"sharpemu_lds[{LdsIndex(address, byteOffset)}] = {value};");
+            }
+            _indent--;
+            Line("}");
+            return true;
         }
 
         private bool TryEmitDataShareReadPair64(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)

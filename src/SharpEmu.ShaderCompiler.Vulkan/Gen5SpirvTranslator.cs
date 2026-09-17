@@ -1505,6 +1505,9 @@ public static partial class Gen5SpirvTranslator
 
                     return true;
                 }
+                case "DsWrite2B64":
+                case "DsWrite2St64B64":
+                    return TryEmitDataShareWritePair64(instruction, control, out error);
                 case "DsWrite2B32":
                 case "DsWrite2St64B32":
                 {
