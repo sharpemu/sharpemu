@@ -474,6 +474,12 @@ public sealed class SelfLoader : ISelfLoader
                 ? 0UL
                 : ResolvePhysicalSegmentOffset(imageData.Length, loadContext, header, index);
 
+            if (header.VirtualAddress > ulong.MaxValue - imageBase)
+            {
+                throw new InvalidDataException(
+                    $"ELF segment {index} virtual address 0x{header.VirtualAddress:X} overflows when combined with the image base 0x{imageBase:X}.");
+            }
+
             var virtualAddress = header.VirtualAddress + imageBase;
 
             Console.Error.WriteLine($"[LOADER] Segment {index}: VAddr=0x{virtualAddress:X16}, FileSize=0x{header.FileSize:X}, MemSize=0x{header.MemorySize:X}, Align=0x{header.Alignment:X}");
@@ -2130,6 +2136,12 @@ public sealed class SelfLoader : ISelfLoader
         {
             if (header.HeaderType == ProgramHeaderType.Load && header.MemorySize > 0)
             {
+                if (header.VirtualAddress > ulong.MaxValue - header.MemorySize)
+                {
+                    throw new InvalidDataException(
+                        $"ELF segment virtual address 0x{header.VirtualAddress:X} plus memory size 0x{header.MemorySize:X} overflows the address space.");
+                }
+
                 if (header.VirtualAddress < minAddr)
                     minAddr = header.VirtualAddress;
 

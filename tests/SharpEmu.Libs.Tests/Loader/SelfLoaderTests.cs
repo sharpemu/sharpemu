@@ -127,6 +127,60 @@ public sealed class SelfLoaderTests
         Assert.Empty(image.MappedRegions);
     }
 
+    // Regression coverage for the loader address-overflow bug behind #235
+    // ("Could not allocate main image at required base 0x0000000800000000"):
+    // a PT_LOAD program header with a pathological VirtualAddress must be
+    // rejected with a clear InvalidDataException instead of either crashing
+    // with an unhandled OverflowException deep in VirtualMemory.Map, or
+    // (worse) silently wrapping around and mapping the segment at the wrong
+    // host address.
+    [Fact]
+    public void Load_RejectsProgramHeaderWhoseVirtualAddressPlusMemorySizeOverflows()
+    {
+        // VirtualAddress + MemorySize wraps past ulong.MaxValue.
+        var imageData = CreateBareElfWithSingleLoadSegment(
+            virtualAddress: ulong.MaxValue - 0x0FFF,
+            memorySize: 0x2000);
+
+        Assert.Throws<InvalidDataException>(() =>
+            new SelfLoader().Load(imageData, new VirtualMemory()));
+    }
+
+    [Fact]
+    public void Load_RejectsProgramHeaderWhoseVirtualAddressPlusImageBaseOverflows()
+    {
+        // MemorySize is small enough that VirtualAddress + MemorySize alone
+        // does not overflow, but VirtualAddress is close enough to
+        // ulong.MaxValue that adding the PS5 image base (AbiVersion == 2
+        // selects 0x0000000800000000) wraps around.
+        var imageData = CreateBareElfWithSingleLoadSegment(
+            virtualAddress: ulong.MaxValue - 0x100,
+            memorySize: 0x10);
+
+        Assert.Throws<InvalidDataException>(() =>
+            new SelfLoader().Load(imageData, new VirtualMemory()));
+    }
+
+    private static byte[] CreateBareElfWithSingleLoadSegment(ulong virtualAddress, ulong memorySize)
+    {
+        const int programHeaderSize = 0x38;
+        var imageData = new byte[ElfHeaderSize + programHeaderSize];
+        WriteMinimalElfHeader(imageData.AsSpan(0, ElfHeaderSize));
+        BinaryPrimitives.WriteUInt16LittleEndian(imageData.AsSpan(0x38), 1); // e_phnum = 1
+
+        var ph = imageData.AsSpan(ElfHeaderSize, programHeaderSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(ph, 1); // p_type = PT_LOAD
+        BinaryPrimitives.WriteUInt32LittleEndian(ph[4..], 4); // p_flags = PF_R
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[8..], 0); // p_offset
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[16..], virtualAddress); // p_vaddr
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[24..], 0); // p_paddr
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[32..], 0); // p_filesz (no file-backed data)
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[40..], memorySize); // p_memsz
+        BinaryPrimitives.WriteUInt64LittleEndian(ph[48..], 0); // p_align
+
+        return imageData;
+    }
+
     private static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)
     {
         var imageData = new byte[SelfHeaderSize + ElfHeaderSize];
