@@ -72,6 +72,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // A range the GPU wrote is downloaded first, so the word is what the guest CPU would read.
         public bool TryReadGuestWord(ulong address, out uint word)
         {
+            using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
             if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint)))
             {
@@ -91,6 +92,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // Refused while a GPU buffer or image write may still own the range.
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
+            using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
             word = 0;
             if (_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) ||
                 _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||

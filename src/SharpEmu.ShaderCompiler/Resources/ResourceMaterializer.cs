@@ -57,13 +57,16 @@ public static class ResourceMaterializer
         out ResourceMaterializationFailure failure,
         Action<IndirectImageFailure>? captureIndirectImageFailure = null)
     {
+        using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
         if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out failure))
         {
             return false;
         }
 
         // The written ranges follow the table reads so every store can check its own.
-        var ranges = DeviceAddressRangePlanner.Evaluate(plan, inputs);
+        DeviceAddressRange[] ranges;
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DeviceAddressRanges))
+            ranges = DeviceAddressRangePlanner.Evaluate(plan, inputs);
         foreach (var range in ranges)
         {
             if (!plan.WrittenRangeSlotByHandle.TryGetValue(range.Handle, out var slot))
@@ -82,6 +85,7 @@ public static class ResourceMaterializer
             return false;
         }
 
+        using var outputProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.OutputAssembly);
         snapshot = new ResourceSnapshot
         {
             Buffers = nextSnapshot.Buffers,
@@ -101,6 +105,7 @@ public static class ResourceMaterializer
     private static bool MaterializeSnapshot(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
         bool captureSelectorDiagnostic, out MaterializedSnapshot snapshot, out ResourceMaterializationFailure failure)
     {
+        using var snapshotProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Snapshot);
         failure = ResourceMaterializationFailure.Other;
         snapshot = new MaterializedSnapshot();
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
@@ -417,6 +422,7 @@ public static class ResourceMaterializer
         out ResourceMaterializationFailure failure,
         Action<IndirectImageFailure>? captureIndirectImageFailure)
     {
+        using var specializationProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Specialization);
         failure = ResourceMaterializationFailure.Other;
         specializedSnapshot = snapshot;
         specialization = new ResourceSpecialization();

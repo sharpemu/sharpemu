@@ -397,6 +397,7 @@ public sealed class RuntimeValueEvaluator
                 foreach (var successor in block.Successors) pending.Push(successor);
         }
 
+        ResourceMaterializationProfile.RecordActivity(activeSources);
         return activeSources;
     }
 
