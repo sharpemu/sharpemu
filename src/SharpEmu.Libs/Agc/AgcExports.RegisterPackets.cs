@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Agc;
@@ -91,6 +92,7 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int CbSetShRegisterRangeDirect(CpuContext ctx)
     {
+        using var emitterMeasurement = AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.Emitter);
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var offset = (uint)ctx[CpuRegister.Rsi];
         var valuesAddress = ctx[CpuRegister.Rdx];
@@ -100,17 +102,23 @@ public static partial class AgcExports
             offset > 0x3FF ||
             !TryGetCbSetShRegisterRangeDirectLayout(valueCount, out var packetDwords, out _))
         {
+            AgcRegisterPacketProfile.RecordResult(false);
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var markerAddress) ||
-            !TryWriteUInt32(ctx, markerAddress, Pm4(2, ItNop, RZero)) ||
-            !TryWriteUInt32(ctx, markerAddress + 4, CbSetShRegisterRangeMarker) ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, offset))
+        ulong commandAddress;
+        using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
-            return ReturnPointer(ctx, 0);
+            if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var markerAddress) ||
+                !TryWriteUInt32(ctx, markerAddress, Pm4(2, ItNop, RZero)) ||
+                !TryWriteUInt32(ctx, markerAddress + 4, CbSetShRegisterRangeMarker) ||
+                !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
+                !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
+                !TryWriteUInt32(ctx, commandAddress + 4, offset))
+            {
+                AgcRegisterPacketProfile.RecordResult(false);
+                return ReturnPointer(ctx, 0);
+            }
         }
 
         var payloadAddress = commandAddress + 8;
@@ -119,28 +127,45 @@ public static partial class AgcExports
             payloadAddress <= ulong.MaxValue - payloadSize;
         var separateRanges = validRanges &&
             (valuesAddress + payloadSize <= payloadAddress || payloadAddress + payloadSize <= valuesAddress);
-        var copied = valuesAddress != 0 && separateRanges &&
-            ctx.Memory.TryCopy(payloadAddress, valuesAddress, payloadSize);
-
+        var copied = false;
+        if (valuesAddress != 0 && separateRanges)
+        {
+            using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.BulkCopy))
+                copied = ctx.Memory.TryCopy(payloadAddress, valuesAddress, payloadSize);
+            AgcRegisterPacketProfile.RecordPath(copied
+                ? AgcRegisterPacketProfile.PayloadPath.BulkCopied
+                : AgcRegisterPacketProfile.PayloadPath.BulkDeclined, valueCount);
+        }
+        else
+        {
+            AgcRegisterPacketProfile.RecordPath(valuesAddress == 0
+                ? AgcRegisterPacketProfile.PayloadPath.NullSource
+                : validRanges ? AgcRegisterPacketProfile.PayloadPath.Overlap
+                : AgcRegisterPacketProfile.PayloadPath.WrappedRange, valueCount);
+        }
         // A null source reserves the payload for the caller to fill later.
         // Keep forward word-copy behavior when a bulk copy is not available.
         if (valuesAddress != 0 && !copied)
         {
+            using var payloadMeasurement = AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.ScalarCopy);
             for (uint valueIndex = 0; valueIndex < valueCount; valueIndex++)
             {
                 if (!TryReadUInt32(ctx, valuesAddress + (valueIndex * sizeof(uint)), out var value))
                 {
+                    AgcRegisterPacketProfile.RecordResult(false);
                     return ReturnPointer(ctx, 0);
                 }
 
                 if (!TryWriteUInt32(ctx, payloadAddress + (valueIndex * sizeof(uint)), value))
                 {
+                    AgcRegisterPacketProfile.RecordResult(false);
                     return ReturnPointer(ctx, 0);
                 }
             }
         }
 
         TraceAgc($"agc.cb_set_sh_range buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{offset:X8} count={valueCount}");
+        AgcRegisterPacketProfile.RecordResult(true);
         return ReturnPointer(ctx, commandAddress);
     }
 
