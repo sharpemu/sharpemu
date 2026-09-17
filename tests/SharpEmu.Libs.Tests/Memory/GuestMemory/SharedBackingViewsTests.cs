@@ -315,6 +315,7 @@ public sealed unsafe class SharedBackingViewsTests
         Assert.False(store.Clear(0, Segment));
         Assert.False(store.TryWriteBacking(baseAddress, new byte[8]));
         Assert.False(store.TryReadBacking(baseAddress, new byte[8]));
+        Assert.False(store.TryCopyBacking(baseAddress, baseAddress, 8));
         Assert.False(store.Unmap(baseAddress, Segment, out _));
         Assert.False(store.TryMapReservedRange(baseAddress, Segment, 0, HostPageProtection.ReadWrite, out var failure));
         Assert.Equal(HostViewFailure.BackingUnavailable, failure);

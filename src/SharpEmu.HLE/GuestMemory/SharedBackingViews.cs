@@ -51,6 +51,18 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
+            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            {
+                var offset = record.Offset + address - record.Address;
+                if (!IsWithinBacking(offset, (ulong)data.Length))
+                {
+                    return false;
+                }
+
+                data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                return true;
+            }
+
             if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
             {
                 return false;
@@ -101,6 +113,23 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
+            if (IsAvailable && size <= int.MaxValue &&
+                TryFindRecord(source, size, out var sourceRecord) &&
+                TryFindRecord(destination, size, out var destinationRecord))
+            {
+                var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
+                var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
+                if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                {
+                    return false;
+                }
+
+                // Use the backing alias so CopyTo can detect overlap between different guest views.
+                new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
+                    .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
+                return true;
+            }
+
             if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
             {
                 return false;
