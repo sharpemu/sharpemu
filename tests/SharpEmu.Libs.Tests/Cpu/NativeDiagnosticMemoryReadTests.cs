@@ -116,6 +116,29 @@ public sealed class NativeDiagnosticMemoryReadTests
         }
     }
 
+    [Fact]
+    public unsafe void LinuxDiagnosticReadsRejectAnUnreadableTrailingPage()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var pageSize = (nuint)Environment.SystemPageSize;
+        var memory = (byte*)HostMemory.Alloc(null, pageSize * 2, 0x3000, HostMemory.PAGE_READWRITE);
+        Assert.NotEqual(0, (nint)memory);
+        try
+        {
+            var address = (ulong)(memory + pageSize - 4);
+            Assert.True((bool)TryReadHostBytes.Invoke(null, [address, new byte[16]])!);
+            Assert.True(HostMemory.Protect(memory + pageSize, pageSize, HostMemory.PAGE_NOACCESS, out _));
+            Assert.False((bool)TryReadHostBytes.Invoke(null, [address, new byte[16]])!);
+            object?[] arguments = [address, 0UL];
+            Assert.False((bool)TryReadDiagnosticHostQword.Invoke(null, arguments)!);
+            Assert.Equal(0UL, arguments[1]);
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free(memory, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
     [Theory]
     [InlineData(0UL)]
     [InlineData(0xFFF0UL)]

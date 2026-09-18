@@ -1279,6 +1279,14 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static bool TryReadDiagnosticHostQword(ulong address, out ulong value)
 	{
+		if (OperatingSystem.IsLinux())
+		{
+			ulong result = 0;
+			bool success = TryReadLinuxMemory(address, (byte*)&result, sizeof(ulong));
+			value = success ? result : 0;
+			return success;
+		}
+
 		if (OperatingSystem.IsMacOS())
 		{
 			ulong result = 0;
@@ -1316,6 +1324,14 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
 	{
+		if (OperatingSystem.IsLinux())
+		{
+			fixed (byte* destination = buffer)
+			{
+				return TryReadLinuxMemory(address, destination, buffer.Length);
+			}
+		}
+
 		if (OperatingSystem.IsMacOS())
 		{
 			fixed (byte* destination = buffer)
@@ -1358,6 +1374,34 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 	}
+
+	private unsafe static bool TryReadLinuxMemory(ulong address, byte* destination, int byteCount)
+	{
+		if (byteCount < 0 || !IsCanonicalUserAddress(address) ||
+			address > 0x0000_8000_0000_0000UL - (ulong)byteCount)
+		{
+			return false;
+		}
+
+		if (byteCount == 0) return true;
+
+		// Read through the kernel so untracked or inaccessible pages cannot fault the reader.
+		var local = new DiagnosticMemoryVector { Address = (nint)destination, Length = (nuint)byteCount };
+		var remote = new DiagnosticMemoryVector { Address = (nint)address, Length = (nuint)byteCount };
+		return ReadLinuxProcessMemory(Environment.ProcessId, &local, 1, &remote, 1, 0) == byteCount;
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct DiagnosticMemoryVector
+	{
+		public nint Address;
+		public nuint Length;
+	}
+
+	[DllImport("libc", EntryPoint = "process_vm_readv")]
+	private unsafe static extern nint ReadLinuxProcessMemory(
+		int processId, DiagnosticMemoryVector* local, nuint localCount,
+		DiagnosticMemoryVector* remote, nuint remoteCount, nuint flags);
 
 	private unsafe static bool TryReadMacOsMemory(ulong address, byte* destination, int byteCount)
 	{
