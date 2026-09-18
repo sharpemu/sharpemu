@@ -21,7 +21,7 @@ public sealed class BackingViewFaultTests
     private const GuestPageProtection ReadWrite = GuestPageProtection.Read | GuestPageProtection.Write;
     private const string WorkerEnvironmentVariable = "SHARPEMU_BACKING_VIEW_FAULT_WORKER";
 
-    [Fact]
+    [NativePageProtectionFact]
     public void PartialUnmapRestoresTheSurvivorsBeforeFaultRecovery()
     {
         if (!Supported) return;
@@ -88,7 +88,7 @@ public sealed class BackingViewFaultTests
         Assert.False(manager.TryResolveFault(FaultKind.Read, address));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void FailedPartialUnmapAllowsAccessAfterTheOriginalViewIsRestored()
     {
         if (!Supported) return;

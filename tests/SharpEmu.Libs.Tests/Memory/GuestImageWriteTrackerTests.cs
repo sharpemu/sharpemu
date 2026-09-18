@@ -48,7 +48,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     private static void FreeTrackedPages(void* allocation) =>
         _ = HostMemory.Free(allocation, 0, HostMemory.MEM_RELEASE);
 
-    [Fact]
+    [NativePageProtectionFact]
     public void GenerationSurvivesDirtyConsume()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -80,7 +80,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void GenerationIncrementsOncePerArmedLifetime()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -112,7 +112,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void GenerationCarriesAcrossRangeReplacement()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -209,7 +209,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ReadSnapshotRejectsAnOverlappingWrite()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -308,7 +308,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ProtectedTrackArmsWriteProtection()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -408,7 +408,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void WriteFaultRemovesTheDirtyImagesPageWatchers()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -439,7 +439,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void SharedPageStaysProtectedForAnotherImageOwner()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -475,7 +475,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void BoundaryPageFaultInvalidatesEveryPageOwner()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -506,7 +506,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ProtectedTrackPreservesExecutePermission()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.
@@ -543,7 +543,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void WatchOnlyTrackDoesNotDowngradeProtectedRange()
     {
         // Page protection uses mprotect: the tracker serves only the macOS backend.

@@ -15,7 +15,7 @@ public sealed class ReleasedWriteFaultTests
 {
     private const GuestPageProtection ReadWrite = GuestPageProtection.Read | GuestPageProtection.Write;
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ReleasedWriteWatchPermitsOneRetryPerPageAndRestoration()
     {
         if (!Supported) return;
@@ -42,7 +42,7 @@ public sealed class ReleasedWriteFaultTests
         Assert.False(manager.TryResolveFault(FaultKind.Write, address));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void RemainingWatchAndHostProtectionPreventRetry()
     {
         if (!Supported) return;
@@ -72,7 +72,7 @@ public sealed class ReleasedWriteFaultTests
         Assert.True(manager.TryResolveFault(FaultKind.Write, address));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void NewMappingCannotUseThePreviousMappingsRestoration()
     {
         if (!Supported) return;
@@ -89,7 +89,7 @@ public sealed class ReleasedWriteFaultTests
         Assert.False(manager.TryResolveFault(FaultKind.Write, address));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void EachFaultingThreadCanRetryAReleasedWatch()
     {
         if (!Supported) return;
