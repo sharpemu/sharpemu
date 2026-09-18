@@ -13,8 +13,13 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 // Test instruction recovery with Linux and macOS signal frames.
 // Confirm that recovery reads and updates the vector register values.
-public sealed unsafe class Sse4aPosixSignalRecoveryTests
+[Collection("PosixSignalRecovery")]
+public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
 {
+    private readonly object? _previousBackend = PosixSignalBackend.GetValue(null);
+
+    public void Dispose() => PosixSignalBackend.SetValue(null, _previousBackend);
+
     private const int PosixSigIll = 4;
     private const int LinuxUcontextGregsOffset = 40;
     private const int LinuxGregsRipOffset = 16 * 8;
@@ -381,3 +386,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
         Assert.True(HostMemory.Free((void*)mapping, 0, HostMemory.MEM_RELEASE));
     }
 }
+
+[CollectionDefinition("PosixSignalRecovery", DisableParallelization = true)]
+public sealed class PosixSignalRecoveryCollection;
