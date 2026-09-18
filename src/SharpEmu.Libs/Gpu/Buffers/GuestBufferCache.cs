@@ -27,7 +27,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private const ulong MiB = 1024 * 1024;
     private const ulong GdsBufferSize = 64 * 1024;
-    private const ulong DownloadAlignment = 64;
+    private readonly record struct PlannedDownload(GpuBuffer Buffer, ulong Address, BufferDownloadPlacement Placement);
 
     private enum ShutdownOutcome
     {
@@ -39,15 +39,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
     private readonly IGpuQueueRelay _relay;
-    private readonly ICpuMemory _guest;
+    private readonly GuestBufferUploader _uploader;
     private readonly IGuestBackedSpace _backing;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
     private readonly GpuBuffer _bdaPageTable;
-    private readonly SlotTable<GpuBuffer> _slots = new();
-    private readonly RecencyQueue<ResourceSlotIdentifier> _lru = new();
-    private readonly SortedList<ulong, ResourceSlotIdentifier> _buffers = new();
-    private readonly PageOwnerTable _pageTable = new();
+    private readonly GuestBufferRegistry<GpuBuffer> _registry = new(CachingPageSize, PageOwnerTable.AddressSpaceSize);
     private readonly SpanSet _gpuModifiedRanges = new();
     private readonly GuestPageTracker _tracker;
     private readonly GpuRingBuffer _staging;
@@ -55,11 +52,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly GpuRingBuffer _download;
     private readonly GpuRingBuffer _deviceRing;
     private readonly object _shutdownGate = new();
+    private readonly BufferRetirementPolicy _retirementPolicy = new();
     private ShutdownOutcome _outcome;
-    private ulong _totalUsedMemory;
-    private ulong _triggerGcMemory = 1024 * MiB;
-    private ulong _criticalGcMemory = 2048 * MiB;
-    private ulong _gcTick;
     private bool _faultProcessPending;
     private bool _disposed;
 
@@ -74,20 +68,20 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _device = device;
         _scheduler = scheduler;
         _relay = relay;
-        _guest = guest;
         _backing = backing;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
+        _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
         _stream = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Stream, 64 * MiB);
         _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 32 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         _gds.Mapped.Clear();
         _gds.Flush(0, _gds.Size);
-        var nullId = _slots.Insert(new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 16));
+        var nullId = _registry.AllocateBuffer(new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 16), 0, 16);
         if (nullId != NullBufferId)
         {
             throw SubmissionScheduler.Fatal("The null buffer occupies the wrong slot.");
@@ -102,22 +96,22 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public GpuBuffer FaultBuffer => _faults.FaultBuffer;
 
-    public ulong TotalUsedMemory => _totalUsedMemory;
+    public ulong TotalUsedMemory => _registry.RegisteredBytes;
 
-    public int BufferCount => _buffers.Count;
+    public int BufferCount => _registry.RegisteredCount;
 
     // The stream fast path aligns to this; the presenter raises it to its descriptor alignment.
     public ulong StreamOffsetAlignment { get; set; }
 
     public void ForEachBuffer(Action<GpuBuffer> visit)
     {
-        foreach (var bufferIdentifier in _buffers.Values)
+        for (var index = 0; index < _registry.RegisteredCount; index++)
         {
-            visit(_slots[bufferIdentifier]);
+            visit(_registry.GetBuffer(_registry.GetRegisteredIdentifier(index)));
         }
     }
 
-    public GpuBuffer GetBuffer(ResourceSlotIdentifier bufferIdentifier) => _slots[bufferIdentifier];
+    public GpuBuffer GetBuffer(ResourceSlotIdentifier bufferIdentifier) => _registry.GetBuffer(bufferIdentifier);
 
     public GpuRingBuffer GetUtilityBuffer(GpuBufferUsage usage) => usage switch
     {
@@ -189,8 +183,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("The buffer lookup range is invalid.");
         }
 
-        var owner = _pageTable.Find(guestAddress >> PageOwnerTable.PageBits);
-        if (owner.IsValid && _slots[owner].IsInBounds(guestAddress, size))
+        var owner = _registry.FindContainingBuffer(guestAddress, size);
+        if (owner.IsValid)
         {
             return owner;
         }
@@ -227,14 +221,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{size:X16}");
         }
 
-        var buffer = _slots.TryGet(bufferIdentifier);
-        if (buffer == null || buffer.IsDeleted || !buffer.IsInBounds(guestAddress, size))
+        var buffer = _registry.TryGetRegisteredBuffer(bufferIdentifier);
+        if (buffer == null || !buffer.IsInBounds(guestAddress, size))
         {
             bufferIdentifier = FindBuffer(guestAddress, size);
-            buffer = _slots[bufferIdentifier];
+            buffer = _registry.GetBuffer(bufferIdentifier);
         }
 
-        TouchBuffer(buffer);
+        TouchBuffer(bufferIdentifier);
         // A persistent upload must track the next CPU write instead of uploading unchanged hot pages.
         // Streaming keeps hot pages writable; the fallback must restore protection before copying.
         _ = SynchronizeBuffer(buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages: false);
@@ -266,7 +260,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 throw SubmissionScheduler.Fatal("The GPU-dirty image source has no device buffer.");
             }
 
-            owner = _slots[FindBuffer(guestAddress, size)];
+            owner = _registry.GetBuffer(FindBuffer(guestAddress, size));
         }
 
         if (owner != null && !cpuModified && (!gpuModified || hasDirtyBufferSource))
@@ -331,9 +325,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var end = guestAddress + (ulong)data.Length;
-        foreach (var (address, bufferIdentifier) in _buffers)
+        for (var index = 0; index < _registry.RegisteredCount; index++)
         {
-            var buffer = _slots[bufferIdentifier];
+            var address = _registry.GetRegisteredAddress(index);
+            var bufferIdentifier = _registry.GetRegisteredIdentifier(index);
+            var buffer = _registry.GetBuffer(bufferIdentifier);
             var begin = Math.Max(guestAddress, address);
             var rangeEnd = Math.Min(end, address + buffer.Size);
             if (begin >= rangeEnd)
@@ -342,7 +338,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             }
 
             WriteDataBuffer(buffer, begin, data.Slice((int)(begin - guestAddress), (int)(rangeEnd - begin)));
-            TouchBuffer(buffer);
+            TouchBuffer(bufferIdentifier);
         }
     }
 
@@ -465,14 +461,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("The registered-region query is invalid.");
         }
 
-        var candidate = LowerBound(guestAddress + size);
-        if (candidate == 0)
-        {
-            return false;
-        }
-
-        var address = _buffers.Keys[candidate - 1];
-        return address + _slots[_buffers.Values[candidate - 1]].Size > guestAddress;
+        return _registry.HasOverlap(guestAddress, size);
     }
 
     public bool HasGpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasGpuDirtyPages(guestAddress, size);
@@ -497,29 +486,24 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         if (traceAddress != 0)
             GuestGpuMemoryHook.Trace(traceAddress, 1,
-                $"device-address-preparation covered={traceCovered} registered={IsRegionRegistered(traceAddress, 1)} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
+                $"device-address-preparation covered={traceCovered} registered={IsRegionRegistered(traceAddress, 1)} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
         _faultProcessPending = true;
     }
 
     public void SynchronizeBuffersInRange(ulong guestAddress, ulong size)
     {
         var end = guestAddress + size;
-        var index = UpperBound(guestAddress);
-        if (index != 0)
+        var index = _registry.FindFirstOverlappingIndex(guestAddress);
+        for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end; index++)
         {
-            index--;
-        }
-
-        for (; index < _buffers.Count && _buffers.Keys[index] < end; index++)
-        {
-            var buffer = _slots[_buffers.Values[index]];
+            var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
             var start = Math.Max(buffer.CpuAddress, guestAddress);
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish)
             {
                 if (GuestGpuMemoryHook.Traces(start, finish - start))
                     GuestGpuMemoryHook.Trace(start, finish - start,
-                        $"device-address-touch buffer={_buffers.Values[index]} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
+                        $"device-address-touch buffer={_registry.GetRegisteredIdentifier(index)} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
                 // Clean buffers remain in use through their device addresses.
                 TouchBuffer(buffer);
                 // Device-address reads reuse persistent buffers; track writes after each upload.
@@ -529,10 +513,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     // Tests use lower thresholds to check collection without large allocations.
-    internal void SetCollectionThresholds(ulong trigger, ulong critical)
+    internal void SetCollectionThresholds(ulong collectionThreshold, ulong criticalThreshold)
     {
-        _triggerGcMemory = trigger;
-        _criticalGcMemory = critical;
+        _retirementPolicy.SetThresholds(collectionThreshold, criticalThreshold);
     }
 
     // Runs before the image readback flush and both collectors; the order matches the render loop.
@@ -548,37 +531,32 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public void RunGarbageCollector()
     {
         ProcessPendingFaultBuffer();
-        var tick = _gcTick++;
-        if (_totalUsedMemory < _triggerGcMemory)
+        if (!_retirementPolicy.TryBeginCollection(_registry.RegisteredBytes, out var retirement))
         {
             return;
         }
 
-        var aggressive = _totalUsedMemory >= _criticalGcMemory;
-        var age = Math.Min(aggressive ? 80UL : 160UL, tick);
-        var limit = aggressive ? 64 : 32;
-
         var dirtyBuffers = new List<ResourceSlotIdentifier>();
         var copies = new List<DownloadPiece>();
         var retireCount = 0;
-        _lru.ForEachItemAtOrBeforeTick(tick - age, bufferIdentifier =>
+        _registry.VisitRetirementCandidates(retirement.LatestEligibleTick, bufferIdentifier =>
         {
-            var buffer = _slots[bufferIdentifier];
-            if (buffer.IsDeleted)
+            var buffer = _registry.TryGetRegisteredBuffer(bufferIdentifier);
+            if (buffer == null)
             {
                 throw SubmissionScheduler.Fatal("The recency queue contains a deleted buffer.");
             }
 
             _tracker.ValidateGpuDirtyOwnership(_gpuModifiedRanges, buffer.CpuAddress, buffer.Size, "garbage collection");
             var dirty = _tracker.HasGpuDirtyPages(buffer.CpuAddress, buffer.Size);
-            if (dirty && !aggressive)
+            if (dirty && !retirement.DownloadDirtyBuffers)
             {
                 return false;
             }
 
             if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
                 GuestGpuMemoryHook.Trace(buffer.CpuAddress, buffer.Size,
-                    $"device-address-collection buffer={bufferIdentifier} dirty={dirty} aggressive={aggressive} cutoff_tick={tick - age} collection_tick={tick} used_bytes={_totalUsedMemory}");
+                    $"device-address-collection buffer={bufferIdentifier} dirty={dirty} aggressive={retirement.DownloadDirtyBuffers} cutoff_tick={retirement.LatestEligibleTick} collection_tick={_retirementPolicy.CurrentTick - 1} used_bytes={_registry.RegisteredBytes}");
             if (dirty)
             {
                 CollectDirtyPieces(buffer, copies, "garbage collection");
@@ -590,7 +568,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 DeleteBuffer(bufferIdentifier);
             }
 
-            return ++retireCount == limit;
+            return ++retireCount == retirement.MaximumBufferCount;
         });
         if (dirtyBuffers.Count == 0)
         {
@@ -622,9 +600,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
             var copies = new List<DownloadPiece>();
             var dirtyBuffers = new List<ResourceSlotIdentifier>();
-            foreach (var bufferIdentifier in _buffers.Values.ToArray())
+            foreach (var bufferIdentifier in _registry.SnapshotRegisteredIdentifiers())
             {
-                var buffer = _slots[bufferIdentifier];
+                var buffer = _registry.GetBuffer(bufferIdentifier);
                 if (_tracker.HasGpuDirtyPages(buffer.CpuAddress, buffer.Size))
                 {
                     CollectDirtyPieces(buffer, copies, "shutdown");
@@ -642,12 +620,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 ReleaseDownloaded(bufferIdentifier);
             }
 
-            foreach (var bufferIdentifier in _buffers.Values.ToArray())
+            foreach (var bufferIdentifier in _registry.SnapshotRegisteredIdentifiers())
             {
-                var buffer = _slots[bufferIdentifier];
+                var buffer = _registry.GetBuffer(bufferIdentifier);
                 _tracker.UntrackMemory(buffer.CpuAddress, buffer.Size);
                 Unregister(bufferIdentifier);
-                _slots.Erase(bufferIdentifier);
+                _registry.CompleteRetirement(bufferIdentifier);
             }
 
             if (_scheduler.Active)
@@ -676,7 +654,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         _disposed = true;
-        _slots.ForEach((_, buffer) => buffer.Dispose());
+        _registry.Dispose();
         _deviceRing.Dispose();
         _download.Dispose();
         _stream.Dispose();
@@ -721,7 +699,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             return;
         }
 
-        var buffer = _slots[FindBuffer(guestAddress, size)];
+        var buffer = _registry.GetBuffer(FindBuffer(guestAddress, size));
 
         // Widen nearby CPU reads so they share one GPU drain.
         const ulong windowSize = 512 * 1024;
@@ -780,7 +758,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private void ReleaseDownloaded(ResourceSlotIdentifier bufferIdentifier)
     {
-        var buffer = _slots[bufferIdentifier];
+        var buffer = _registry.GetBuffer(bufferIdentifier);
         _tracker.ClearGpuDirtyPages(buffer.CpuAddress, buffer.Size);
         if (_tracker.HasGpuDirtyPages(buffer.CpuAddress, buffer.Size) || _gpuModifiedRanges.Overlaps(buffer.CpuAddress, buffer.Size))
         {
@@ -789,7 +767,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         _tracker.UntrackMemory(buffer.CpuAddress, buffer.Size);
         Unregister(bufferIdentifier);
-        _slots.Erase(bufferIdentifier);
+        _registry.CompleteRetirement(bufferIdentifier);
     }
 
     private void WriteDataBuffer(GpuBuffer buffer, ulong address, ReadOnlySpan<byte> source)
@@ -810,30 +788,19 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private void UpdateRegistration(ResourceSlotIdentifier bufferIdentifier, bool insert)
     {
-        var buffer = _slots[bufferIdentifier];
+        var buffer = _registry.GetBuffer(bufferIdentifier);
         if (!PageOwnerTable.TryGetPageRange(buffer.CpuAddress, buffer.Size, out var first, out var lastExclusive))
         {
             throw SubmissionScheduler.Fatal("The buffer is outside the page table.");
         }
 
-        for (var page = first; page < lastExclusive; page++)
-        {
-            _pageTable.Set(page, insert ? bufferIdentifier : ResourceSlotIdentifier.Invalid);
-        }
-
         var sizePages = lastExclusive - first;
         if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
             GuestGpuMemoryHook.Trace(buffer.CpuAddress, buffer.Size,
-                $"device-address-registration insert={insert} buffer={bufferIdentifier} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
+                $"device-address-registration insert={insert} buffer={bufferIdentifier} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
         if (insert)
         {
-            if (!_buffers.TryAdd(buffer.CpuAddress, bufferIdentifier))
-            {
-                throw SubmissionScheduler.Fatal("The buffer is already registered.");
-            }
-
-            _totalUsedMemory += buffer.Size;
-            buffer.RecencyEntryIndex = _lru.Insert(bufferIdentifier, _gcTick);
+            _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
             {
@@ -844,36 +811,26 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         else
         {
-            if (!_buffers.TryGetValue(buffer.CpuAddress, out var found) || found != bufferIdentifier)
-            {
-                throw SubmissionScheduler.Fatal("Cannot unregister an unknown buffer.");
-            }
-
-            _buffers.Remove(buffer.CpuAddress);
-            if (buffer.Size > _totalUsedMemory)
-            {
-                throw SubmissionScheduler.Fatal("The released memory exceeds the tracked allocation total.");
-            }
-
-            _totalUsedMemory -= buffer.Size;
-            _lru.Free(buffer.RecencyEntryIndex);
+            _registry.BeginRetirement(bufferIdentifier);
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
-            buffer.IsDeleted = true;
         }
     }
 
     private void TouchBuffer(GpuBuffer buffer)
     {
-        if (!buffer.IsDeleted)
+        var identifier = _registry.FindContainingBuffer(buffer.CpuAddress, buffer.Size);
+        if (identifier.IsValid && ReferenceEquals(_registry.GetBuffer(identifier), buffer))
         {
-            _lru.Touch(buffer.RecencyEntryIndex, _gcTick);
+            TouchBuffer(identifier);
         }
     }
 
+    private void TouchBuffer(ResourceSlotIdentifier identifier) =>
+        _registry.MarkBufferUsed(identifier, _retirementPolicy.CurrentTick);
+
     private void DeleteBuffer(ResourceSlotIdentifier bufferIdentifier)
     {
-        var buffer = _slots.TryGet(bufferIdentifier);
-        if (buffer == null || buffer.IsDeleted)
+        if (_registry.TryGetRegisteredBuffer(bufferIdentifier) == null)
         {
             return;
         }
@@ -881,67 +838,43 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         Unregister(bufferIdentifier);
         if (_scheduler.Active)
         {
-            _scheduler.QueueCompletionAction(() => _slots.Erase(bufferIdentifier));
+            _scheduler.QueueCompletionAction(() => _registry.CompleteRetirement(bufferIdentifier));
         }
         else
         {
-            _slots.Erase(bufferIdentifier);
+            _registry.CompleteRetirement(bufferIdentifier);
         }
     }
-
-    private static (ulong Begin, ulong Size) GetAlignedDownloadRange(in DownloadPiece copy)
-    {
-        if (copy.Size == 0 || copy.SourceOffset > copy.Buffer.Size || copy.Size > copy.Buffer.Size - copy.SourceOffset)
-        {
-            throw SubmissionScheduler.Fatal("The download copy range is invalid.");
-        }
-
-        var begin = copy.SourceOffset & ~3UL;
-        if (copy.SourceOffset > ulong.MaxValue - copy.Size || copy.SourceOffset + copy.Size > ulong.MaxValue - 3)
-        {
-            throw SubmissionScheduler.Fatal("The aligned download range exceeds the address limit.");
-        }
-
-        var end = (copy.SourceOffset + copy.Size + 3) & ~3UL;
-        if (end > copy.Buffer.Size)
-        {
-            throw SubmissionScheduler.Fatal("The aligned download range exceeds its buffer.");
-        }
-
-        return (begin, end - begin);
-    }
-
-    private static ulong AlignDownloadSize(ulong size) => (size + DownloadAlignment - 1) & ~(DownloadAlignment - 1);
 
     // Packs pieces into the download ring, waits for the copy, then writes each through the backing alias.
     private void DownloadBufferMemory(List<DownloadPiece> copies)
     {
-        var batch = new List<DownloadPiece>();
-        var packedSize = 0UL;
+        var batch = new List<PlannedDownload>();
+        var planner = new BufferDownloadBatchPlanner(_download.Size);
         foreach (var piece in copies)
         {
             var copy = piece;
             while (copy.Size != 0)
             {
-                var available = _download.Size - packedSize;
-                var prefix = copy.SourceOffset & 3;
-                var bytes = Math.Min(copy.Size, available - prefix);
-                var part = copy with { Size = bytes };
-                var (_, envelopeSize) = GetAlignedDownloadRange(part);
-                packedSize += AlignDownloadSize(envelopeSize);
-                batch.Add(part);
-                copy = copy with { SourceOffset = copy.SourceOffset + bytes, Address = copy.Address + bytes, Size = copy.Size - bytes };
-                if (packedSize == _download.Size)
+                var placement = planner.Append(copy.SourceOffset, copy.Size, copy.Buffer.Size);
+                batch.Add(new PlannedDownload(copy.Buffer, copy.Address, placement));
+                copy = copy with
                 {
-                    FlushDownloads(batch, packedSize);
-                    packedSize = 0;
+                    SourceOffset = copy.SourceOffset + placement.DataSize,
+                    Address = copy.Address + placement.DataSize,
+                    Size = copy.Size - placement.DataSize,
+                };
+                if (planner.IsFull)
+                {
+                    FlushDownloads(batch, planner.PackedSize);
+                    planner.Reset();
                 }
             }
         }
 
         if (batch.Count != 0)
         {
-            FlushDownloads(batch, packedSize);
+            FlushDownloads(batch, planner.PackedSize);
         }
 
         foreach (var copy in copies)
@@ -950,39 +883,34 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
-    private void FlushDownloads(List<DownloadPiece> batch, ulong packedSize)
+    private void FlushDownloads(List<PlannedDownload> batch, ulong packedSize)
     {
-        if (!_download.TryMap(packedSize, out var baseOffset, DownloadAlignment))
+        if (!_download.TryMap(packedSize, out var baseOffset, BufferDownloadBatchPlanner.Alignment))
         {
             throw SubmissionScheduler.Fatal("The download ring could not map the batch.");
         }
 
-        var cursor = 0UL;
         foreach (var copy in batch)
         {
-            var (sourceBegin, envelopeSize) = GetAlignedDownloadRange(copy);
+            var placement = copy.Placement;
             _download.CopyFrom(
-                _scheduler.Current, copy.Buffer, sourceBegin, baseOffset + cursor, envelopeSize,
+                _scheduler.Current, copy.Buffer, placement.SourceOffset, baseOffset + placement.DestinationOffset, placement.TransferSize,
                 AccessFlags.MemoryWriteBit, AccessFlags.None, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.HostReadBit);
-            cursor += AlignDownloadSize(envelopeSize);
         }
 
         _download.Commit();
         var completionTick = _scheduler.CurrentTick;
         _scheduler.Finish();
         _scheduler.WaitForPriorityOperations(completionTick);
-        cursor = 0;
         foreach (var copy in batch)
         {
-            var (sourceBegin, envelopeSize) = GetAlignedDownloadRange(copy);
-            var offset = cursor + copy.SourceOffset - sourceBegin;
-            _download.Invalidate(baseOffset + offset, copy.Size);
-            if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)(baseOffset + offset), (int)copy.Size)))
+            var placement = copy.Placement;
+            var offset = baseOffset + placement.DataOffset;
+            _download.Invalidate(offset, placement.DataSize);
+            if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
-                throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{copy.Size:X16}");
+                throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
-
-            cursor += AlignDownloadSize(envelopeSize);
         }
 
         batch.Clear();
@@ -990,71 +918,29 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private OverlapSpan ResolveOverlaps(ulong guestAddress, ulong size)
     {
-        const int streamLeapThreshold = 16;
-        const ulong streamLeapSize = CachingPageSize * 128;
-
-        var begin = guestAddress;
-        var end = guestAddress + size;
-        var first = FindFirstOverlappingBuffer(begin);
+        var range = new BufferMergeRange(guestAddress, guestAddress + size);
+        var first = _registry.FindFirstOverlappingIndex(range.Begin);
         var last = first;
-        var streamScore = 0;
-        var hasStreamLeap = false;
-        for (; last < _buffers.Count && _buffers.Keys[last] < end; last++)
+        for (; last < _registry.RegisteredCount && _registry.GetRegisteredAddress(last) < range.End; last++)
         {
-            var buffer = _slots[_buffers.Values[last]];
-            var bufferBegin = buffer.CpuAddress;
-            var bufferEnd = bufferBegin + buffer.Size;
-            var expandsLeft = bufferBegin < begin;
-            var expandsRight = bufferEnd > end;
-            begin = Math.Min(begin, bufferBegin);
-            end = Math.Max(end, bufferEnd);
-            if (!hasStreamLeap && (streamScore += buffer.StreamScore) > streamLeapThreshold)
+            var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(last));
+            if (range.IncludeBuffer(buffer.CpuAddress, buffer.CpuAddress + buffer.Size, buffer.StreamScore))
             {
-                hasStreamLeap = true;
-                if (expandsRight)
+                first = _registry.FindFirstOverlappingIndex(range.Begin);
+                if (first < _registry.RegisteredCount)
                 {
-                    end += Math.Min(streamLeapSize, PageOwnerTable.AddressSpaceSize - end);
-                }
-
-                if (expandsLeft)
-                {
-                    const ulong minimum = CachingPageSize * 2;
-                    if (begin > minimum)
-                    {
-                        begin -= Math.Min(streamLeapSize, begin - minimum);
-                    }
-
-                    first = FindFirstOverlappingBuffer(begin);
-                    if (first < _buffers.Count)
-                    {
-                        begin = Math.Min(begin, _buffers.Keys[first]);
-                    }
+                    range.IncludeEarlierBuffer(_registry.GetRegisteredAddress(first));
                 }
             }
         }
 
-        return new OverlapSpan(first, last, begin, end, hasStreamLeap);
-    }
-
-    private int FindFirstOverlappingBuffer(ulong address)
-    {
-        var first = LowerBound(address);
-        if (first != 0)
-        {
-            var previous = _slots[_buffers.Values[first - 1]];
-            if (previous.CpuAddress + previous.Size > address)
-            {
-                first--;
-            }
-        }
-
-        return first;
+        return new OverlapSpan(first, last, range.Begin, range.End, range.HasStreamExpansion);
     }
 
     private void MergeOverlappingBuffer(ResourceSlotIdentifier newBufferIdentifier, ResourceSlotIdentifier overlappingBufferIdentifier, bool accumulateStreamScore)
     {
-        var newBuffer = _slots[newBufferIdentifier];
-        var overlap = _slots[overlappingBufferIdentifier];
+        var newBuffer = _registry.GetBuffer(newBufferIdentifier);
+        var overlap = _registry.GetBuffer(overlappingBufferIdentifier);
         if (GuestGpuMemoryHook.Traces(overlap.CpuAddress, overlap.Size))
             GuestGpuMemoryHook.Trace(overlap.CpuAddress, overlap.Size,
                 $"device-address-merge old={overlappingBufferIdentifier} replacement={newBufferIdentifier} submission_tick={_scheduler.CurrentTick}");
@@ -1081,12 +967,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var overlapping = new List<ResourceSlotIdentifier>();
         for (var index = overlap.First; index < overlap.Last; index++)
         {
-            overlapping.Add(_buffers.Values[index]);
+            overlapping.Add(_registry.GetRegisteredIdentifier(index));
         }
 
-        var bufferIdentifier = _slots.Insert(new GpuBuffer(
+        var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
             _device, _scheduler, GpuBufferUsage.DeviceLocal, overlap.Begin,
-            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin));
+            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin), overlap.Begin, overlap.End - overlap.Begin);
         foreach (var oldId in overlapping)
         {
             MergeOverlappingBuffer(bufferIdentifier, oldId, !overlap.HasStreamLeap);
@@ -1120,7 +1006,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
                 totalSize += bytes;
             },
-            () => source = UploadCopies(buffer, copies, totalSize, guestAddress, size),
+            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size),
             preserveCpuWriteHotPages);
         if (source != null)
         {
@@ -1173,67 +1059,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return false;
     }
 
-    // Reads the CPU-dirty runs from guest memory into the staging ring, or a one-shot upload buffer.
-    private GpuBuffer? UploadCopies(GpuBuffer buffer, List<BufferCopy> copies, ulong totalSize, ulong requestedAddress, ulong requestedSize)
-    {
-        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStagingUpload);
-        if (copies.Count == 0)
-        {
-            return null;
-        }
-
-        var regions = CollectionsMarshal.AsSpan(copies);
-        if (_staging.TryMap(totalSize, out var baseOffset, 4))
-        {
-            foreach (ref var copy in regions)
-            {
-                ReadGuestBytes(buffer.CpuAddress + copy.DstOffset, _staging.Mapped.Slice((int)(baseOffset + copy.SrcOffset), (int)copy.Size), requestedAddress, requestedSize);
-                copy.SrcOffset += baseOffset;
-            }
-
-            _staging.Commit();
-            return _staging;
-        }
-
-        var temporary = new GpuBuffer(_device, _scheduler, GpuBufferUsage.Upload, 0, BufferUsageFlags.TransferSrcBit, totalSize);
-        foreach (ref readonly var copy in regions)
-        {
-            ReadGuestBytes(buffer.CpuAddress + copy.DstOffset, temporary.Mapped.Slice((int)copy.SrcOffset, (int)copy.Size), requestedAddress, requestedSize);
-        }
-
-        temporary.Flush(0, totalSize);
-        _scheduler.QueueCompletionAction(temporary.Dispose);
-        return temporary;
-    }
-
-    private void ReadGuestBytes(ulong address, Span<byte> destination, ulong requestedAddress, ulong requestedSize)
-    {
-        if (!_guest.TryRead(address, destination))
-        {
-            Console.Error.WriteLine($"[GPU][READ_FAILURE] addr=0x{address:X16} size=0x{destination.Length:X}");
-            Console.Error.WriteLine($"[GPU][READ_FAILURE] binding=0x{requestedAddress:X16} size=0x{requestedSize:X}");
-            try
-            {
-                Console.Error.WriteLine(_guest.DescribeReadRange(address, (ulong)destination.Length));
-            }
-            catch (Exception error)
-            {
-                Console.Error.WriteLine($"[GPU][READ_FAILURE] mapping query failed: {error.GetType().Name}");
-            }
-            throw SubmissionScheduler.Fatal($"Could not read guest memory: addr=0x{address:X16} size=0x{destination.Length:X}");
-        }
-    }
-
     private GpuBuffer? FindOwner(ulong guestAddress, ulong size)
     {
-        var owner = _pageTable.Find(guestAddress >> PageOwnerTable.PageBits);
-        if (!owner.IsValid)
-        {
-            return null;
-        }
-
-        var buffer = _slots[owner];
-        return buffer.IsInBounds(guestAddress, size) ? buffer : null;
+        return _registry.TryGetRegisteredBuffer(_registry.FindContainingBuffer(guestAddress, size));
     }
 
     private IGuestImageCache RequireImageCache() =>
@@ -1241,43 +1069,4 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private static bool IsValidRange(ulong guestAddress, ulong size) => guestAddress != 0 && size != 0 && new GuestSpan(guestAddress, size).IsValid;
 
-    private int LowerBound(ulong key)
-    {
-        var low = 0;
-        var high = _buffers.Count;
-        while (low < high)
-        {
-            var mid = (low + high) / 2;
-            if (_buffers.Keys[mid] < key)
-            {
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid;
-            }
-        }
-
-        return low;
-    }
-
-    private int UpperBound(ulong key)
-    {
-        var low = 0;
-        var high = _buffers.Count;
-        while (low < high)
-        {
-            var mid = (low + high) / 2;
-            if (_buffers.Keys[mid] <= key)
-            {
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid;
-            }
-        }
-
-        return low;
-    }
 }

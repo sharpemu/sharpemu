@@ -31,7 +31,6 @@ public sealed class GpuBufferTests : IClassFixture<HeadlessVulkanFixture>
         Assert.False(buffer.IsInBounds(0x10000, ulong.MaxValue));
         Assert.Equal(0x1000UL, buffer.Offset(0x11000));
         Assert.True(buffer.Mapped.IsEmpty);
-        Assert.False(buffer.IsDeleted);
     }
 
     [Fact]

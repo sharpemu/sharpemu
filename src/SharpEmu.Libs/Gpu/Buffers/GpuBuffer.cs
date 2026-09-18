@@ -116,10 +116,6 @@ public unsafe class GpuBuffer : IDisposable
 
     public int StreamScore { get; private set; }
 
-    public bool IsDeleted { get; set; }
-
-    public int RecencyEntryIndex { get; set; }
-
     protected GpuDeviceInfo Device => _device;
 
     protected SubmissionScheduler Scheduler => _scheduler;

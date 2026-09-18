@@ -134,6 +134,106 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         });
     }
 
+    [Fact]
+    public void MergedAllocationPreservesBothGpuWrittenRanges()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var first = harness.Cache.ObtainBuffer(address, 4, isWritten: true);
+            first.Buffer.Fill(first.Offset, 4, 0x12345678);
+            var second = harness.Cache.ObtainBuffer(address + 2 * Page, 4, isWritten: true);
+            second.Buffer.Fill(second.Offset, 4, 0xABCDEF01);
+            Assert.Equal(2, harness.Cache.BufferCount);
+            _ = harness.Cache.FindBuffer(address, 2 * Page + 4);
+            Assert.Equal(1, harness.Cache.BufferCount);
+        });
+        Assert.True(harness.Store.DownloadToCpu(address, 2 * Page + 4));
+        Assert.Equal(0x12345678U, BitConverter.ToUInt32(harness.Read(address, 4)));
+        Assert.Equal(0xABCDEF01U, BitConverter.ToUInt32(harness.Read(address + 2 * Page, 4)));
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 2 * Page + 4));
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UploadSourcePacksRangesAndSurvivesUntilGpuCompletion(bool useTemporaryBuffer)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, [1, 2, 3, 4, 5, 6, 7, 8]);
+        harness.Write(address + 32, [9, 10, 11, 12, 13, 14, 15, 16]);
+        harness.Worker.Run(() =>
+        {
+            using var staging = new GpuRingBuffer(_vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.Upload, useTemporaryBuffer ? 8UL : 128UL);
+            if (!useTemporaryBuffer) staging.Copy(new byte[16], 4);
+            var uploader = new GuestBufferUploader(_vulkan.DeviceInfo, harness.Scheduler, harness.Memory, staging);
+            BufferCopy[] regions = [new(0, 0, 8), new(8, 32, 8)];
+            var source = uploader.PrepareSource(address, regions, 16, address, 40);
+            Assert.NotNull(source);
+            Assert.Equal(useTemporaryBuffer, !ReferenceEquals(staging, source));
+            Assert.Equal(useTemporaryBuffer ? 0UL : 16UL, regions[0].SrcOffset);
+            Assert.Equal(regions[0].SrcOffset + 8, regions[1].SrcOffset);
+            Assert.Equal(32UL, regions[1].DstOffset);
+            using var download = new GpuBuffer(_vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 16);
+            download.CopyFrom(harness.Scheduler.Current, source, regions[0].SrcOffset, 0, 16,
+                AccessFlags.HostWriteBit, AccessFlags.None,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.HostReadBit);
+            Assert.NotEqual(0UL, source.Handle.Handle);
+            harness.Scheduler.Finish();
+            download.Invalidate(0, 16);
+            Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+                download.Mapped[..16].ToArray());
+            Assert.Equal(useTemporaryBuffer, source.Handle.Handle == 0);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void EmptyUploadDoesNotReserveStagingBytes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        harness.Worker.Run(() =>
+        {
+            using var staging = new GpuRingBuffer(_vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.Upload, 128);
+            var uploader = new GuestBufferUploader(_vulkan.DeviceInfo, harness.Scheduler, harness.Memory, staging);
+            Assert.Null(uploader.PrepareSource(0, [], 0, 0, 0));
+            Assert.True(staging.TryMap(128, out var offset, 4));
+            Assert.Equal(0UL, offset);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ReplacedBufferRemainsAliveUntilRecordedCopiesComplete()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var originalIdentifier = harness.Cache.FindBuffer(address, Page);
+            var original = harness.Cache.GetBuffer(originalIdentifier);
+            var replacementIdentifier = harness.Cache.FindBuffer(address, 2 * Page);
+            Assert.NotEqual(originalIdentifier, replacementIdentifier);
+            Assert.Equal(replacementIdentifier, harness.Cache.FindBuffer(address, Page));
+            Assert.Same(original, harness.Cache.GetBuffer(originalIdentifier));
+            Assert.NotEqual(0UL, original.Handle.Handle);
+            Assert.Equal(2 * Page, harness.Cache.TotalUsedMemory);
+            harness.Scheduler.Finish();
+            Assert.Equal(0UL, original.Handle.Handle);
+            Assert.NotEqual(0UL, harness.Cache.GetBuffer(replacementIdentifier).Handle.Handle);
+        });
+        harness.Shutdown();
+    }
+
     private const GuestPageProtection ReadWrite = GuestPageProtection.Read | GuestPageProtection.Write;
 
     private readonly HeadlessVulkan? _vulkan;
@@ -442,6 +542,31 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void UnalignedReadbackAcrossDownloadBatchesPreservesAdjacentGuestBytes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan, backingBytes: 64 * 1024 * 1024);
+        const int downloadSize = 32 * 1024 * 1024 + 7;
+        var address = harness.MapBacked(32 * 1024 * 1024 + Page, ReadWrite);
+        harness.Write(address, [0x71, 0x72, 0x73]);
+        harness.Write(address + 3 + downloadSize, [0x74, 0x75]);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address + 3, downloadSize, isWritten: true);
+            buffer.Fill(offset - 3, (ulong)downloadSize + 5, 0xA5A5A5A5);
+        });
+
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address + 3, downloadSize));
+        Assert.True(harness.Store.DownloadToCpu(address + 3, downloadSize));
+        Assert.Equal(new byte[] { 0x71, 0x72, 0x73 }, harness.Read(address, 3));
+        Assert.Equal(new byte[] { 0x74, 0x75 }, harness.Read(address + 3 + downloadSize, 2));
+        Assert.True(harness.Read(address + 3, downloadSize).AsSpan().IndexOfAnyExcept((byte)0xA5) < 0);
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, (ulong)downloadSize + 5));
+        Assert.False(harness.Cache.HasGpuDirtyPages(address, (ulong)downloadSize + 5));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void WriteHostMemory_LandsInGuestMemoryAndEveryOverlappingBuffer()
     {
         if (_vulkan is null) return;
@@ -689,6 +814,31 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(dirty));
         Assert.Equal(0x0BADF00Du, BitConverter.ToUInt32(harness.Read(dirty + 0xFC, 4)));
         Assert.False(harness.Cache.HasGpuDirtyBytes(dirty, 0x10000));
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false, 32)]
+    [InlineData(true, 64)]
+    public void GarbageCollector_StopsAtTheRetirementLimit(bool critical, int expectedRetired)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int bufferCount = 65;
+        for (var index = 0; index < bufferCount; index++)
+        {
+            var address = harness.MapBacked(0x10000, ReadWrite);
+            harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x4100, isWritten: false));
+        }
+
+        harness.Worker.Run(() =>
+        {
+            for (var index = 0; index < 161; index++) harness.Cache.RunGarbageCollector();
+            Assert.Equal(bufferCount, harness.Cache.BufferCount);
+            harness.Cache.SetCollectionThresholds(1, critical ? 1UL : ulong.MaxValue);
+            harness.Cache.RunGarbageCollector();
+        });
+        Assert.Equal(bufferCount - expectedRetired, harness.Cache.BufferCount);
         harness.Shutdown();
     }
 
