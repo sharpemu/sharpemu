@@ -22,8 +22,8 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
         using var owner = new GuestSpaceOwner(host, BackingSize);
-        var granularity = host.Granularity;
-        var address = ProbeFreeAddress(host, 5 * granularity);
+        var granularity = Math.Max(host.Granularity, Page);
+        var address = ProbeGuestAddress(host, 5 * granularity);
         Assert.True(owner.TryReserveAddressRange(address + 2 * granularity, granularity));
         host.Log.Clear();
         if (failSecondGap)
@@ -54,7 +54,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         var host = new FailingHostViews(HostViewMemory.Create());
         using var owner = new GuestSpaceOwner(host, BackingSize);
         var holeSize = HoleSize(host);
-        var address = ProbeFreeAddress(host, 3 * holeSize);
+        var address = ProbeGuestAddress(host, 3 * holeSize);
         Assert.True(owner.TryReserveAddressRange(address, holeSize), "The initial reservation failed.");
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _), "The initial view failed.");
         *(ulong*)address = Marker;
@@ -74,7 +74,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         var host = new FailingHostViews(HostViewMemory.Create());
         using var owner = new GuestSpaceOwner(host, BackingSize);
         var holeSize = HoleSize(host);
-        var address = ProbeFreeAddress(host, 3 * holeSize);
+        var address = ProbeGuestAddress(host, 3 * holeSize);
         Assert.True(owner.TryReserveAddressRange(address, holeSize));
         var foreignAddress = address + 2 * holeSize;
         Assert.Equal(foreignAddress, host.ReserveHole(foreignAddress, holeSize));
@@ -94,7 +94,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var probe = ProbeFreeAddress(host, size);
+            var probe = ProbeGuestAddress(host, size);
             if (owner.TryReserveAddressRange(probe, size))
             {
                 return probe;
@@ -168,7 +168,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         using var owner = new GuestSpaceOwner(host, BackingSize);
         var hole = HoleSize(host);
         var owned = AcquireRange(owner, host, hole);
-        var foreign = ProbeFreeAddress(host, hole);
+        var foreign = ProbeGuestAddress(host, hole);
         Assert.True(owner.MapShared(owned, Page, 0, HostPageProtection.ReadWrite, out _));
         Assert.True(owner.AllocatePrivate(owned + Page, Page, HostPageProtection.ReadWrite));
         host.Log.Clear();
@@ -361,7 +361,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         Assert.False(owner.SetTransientAccess(baseAddress + 0x800, 0x1000, HostPageProtection.ReadWrite));
         Assert.False(owner.SetTransientAccess(baseAddress, 0, HostPageProtection.ReadWrite));
         Assert.False(owner.SetTransientAccess(ulong.MaxValue - 0x1000 + 1, 0x2000, HostPageProtection.ReadWrite));
-        Assert.True(owner.SetTransientAccess(baseAddress + 0x1000, 0x1000, HostPageProtection.ReadWrite));
+        Assert.True(owner.SetTransientAccess(baseAddress + host.PageSize, host.PageSize, HostPageProtection.ReadWrite));
 
         Assert.False(owner.TryReserveAddressRange(baseAddress + Page, hole));
         Assert.False(owner.TryReserveAddressRange(baseAddress, hole + Page));

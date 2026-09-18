@@ -18,7 +18,7 @@ public sealed class KernelBackedMemoryTests
     public void BatchRemapCanExtendAnUnmappedReservationWithoutOverwritingMappings()
     {
         using var test = new BackedKernelMemory();
-        const ulong address = 0x102A000000;
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x420000);
         test.Allocate(0, 0x410000);
         test.Map(0, 0x200000, address);
         test.Map(0x200000, 0x10000, address + 0x200000);
@@ -219,8 +219,8 @@ public sealed class KernelBackedMemoryTests
     public void SparseImageReadCopiesResidentRangesAndClearsReservedGaps()
     {
         using var test = new BackedKernelMemory();
-        const ulong address = 0x1026C00000;
         const int size = 0x10000;
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, size);
         test.Reserve(size, address);
         test.Allocate(0, 0x8000);
         test.Map(0, 0x4000, address);
@@ -250,7 +250,7 @@ public sealed class KernelBackedMemoryTests
     public void SparseImageReadRejectsUnreservedAndOutOfApertureRanges()
     {
         using var test = new BackedKernelMemory();
-        const ulong address = 0x1026C00000;
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x20000);
         test.Reserve(0x10000, address);
         SetPrtAperture(test, address, 0x20000);
         try
@@ -672,7 +672,7 @@ public sealed class KernelBackedMemoryTests
     public void OccupiedApertureFailsWithoutReplacingPrivateMemory()
     {
         using var test = new BackedKernelMemory();
-        const ulong address = 0x10_0000_0000;
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x10000);
         Assert.Equal(address, test.Memory.AllocateAt(address, 0x10000, false, false));
         Assert.True(test.Context.TryWriteUInt64(address, 321));
         test.Allocate(0, 0x4000);

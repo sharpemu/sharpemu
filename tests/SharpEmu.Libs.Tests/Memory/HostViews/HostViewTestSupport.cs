@@ -20,6 +20,21 @@ internal static class HostViewTestSupport
 
     public static ulong HoleSize(IHostViewMemory views) => AlignUp(4 * Segment, views.Granularity);
 
+    // Keep search tests below the guest address limit and outside reserved graphics memory.
+    public static ulong ProbeGuestAddress(IHostViewMemory views, ulong size)
+    {
+        size = AlignUp(size, views.Granularity);
+        var step = AlignUp(Math.Max(size, 0x1000000UL), views.Granularity);
+        for (var candidate = 0x70_0000_0000UL; candidate < 0x71_0000_0000UL; candidate += step)
+        {
+            if (views.ReserveHole(candidate, size) != candidate) continue;
+            Assert.True(views.FreeHole(candidate, size));
+            return candidate;
+        }
+        Assert.Fail("No free guest test range was found.");
+        return 0;
+    }
+
     public static ulong AlignUp(ulong value, ulong alignment) => (value + alignment - 1) / alignment * alignment;
 
     // Reserves then frees a probe so the address is free and granularity-aligned.

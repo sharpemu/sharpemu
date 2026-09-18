@@ -231,17 +231,17 @@ public sealed class KernelMemoryCompatExportsTests
         }
     }
 
-    private static void AllocateDirectMemory(CpuContext context, ulong start, ulong length)
+    private static void AllocateDirectMemory(CpuContext context, ulong start, ulong length, ulong outputAddress = AllocationOutAddress)
     {
         context[CpuRegister.Rdi] = start;
         context[CpuRegister.Rsi] = start + length;
         context[CpuRegister.Rdx] = length;
         context[CpuRegister.Rcx] = 0x4000;
         context[CpuRegister.R8] = 0;
-        context[CpuRegister.R9] = AllocationOutAddress;
+        context[CpuRegister.R9] = outputAddress;
 
         Assert.Equal(0, KernelMemoryCompatExports.KernelAllocateDirectMemory(context));
-        Assert.True(context.TryReadUInt64(AllocationOutAddress, out var allocatedAddress));
+        Assert.True(context.TryReadUInt64(outputAddress, out var allocatedAddress));
         Assert.Equal(start, allocatedAddress);
     }
 
@@ -437,7 +437,7 @@ public sealed class KernelMemoryCompatExportsTests
         const ulong length = 0x0001_0000;
         const ulong requestedAddress = 0x2_0000_0000;
         using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
-        Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
+        var outputAddress = memory.AllocateAt(0, 0x4000, false);
         var context = new CpuContext(memory, Generation.Gen5);
         var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace());
         GuestGpuMemoryHook.Attach(gpuMemory);
@@ -445,17 +445,17 @@ public sealed class KernelMemoryCompatExportsTests
 
         try
         {
-            AllocateDirectMemory(context, directStart, length);
+            AllocateDirectMemory(context, directStart, length, outputAddress);
 
-            Assert.True(context.TryWriteUInt64(AllocationOutAddress, requestedAddress));
-            context[CpuRegister.Rdi] = AllocationOutAddress;
+            Assert.True(context.TryWriteUInt64(outputAddress, requestedAddress));
+            context[CpuRegister.Rdi] = outputAddress;
             context[CpuRegister.Rsi] = length;
             context[CpuRegister.Rdx] = 0x33; // CPU read|write, GPU read|write
             context[CpuRegister.Rcx] = 0;
             context[CpuRegister.R8] = directStart;
             context[CpuRegister.R9] = 0;
             Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(context));
-            Assert.True(context.TryReadUInt64(AllocationOutAddress, out mappedAddress));
+            Assert.True(context.TryReadUInt64(outputAddress, out mappedAddress));
             Assert.True(gpuMemory.Covers(mappedAddress, length));
 
             context[CpuRegister.Rdi] = mappedAddress;
@@ -488,7 +488,7 @@ public sealed class KernelMemoryCompatExportsTests
         const ulong unallocatedStart = 0x0500_0000;
         const ulong requestedAddress = 0x2_1000_0000;
         using var memory = new PhysicalVirtualMemory(viewHost: HostViewMemory.Create(), backingBytes: 128UL * 1024 * 1024);
-        Assert.Equal(GuestMemoryBase, memory.AllocateAt(GuestMemoryBase, 0x4000, false, false));
+        var outputAddress = memory.AllocateAt(0, 0x4000, false);
         var context = new CpuContext(memory, Generation.Gen5);
         var gpuMemory = new GuestGpuMemory(new RecordingAddressSpace());
         GuestGpuMemoryHook.Attach(gpuMemory);
@@ -496,17 +496,17 @@ public sealed class KernelMemoryCompatExportsTests
 
         try
         {
-            AllocateDirectMemory(context, directStart, length);
+            AllocateDirectMemory(context, directStart, length, outputAddress);
 
-            Assert.True(context.TryWriteUInt64(AllocationOutAddress, requestedAddress));
-            context[CpuRegister.Rdi] = AllocationOutAddress;
+            Assert.True(context.TryWriteUInt64(outputAddress, requestedAddress));
+            context[CpuRegister.Rdi] = outputAddress;
             context[CpuRegister.Rsi] = length;
             context[CpuRegister.Rdx] = 0x33; // CPU read|write, GPU read|write
             context[CpuRegister.Rcx] = 0;
             context[CpuRegister.R8] = directStart;
             context[CpuRegister.R9] = 0;
             Assert.Equal(0, KernelMemoryCompatExports.KernelMapDirectMemory(context));
-            Assert.True(context.TryReadUInt64(AllocationOutAddress, out mappedAddress));
+            Assert.True(context.TryReadUInt64(outputAddress, out mappedAddress));
             Assert.True(gpuMemory.Covers(mappedAddress, length));
 
             context[CpuRegister.Rdi] = unallocatedStart;

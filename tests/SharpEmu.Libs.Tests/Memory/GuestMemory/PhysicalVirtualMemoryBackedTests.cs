@@ -80,7 +80,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     {
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var address = ProbeFreeAddress(host, HoleSize(host));
+            var address = ProbeGuestAddress(host, HoleSize(host));
             if (memory.TryHoldRange(address, HoleSize(host)))
             {
                 return address;
@@ -96,7 +96,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     {
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var address = ProbeFreeAddress(host, size);
+            var address = ProbeGuestAddress(host, size);
             try
             {
                 memory.Map(address, size, 0, ReadOnlySpan<byte>.Empty, flags);
@@ -293,15 +293,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         var size = HoleSize(host);
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
-        var lowerAddress = 0UL;
-        for (var candidate = 0x2_0000_0000UL; candidate < 0x3_0000_0000UL; candidate += 0x100_0000)
-        {
-            if (host.ReserveHole(candidate, 3 * size) != candidate) continue;
-            Assert.True(host.FreeHole(candidate, 3 * size));
-            lowerAddress = candidate;
-            break;
-        }
-        Assert.NotEqual(0UL, lowerAddress);
+        var lowerAddress = ProbeGuestAddress(host, 3 * size);
         var higherAddress = lowerAddress + 2 * size;
         Assert.True(memory.TryHoldRange(higherAddress, size));
         Assert.True(memory.TryHoldRangeAtOrAbove(lowerAddress, size, size, out var selectedAddress));
@@ -331,14 +323,8 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         if (!Supported) return;
         var host = HostViewMemory.Create();
         var size = HoleSize(host);
-        var occupied = 0UL;
-        for (var candidate = 0x2_0000_0000UL; occupied == 0 && candidate < 0x3_0000_0000UL; candidate += 0x100_0000)
-        {
-            if (PlatformMemory.Allocate(candidate, size, HostPageProtection.ReadWrite) == candidate)
-            {
-                occupied = candidate;
-            }
-        }
+        var candidate = ProbeGuestAddress(host, size);
+        var occupied = PlatformMemory.Allocate(candidate, size, HostPageProtection.ReadWrite);
 
         Assert.NotEqual(0UL, occupied);
         try
@@ -366,7 +352,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         ulong address = 0;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var candidate = ProbeFreeAddress(host, 2 * size);
+            var candidate = ProbeGuestAddress(host, 2 * size);
             if (memory.TryHoldRange(candidate, size) && memory.TryHoldRange(candidate + size, size))
             {
                 address = candidate;
