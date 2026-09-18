@@ -53,27 +53,34 @@ public sealed class GuestPageTrackerTests : IDisposable
 
     private readonly Action<string> _previousFatal = PageGuard.OnFatal;
     private readonly IHostMemory _host = HostViewTestSupport.PlatformMemory;
-    private readonly PhysicalVirtualMemory _memory = new();
+    private readonly PhysicalVirtualMemory _memory;
     private readonly LoggingSpace _space;
     private readonly GuestGpuMemory _gpu;
     private readonly GuestPageTracker _tracker;
 
     public GuestPageTrackerTests()
     {
+        PageGuard.OnFatal = message => throw new TrackerFatalException(message);
+        _memory = new PhysicalVirtualMemory(hostMemory: _host);
         _space = new LoggingSpace(_memory);
         _gpu = new GuestGpuMemory(_space);
         _tracker = new GuestPageTracker(_gpu.Pages);
-        PageGuard.OnFatal = message => throw new TrackerFatalException(message);
     }
 
     public void Dispose()
     {
-        PageGuard.OnFatal = _previousFatal;
-        _gpu.Dispose();
-        _memory.Dispose();
+        try
+        {
+            _gpu.Dispose();
+        }
+        finally
+        {
+            try { _memory.Dispose(); }
+            finally { PageGuard.OnFatal = _previousFatal; }
+        }
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void QueriesDoNotRequireMappedOwnership()
     {
         const ulong address = 0x2_0300_0000;
@@ -86,7 +93,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.False(_tracker.HasRegion(address + Region, Page));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ConcurrentRegionPublicationKeepsInitialCpuOwnership()
     {
         var address = Allocate(1);
@@ -118,7 +125,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         });
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void CpuDirtyUploadArmsWriteProtectionAndExplicitDirtinessReleasesIt()
     {
         var address = Allocate(2);
@@ -146,7 +153,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void RangeInvalidationBatchesOwnershipTransferAcrossRegions()
     {
         const ulong size = Region * 2;
@@ -176,7 +183,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, size);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void InvalidationAcceptsANewGenerationOfGpuOwnership()
     {
         var address = Allocate(1);
@@ -217,7 +224,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void GpuDirtyBitsStayInsideTheRequestedRange()
     {
         var address = Allocate(2);
@@ -236,7 +243,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ExactDirtyIntervalsShareOneTrackerPage()
     {
         var address = Allocate(1);
@@ -276,7 +283,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void DownloadsMirrorTheProtectionOfEachSide()
     {
         var address = Allocate(4);
@@ -321,7 +328,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 4);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void CrossRegionUploadClearsAndProtectsBothRegions()
     {
         var address = AllocateAligned(Region * 2, Region);
@@ -339,7 +346,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Region * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void UploadDoesNotSerializeADisjointRegion()
     {
         var address = AllocateAligned(Region * 2, Region);
@@ -378,7 +385,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.True(queryResult);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void DownloadDoesNotSerializeADisjointRegion()
     {
         var address = AllocateAligned(Region * 2, Region);
@@ -419,7 +426,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.True(bothGpuOwned);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void GpuUnmarkUsesOneRegionMaskPerRegion()
     {
         var address = AllocateAligned(Region * 2, Region);
@@ -453,7 +460,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Region * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void FullRegionGpuUnmarkUsesOneProtectionRequest()
     {
         var address = AllocateAligned(Region, Region);
@@ -474,7 +481,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Region);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ExplicitCpuDirtinessOnGpuDirtyMemoryIsFatal()
     {
         var address = Allocate(1);
@@ -489,7 +496,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void CleanUploadStillRunsCallbackAndTransfersWritableOwnership()
     {
         var address = Allocate(1);
@@ -509,7 +516,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void RepeatedCpuWritesKeepReadOnlyHotPagesWritableAndDirty()
     {
         var address = Allocate(1);
@@ -542,7 +549,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Theory]
+    [NativePageProtectionTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void TrackedReadOnlyUploadRearmsHotPagesAndRetriesFailures(bool failUpload)
@@ -583,7 +590,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ReadOnlyUploadClearsColdPagesAndPreservesHotPages()
     {
         var address = Allocate(2);
@@ -607,7 +614,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void ReenteringTheTrackerFromAnUploadCallbackIsFatal()
     {
         var address = Allocate(1);
@@ -621,7 +628,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [Theory]
+    [NativePageProtectionTheory]
     [InlineData(false, true)]
     [InlineData(true, true)]
     [InlineData(true, false)]
@@ -659,7 +666,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Region * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void FailedReadOnlyUploadKeepsAnOwnershipInstalledAfterItsLockOpened()
     {
         var address = Allocate(2);
@@ -696,7 +703,7 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page * 2);
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void UntrackingGpuDirtyMemoryIsFatal()
     {
         var address = Allocate(1);

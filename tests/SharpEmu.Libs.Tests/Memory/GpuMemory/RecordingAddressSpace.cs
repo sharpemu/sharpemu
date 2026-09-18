@@ -8,6 +8,8 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 
 internal sealed class RecordingAddressSpace : IGuestAddressSpace
 {
+    public ulong ProtectionPageSize { get; init; } = 4096;
+
     public List<(ulong Address, ulong Size, GuestPageProtection Protection)> Protects { get; } = new();
 
     public bool FailProtect { get; set; }

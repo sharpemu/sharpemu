@@ -13,6 +13,9 @@ namespace SharpEmu.HLE;
 /// </summary>
 public interface IGuestAddressSpace : IGuestMemoryAllocator
 {
+    // The smallest range that this address space can protect independently.
+    ulong ProtectionPageSize => (ulong)Environment.SystemPageSize;
+
     ulong AllocateAt(ulong desiredAddress, ulong size, bool executable = true, bool allowAlternative = true);
 
     /// <summary>

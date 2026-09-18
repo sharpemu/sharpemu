@@ -84,7 +84,7 @@ public sealed class KernelBackedMemoryTests
         }
     }
 
-    [Theory]
+    [NativePageProtectionTheory]
     [InlineData(false)]
     [InlineData(true)]
     public void ReservationLetsPendingGpuReadsFinishBeforeTakingMappingLocks(bool replaceMapping)
@@ -142,7 +142,7 @@ public sealed class KernelBackedMemoryTests
         }
     }
 
-    [Theory]
+    [NativePageProtectionTheory]
     [InlineData("direct")]
     [InlineData("flexible")]
     [InlineData("unmap")]
@@ -426,7 +426,7 @@ public sealed class KernelBackedMemoryTests
         Assert.False(test.Memory.IsBackedView(second));
     }
 
-    [Fact]
+    [NativePageProtectionFact]
     public void FailedSecondAliasUnmapRestoresViewsAndGpuRegistration()
     {
         using var test = new BackedKernelMemory();

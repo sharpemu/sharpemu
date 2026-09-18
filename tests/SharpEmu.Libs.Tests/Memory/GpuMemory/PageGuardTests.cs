@@ -29,6 +29,13 @@ public sealed class PageGuardTests : IDisposable
     }
 
     [Fact]
+    public void ConstructorRejectsUnsupportedProtectionGranularity()
+    {
+        using var guard = new PageGuard(new RecordingAddressSpace { ProtectionPageSize = 16384 });
+        Assert.Equal("The host page size is not supported: 0x00004000.", Assert.Single(_fatals));
+    }
+
+    [Fact]
     public void AddWatch_CoalescesPagesIntoOneProtectCall()
     {
         using var guard = new PageGuard(_space);
@@ -198,6 +205,8 @@ public sealed class PageGuardTests : IDisposable
     // Blocks one protection call so a concurrent Reapply has to queue behind the watcher update.
     private sealed class BlockingAddressSpace : IGuestAddressSpace
     {
+        public ulong ProtectionPageSize => 4096;
+
         public List<(ulong Address, ulong Size, GuestPageProtection Protection)> Protects { get; } = new();
 
         public ManualResetEventSlim Entered { get; } = new();

@@ -127,9 +127,9 @@ public sealed class PageGuard : IDisposable
     public PageGuard(IGuestAddressSpace addressSpace)
     {
         GpuMemoryAccessProfile.Initialize();
-        if (Environment.SystemPageSize != (int)PageBytes)
+        if (addressSpace.ProtectionPageSize != PageBytes)
         {
-            OnFatal($"The host page size is not supported: 0x{Environment.SystemPageSize:X8}.");
+            OnFatal($"The host page size is not supported: 0x{addressSpace.ProtectionPageSize:X8}.");
         }
 
         _addressSpace = addressSpace;
