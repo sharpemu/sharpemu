@@ -1076,13 +1076,8 @@ internal static class KernelSocketCompatExports
         client = new TcpClient();
         try
         {
-            var connectTask = client.ConnectAsync(ipAddress, port);
-            if (!connectTask.Wait(TimeSpan.FromMilliseconds(500)))
-            {
-                client.Dispose();
-                client = null!;
-                return false;
-            }
+            // The guest call blocks. Do not require a thread-pool worker to complete it.
+            client.Connect(ipAddress, port);
 
             return true;
         }
