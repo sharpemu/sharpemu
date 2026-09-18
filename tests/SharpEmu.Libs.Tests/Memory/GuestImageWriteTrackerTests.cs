@@ -458,14 +458,8 @@ public sealed unsafe class GuestImageWriteTrackerTests
 
             Assert.True(GuestImageWriteTracker.PeekDirty(address));
             Assert.False(GuestImageWriteTracker.PeekDirty(overlapAddress));
-            Assert.NotEqual(0u, HostMemory.Query((void*)address, out var firstPage));
-            Assert.NotEqual(
-                0u,
-                HostMemory.Query(
-                    (void*)(address + (ulong)TrackedByteCount),
-                    out var sharedPage));
-            Assert.Equal(HostMemory.PAGE_READWRITE, firstPage.Protect & 0xFFu);
-            Assert.Equal(HostMemory.PAGE_READONLY, sharedPage.Protect & 0xFFu);
+            Assert.Equal(HostMemory.PAGE_READWRITE, NativePageProtection.Query(address));
+            Assert.Equal(HostMemory.PAGE_READONLY, NativePageProtection.Query(overlapAddress));
         }
         finally
         {
@@ -525,16 +519,14 @@ public sealed unsafe class GuestImageWriteTrackerTests
         try
         {
             GuestImageWriteTracker.Track(address, TrackedByteCount);
-            Assert.NotEqual(0u, HostMemory.Query(allocation, out var armedInfo));
             Assert.Equal(
                 HostMemory.PAGE_EXECUTE_READ,
-                armedInfo.Protect & 0xFFu);
+                NativePageProtection.Query(address));
 
             Assert.True(GuestImageWriteTracker.TryHandleWriteFault(address));
-            Assert.NotEqual(0u, HostMemory.Query(allocation, out var writableInfo));
             Assert.Equal(
                 HostMemory.PAGE_EXECUTE_READWRITE,
-                writableInfo.Protect & 0xFFu);
+                NativePageProtection.Query(address));
         }
         finally
         {

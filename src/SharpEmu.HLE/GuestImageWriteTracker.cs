@@ -229,8 +229,10 @@ public static unsafe partial class GuestImageWriteTracker
             return;
         }
 
-        var scratch = (nint)NativeMemory.AllocZeroed(4096);
-        if (scratch == 0)
+        // Protection must not cover allocator metadata or other heap allocations.
+        var scratch = HostMemory.Alloc(null, (nuint)Environment.SystemPageSize,
+            HostMemory.MEM_RESERVE | HostMemory.MEM_COMMIT, HostMemory.PAGE_READWRITE);
+        if (scratch == null)
         {
             return;
         }
@@ -244,11 +246,11 @@ public static unsafe partial class GuestImageWriteTracker
             Track(address, 4096);
             _ = TryHandleWriteFault(address);
             _ = ConsumeDirty(address);
-            Untrack(address);
         }
         finally
         {
-            NativeMemory.Free((void*)scratch);
+            Untrack((ulong)scratch);
+            _ = HostMemory.Free(scratch, 0, HostMemory.MEM_RELEASE);
         }
     }
 
