@@ -2156,7 +2156,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return true;
             }
 
-            if (!_hostMemory.Protect((ulong)destPtr, (ulong)source.Length, HostPageProtection.ReadWriteExecute, out var oldProtect))
+            var writeProtection = region.IsExecutable
+                ? HostPageProtection.ReadWriteExecute
+                : HostPageProtection.ReadWrite;
+            if (!_hostMemory.Protect((ulong)destPtr, (ulong)source.Length, writeProtection, out var oldProtect))
             {
                 return false;
             }

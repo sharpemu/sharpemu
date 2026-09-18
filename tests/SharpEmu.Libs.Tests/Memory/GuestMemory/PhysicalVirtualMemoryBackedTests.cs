@@ -16,11 +16,18 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     private sealed class QueryCountingHostMemory(IHostMemory inner) : IHostMemory
     {
         public int QueryCount { get; set; }
+        public bool RejectExecutableProtection { get; init; }
         public ulong Allocate(ulong address, ulong size, HostPageProtection protection) => inner.Allocate(address, size, protection);
         public ulong Reserve(ulong address, ulong size, HostPageProtection protection) => inner.Reserve(address, size, protection);
         public bool Commit(ulong address, ulong size, HostPageProtection protection) => inner.Commit(address, size, protection);
         public bool Free(ulong address) => inner.Free(address);
-        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint previous) => inner.Protect(address, size, protection, out previous);
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint previous)
+        {
+            previous = 0;
+            if (RejectExecutableProtection && protection == HostPageProtection.ReadWriteExecute)
+                return false;
+            return inner.Protect(address, size, protection, out previous);
+        }
         public bool ProtectRaw(ulong address, ulong size, uint protection, out uint previous) => inner.ProtectRaw(address, size, protection, out previous);
         public void FlushInstructionCache(ulong address, ulong size) => inner.FlushInstructionCache(address, size);
         public bool Query(ulong address, out HostRegionInfo info)
@@ -230,7 +237,8 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     {
         if (!Supported) return;
         var host = HostViewMemory.Create();
-        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory) { RejectExecutableProtection = true };
+        using var memory = new PhysicalVirtualMemory(hostMemory: memoryHost, viewHost: host, backingBytes: BackingSize);
         var view = Hold(memory, host);
         Assert.True(memory.TryMapBacked(view, Segment, 0, GuestPageProtection.Read, out _));
         for (var i = 0; i < 0x40; i++)
