@@ -274,7 +274,7 @@ internal static unsafe class PosixHostStubs
 
         // Linux: call pthread_getspecific, preserving the registers that are
         // volatile in SysV but non-volatile in Win64 (rsi, rdi).
-        var pthreadGetSpecific = ResolveLibcExport("pthread_getspecific");
+        var pthreadGetSpecific = NativeLibrary.GetExport(NativeLibrary.Load("libpthread.so.0"), "pthread_getspecific");
         Emit(page, ref offset, 0x56);                                               // push rsi
         Emit(page, ref offset, 0x57);                                               // push rdi
         Emit(page, ref offset, 0x48, 0x83, 0xEC, 0x08);                             // sub rsp, 8
@@ -366,25 +366,25 @@ internal static unsafe class PosixHostStubs
     [DllImport("libc", EntryPoint = "pthread_key_create", SetLastError = true)]
     private static extern int pthread_key_create_mac(nuint* key, nint destructor);
 
-    [DllImport("libc", EntryPoint = "pthread_key_create", SetLastError = true)]
+    [DllImport("libpthread.so.0", EntryPoint = "pthread_key_create", SetLastError = true)]
     private static extern int pthread_key_create_linux(uint* key, nint destructor);
 
     [DllImport("libc", EntryPoint = "pthread_key_delete")]
     private static extern int pthread_key_delete_mac(nuint key);
 
-    [DllImport("libc", EntryPoint = "pthread_key_delete")]
+    [DllImport("libpthread.so.0", EntryPoint = "pthread_key_delete")]
     private static extern int pthread_key_delete_linux(uint key);
 
     [DllImport("libc", EntryPoint = "pthread_setspecific")]
     private static extern int pthread_setspecific_mac(nuint key, nint value);
 
-    [DllImport("libc", EntryPoint = "pthread_setspecific")]
+    [DllImport("libpthread.so.0", EntryPoint = "pthread_setspecific")]
     private static extern int pthread_setspecific_linux(uint key, nint value);
 
     [DllImport("libc", EntryPoint = "pthread_getspecific")]
     private static extern nint pthread_getspecific_mac(nuint key);
 
-    [DllImport("libc", EntryPoint = "pthread_getspecific")]
+    [DllImport("libpthread.so.0", EntryPoint = "pthread_getspecific")]
     private static extern nint pthread_getspecific_linux(uint key);
 
     [DllImport("libc")]
