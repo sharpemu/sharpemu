@@ -64,6 +64,17 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public ulong ReserveHole(ulong address, ulong size)
     {
+        lock (PosixViewRegions.Gate)
+        {
+            var result = ReserveHoleCore(address, size);
+            if (result != 0)
+                PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+            return result;
+        }
+    }
+
+    private ulong ReserveHoleCore(ulong address, ulong size)
+    {
         if (!HostViewMemory.IsValidRange(address, size) || address % Granularity != 0)
         {
             return 0;
@@ -89,9 +100,19 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public bool JoinHoles(ulong address, ulong size) => size != 0;
 
-    public bool FreeHole(ulong address, ulong size) => munmap((nint)address, (nuint)size) == 0;
+    public bool FreeHole(ulong address, ulong size) => FreeOwnedRange(address, size);
 
     public bool TryMapView(HostBackingObject backing, ulong address, ulong offset, ulong size, HostPageProtection protection, out HostViewFailure failure)
+    {
+        lock (PosixViewRegions.Gate)
+        {
+            if (!TryMapViewCore(backing, address, offset, size, protection, out failure)) return false;
+            PosixViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, PosixViewRegions.RawProtection(protection));
+            return true;
+        }
+    }
+
+    private bool TryMapViewCore(HostBackingObject backing, ulong address, ulong offset, ulong size, HostPageProtection protection, out HostViewFailure failure)
     {
         if (address == 0 || address % PageSize != 0)
         {
@@ -140,20 +161,47 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     public bool UnmapView(ulong address, ulong size) => RestoreHole(address, size);
 
-    public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection) =>
-        mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) == 0;
+    public bool CommitPrivate(ulong address, ulong size, HostPageProtection protection)
+    {
+        lock (PosixViewRegions.Gate)
+        {
+            if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
+            PosixViewRegions.Replace(address, size, HostMemory.MEM_COMMIT, PosixViewRegions.RawProtection(protection));
+            return true;
+        }
+    }
 
     public bool ReleasePrivate(ulong address, ulong size) => RestoreHole(address, size);
 
-    public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) =>
-        mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) == 0;
+    public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection)
+    {
+        lock (PosixViewRegions.Gate)
+        {
+            if (mprotect((nint)address, (nuint)size, GetNativeProtection(protection)) != 0) return false;
+            PosixViewRegions.ChangeProtection(address, size, PosixViewRegions.RawProtection(protection));
+            return true;
+        }
+    }
 
-    public bool FreeOwnedRange(ulong address, ulong size) => munmap((nint)address, (nuint)size) == 0;
+    public bool FreeOwnedRange(ulong address, ulong size)
+    {
+        lock (PosixViewRegions.Gate)
+        {
+            if (munmap((nint)address, (nuint)size) != 0) return false;
+            PosixViewRegions.Replace(address, size, HostMemory.MEM_FREE_STATE, HostMemory.PAGE_NOACCESS);
+            return true;
+        }
+    }
 
     private static bool RestoreHole(ulong address, ulong size)
     {
-        var ptr = mmap((nint)address, (nuint)size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
-        return ptr != MAP_FAILED && (ulong)ptr == address;
+        lock (PosixViewRegions.Gate)
+        {
+            var ptr = mmap((nint)address, (nuint)size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+            if (ptr == MAP_FAILED || (ulong)ptr != address) return false;
+            PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+            return true;
+        }
     }
 
     private static int OpenSharedObject()

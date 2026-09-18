@@ -101,6 +101,13 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
+        if (PosixViewRegions.TryQuery(address, out var view))
+        {
+            info = new HostRegionInfo(view.BaseAddress, view.AllocationBase, view.RegionSize,
+                view.State == HostMemory.MEM_RESERVE ? HostRegionState.Reserved : HostRegionState.Committed,
+                view.State, ToHostProtection(view.Protect), view.Protect, view.AllocationProtect);
+            return true;
+        }
         if (Posix.Query((void*)address, out var nativeInfo) == 0)
         {
             info = default;
