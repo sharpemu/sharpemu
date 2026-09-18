@@ -14,6 +14,22 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 public sealed class MslTranslationTests
 {
     [Fact]
+    public void ComputeFixturesResolveDescriptorFormatsBeforeCompilation()
+    {
+        foreach (var fixture in new[] { Gen5ComputeFixtures.TypedLoad, Gen5ComputeFixtures.TypedStore })
+        {
+            var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
+            Assert.NotEmpty(request.Resources.Info.Buffers);
+            Assert.All(request.Resources.Info.Buffers, buffer =>
+            {
+                Assert.Equal(56u, buffer.DescriptorFormat);
+                Assert.Equal(DescriptorConstants.IdentityDestinationSelect, buffer.DescriptorSwizzle);
+            });
+            _ = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        }
+    }
+
+    [Fact]
     public void SadU32UsesUnsignedAbsoluteDifferenceAndAccumulator()
     {
         var sad = new Gen5ShaderInstruction(

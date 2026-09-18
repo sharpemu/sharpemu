@@ -199,10 +199,17 @@ internal static class Gen5ComputeFixtures
     private const uint UserDataCount = 16;
 
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
-        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null)
+        IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null)
     {
         var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
-        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var specialization = ResourceSpecialization.Default(plan.Info);
+        if (runtimeInputs is not null)
+        {
+            var snapshot = new ResourceSnapshot();
+            if (!ResourceMaterializer.Materialize(plan, runtimeInputs, ref snapshot, ref specialization, out var failure))
+                throw new InvalidOperationException($"Fixture resource resolution failed: {failure}");
+        }
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
@@ -220,13 +227,28 @@ internal static class Gen5ComputeFixtures
 
     public static Gen5MslShader CompileRequestOrThrow(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32)
     {
-        var request = RequestOrThrow(DecodeOrThrow(fixture), ShaderStage.Compute, waveLaneCount, localSizeX);
+        var request = CreateComputeRequest(fixture, waveLaneCount, localSizeX);
         if (!Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error))
         {
             throw new InvalidOperationException($"[{fixture.Name}] MSL request emit failed: {error}");
         }
 
         return shader;
+    }
+
+    public static ShaderCompileRequest CreateComputeRequest(Gen5ComputeFixture fixture, uint waveLaneCount = 32, uint localSizeX = 32)
+    {
+        var program = DecodeOrThrow(fixture);
+        var hasBufferDescriptor = program.Instructions.Any(instruction => instruction.Control is Gen5BufferMemoryControl);
+        var userData = new uint[UserDataCount];
+        if (hasBufferDescriptor && fixture.StoreBackingBytes != 0)
+        {
+            userData[fixture.StoreScalarResourceBase] = 0x200000;
+            userData[fixture.StoreScalarResourceBase + 2] = (uint)fixture.StoreBackingBytes;
+            userData[fixture.StoreScalarResourceBase + 3] = DescriptorConstants.IdentityDestinationSelect;
+        }
+        return RequestOrThrow(program, ShaderStage.Compute, waveLaneCount, localSizeX,
+            runtimeInputs: hasBufferDescriptor ? new ResourceRuntimeInputs { UserData = userData } : null);
     }
 
     public static Gen5MslShader CompileStageRequestOrThrow(uint[] words, ShaderStage stage, int requiredVertexOutputCount = 0)

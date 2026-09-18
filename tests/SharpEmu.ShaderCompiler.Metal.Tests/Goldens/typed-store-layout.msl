@@ -459,7 +459,7 @@ kernel void gen5_cs(
             if (exec) { v[3] = t2; }
             uint t3 = ((0x10u + 0u + 0u + (0u * 0u)) + bias[0]);
             bool t4 = 2u <= sharpemu_resources.buffer_bytes[0] && t3 <= sharpemu_resources.buffer_bytes[0] - 2u;
-            bool t5 = ((0xFACu >> 12) & 0x7Fu) != 0u && t4;
+            bool t5 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t4;
             if (exec && t5)
             {
                 uint t6 = sharpemu_format_encode(v[2], 8u, 0u, 3u);

@@ -455,7 +455,7 @@ kernel void gen5_cs(
             s[11] = t0;
             uint t1 = ((0x0u + 0u + 0u + (0u * 0u)) + bias[0]);
             bool t2 = 8u <= sharpemu_resources.buffer_bytes[0] && t1 <= sharpemu_resources.buffer_bytes[0] - 8u;
-            bool t3 = ((0xFACu >> 12) & 0x7Fu) != 0u && t2;
+            bool t3 = ((0x38FACu >> 12) & 0x7Fu) != 0u && t2;
             uint t4 = 0u;
             uint t5 = 0u;
             uint t6 = 0u;
