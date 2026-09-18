@@ -770,8 +770,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly RawExceptionHandlerDelegate RawVectoredHandlerDelegateInstance = RawVectoredHandlerManaged;
 	private static readonly RawExceptionHandlerDelegate RawUnhandledFilterDelegateInstance = RawUnhandledFilterManaged;
 
-	private static readonly nint ImportGatewayPtr = ResolveWin64CallbackPtr(
-		Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance));
+	private static readonly Lazy<nint> ImportGatewayAddress = new(() => ResolveWin64CallbackPtr(
+		Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance)));
+	private static nint ImportGatewayPtr => ImportGatewayAddress.Value;
 
 	// Emitted trampolines call managed callbacks with the Win64 ABI. On
 	// Windows the runtime already compiles them that way; on POSIX .NET they
@@ -1056,6 +1057,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public unsafe DirectExecutionBackend(IModuleManager moduleManager)
 	{
+		if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+		{
+			throw new PlatformNotSupportedException("Native guest execution requires an x64 process.");
+		}
+
 		_moduleManager = moduleManager ?? throw new ArgumentNullException("moduleManager");
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);

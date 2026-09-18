@@ -16,7 +16,7 @@ public sealed class GuestThreadFlowProfileCollection;
 [Collection("GuestThreadFlowProfile")]
 public sealed class GuestThreadFlowProfileTests
 {
-    [Fact]
+    [NativeX64Fact]
     public void NewSessionReopensAllClosedTraces()
     {
         var modules = new ModuleManager();
@@ -44,7 +44,7 @@ public sealed class GuestThreadFlowProfileTests
         Assert.Equal(RenderPhaseProfile.FrameTraceEnabled, submissionOutput.ToString().Contains("[PERF][SUBMISSION_FLOW_TRACE]"));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void TraceOutputFailureDoesNotInterruptBackendCleanup(bool disposedOutput)
@@ -71,7 +71,7 @@ public sealed class GuestThreadFlowProfileTests
         }
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void DetailedTraceDoesNotLetReadyThreadBypassActiveExecutor()
     {
         var modules = new ModuleManager();
@@ -111,7 +111,7 @@ public sealed class GuestThreadFlowProfileTests
             Assert.Empty(snapshot.Events);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void ShutdownRequestWritesTraceBeforeBackendDisposal()
     {
         var modules = new ModuleManager();

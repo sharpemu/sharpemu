@@ -15,7 +15,7 @@ public sealed class ReadyThreadDispatchCollection;
 [Collection("ReadyThreadDispatch")]
 public sealed class ReadyThreadDispatchTests
 {
-    [Theory]
+    [NativeX64Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void ReadyNotificationWorksBeforeOrAfterDispatcherWait(bool enqueueBeforeStart)
@@ -33,7 +33,7 @@ public sealed class ReadyThreadDispatchTests
         harness.AssertCompleted(1);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void ActiveExecutorReleaseWakesDispatcherWithoutAnotherGuestCall()
     {
         using var harness = new DispatchHarness();
@@ -49,7 +49,7 @@ public sealed class ReadyThreadDispatchTests
         harness.AssertCompleted(2);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void NotificationsSurviveRepeatedIdleTransitionsAndCompetingDrains()
     {
         using var harness = new DispatchHarness();
@@ -65,7 +65,7 @@ public sealed class ReadyThreadDispatchTests
         harness.AssertCompleted(Enumerable.Range(10, 32).Select(value => (ulong)value).ToArray());
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void StopWakesIdleDispatcherAndAllowsRestart()
     {
         using var harness = new DispatchHarness();
@@ -81,7 +81,7 @@ public sealed class ReadyThreadDispatchTests
         harness.AssertCompleted(50);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void CompetingClaimsCannotAssignTheSameExecutorTwice()
     {
         using var harness = new DispatchHarness();

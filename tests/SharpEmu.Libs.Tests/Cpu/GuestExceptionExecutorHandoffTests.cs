@@ -11,7 +11,7 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class GuestExceptionExecutorHandoffTests
 {
-    [Theory]
+    [NativeX64Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void BlockedThreadTakesPendingExceptionWhenExecutorReleasesIt(bool signalArrivesBeforeYield)
