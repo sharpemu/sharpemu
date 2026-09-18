@@ -16,6 +16,7 @@ public sealed class ResourceRuntimeInputs
     public ulong ShaderBase { get; init; }
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
+    public ComputeSelectorState? ComputeState { get; init; }
 
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
@@ -23,5 +24,9 @@ public sealed class ResourceRuntimeInputs
         ShaderBase = ShaderBase,
         ReadMemory = reader,
         ReadCleanMemory = ReadCleanMemory,
+        ComputeState = ComputeState,
     };
 }
+
+public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX, uint ThreadsY, uint ThreadsZ,
+    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents);

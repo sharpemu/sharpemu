@@ -866,7 +866,7 @@ public static partial class Gen5SpirvTranslator
 
         // An access over several descriptors takes one constant-element case per descriptor:
         // the mip operand selects a per-mip element, the indirect key a candidate.
-        private bool TryGetImageElementCases(Gen5ShaderInstruction instruction, Gen5ImageControl image, out uint selector, out IReadOnlyList<uint> elements, out string error)
+        private bool TryGetImageElementCases(Gen5ShaderInstruction instruction, Gen5ImageControl image, out uint selector, out IReadOnlyList<(uint Resource, uint Element)> elements, out string error)
         {
             selector = 0;
             elements = [];
@@ -904,7 +904,8 @@ public static partial class Gen5SpirvTranslator
                 // A mip past the last descriptor matches no case and does nothing.
                 var coordinateComponentCount = imageClass.Arrayed ? ImageSpatialComponentCountOf(imageClass.Dimension) + 1 : ImageSpatialComponentCountOf(imageClass.Dimension);
                 selector = LoadImageIntegerAddress(image, (int)coordinateComponentCount);
-                elements = Enumerable.Range(0, (int)imageInfo.MipCount).Select(mip => (uint)element + (uint)mip).ToList();
+                elements = Enumerable.Range(0, (int)imageInfo.MipCount)
+                    .Select(mip => ((uint)resourceIndex, (uint)element + (uint)mip)).ToList();
                 return true;
             }
 
@@ -917,17 +918,23 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 var candidates = info.Images[(int)imageInfo.IndirectRoot].IndirectResources;
-                var candidateElements = new List<uint>();
+                var candidateElements = new List<(uint Resource, uint Element)>();
                 foreach (var candidate in candidates)
                 {
-                    var candidateElement = classElements.IndexOf(candidate);
+                    var candidateKind = ImageDescriptorBinding.ForImage(info.Images[(int)candidate]);
+                    if (candidateKind is null || !_imageClasses.TryGetValue(candidateKind.Value, out var candidateClass))
+                    {
+                        error = $"indirect candidate {candidate} has no declared binding class";
+                        return false;
+                    }
+                    var candidateElement = candidateClass.Resources.ToList().IndexOf(candidate);
                     if (candidateElement < 0)
                     {
-                        error = $"indirect candidate {candidate} is not an element of {kind.Value}";
+                        error = $"indirect candidate {candidate} is not an element of {candidateKind.Value}";
                         return false;
                     }
 
-                    candidateElements.Add((uint)candidateElement);
+                    candidateElements.Add((candidate, (uint)candidateElement));
                 }
 
                 selector = SelectIndirectCandidate(imageInfo, keyMemoryIndex, (uint)candidateElements.Count);
@@ -949,7 +956,7 @@ public static partial class Gen5SpirvTranslator
             out uint imageObject,
             out uint dstSelect,
             out string error,
-            uint? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null)
         {
             error = string.Empty;
             resource = default;
@@ -970,7 +977,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var resourceIndex = (int)entry.Resource;
+            var resourceIndex = (int)(fixedElement?.Resource ?? entry.Resource);
             var imageInfo = info.Images[resourceIndex];
             var kind = ImageDescriptorBinding.ForImage(imageInfo);
             if (kind is null || !_imageClasses.TryGetValue(kind.Value, out var imageClass))
@@ -1002,7 +1009,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var elementIndex = UInt(fixedElement ?? (uint)element);
+            var elementIndex = UInt(fixedElement?.Element ?? (uint)element);
             var elementPointer = _module.AddInstruction(SpirvOp.AccessChain, imageClass.ElementPointer, imageClass.Variable, elementIndex);
             var imageValue = Load(imageClass.ImageType, elementPointer);
             uint objectType;

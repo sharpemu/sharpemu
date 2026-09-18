@@ -1454,6 +1454,8 @@ public static partial class Gen5SpirvTranslator
 
             switch (instruction.Opcode)
             {
+                case "DsSwizzleB32":
+                    return TryEmitDataShareSwizzle(instruction, control, out error);
                 case "DsAppend":
                 case "DsConsume":
                     return TryEmitDataShareWaveCounter(instruction, control, out error);
@@ -5355,7 +5357,7 @@ public static partial class Gen5SpirvTranslator
             _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                 instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
-                    "DsAppend" or "DsConsume");
+                    "DsAppend" or "DsConsume" or "DsSwizzleB32");
 
         private bool UsesSubgroupBroadcast() =>
             _request.Program.Instructions.Any(instruction =>

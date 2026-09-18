@@ -1304,6 +1304,8 @@ public static partial class Gen5MslTranslator
 
             switch (instruction.Opcode)
             {
+                case "DsSwizzleB32":
+                    return TryEmitDataShareSwizzle(instruction, control, out error);
                 case "DsAppend":
                 case "DsConsume":
                 {

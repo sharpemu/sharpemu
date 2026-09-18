@@ -79,6 +79,66 @@ public sealed class DirectImageTableTests
         return (plan, snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 });
     }
 
+    public static (ResourceSnapshot Snapshot, ShaderCompileRequest Request) PrepareMixedDimensions(uint mask, bool arrayFirst)
+    {
+        var program = CreateGuardedProgram(mask);
+        program = program with
+        {
+            Instructions = program.Instructions.Select(instruction => instruction.Pc switch
+            {
+                48 => MoveVector(48, 3, 1),
+                60 => Image(60, "ImageLoad", 4, dimension: 5, dmask: 1, vectorAddress: 1),
+                _ => instruction,
+            }).ToArray(),
+        };
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 + 344 || address >= 0x1000 + 344 + 32 * 32) return false;
+            var offset = address - 0x1000 - 344;
+            var record = offset / 32;
+            if (record is not (0 or 31)) return true;
+            var array = (record == 0) == arrayFirst;
+            word = (offset % 32 / 4) switch
+            {
+                0 => array ? 0x1000u : 0x2000u,
+                1 => 20u << 20,
+                3 => 0xFACu | ((array ? 13u : 9u) << 28),
+                4 => array ? 1u : 0u,
+                _ => 0,
+            };
+            return true;
+        }
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        return (snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MixedDimensionsRetainEveryCandidateAndUseSeparateBindings(bool arrayFirst)
+    {
+        var (snapshot, request) = PrepareMixedDimensions(1, arrayFirst);
+        Assert.Equal(3, snapshot.Images.Length);
+        var images = request.Resources.Info.Images;
+        Assert.Equal(3, images[0].IndirectResources.Count);
+        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2D);
+        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2DArray);
+        var mapping = (int)images[0].IndirectMappingOffset;
+        Assert.Equal(32u, snapshot.FlattenedResourceTable[mapping]);
+        Assert.Equal(344u + 31 * 32, snapshot.FlattenedResourceTable[mapping + 63]);
+        Assert.Equal(2u, snapshot.FlattenedResourceTable[mapping + 64]);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out error));
+        Assert.Contains("not supported on Metal", error);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

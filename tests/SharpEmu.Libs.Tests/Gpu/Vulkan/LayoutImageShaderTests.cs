@@ -422,6 +422,56 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         harness.AssertNoValidationMessages();
     }
 
+    [Theory]
+    [InlineData(1u, true, 37u)]
+    [InlineData(0x80000000u, true, 91u)]
+    [InlineData(1u, false, 91u)]
+    [InlineData(0x80000000u, false, 37u)]
+    public void MixedImageDimensionsSelectTheirOwnBinding(uint mask, bool arrayFirst, uint expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var (snapshot, request) = DirectImageTableTests.PrepareMixedDimensions(mask, arrayFirst);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(new byte[ResultBytes]);
+        var images = new CachedImage[snapshot.Images.Length];
+        var views = new DescriptorImageInfo[images.Length];
+        for (var index = 0; index < images.Length; index++)
+        {
+            var array = request.Resources.Info.Images[index].Dimension == ImageDimension.Dim2DArray;
+            var description = Describe((ulong)index * 0x10000, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
+            description.Resources = new SubresourceCount(1, array ? 2u : 1u);
+            images[index] = harness.CreateImage(description);
+            uint[] texels = array ? [13u, 37u] : [91u];
+            harness.UploadImage(images[index], MemoryMarshal.AsBytes<uint>(texels), ImageTestHarness.WholeImageCopies(description, 0));
+            views[index] = new DescriptorImageInfo
+            {
+                ImageView = images[index].GetOrCreateView(ImageViewDescription.Default with
+                {
+                    Format = Format.R32Uint,
+                    Type = array ? ImageViewType.Type2DArray : ImageViewType.Type2D,
+                    LayerCount = description.Resources.Layers,
+                }),
+                ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+        }
+        var bound = request.Bindings.Descriptors
+            .Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(index => views[index]).ToArray());
+        harness.Run(() =>
+        {
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            foreach (var image in images)
+                image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+            runner.Dispatch([0x1000, 0], new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] },
+                1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
+        });
+        Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, sizeof(uint))));
+        harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void DynamicMipStorageImage_WritesEachMipThroughItsOwnDescriptor()
     {

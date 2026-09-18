@@ -193,6 +193,11 @@ internal sealed class ShaderProgramCache
             ShaderBase = source.Address,
             ReadMemory = _host.TryReadGuestWord,
             ReadCleanMemory = _host.TryReadCleanGuestWord,
+            ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+                ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                    Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                    computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+                : null,
         };
         if (entry is null)
         {

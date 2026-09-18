@@ -665,7 +665,12 @@ public static class ResourceMaterializer
                     images[candidate] = image;
                 }
 
-                if (image.NumericClass != imageClass.NumericClass || image.Dimension != imageClass.Dimension ||
+                // Sampled 2D cases use their own binding and coordinate width.
+                var separateDimensions = info.Images[rootIndex].ResourceClass == ImageResourceClass.Sampled &&
+                    !image.Cube && !imageClass.Cube &&
+                    image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
+                    imageClass.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
+                if (image.NumericClass != imageClass.NumericClass || (!separateDimensions && image.Dimension != imageClass.Dimension) ||
                     image.MipCount != imageClass.MipCount || image.ConversionFormat != imageClass.ConversionFormat ||
                     image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube)
                 {

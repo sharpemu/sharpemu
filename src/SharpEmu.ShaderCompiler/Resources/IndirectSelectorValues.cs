@@ -11,8 +11,13 @@ public sealed class IndirectSelectorValues
     private sealed record Expression(uint[]? Values = null, ScalarValue? RuntimeValue = null,
         ScalarOperation Operation = ScalarOperation.None, Expression[]? Inputs = null);
     private readonly Expression _root;
+    private readonly WaveMaskSelectorBounds? _waveBounds;
 
-    private IndirectSelectorValues(Expression root) => _root = root;
+    private IndirectSelectorValues(Expression root, WaveMaskSelectorBounds? waveBounds)
+    {
+        _root = root;
+        _waveBounds = waveBounds;
+    }
 
     internal static IndirectSelectorValues? Create(ShaderResourcePlan plan, ScalarValue selector)
     {
@@ -21,7 +26,8 @@ public sealed class IndirectSelectorValues
         if (instruction is not { Opcode: "VReadfirstlaneB32", Sources.Count: 1 }) return null;
         var builder = new Builder(plan);
         var root = builder.Read(instruction.Sources[0], instruction.Pc);
-        return root is null || !builder.HasBitScan ? null : new IndirectSelectorValues(root);
+        return root is null || !builder.HasBitScan ? null : new IndirectSelectorValues(root,
+            WaveMaskSelectorBounds.TryCreate(plan, instruction));
     }
 
     internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] values,
@@ -39,6 +45,8 @@ public sealed class IndirectSelectorValues
         var reader = inputs.ReadCleanMemory;
         if (diagnostic is not null && reader is not null) reader = ReadCapturedWord;
         var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(reader));
+        if (_waveBounds is not null && _waveBounds.TryEvaluate(evaluator, inputs.ComputeState, out values))
+            return true;
         var cache = new Dictionary<Expression, uint[]>();
         uint[]? Decline(string reason)
         {
