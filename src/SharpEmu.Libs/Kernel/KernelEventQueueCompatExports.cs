@@ -16,8 +16,8 @@ public static class KernelEventQueueCompatExports
     public const short KernelEventFilterRead = -1;
     public const short KernelEventFilterGraphics = -14;
     public const short KernelEventFilterUser = -11;
-    public const short KernelEventFilterAmpr = -16;
-    public const short KernelEventFilterAmprSystem = -17;
+    public const short KernelEventFilterAmpr = -25;
+    public const short KernelEventFilterAmprSystem = -30;
     public const ushort KernelEventFlagClear = 0x20;
     public const ushort KernelEventFlagEof = 0x8000;
     private const int ReadEventPollPeriodMilliseconds = 10;
