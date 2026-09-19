@@ -1905,6 +1905,9 @@ internal static unsafe class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    internal static bool IsPackedRgb10PresentSource(Format format) =>
+        format is Format.A2R10G10B10UnormPack32 or Format.A2B10G10R10UnormPack32;
+
     // A guest image accepts a request in a different Vulkan format without
     // being recreated when the two formats are the same texel layout read
     // through different transfer functions (sRGB vs UNORM counterparts).
@@ -2033,6 +2036,11 @@ internal static unsafe class VulkanVideoPresenter
         if (address == 0 || guestFormat == 0)
         {
             return;
+        }
+
+        if ((guestFormat & 0x8000_0000u) == 0)
+        {
+            guestFormat = 0x8000_0000u | ((guestFormat & 0x1FFu) << 8);
         }
 
         lock (_gate)
@@ -2339,7 +2347,8 @@ internal static unsafe class VulkanVideoPresenter
     }
 
     private static bool IsKnownGuestTextureFormat(uint format) =>
-        format is >= 1 and <= 19 or 34 or >= 169 and <= 182;
+        format is >= 1 and <= 19 or 20 or 22 or 29 or 34 or 36 or 49 or 56 or 62 or 64 or 71 or 75
+            or >= 169 and <= 182;
 
     private static byte[] CreateBlackFrame(uint width, uint height)
     {
@@ -18308,7 +18317,8 @@ internal static unsafe class VulkanVideoPresenter
                 (_presentEncodeExtent.Width != _extent.Width ||
                  _presentEncodeExtent.Height != _extent.Height))
             {
-                DestroyPresentEncodeImage();
+            DestroyPresentEncodeImage();
+            DestroyPresentUnpackImage();
             }
 
             if (_presentEncodeImage.Handle == 0)
@@ -18377,6 +18387,89 @@ internal static unsafe class VulkanVideoPresenter
             _presentEncodeExtent = default;
         }
 
+        private Image _presentUnpackImage;
+        private DeviceMemory _presentUnpackMemory;
+        private Extent2D _presentUnpackExtent;
+
+        private bool TryGetPresentUnpackImage(uint width, uint height, out Image unpackImage)
+        {
+            unpackImage = default;
+            if (width == 0 || height == 0)
+            {
+                return false;
+            }
+
+            if (_presentUnpackImage.Handle != 0 &&
+                (_presentUnpackExtent.Width != width || _presentUnpackExtent.Height != height))
+            {
+                DestroyPresentUnpackImage();
+            }
+
+            if (_presentUnpackImage.Handle == 0)
+            {
+                var imageInfo = new ImageCreateInfo
+                {
+                    SType = StructureType.ImageCreateInfo,
+                    ImageType = ImageType.Type2D,
+                    Format = Format.R16G16B16A16Sfloat,
+                    Extent = new Extent3D(width, height, 1),
+                    MipLevels = 1,
+                    ArrayLayers = 1,
+                    Samples = SampleCountFlags.Count1Bit,
+                    Tiling = ImageTiling.Optimal,
+                    Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.TransferSrcBit,
+                    SharingMode = SharingMode.Exclusive,
+                    InitialLayout = ImageLayout.Undefined,
+                };
+                Check(
+                    _vk.CreateImage(_device, &imageInfo, null, out _presentUnpackImage),
+                    "vkCreateImage(present unpack)");
+                _vk.GetImageMemoryRequirements(
+                    _device,
+                    _presentUnpackImage,
+                    out var requirements);
+                var allocationInfo = new MemoryAllocateInfo
+                {
+                    SType = StructureType.MemoryAllocateInfo,
+                    AllocationSize = requirements.Size,
+                    MemoryTypeIndex = FindMemoryType(
+                        requirements.MemoryTypeBits,
+                        MemoryPropertyFlags.DeviceLocalBit),
+                };
+                Check(
+                    _vk.AllocateMemory(_device, &allocationInfo, null, out _presentUnpackMemory),
+                    "vkAllocateMemory(present unpack)");
+                Check(
+                    _vk.BindImageMemory(_device, _presentUnpackImage, _presentUnpackMemory, 0),
+                    "vkBindImageMemory(present unpack)");
+                _presentUnpackExtent = new Extent2D(width, height);
+                SetDebugName(
+                    ObjectType.Image,
+                    _presentUnpackImage.Handle,
+                    "SharpEmu present RGB10 unpack image");
+            }
+
+            unpackImage = _presentUnpackImage;
+            return true;
+        }
+
+        private void DestroyPresentUnpackImage()
+        {
+            if (_presentUnpackImage.Handle != 0)
+            {
+                _vk.DestroyImage(_device, _presentUnpackImage, null);
+                _presentUnpackImage = default;
+            }
+
+            if (_presentUnpackMemory.Handle != 0)
+            {
+                _vk.FreeMemory(_device, _presentUnpackMemory, null);
+                _presentUnpackMemory = default;
+            }
+
+            _presentUnpackExtent = default;
+        }
+
         private void RecordGuestImageBlit(
             uint imageIndex,
             GuestImageResource source)
@@ -18433,10 +18526,17 @@ internal static unsafe class VulkanVideoPresenter
             };
             // Linear-float flips need a linear->sRGB encode on the way to a
             // UNORM swapchain; sRGB (or unknown-counterpart) swapchains keep
-            // the direct blit.
+            // the direct blit. Packed RGB10 cannot blit directly into sRGB on
+            // MoltenVK (horizontal stripes) — unpack to RGBA16F first.
+            Image unpackImage = default;
+            var unpackForPresent = IsPackedRgb10PresentSource(source.Format) &&
+                TryGetPresentUnpackImage(source.Width, source.Height, out unpackImage);
+            var presentSourceFormat = unpackForPresent
+                ? Format.R16G16B16A16Sfloat
+                : source.Format;
             var encodeForPresent = false;
             Image encodeImage = default;
-            if (IsLinearFloatPresentSource(source.Format) &&
+            if (IsLinearFloatPresentSource(presentSourceFormat) &&
                 GetSrgbCounterpart(_swapchainFormat) != Format.Undefined)
             {
                 encodeForPresent = TryGetPresentEncodeImage(out encodeImage);
@@ -18469,6 +18569,72 @@ internal static unsafe class VulkanVideoPresenter
                 null,
                 encodeForPresent ? 3u : 2u,
                 barriers);
+
+            var blitSource = source.Image;
+            if (unpackForPresent)
+            {
+                var unpackToDst = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = 0,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.Undefined,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = unpackImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &unpackToDst);
+                var unpackRegion = new ImageBlit
+                {
+                    SrcSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    SrcOffsets = new ImageBlit.SrcOffsetsBuffer
+                    {
+                        Element0 = new Offset3D(0, 0, 0),
+                        Element1 = new Offset3D((int)source.Width, (int)source.Height, 1),
+                    },
+                    DstSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstOffsets = new ImageBlit.DstOffsetsBuffer
+                    {
+                        Element0 = new Offset3D(0, 0, 0),
+                        Element1 = new Offset3D((int)source.Width, (int)source.Height, 1),
+                    },
+                };
+                _vk.CmdBlitImage(
+                    _commandBuffer,
+                    source.Image,
+                    ImageLayout.TransferSrcOptimal,
+                    unpackImage,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &unpackRegion,
+                    Filter.Nearest);
+                var unpackToSrc = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferSrcOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = unpackImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &unpackToSrc);
+                blitSource = unpackImage;
+            }
 
             var sourceX = 0u;
             var sourceY = 0u;
@@ -18574,7 +18740,7 @@ internal static unsafe class VulkanVideoPresenter
                 destinationWidth % sourceWidth == 0 && destinationHeight % sourceHeight == 0;
             _vk.CmdBlitImage(
                 _commandBuffer,
-                source.Image,
+                blitSource,
                 ImageLayout.TransferSrcOptimal,
                 encodeForPresent ? encodeImage : presentationTarget,
                 ImageLayout.TransferDstOptimal,
