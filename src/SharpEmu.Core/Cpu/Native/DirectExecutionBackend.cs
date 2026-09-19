@@ -2416,10 +2416,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
-		EmitByte(code, ref offset, 0x48); // sub rsp, 0x20
+		// The guest reaches this stub by returning, so rax still holds its exit code and has to
+		// survive to the ret at the bottom: ExecuteEntry reads it as the entry's result, and the
+		// TBB fault path sets CONTEXT.Rax = 0 before redirecting here so the unwind reads as a
+		// clean 0. TlsGetValue returns in rax, so park the guest value across the call and route
+		// the slot pointer through r10 - the same reason the entry-stub epilogue uses r10 rather
+		// than rax for its identical stack switch.
+		EmitByte(code, ref offset, 0x50); // push rax (guest exit code)
+		EmitByte(code, ref offset, 0x48); // sub rsp, 0x28
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xEC);
-		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x28);
 		EmitByte(code, ref offset, 0xB9); // mov ecx, tlsIndex
 		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
 		EmitByte(code, ref offset, 0x48); // mov rax, TlsGetValue
@@ -2428,13 +2435,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		offset += sizeof(ulong);
 		EmitByte(code, ref offset, 0xFF); // call rax
 		EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); // add rsp, 0x20
+		EmitByte(code, ref offset, 0x48); // add rsp, 0x28
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xC4);
-		EmitByte(code, ref offset, 0x20);
-		EmitByte(code, ref offset, 0x48); // mov rsp, [rax]
+		EmitByte(code, ref offset, 0x28);
+		EmitByte(code, ref offset, 0x4C); // mov r10, [rax]
 		EmitByte(code, ref offset, 0x8B);
-		EmitByte(code, ref offset, 0x20);
+		EmitByte(code, ref offset, 0x10);
+		EmitByte(code, ref offset, 0x58); // pop rax (restore the guest exit code)
+		EmitByte(code, ref offset, 0x4C); // mov rsp, r10
+		EmitByte(code, ref offset, 0x89);
+		EmitByte(code, ref offset, 0xD4);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
