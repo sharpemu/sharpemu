@@ -1115,6 +1115,9 @@ public sealed partial class ScalarValueGraph
                     return Binary(ScalarOperation.Or32, Source(0), Source(1));
                 case "VXorB32":
                     return Binary(ScalarOperation.Xor32, Source(0), Source(1));
+                case "VXor3B32":
+                    return Binary(ScalarOperation.Xor32,
+                        Binary(ScalarOperation.Xor32, Source(0), Source(1)), Source(2));
                 case "VXnorB32":
                     return Unary(ScalarOperation.Not32, Binary(ScalarOperation.Xor32, Source(0), Source(1)));
                 case "VNotB32":

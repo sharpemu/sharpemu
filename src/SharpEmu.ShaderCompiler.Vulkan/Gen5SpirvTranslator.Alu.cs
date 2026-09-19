@@ -421,6 +421,10 @@ public static partial class Gen5SpirvTranslator
                 case "VXorB32":
                     result = EmitIntegerBinary(instruction, SpirvOp.BitwiseXor);
                     break;
+                case "VXor3B32":
+                    result = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType,
+                        EmitIntegerBinary(instruction, SpirvOp.BitwiseXor), GetRawSource(instruction, 2));
+                    break;
                 case "VXnorB32":
                 {
                     var xor = EmitIntegerBinary(instruction, SpirvOp.BitwiseXor);

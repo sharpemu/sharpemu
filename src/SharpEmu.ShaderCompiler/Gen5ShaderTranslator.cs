@@ -1103,6 +1103,7 @@ public static partial class Gen5ShaderTranslator
             0x347 => "VAddLshlU32",
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
+            0x178 => "VXor3B32",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
