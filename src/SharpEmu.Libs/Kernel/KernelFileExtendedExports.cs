@@ -562,7 +562,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         var submitId = unchecked((uint)Interlocked.Increment(ref _nextAioSubmitId));
-        _aioResults[submitId] = 0;
+        _aioResults[submitId] = (int)AioStateCompleted;
         if (outIdAddress != 0)
         {
             Span<byte> idBuffer = stackalloc byte[sizeof(uint)];
@@ -621,21 +621,73 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "lgK+oIWkJyA", ExportName = "sceKernelAioWaitRequests",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioWaitRequests(CpuContext ctx) => KernelAioComplete(ctx);
+    public static int KernelAioWaitRequests(CpuContext ctx)
+    {
+        if (ctx[CpuRegister.Rcx] is not (1 or 2))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        return KernelAioComplete(ctx);
+    }
+
+    [SysAbiExport(Nid = "KOF-oJbQVvc", ExportName = "sceKernelAioWaitRequest",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelAioWaitRequest(CpuContext ctx)
+    {
+        var submitId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        if (!_aioResults.TryGetValue(submitId, out var completedState))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // Submission finishes the transfer before it publishes the request ID.
+        Span<byte> state = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(state, completedState);
+        if (!ctx.Memory.TryWrite(ctx[CpuRegister.Rsi], state))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
 
     private static int KernelAioComplete(CpuContext ctx)
     {
-        // Submission already performed the I/O synchronously, so every request
-        // reports completed. Rsi points at the state-out array, Rdx = count.
-        var statesAddress = ctx[CpuRegister.Rsi];
-        var count = unchecked((int)ctx[CpuRegister.Rdx]);
-        if (statesAddress != 0 && count > 0 && count <= 0x10000)
+        var requestIdsAddress = ctx[CpuRegister.Rdi];
+        var count = unchecked((int)ctx[CpuRegister.Rsi]);
+        var statesAddress = ctx[CpuRegister.Rdx];
+        if (count <= 0 || count > 128)
         {
-            Span<byte> state = stackalloc byte[sizeof(uint)];
-            BinaryPrimitives.WriteUInt32LittleEndian(state, AioStateCompleted);
-            for (var i = 0; i < count; i++)
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var byteCount = (ulong)count * sizeof(uint);
+        if (requestIdsAddress == 0 || statesAddress == 0 ||
+            requestIdsAddress > ulong.MaxValue - byteCount || statesAddress > ulong.MaxValue - byteCount)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        Span<byte> state = stackalloc byte[sizeof(uint)];
+        for (var index = 0; index < count; index++)
+        {
+            if (!ctx.Memory.TryRead(requestIdsAddress + (ulong)index * sizeof(uint), state))
             {
-                _ = ctx.Memory.TryWrite(statesAddress + (ulong)(i * sizeof(uint)), state);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            var submitId = BinaryPrimitives.ReadUInt32LittleEndian(state);
+            if (!_aioResults.TryGetValue(submitId, out var completedState))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            BinaryPrimitives.WriteInt32LittleEndian(state, completedState);
+            if (!ctx.Memory.TryWrite(statesAddress + (ulong)index * sizeof(uint), state))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
         }
 
