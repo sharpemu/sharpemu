@@ -256,8 +256,16 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
         var desired = requested != 0 ? requested : DefaultMapSearchBase;
-        while (space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+        while (true)
         {
+            var hintedRegions = reuseReservation && desired == requested && requested != 0
+                ? GetMappingSlices(requested, length) : [];
+            var reusableHint = hintedRegions.Length != 0 && requested % alignment == 0 &&
+                MappingsCoverRange(hintedRegions, requested, length) && hintedRegions.All(region => region.IsReserved);
+            if (!reusableHint)
+                desired = FindAvailableMappingAddress(desired, length, alignment);
+            if (desired == 0 || !space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+                return false;
             var overlap = GetMappingSlices(address, length, clip: false);
             if (overlap.Length == 0 || (reuseReservation && address == requested &&
                 MappingsCoverRange(GetMappingSlices(address, length), address, length) && overlap.All(region => region.IsReserved)))
@@ -269,6 +277,41 @@ public static partial class KernelMemoryCompatExports
             return false;
         GuestGpuMemoryHook.NoteUnmapped(address, length);
         return true;
+    }
+
+    // Skip kernel reservations before asking the host to reserve a candidate.
+    private static ulong FindAvailableMappingAddress(ulong desired, ulong length, ulong alignment)
+    {
+        var padding = (alignment - desired % alignment) % alignment;
+        if (padding > ulong.MaxValue - desired)
+            return 0;
+        var candidate = desired + padding;
+        var lowerIndex = 0;
+        var upperIndex = _mappedRegions.Count;
+        while (lowerIndex < upperIndex)
+        {
+            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
+            if (_mappedRegions.Keys[middleIndex] <= candidate)
+                lowerIndex = middleIndex + 1;
+            else
+                upperIndex = middleIndex;
+        }
+        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        {
+            if (length > ulong.MaxValue - candidate)
+                return 0;
+            var region = _mappedRegions.Values[index];
+            if (region.Address >= candidate + length)
+                break;
+            var regionEnd = region.Address + region.Length;
+            if (regionEnd <= candidate)
+                continue;
+            padding = (alignment - regionEnd % alignment) % alignment;
+            if (padding > ulong.MaxValue - regionEnd)
+                return 0;
+            candidate = regionEnd + padding;
+        }
+        return length <= ulong.MaxValue - candidate ? candidate : 0;
     }
 
     internal static int ReserveBackingRange(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)

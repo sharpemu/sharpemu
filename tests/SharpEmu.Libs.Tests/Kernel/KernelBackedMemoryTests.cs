@@ -313,6 +313,63 @@ public sealed class KernelBackedMemoryTests
         Assert.True(test.Map(0, 0x10000) >= start + size);
     }
 
+    [Fact]
+    public void AddressSearchSkipsReservationsBeforeCallingTheBackingStore()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong pageSize = 0x4000;
+        var start = test.Reserve(64 * pageSize);
+        for (var index = 0UL; index < 64; index++)
+            test.Reserve(pageSize, start + index * pageSize);
+        var backing = new AddressSearchRecorder();
+        var method = typeof(KernelMemoryCompatExports).GetMethod("TrySelectBackingAddress",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        object[] arguments = [backing, start, pageSize, pageSize, 0UL, 0UL, false];
+
+        Assert.True((bool)method.Invoke(null, arguments)!);
+
+        Assert.Equal(start + 64 * pageSize, (ulong)arguments[5]);
+        Assert.Equal(new[] { start + 64 * pageSize }, backing.SearchStarts);
+    }
+
+    [Fact]
+    public void AddressSearchKeepsTheFirstAlignedGap()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong alignment = 0x10000;
+        var start = test.Reserve(8 * alignment);
+        Assert.Equal(0, test.Unmap(start + alignment, 3 * alignment));
+        var method = typeof(KernelMemoryCompatExports).GetMethod("FindAvailableMappingAddress",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+
+        Assert.Equal(start + alignment,
+            (ulong)method.Invoke(null, [start + 0x4000, 2 * alignment, alignment])!);
+        Assert.Equal(start + 8 * alignment,
+            (ulong)method.Invoke(null, [start, 4 * alignment, alignment])!);
+        Assert.Equal(0UL,
+            (ulong)method.Invoke(null, [ulong.MaxValue - 0x3FFF, alignment, alignment])!);
+    }
+
+    private sealed class AddressSearchRecorder : IGuestBackedSpace
+    {
+        public List<ulong> SearchStarts { get; } = [];
+        public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        {
+            SearchStarts.Add(searchStart);
+            address = searchStart;
+            return true;
+        }
+        public bool TryHoldRange(ulong address, ulong size) => throw new NotSupportedException();
+        public bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection,
+            out HostViewFailure failure) => throw new NotSupportedException();
+        public bool TryUnmapBacked(ulong address, ulong size) => throw new NotSupportedException();
+        public bool IsBackedRange(ulong address, ulong size) => false;
+        public bool IsBackedView(ulong address) => false;
+        public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data) => throw new NotSupportedException();
+        public bool TryReadBacking(ulong address, Span<byte> data) => throw new NotSupportedException();
+        public bool TryClearBacking(ulong offset, ulong size) => throw new NotSupportedException();
+    }
+
     [Theory]
     [InlineData(0UL, 0UL)]
     [InlineData(0x4000UL, 0UL)]
