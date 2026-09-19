@@ -27,6 +27,21 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
     private const uint SourceRegister = 4;
     private const uint DestinationRegister = 12;
 
+    [Theory]
+    [InlineData(false, 14u)]
+    [InlineData(true, 14u)]
+    [InlineData(false, 8u)]
+    [InlineData(true, 8u)]
+    public void InactiveDeviceAddressLoadsDoNotFault(bool flatAddress, uint opcode)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var shader = CompileShader(flatAddress, opcode, false, DestinationRegister, false);
+        var initial = CreateInput();
+        var result = RunOnce(vulkan, shader, initial, missingDevicePage: true);
+        Assert.Equal(ExpectedResult(initial, opcode, false, DestinationRegister, false), result);
+    }
+
     public static IEnumerable<object[]> MemoryCases()
     {
         foreach (var usesFlatAddress in new[] { false, true })
@@ -292,7 +307,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
 
     private sealed record ShaderFixture(ShaderResourcePlan Plan, uint[] UserData, uint LocalSizeX);
 
-    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1)
+    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool missingDevicePage = false)
     {
         bool ReadWordFromFixture(ulong address, out uint value)
         {
@@ -330,7 +345,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         {
             var pageCount = (BufferAddress >> Gen5SpirvTranslator.DeviceAddressPageBits) + 1;
             bindings[DescriptorBindingKind.DeviceAddressPageTable] =
-                [runner.CreatePageTable(pageCount, [(BufferAddress, records, 0ul)])];
+                [runner.CreatePageTable(pageCount, missingDevicePage ? [] : [(BufferAddress, records, 0ul)])];
             bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint))];
         }
 
@@ -343,6 +358,11 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         }
         harness.Run(() => runner.Dispatch(fixture.UserData, bindings, 1, flattenedTable: flattenedTable));
         var result = harness.ReadBack(records.Handle, 0, BufferBytes);
+        if (missingDevicePage)
+        {
+            var faults = bindings[DescriptorBindingKind.FaultBuffer][0];
+            Assert.All(harness.ReadBack(faults.Handle, 0, faults.Size), value => Assert.Equal(0, value));
+        }
         harness.AssertNoValidationMessages();
         vulkan.AssertNoValidationMessages();
         return result;

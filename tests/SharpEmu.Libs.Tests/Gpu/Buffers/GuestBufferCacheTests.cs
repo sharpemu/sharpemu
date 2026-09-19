@@ -624,6 +624,34 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DeviceAddressPreparationKeepsCleanBuffersResident(bool aggressiveCollection)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RunGarbageCollector();
+            _ = harness.Cache.ObtainBuffer(address, 0x8000, false);
+            harness.Cache.SetCollectionThresholds(1, aggressiveCollection ? 1UL : ulong.MaxValue);
+            for (var collection = 0; collection < 170; collection++)
+            {
+                harness.Cache.PrepareBda([new GuestSpan(address, 0x20000)]);
+                harness.Cache.RunGarbageCollector();
+                Assert.True(harness.Cache.IsRegionRegistered(address, 0x8000));
+                harness.Scheduler.Finish();
+            }
+
+            for (var collection = 0; collection < 161; collection++)
+                harness.Cache.RunGarbageCollector();
+            Assert.False(harness.Cache.IsRegionRegistered(address, 0x8000));
+        });
+        harness.Shutdown();
+    }
+
     [Fact]
     public void GarbageCollector_DownloadsDirtyBuffersAndUntracksCleanOnes()
     {
@@ -962,6 +990,39 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             GuestGpuMemoryHook.Attach(null);
         }
 
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ProcessFaultBufferPreservesRequestsBeyondOutputCapacity()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int pageCount = 1056;
+        var address = harness.MapBacked((ulong)(pageCount + 32) * Page, ReadWrite);
+        var firstPage = ((address / Page) + 31) & ~31UL;
+        var bitmap = Enumerable.Repeat((byte)255, pageCount / 8).ToArray();
+        harness.Worker.Run(() =>
+        {
+            var staging = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Upload);
+            var offset = staging.Copy(bitmap, 4);
+            harness.Cache.FaultBuffer.CopyFrom(harness.Scheduler.Current, staging, offset,
+                firstPage / 8, (ulong)bitmap.Length, Silk.NET.Vulkan.AccessFlags.HostWriteBit);
+            harness.Cache.ProcessFaultBuffer();
+            harness.Scheduler.Finish();
+        });
+
+        var remaining = harness.ReadBack(harness.Cache.FaultBuffer, firstPage / 8, (ulong)bitmap.Length);
+        Assert.Equal(pageCount - 1023, remaining.Sum(value => System.Numerics.BitOperations.PopCount((uint)value)));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.ProcessFaultBuffer();
+            harness.Scheduler.Finish();
+        });
+        Assert.All(harness.ReadBack(harness.Cache.FaultBuffer, firstPage / 8, (ulong)bitmap.Length),
+            value => Assert.Equal(0, value));
+        for (var page = 0; page < pageCount; page++)
+            Assert.True(harness.Cache.IsRegionRegistered((firstPage + (ulong)page) * Page, Page));
         harness.Shutdown();
     }
 

@@ -409,6 +409,44 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
     }
 
     [Fact]
+    public void BindResourcesMakesReadOnlyDeviceAddressRangesResidentOnFirstUse()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite) + 32;
+        var expected = Enumerable.Range(0, 32).Select(index => (byte)(index + 17)).ToArray();
+        harness.Write(address, expected);
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3);
+        var snapshot = new ResourceSnapshot
+        {
+            DeviceAddressRanges = [new DeviceAddressRange(0, address, 32, true, false)],
+        };
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            var buffer = presenter.Run(() =>
+            {
+                using var preparation = presenter.RenderHost.BeginPreparation();
+                var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+                presenter.RenderHost.PrepareDeviceAddresses();
+                presenter.RenderHost.BindResources(prepared);
+                Assert.True(harness.Cache.IsRegionRegistered(address, 32));
+                Assert.False(harness.Cache.HasCpuDirtyPages(address, 32));
+                Assert.False(harness.Cache.HasGpuDirtyPages(address, 32));
+                return harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, 32));
+            });
+            Assert.Equal(expected, harness.ReadBack(buffer, buffer.Offset(address), 32));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void PrepareBindings_PrivateBufferUploadsCurrentBytesAndStillRejectsGpuWrites()
     {
         if (!Ready()) return;

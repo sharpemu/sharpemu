@@ -497,6 +497,8 @@ public static class SpirvFixedShaders
         module.AddStatement(SpirvOp.BranchConditional, fits, store, exit);
 
         module.AddLabel(exit);
+        // Keep requests that did not fit for the next fault scan.
+        module.AddStatement(SpirvOp.Store, wordPtr, word);
         module.AddStatement(SpirvOp.Return);
 
         module.AddLabel(store);

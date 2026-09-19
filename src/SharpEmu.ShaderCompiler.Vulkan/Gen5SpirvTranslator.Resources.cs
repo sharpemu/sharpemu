@@ -796,21 +796,25 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            if (TryGetSubdwordLoadInfo(memoryOpcode, out var loadByteCount, out var signExtend, out var d16, out var d16High))
+            // Inactive lanes must not access memory or record page faults.
+            EmitExecConditional(() =>
             {
-                StoreV(
-                    control.DestinationVectorRegister,
-                    LoadSubdwordDeviceValue(address, LoadV(control.DestinationVectorRegister), loadByteCount, signExtend, d16, d16High));
-                return true;
-            }
+                if (TryGetSubdwordLoadInfo(memoryOpcode, out var loadByteCount, out var signExtend, out var d16, out var d16High))
+                {
+                    StoreV(
+                        control.DestinationVectorRegister,
+                        LoadSubdwordDeviceValue(address, LoadV(control.DestinationVectorRegister), loadByteCount, signExtend, d16, d16High));
+                    return;
+                }
 
-            var aligned = And64(address, ULong(~3ul));
-            for (uint index = 0; index < control.DwordCount; index++)
-            {
-                StoreV(
-                    control.DestinationVectorRegister + index,
-                    LoadDeviceDword(index == 0 ? aligned : IAdd64(aligned, ULong((ulong)index * sizeof(uint)))));
-            }
+                var aligned = And64(address, ULong(~3ul));
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    StoreV(
+                        control.DestinationVectorRegister + index,
+                        LoadDeviceDword(index == 0 ? aligned : IAdd64(aligned, ULong((ulong)index * sizeof(uint)))));
+                }
+            });
 
             return true;
         }

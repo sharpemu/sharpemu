@@ -505,6 +505,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish)
             {
+                // Clean buffers remain in use through their device addresses.
+                TouchBuffer(buffer);
                 // Device-address reads reuse persistent buffers; track writes after each upload.
                 _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
             }

@@ -324,7 +324,7 @@ internal static unsafe partial class VulkanVideoPresenter
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
             var stage = (PreparedStageBindings)prepared;
             BindBuffers(stage);
-            ObtainWrittenRanges(stage);
+            ObtainDeviceAddressRanges(stage);
             BindImages(stage);
         }
 
@@ -420,19 +420,15 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Every written device-address range is obtained as written so the cache records the GPU write.
-        private void ObtainWrittenRanges(PreparedStageBindings prepared)
+        // Device-address reads need persistent page-table entries before the shader runs.
+        private void ObtainDeviceAddressRanges(PreparedStageBindings prepared)
         {
             var program = prepared.Program;
             foreach (var range in prepared.Stage.Resources.DeviceAddressRanges)
             {
-                if (!range.Written)
-                {
-                    continue;
-                }
-
                 if (!range.Planned)
                 {
+                    if (!range.Written) continue;
                     throw SubmissionScheduler.Fatal($"A written device-address range cannot be planned: handle={range.Handle} hash=0x{program.Hash:X16}.");
                 }
 
@@ -443,10 +439,20 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (range.Base >= PageOwnerTable.AddressSpaceSize || range.Size > PageOwnerTable.AddressSpaceSize - range.Base)
                 {
-                    throw SubmissionScheduler.Fatal($"A written device-address range is outside the cache: handle={range.Handle} base=0x{range.Base:X16} size=0x{range.Size:X} hash=0x{program.Hash:X16}.");
+                    throw SubmissionScheduler.Fatal($"A device-address range is outside the cache: handle={range.Handle} base=0x{range.Base:X16} size=0x{range.Size:X} hash=0x{program.Hash:X16}.");
                 }
 
-                _ = _bufferCache.ObtainBuffer(range.Base, ClampMappedSize(range.Base, range.Size), isWritten: true);
+                var size = ClampMappedSize(range.Base, range.Size);
+                if (range.Written)
+                {
+                    _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true);
+                }
+                else
+                {
+                    // Stream buffers do not populate the device-address page table.
+                    _ = _bufferCache.FindBuffer(range.Base, size);
+                    _bufferCache.SynchronizeBuffersInRange(range.Base, size);
+                }
             }
         }
 
