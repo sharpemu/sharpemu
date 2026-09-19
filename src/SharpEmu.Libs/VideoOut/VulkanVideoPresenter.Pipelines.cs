@@ -74,7 +74,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
-            if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint)))
+            if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint),
+                SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead))
             {
                 return false;
             }

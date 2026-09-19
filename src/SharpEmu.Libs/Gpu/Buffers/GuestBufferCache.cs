@@ -133,21 +133,26 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     {
         var completed = true;
         var tracked = _tracker.InvalidateRegion(address, size,
-            () => completed &= ReadMemoryOrAwaitShutdown(address, size, isWrite: true));
+            () => completed &= ReadMemoryOrAwaitShutdown(address, size, isWrite: true,
+                GuestMemoryProfile.ReadbackSource.CpuWriteInvalidation));
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"buffer-write tracked={tracked} completed={completed}");
         return tracked && completed;
     }
 
     public bool TrySynchronizeCpuRead(ulong address, ulong size) =>
-        !_tracker.HasGpuDirtyPages(address, size) || ReadMemoryOrAwaitShutdown(address, size, isWrite: false);
+        TrySynchronizeCpuRead(address, size, GuestMemoryProfile.ReadbackSource.CpuReadSynchronization);
+
+    public bool TrySynchronizeCpuRead(ulong address, ulong size, GuestMemoryProfile.ReadbackSource source) =>
+        !_tracker.HasGpuDirtyPages(address, size) || ReadMemoryOrAwaitShutdown(address, size, isWrite: false, source);
 
     // A CPU read fault: GPU-dirty pages download through the worker first.
     public bool DownloadToCpu(ulong address, ulong size)
     {
         var tracked = _tracker.HasRegion(address, size);
         var dirty = tracked && _tracker.HasGpuDirtyPages(address, size);
-        var completed = tracked && (!dirty || ReadMemoryOrAwaitShutdown(address, size, isWrite: false));
+        var completed = tracked && (!dirty || ReadMemoryOrAwaitShutdown(address, size, isWrite: false,
+            GuestMemoryProfile.ReadbackSource.StoreDownload));
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"buffer-read tracked={tracked} gpu_dirty={dirty} completed={completed}");
         return completed;
@@ -682,7 +687,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     // False only when the store closed and its drain failed; the caller then declines the fault.
-    private bool ReadMemoryOrAwaitShutdown(ulong guestAddress, ulong size, bool isWrite)
+    private bool ReadMemoryOrAwaitShutdown(ulong guestAddress, ulong size, bool isWrite,
+        GuestMemoryProfile.ReadbackSource source = GuestMemoryProfile.ReadbackSource.ExplicitReadback)
     {
         if (!_relay.IsGpuQueueThread && SubmissionScheduler.InDeferredOperation)
         {
@@ -690,7 +696,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 $"unsupported buffer readback from an asynchronous GPU completion, addr=0x{guestAddress:X16} size=0x{size:X16}");
         }
 
-        if (_relay.TryRunOnGpuQueue(() => ReadMemoryOnGpu(guestAddress, size, isWrite)))
+        if (_relay.TryRunOnGpuQueue(() => ReadMemoryOnGpu(guestAddress, size, isWrite, source)))
         {
             return true;
         }
@@ -706,9 +712,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
-    private void ReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite)
+    private void ReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source)
     {
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
+        var readbackStarted = GuestMemoryProfile.ReadbackDetailsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         if (isWrite && !IsRegionRegistered(guestAddress, size))
         {
             return;
@@ -744,6 +751,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWrite)
         {
             _tracker.MarkCpuDirtyPages(guestAddress, size);
+        }
+        if (GuestMemoryProfile.ReadbackDetailsEnabled)
+        {
+            var downloadedBytes = 0UL;
+            foreach (var copy in copies)
+                downloadedBytes += copy.Size;
+            GuestMemoryProfile.RecordBufferReadback(windowBegin, windowEnd - windowBegin, isWrite, downloadedBytes,
+                System.Diagnostics.Stopwatch.GetTimestamp() - readbackStarted, source);
         }
     }
 

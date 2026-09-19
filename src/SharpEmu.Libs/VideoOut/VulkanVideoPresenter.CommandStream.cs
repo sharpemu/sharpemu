@@ -256,7 +256,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemorySync))
             {
-                if (!_bufferCache.TrySynchronizeCpuRead(address, (ulong)destination.Length))
+                if (!_bufferCache.TrySynchronizeCpuRead(address, (ulong)destination.Length,
+                    SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.CommandMemoryRead))
                 {
                     return false;
                 }
