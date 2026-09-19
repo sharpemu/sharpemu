@@ -9,6 +9,7 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Tests.Loader;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
@@ -16,10 +17,11 @@ namespace SharpEmu.Libs.Tests.Cpu;
 public sealed class Gen5NativeReturnSmokeTests
 {
     private const string WorkerEnvironmentVariable = "SHARPEMU_NATIVE_RETURN_SMOKE_WORKER";
+    private const string WorkerCompletionMarker = "SHARPEMU_NATIVE_RETURN_SMOKE_COMPLETED";
     private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public async Task SyntheticGen5Entry_ReturnsToHost()
+    public async Task SyntheticGen5ElfAndMinimalSelfEntries_ReturnToHost()
     {
         if (!IsSupportedHost)
         {
@@ -31,7 +33,8 @@ public sealed class Gen5NativeReturnSmokeTests
                 "1",
                 StringComparison.Ordinal))
         {
-            ExecuteSyntheticGuest();
+            ExecuteSyntheticGuests();
+            Console.Error.WriteLine(WorkerCompletionMarker);
             return;
         }
 
@@ -43,16 +46,30 @@ public sealed class Gen5NativeReturnSmokeTests
         Assert.True(
             result.ExitCode == 0,
             $"native return worker exited with code {result.ExitCode}\n{result.Output}");
+        Assert.True(
+            result.Output.Contains(WorkerCompletionMarker, StringComparison.Ordinal),
+            $"native return worker exited without confirming both guest executions\n{result.Output}");
     }
 
     private static bool IsSupportedHost =>
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
         (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
 
-    private static void ExecuteSyntheticGuest()
+    private static void ExecuteSyntheticGuests()
+    {
+        ExecuteSyntheticGuest(BuildSyntheticElf(), expectedIsSelf: false);
+
+        ReadOnlySpan<byte> payload = [0x31, 0xC0, 0xC3]; // xor eax, eax; ret
+        ExecuteSyntheticGuest(
+            SyntheticGen5SelfImageBuilder.BuildMinimalSelfSegmentTableImage(payload),
+            expectedIsSelf: true);
+    }
+
+    private static void ExecuteSyntheticGuest(byte[] imageData, bool expectedIsSelf)
     {
         using var memory = new PhysicalVirtualMemory();
-        var image = new SelfLoader().Load(BuildSyntheticElf(), memory);
+        var image = new SelfLoader().Load(imageData, memory);
+        Assert.Equal(expectedIsSelf, image.IsSelf);
         Assert.Equal((byte)2, image.ElfHeader.AbiVersion);
         Assert.Equal(0x0000_0008_0000_1000UL, image.EntryPoint);
 
@@ -100,7 +117,9 @@ public sealed class Gen5NativeReturnSmokeTests
         startInfo.ArgumentList.Add(typeof(Gen5NativeReturnSmokeTests).Assembly.Location);
         startInfo.ArgumentList.Add("--filter");
         startInfo.ArgumentList.Add(
-            $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{nameof(SyntheticGen5Entry_ReturnsToHost)}");
+            $"FullyQualifiedName={typeof(Gen5NativeReturnSmokeTests).FullName}.{nameof(SyntheticGen5ElfAndMinimalSelfEntries_ReturnToHost)}");
+        startInfo.ArgumentList.Add("--logger");
+        startInfo.ArgumentList.Add("console;verbosity=normal");
         startInfo.Environment[WorkerEnvironmentVariable] = "1";
         startInfo.Environment["SHARPEMU_SENTINEL_PROBE"] = null;
 
