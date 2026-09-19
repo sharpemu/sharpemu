@@ -614,6 +614,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
                 else
                 {
+                    // Shared reservations permit adjacent allocations, not reuse of live pages.
+                    if (info.State == HostRegionState.Committed && cursor < requestEnd && segmentEnd > requestStart)
+                    {
+                        Reject(cursor, "already-committed pages");
+                        return 0;
+                    }
+
                     var trusted = _fixedGranuleReservationBases.Contains(info.AllocationBase) ||
                         IsTrackedRegionBase(info.AllocationBase);
                     if (!trusted && cursor < requestEnd && segmentEnd > requestStart)
