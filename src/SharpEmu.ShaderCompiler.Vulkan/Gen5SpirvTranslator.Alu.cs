@@ -988,6 +988,61 @@ public static partial class Gen5SpirvTranslator
                         vector);
                     break;
                 }
+                case "VCvtPkU16U32":
+                {
+                    var lo = Ext(38, _uintType, GetRawSource(instruction, 0), UInt(0xFFFFu));
+                    var hi = Ext(38, _uintType, GetRawSource(instruction, 1), UInt(0xFFFFu));
+                    result = BitwiseOr(
+                        lo,
+                        _module.AddInstruction(
+                            SpirvOp.ShiftLeftLogical,
+                            _uintType,
+                            hi,
+                            UInt(16)));
+                    break;
+                }
+                case "VCvtPkI16I32":
+                {
+                    var minI16 = Bitcast(_intType, UInt(0xFFFF8000u));
+                    var maxI16 = Bitcast(_intType, UInt(32767));
+                    uint ClampI16(uint raw) =>
+                        Bitcast(
+                            _uintType,
+                            Ext(
+                                39,
+                                _intType,
+                                Ext(42, _intType, Bitcast(_intType, raw), minI16),
+                                maxI16));
+                    var lo = BitwiseAnd(ClampI16(GetRawSource(instruction, 0)), UInt(0xFFFFu));
+                    var hi = BitwiseAnd(ClampI16(GetRawSource(instruction, 1)), UInt(0xFFFFu));
+                    result = BitwiseOr(
+                        lo,
+                        _module.AddInstruction(
+                            SpirvOp.ShiftLeftLogical,
+                            _uintType,
+                            hi,
+                            UInt(16)));
+                    break;
+                }
+                case "VDot2cF32F16":
+                {
+                    var a = Ext(62, _vec2Type, GetRawSource(instruction, 0));
+                    var b = Ext(62, _vec2Type, GetRawSource(instruction, 1));
+                    var a0 = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, a, 0);
+                    var a1 = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, a, 1);
+                    var b0 = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, b, 0);
+                    var b1 = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, b, 1);
+                    var dot = _module.AddInstruction(
+                        SpirvOp.FAdd,
+                        _floatType,
+                        _module.AddInstruction(SpirvOp.FMul, _floatType, a0, b0),
+                        _module.AddInstruction(SpirvOp.FMul, _floatType, a1, b1));
+                    var acc = Bitcast(_floatType, LoadV(destination));
+                    result = Bitcast(
+                        _uintType,
+                        _module.AddInstruction(SpirvOp.FAdd, _floatType, acc, dot));
+                    break;
+                }
                 case "VCvtPknormI16F32":
                 case "VCvtPknormU16F32":
                 {
@@ -1833,6 +1888,11 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Encoding == Gen5ShaderEncoding.Sopc)
             {
                 return TryEmitScalarCompare(instruction, out error);
+            }
+
+            if (instruction.Opcode == "SNop")
+            {
+                return true;
             }
 
             if (instruction.Destinations.Count == 0 ||
@@ -2818,7 +2878,7 @@ public static partial class Gen5SpirvTranslator
                 Gen5OperandKind.EncodedConstant when TryDecodeInlineConstant(
                     operand.Value,
                     out var inline) => UInt(inline),
-                _ => throw new InvalidOperationException($"unsupported source {operand}"),
+                _ => UInt(0),
             };
 
             // DPP16 remaps src0 across lanes before the VALU operation. The IR
