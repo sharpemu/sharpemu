@@ -155,7 +155,10 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         LastRecentInstructionWindow = null;
         LastRecentControlTransferTrace = null;
         LastSessionSummary = default;
-        OrbisGen2Result FailEarly(OrbisGen2Result result, CpuExitReason reason = CpuExitReason.UnhandledException)
+        OrbisGen2Result FailEarly(
+            OrbisGen2Result result,
+            CpuExitReason reason = CpuExitReason.UnhandledException,
+            NativeCpuSessionStatistics nativeStatistics = default)
         {
             LastSessionSummary = new CpuSessionSummary(
                 result,
@@ -164,8 +167,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 lastGuestRip: entryPoint,
                 lastStubRip: 0,
                 totalInstructions: 0,
-                importsHit: 0,
-                uniqueNidsHit: 0);
+                importsHit: nativeStatistics.ImportsHit,
+                uniqueNidsHit: nativeStatistics.UniqueNidsHit);
             return result;
         }
 
@@ -290,14 +293,18 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         _nativeCpuBackend ??= new DirectExecutionBackend(_moduleManager);
         // Let backend stall reports reference the same frame as entry.
         (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveDebugFrame(debugFrame);
-        if (_nativeCpuBackend.TryExecute(
+        var nativeSucceeded = _nativeCpuBackend.TryExecute(
                 context,
                 entryPoint,
                 generation,
                 effectiveImportStubs,
                 runtimeSymbols ?? new Dictionary<string, ulong>(StringComparer.Ordinal),
                 executionOptions,
-                out var nativeResult))
+                out var nativeResult);
+        var nativeStatistics = _nativeCpuBackend is INativeCpuSessionStatisticsProvider statisticsProvider
+            ? statisticsProvider.LastSessionStatistics
+            : default;
+        if (nativeSucceeded)
         {
             debugHook?.OnFrameExit(debugFrame!, nativeResult);
             LastSessionSummary = new CpuSessionSummary(
@@ -309,8 +316,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 lastGuestRip: context.Rip,
                 lastStubRip: 0,
                 totalInstructions: 0,
-                importsHit: 0,
-                uniqueNidsHit: 0);
+                importsHit: nativeStatistics.ImportsHit,
+                uniqueNidsHit: nativeStatistics.UniqueNidsHit);
             return nativeResult;
         }
 
@@ -336,7 +343,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         Console.Error.WriteLine($"[DISPATCHER] Native backend FAILED: {backendError}");
         return FailEarly(
             OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED,
-            CpuExitReason.NativeBackendUnavailable);
+            CpuExitReason.NativeBackendUnavailable,
+            nativeStatistics);
     }
 
     private ulong TryMapStackRegion()

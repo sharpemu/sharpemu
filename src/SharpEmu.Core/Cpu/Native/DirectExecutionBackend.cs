@@ -18,7 +18,11 @@ using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Core.Cpu.Native;
 
-public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, IGuestThreadScheduler, IDisposable
+public sealed unsafe partial class DirectExecutionBackend :
+	INativeCpuBackend,
+	INativeCpuSessionStatisticsProvider,
+	IGuestThreadScheduler,
+	IDisposable
 {
 	private static readonly SharpEmu.Logging.SharpEmuLogger Log = SharpEmu.Logging.SharpEmuLog.For("Native");
 
@@ -298,6 +302,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private nint _guestContextTransferStub;
 
 	private long _importDispatchCount;
+
+	private NativeImportSessionCounters? _activeImportSessionCounters;
+
+	private int _lastSessionImportsHit;
+
+	private int _lastSessionUniqueNidsHit;
 
 	private const int ImportDispatchBlockSize = 256;
 
@@ -1132,7 +1142,31 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		PrewarmNativeGuestWorkers(Math.Max(NativeWorkerMaxConcurrent, 4));
 	}
 
+	NativeCpuSessionStatistics INativeCpuSessionStatisticsProvider.LastSessionStatistics =>
+		new(
+			Volatile.Read(ref _lastSessionImportsHit),
+			Volatile.Read(ref _lastSessionUniqueNidsHit));
+
 	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
+	{
+		var sessionCounters = new NativeImportSessionCounters();
+		Volatile.Write(ref _lastSessionImportsHit, 0);
+		Volatile.Write(ref _lastSessionUniqueNidsHit, 0);
+		Volatile.Write(ref _activeImportSessionCounters, sessionCounters);
+		try
+		{
+			return TryExecuteCore(context, entryPoint, generation, importStubs, runtimeSymbols, executionOptions, out result);
+		}
+		finally
+		{
+			Interlocked.CompareExchange(ref _activeImportSessionCounters, null, sessionCounters);
+			var statistics = sessionCounters.Snapshot();
+			Volatile.Write(ref _lastSessionImportsHit, statistics.ImportsHit);
+			Volatile.Write(ref _lastSessionUniqueNidsHit, statistics.UniqueNidsHit);
+		}
+	}
+
+	private bool TryExecuteCore(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
 	{
 		Console.Error.WriteLine("[LOADER][INFO] === Execute START ===");
 		Console.Error.WriteLine($"[LOADER][INFO] EntryPoint: 0x{entryPoint:X16}, ImportStubs: {importStubs.Count}");
