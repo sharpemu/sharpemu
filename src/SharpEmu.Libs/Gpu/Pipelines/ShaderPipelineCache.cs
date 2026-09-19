@@ -92,6 +92,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelSource = PrepareSource(
                 pixel.Address, ShaderStage.Pixel, "pixel", pixel.UserScalars, pixel.Resource2.UserScalarCount,
                 probeWrittenRegisters: true, userDataBase: 0);
+            if (RenderTrace.Enabled)
+                RenderTrace.Write($"PixelDrawState shader=0x{pixelSource.Address:X16} hash=0x{pixelSource.Hash:X16} " +
+                    $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
             var pixelProgram = _programs.Decode(pixelSource);
             attributeCount = InterpolatedAttributeCount(pixelProgram);
