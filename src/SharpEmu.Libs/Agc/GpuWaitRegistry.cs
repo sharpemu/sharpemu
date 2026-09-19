@@ -49,6 +49,10 @@ internal static class GpuWaitRegistry
         // (Stopwatch ticks) after which the waiter is resumed even if unsatisfied,
         // so a legitimately empty indirect dispatch can never stall forever.
         public long RetryDeadlineTicks;
+        // Frame counter at registration. The deadlock breaker may only replay a
+        // produced label value written in this frame or later — never an earlier
+        // frame's signal that the guest has since recycled.
+        public long WaitFrameId;
     }
 
     private static readonly object _gate = new();
@@ -201,6 +205,7 @@ internal static class GpuWaitRegistry
     {
         waiter.WaitAddress = address;
         waiter.Memory = Canonicalize(waiter.Memory);
+        waiter.WaitFrameId = System.Threading.Volatile.Read(ref _currentFrameId);
         lock (_gate)
         {
             if (!_waiters.TryGetValue(address, out var list))
@@ -640,6 +645,8 @@ internal static class GpuWaitRegistry
                     if (!ReferenceEquals(waiter.Memory, memory) ||
                         nowTicks - waiter.RegisteredTicks < minAgeTicks ||
                         !_lastProduced.TryGetValue((memory, address), out var produced) ||
+                        !_labelFrameIds.TryGetValue((memory, address), out var produceFrame) ||
+                        produceFrame < waiter.WaitFrameId ||
                         !Compare(waiter, produced))
                     {
                         continue;
@@ -664,6 +671,140 @@ internal static class GpuWaitRegistry
                     _waiters.Remove(address);
                 }
             }
+        }
+
+        return broken;
+    }
+
+    private static bool IsComputeQueue(string? queueName) =>
+        queueName is not null &&
+        queueName.StartsWith("acb.compute", StringComparison.Ordinal);
+
+    private static bool IsGraphicsQueue(string? queueName) =>
+        queueName is not null &&
+        queueName.StartsWith("dcb.graphics", StringComparison.Ordinal);
+
+    private static long _lastCircularBreakTicks;
+    private static int _circularBreaksThisWindow;
+
+    /// <summary>
+    /// Astro-style A↔B hang: graphics waits for a compute label while compute
+    /// waits for a graphics label further down the same CB. Replaying a stale
+    /// produced value onto graphics races the title draw ahead of meshlet work.
+    /// Prefer force-resuming aged compute waiters so they can signal graphics.
+    /// Throttled: at most two breaks per second, otherwise we keep skipping
+    /// waits that still need a real producer (asset/meshlet fill never lands).
+    /// </summary>
+    public static List<WaitingDcb>? CollectCircularComputeBreaks(
+        object memory,
+        long nowTicks,
+        long minAgeTicks)
+    {
+        memory = Canonicalize(memory)!;
+        var windowTicks = System.Diagnostics.Stopwatch.Frequency; // ~1s
+        if (nowTicks - System.Threading.Volatile.Read(ref _lastCircularBreakTicks) > windowTicks)
+        {
+            System.Threading.Volatile.Write(ref _lastCircularBreakTicks, nowTicks);
+            System.Threading.Volatile.Write(ref _circularBreaksThisWindow, 0);
+        }
+
+        if (System.Threading.Volatile.Read(ref _circularBreaksThisWindow) >= 2)
+        {
+            return null;
+        }
+
+        List<WaitingDcb>? broken = null;
+        lock (_gate)
+        {
+            WaitingDcb? oldestGraphics = null;
+            foreach (var (_, list) in _waiters)
+            {
+                foreach (var waiter in list)
+                {
+                    if (!ReferenceEquals(waiter.Memory, memory) ||
+                        !IsGraphicsQueue(waiter.QueueName) ||
+                        nowTicks - waiter.RegisteredTicks < minAgeTicks)
+                    {
+                        continue;
+                    }
+
+                    if (oldestGraphics is null ||
+                        waiter.RegisteredTicks < oldestGraphics.Value.RegisteredTicks)
+                    {
+                        oldestGraphics = waiter;
+                    }
+                }
+            }
+
+            if (oldestGraphics is null)
+            {
+                return null;
+            }
+
+            // Only break compute waiters that look like the mid-CB handshake
+            // graphics will release later (0x40020xxx labels), not arbitrary
+            // compute waits that still need a real producer.
+            WaitingDcb? oldestCompute = null;
+            ulong oldestAddress = 0;
+            foreach (var (address, list) in _waiters)
+            {
+                if (address < 0x0000000400200000UL || address >= 0x0000000400210000UL)
+                {
+                    continue;
+                }
+
+                foreach (var waiter in list)
+                {
+                    if (!ReferenceEquals(waiter.Memory, memory) ||
+                        !IsComputeQueue(waiter.QueueName) ||
+                        nowTicks - waiter.RegisteredTicks < minAgeTicks)
+                    {
+                        continue;
+                    }
+
+                    if (oldestCompute is null ||
+                        waiter.RegisteredTicks < oldestCompute.Value.RegisteredTicks)
+                    {
+                        oldestCompute = waiter;
+                        oldestAddress = address;
+                    }
+                }
+            }
+
+            if (oldestCompute is null)
+            {
+                return null;
+            }
+
+            if (!_waiters.TryGetValue(oldestAddress, out var computeList))
+            {
+                return null;
+            }
+
+            for (var i = computeList.Count - 1; i >= 0; i--)
+            {
+                var waiter = computeList[i];
+                if (!ReferenceEquals(waiter.Memory, memory) ||
+                    waiter.RegisteredTicks != oldestCompute.Value.RegisteredTicks ||
+                    waiter.WaitAddress != oldestCompute.Value.WaitAddress)
+                {
+                    continue;
+                }
+
+                broken = [waiter];
+                computeList.RemoveAt(i);
+                break;
+            }
+
+            if (computeList.Count == 0)
+            {
+                _waiters.Remove(oldestAddress);
+            }
+        }
+
+        if (broken is not null)
+        {
+            System.Threading.Interlocked.Increment(ref _circularBreaksThisWindow);
         }
 
         return broken;
@@ -709,6 +850,11 @@ internal static class GpuWaitRegistry
         {
             _waiters.Clear();
             _lastProduced.Clear();
+            _labelFrameIds.Clear();
         }
+
+        System.Threading.Volatile.Write(ref _currentFrameId, 0);
+        System.Threading.Volatile.Write(ref _lastCircularBreakTicks, 0);
+        System.Threading.Volatile.Write(ref _circularBreaksThisWindow, 0);
     }
 }

@@ -39,6 +39,62 @@ public sealed class GpuWaitRegistryProducedRetentionTests
     }
 
     [Fact]
+    public void CircularHangPrefersBreakingAgedComputeBeforeGraphics()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+
+        var graphics = NewWaiter(memory, 0x4002_02DC0UL);
+        graphics.QueueName = "dcb.graphics";
+        GpuWaitRegistry.Register(0x4002_02DC0UL, graphics);
+
+        var compute = NewWaiter(memory, 0x4002_03980UL);
+        compute.QueueName = "acb.compute[72]";
+        GpuWaitRegistry.Register(0x4002_03980UL, compute);
+
+        var broken = GpuWaitRegistry.CollectCircularComputeBreaks(
+            memory, nowTicks: 1_000_000, minAgeTicks: 1);
+
+        Assert.NotNull(broken);
+        Assert.Single(broken!);
+        Assert.StartsWith("acb.compute", broken![0].QueueName);
+        Assert.Equal(0x4002_03980UL, broken[0].WaitAddress);
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void StaleProducedValueDoesNotBreakWaiterRegisteredInLaterFrame()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+        GpuWaitRegistry.AdvanceFrame();
+
+        GpuWaitRegistry.Register(WatchedLabel, NewWaiter(memory, WatchedLabel));
+        var broken = GpuWaitRegistry.CollectDeadlockBroken(memory, nowTicks: 1_000_000, minAgeTicks: 1);
+
+        Assert.Null(broken);
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
+    public void SameFrameProducedValueCanBreakAfterLabelReset()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+
+        GpuWaitRegistry.RecordProduced(memory, WatchedLabel, 1);
+        GpuWaitRegistry.Register(WatchedLabel, NewWaiter(memory, WatchedLabel));
+
+        var broken = GpuWaitRegistry.CollectDeadlockBroken(memory, nowTicks: 1_000_000, minAgeTicks: 1);
+
+        Assert.NotNull(broken);
+        Assert.Contains(broken!, waiter => waiter.WaitAddress == WatchedLabel);
+        GpuWaitRegistry.Clear();
+    }
+
+    [Fact]
     public void UnwatchedProducedValuesArePrunedAtTheBound()
     {
         GpuWaitRegistry.Clear();

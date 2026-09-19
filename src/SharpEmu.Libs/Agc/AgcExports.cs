@@ -7488,13 +7488,14 @@ public static partial class AgcExports
                 }
             }
 
-            // Break cross-queue deadlocks: a waiter stuck past the deadline whose
-            // label a real producer already signalled (but guest memory has since
-            // been reset for reuse) is released using that produced value. Only
-            // fires for genuinely wedged waits, so fast-resolving ones on working
-            // titles are untouched.
-            var deadlockBroken = GpuWaitRegistry.CollectDeadlockBroken(
-                ctx.Memory, System.Diagnostics.Stopwatch.GetTimestamp(), _gpuDeadlockBreakTicks);
+            // Prefer unblocking aged compute waiters when graphics is also
+            // wedged (Astro meshlet A↔B hang). Replaying a stale produced value
+            // onto graphics first races the title draw ahead of empty meshlets.
+            var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            var deadlockBroken = GpuWaitRegistry.CollectCircularComputeBreaks(
+                ctx.Memory, nowTicks, _gpuDeadlockBreakTicks);
+            deadlockBroken ??= GpuWaitRegistry.CollectDeadlockBroken(
+                ctx.Memory, nowTicks, _gpuDeadlockBreakTicks);
             if (deadlockBroken is not null)
             {
                 foreach (var waiter in deadlockBroken)
