@@ -70,6 +70,15 @@ internal static class CommandTranslator
                 return parts.Length >= 3
                     ? Request("read-memory", ("address", parts[1]), ("length", parts[2]))
                     : Error("Usage: mem <address> <length>");
+            case "disasm" or "disassemble" or "u":
+                if (parts.Length < 2)
+                {
+                    return Error("Usage: disasm <address> [count]");
+                }
+
+                return parts.Length >= 3
+                    ? Request("disassemble", ("address", parts[1]), ("count", parts[2]))
+                    : Request("disassemble", ("address", parts[1]));
             case "write":
                 return parts.Length >= 3
                     ? Request("write-memory", ("address", parts[1]), ("bytes", parts[2]))
@@ -143,6 +152,7 @@ internal static class CommandTranslator
           regs | registers         Dump integer registers (paused only)
           setreg <reg> <value>     Set a register (rip/rflags/gp, paused only)
           mem <addr> <len>         Read guest memory as hex (paused only)
+          disasm <addr> [count]    Disassemble instructions at address (paused only)
           write <addr> <hex>       Write guest memory from hex (paused only)
           break <addr> [kind] [len]  Add a breakpoint (kind: execute/readwatch/writewatch/accesswatch)
           bp | breakpoints         List breakpoints

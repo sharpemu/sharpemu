@@ -15,6 +15,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.GUI\SharpEmu.GUI.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.Debugger\SharpEmu.Debugger.csproj" />
   </ItemGroup>
 
   <ItemGroup>

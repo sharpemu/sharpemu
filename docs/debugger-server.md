@@ -100,6 +100,7 @@ number or a `0x`-prefixed hex string.
 | `set-register` | `register`, `value` | — |
 | `read-memory` | `address`, `length` (≤ 65536) | `address`, `length`, `bytes` (hex) |
 | `write-memory` | `address`, `bytes` (hex) | `written` |
+| `disassemble` (`disasm`, `u`) | `address`, `count?` (≤ 512, default 10) | `address`, `instructions[]` (`address`, `length`, `bytes`, `text`, `mnemonic`) |
 | `list-breakpoints` (`breakpoints`) | — | `breakpoints[]` |
 | `add-breakpoint` (`break`) | `address`, `kind?`, `length?` | `breakpoint` |
 | `remove-breakpoint` (`delete-breakpoint`) | `id` | — |
