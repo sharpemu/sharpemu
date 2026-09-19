@@ -12846,13 +12846,27 @@ private static long _indirectDrawProbeCount;
                 out var evaluation,
                 out error))
         {
+            var firstComputeFailure = false;
             lock (_submitTraceGate)
             {
-                if (_tracedComputeShaders.Add(shaderAddress))
+                firstComputeFailure = _tracedComputeShaders.Add(shaderAddress);
+                if (firstComputeFailure)
                 {
                     TraceAgcShader(
                         $"agc.compute_shader cs=0x{shaderAddress:X16} error={error}");
                 }
+            }
+
+            // Same reasoning as the graphics path: a compute shader that fails to translate is a
+            // compatibility issue, not verbose shader tracing. The dispatch is dropped silently,
+            // so without this a title that reaches gameplay and starts dispatching compute
+            // produces no output at all for the work it lost - and the missing opcode, which is
+            // the one thing needed to fix it, is only visible with SHARPEMU_LOG_AGC_SHADER=1.
+            // Deduplicated per shader address, so a dispatch loop cannot turn this into spam.
+            if (firstComputeFailure)
+            {
+                Console.Error.WriteLine(
+                    $"[COMPAT][SHADER] cs=0x{shaderAddress:X16} error={error}");
             }
 
             return;
