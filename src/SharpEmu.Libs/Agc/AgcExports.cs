@@ -8393,12 +8393,15 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             // modelling DCC block state.
             if (translatedDraw.IsDccFastClear)
             {
-                foreach (var target in translatedDraw.GuestTargets)
+                // Still create host GPU images (zero clear). RequestGuestColorClear
+                // alone never publishes _availableGuestImages, so later composites
+                // sample empty CPU tiles (Astro title gray/black).
+                if (translatedDraw.GuestTargets.Count > 0)
                 {
-                    if (target.Address != 0)
-                    {
-                        VulkanVideoPresenter.RequestGuestColorClear(target.Address);
-                    }
+                    VulkanVideoPresenter.SubmitOffscreenColorClear(
+                        translatedDraw.GuestTargets,
+                        0f, 0f, 0f, 0f,
+                        translatedDraw.PixelShaderAddress);
                 }
 
                 ReturnPooledDrawArrays(
@@ -11748,9 +11751,14 @@ private static long _indirectDrawProbeCount;
         // With the write tracker off (Windows default), IsGuestImageUploadKnown
         // uses a cheap guest-memory probe so static UI can still skip (Dead
         // Cells menus) while changing CPU content (GTA Bink) forces a copy.
-        if (!isStorage &&
+        if (!_textureCopySkipDisabled &&
+            !isStorage &&
             !wantsArrayUpload &&
             descriptor.Address != 0 &&
+            GuestGpu.Current.IsGpuGuestImageAvailable(
+                descriptor.Address,
+                descriptor.Format,
+                descriptor.NumberType) &&
             GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
