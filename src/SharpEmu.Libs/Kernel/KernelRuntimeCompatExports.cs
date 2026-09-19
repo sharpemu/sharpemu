@@ -39,8 +39,6 @@ public static class KernelRuntimeCompatExports
     private const ulong ModuleInfoExSegmentCountOffset = 0x1A0;
     private const int ModuleInfoSegmentSize = 16;
     private const ulong DefaultKernelTscFrequency = 10_000_000UL;
-    private const ulong PrtAreaStartAddress = 0x0000001000000000UL;
-    private const ulong PrtAreaSize = 0x000000EC00000000UL;
     private const int MapFlagFixed = 0x10;
     private const ulong DefaultVirtualRangeAlignment = 0x4000UL;
     private const int AioInitParamSize = 0x3C;
@@ -891,22 +889,24 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if ((apertureBase & 0xFFFUL) != 0)
+        if (apertureBase == 0 || (apertureBase & 0xFFFUL) != 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (apertureBase < PrtAreaStartAddress)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        if (apertureSize > PrtAreaSize)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        if (apertureBase - PrtAreaStartAddress > PrtAreaSize - apertureSize)
+        // The aperture range is not checked against a fixed window any more. A title obtains the
+        // range from sceKernelReserveVirtualRange and hands the result straight back here, and that
+        // allocator searches free host VA from _nextReservedVirtualBase (0x6_0000_0000) upwards -
+        // below where the old window began and, in practice, far past where it ended. Guest and
+        // host share one address space because guest code executes natively, so a reserved range
+        // is a legitimate aperture wherever it landed; the old window described a region nothing
+        // in the emulator ever allocates from, so a correct call was rejected on arrival.
+        //
+        // Rejecting it is not only a wrong error code. On success the import dispatcher calls
+        // RegisterPrtLazyCommitRange for this range, which is what makes later guest accesses to
+        // the aperture demand-page instead of faulting, so the failure also left the range
+        // unbacked.
+        if (apertureBase > ulong.MaxValue - apertureSize)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
