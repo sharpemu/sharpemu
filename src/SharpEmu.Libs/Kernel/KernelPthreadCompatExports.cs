@@ -900,6 +900,7 @@ public static class KernelPthreadCompatExports
             if (!tryOnly && state.Type == MutexTypeAdaptiveNp &&
                 IsGuestTrackedSelfLock(ctx, mutexAddress, currentThreadId))
             {
+                TracePthreadFastPathBusy("lock_guest_self", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
                 TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
             }
@@ -953,6 +954,7 @@ public static class KernelPthreadCompatExports
                 if (!tryOnly && state.Type == MutexTypeAdaptiveNp &&
                     IsGuestTrackedSelfLock(ctx, mutexAddress, currentThreadId))
                 {
+                    TracePthreadFastPathBusy("lock_guest_self", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
                     TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
                 }
