@@ -22,7 +22,6 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
-using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Reflection;
@@ -35,6 +34,12 @@ public partial class MainWindow : Window
 {
     private const int MaxConsoleLines = 4000;
     private const int MaxConsoleLinesPerFlush = 500;
+
+    // MaxConsoleLinesPerFlush every 80 ms is roughly 6k lines/second, and a title can emit far
+    // more than that, so the queue feeding the flush needs a ceiling of its own or it retains the
+    // entire overflow. About 40 flushes' worth: deep enough to ride out a burst without losing
+    // anything, small enough that a runaway logger costs a few megabytes instead of the process.
+    private const int MaxPendingConsoleLines = 20_000;
     private static readonly TimeSpan NavigationIndicatorAnimationDuration =
         TimeSpan.FromMilliseconds(180);
 
@@ -89,7 +94,7 @@ public partial class MainWindow : Window
     private readonly GameLibraryWatcher _libraryWatcher = new();
     private readonly AvaloniaList<LogLine> _consoleLines = new();
     private readonly List<LogLine> _allConsoleLines = new();
-    private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
+    private readonly ConsoleLineBuffer _pendingLines = new(MaxPendingConsoleLines);
     private readonly DispatcherTimer _consoleFlushTimer;
 
     private GuiSettings _settings = new();
@@ -170,8 +175,7 @@ public partial class MainWindow : Window
         GameList.ItemsSource = _libraryTiles;
         _libraryWatcher.RefreshRequested += OnLibraryRefreshRequested;
         ConsoleList.ItemsSource = _consoleLines;
-        _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
-            _pendingLines.Enqueue((line, isError)));
+        _consoleMirror = GuiConsoleMirror.Install(_pendingLines.Enqueue);
         _consoleFlushTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(80),
@@ -2614,7 +2618,7 @@ public partial class MainWindow : Window
 
     private void OnEmulatorOutput(string line, bool isError)
     {
-        _pendingLines.Enqueue((line, isError));
+        _pendingLines.Enqueue(line, isError);
     }
 
     private void OpenFileLog(string? titleId)
@@ -2698,17 +2702,29 @@ public partial class MainWindow : Window
 
     private void FlushPendingConsoleLines()
     {
-        if (_pendingLines.IsEmpty)
+        var dropped = _pendingLines.ExchangeDroppedCount();
+        if (dropped == 0 && _pendingLines.IsEmpty)
         {
             return;
         }
 
         var incoming = new List<LogLine>();
-        while (incoming.Count < MaxConsoleLinesPerFlush &&
-               _pendingLines.TryDequeue(out var pending))
+        if (dropped > 0)
         {
-            WriteFileLog(pending.Line);
-            incoming.Add(new LogLine(pending.Line, BrushForLine(pending.Line)));
+            // What was dropped was the oldest still queued, so the notice belongs ahead of
+            // whatever survived. Recording the gap matters: without it a title that outruns the
+            // console looks like one that simply stopped logging.
+            var notice =
+                $"[GUI][WARN] Console output is arriving faster than it can be shown; dropped {dropped} line(s).";
+            WriteFileLog(notice);
+            incoming.Add(new LogLine(notice, BrushForLine(notice)));
+        }
+
+        while (incoming.Count < MaxConsoleLinesPerFlush &&
+               _pendingLines.TryDequeue(out var line, out _))
+        {
+            WriteFileLog(line);
+            incoming.Add(new LogLine(line, BrushForLine(line)));
         }
 
         FlushFileLog();
