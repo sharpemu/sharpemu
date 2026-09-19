@@ -1167,6 +1167,11 @@ public static partial class Gen5MslTranslator
                     StoreScalar(destination, result);
                     return true;
                 }
+                case "SBitset0B32":
+                    StoreScalar(
+                        destination,
+                        $"{ScalarExpression(destination)} & ~(1u << ({left} & 31u))");
+                    return true;
                 case "SBitset1B32":
                     StoreScalar(
                         destination,

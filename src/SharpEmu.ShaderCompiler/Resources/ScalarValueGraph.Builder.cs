@@ -507,6 +507,12 @@ public sealed partial class ScalarValueGraph
                 case "SFF1I32B32":
                     state.WriteScalar(destinationRegister, _graph.FindLowestSetBit(left, instruction.Pc));
                     return;
+                case "SBitset0B32":
+                {
+                    var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u), Binary(ScalarOperation.And32, left, _graph.Constant(31u)));
+                    state.WriteScalar(destinationRegister, Binary(ScalarOperation.And32, state.Scalars[destinationRegister], Unary(ScalarOperation.Not32, bit)));
+                    return;
+                }
                 case "SBitset1B32":
                 {
                     var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u), Binary(ScalarOperation.And32, left, _graph.Constant(31u)));

@@ -2082,12 +2082,13 @@ public static partial class Gen5SpirvTranslator
                     result = Ext(73, _uintType, left);
                     StoreS(destination, result);
                     return true;
+                case "SBitset0B32":
                 case "SBitset1B32":
                     result = _module.AddInstruction(
                         SpirvOp.BitFieldInsert,
                         _uintType,
                         LoadS(destination),
-                        UInt(1),
+                        UInt(instruction.Opcode == "SBitset0B32" ? 0u : 1u),
                         BitwiseAnd(left, UInt(31)),
                         UInt(1));
                     StoreS(destination, result);

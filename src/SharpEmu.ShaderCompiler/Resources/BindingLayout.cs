@@ -329,6 +329,17 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
+        if (instruction.Opcode is "SBitset0B32" or "SBitset1B32")
+        {
+            foreach (var destination in instruction.Destinations)
+            {
+                if (destination.Kind == Gen5OperandKind.ScalarRegister)
+                {
+                    Use(destination.Value, 1);
+                }
+            }
+        }
+
         switch (instruction.Control)
         {
             case Gen5ImageControl image:
