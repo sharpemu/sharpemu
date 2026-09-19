@@ -1001,6 +1001,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_DATA_REBIND"),
             "1",
             StringComparison.Ordinal);
+        Span<byte> relocationValueBytes = stackalloc byte[sizeof(ulong)];
         for (var i = 0; i < image.ImportedRelocations.Count; i++)
         {
             var relocation = image.ImportedRelocations[i];
@@ -1027,8 +1028,19 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             {
                 if (logRebind)
                 {
+                    var readable = _virtualMemory.TryRead(relocation.TargetAddress, relocationValueBytes);
+                    var currentValue = readable ? BinaryPrimitives.ReadUInt64LittleEndian(relocationValueBytes) : 0;
                     Console.Error.WriteLine(
-                        $"[RUNTIME] Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+                        $"[RUNTIME] Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16} readable={readable} current=0x{currentValue:X16}");
+                    foreach (var region in _virtualMemory.SnapshotRegions())
+                    {
+                        if (relocation.TargetAddress >= region.VirtualAddress &&
+                            relocation.TargetAddress - region.VirtualAddress < region.MemorySize)
+                        {
+                            Console.Error.WriteLine(
+                                $"[RUNTIME] Imported data target-region: start=0x{region.VirtualAddress:X16} size=0x{region.MemorySize:X} protection={region.Protection}");
+                        }
+                    }
                 }
 
                 unresolved++;
