@@ -180,7 +180,7 @@ public sealed partial class DirectExecutionBackend
 
 	private void PrewarmNativeGuestWorkers(int count)
 	{
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled || count <= 0)
+		if (NativeGuestWorkersDisabled || count <= 0)
 		{
 			return;
 		}
@@ -223,10 +223,10 @@ public sealed partial class DirectExecutionBackend
 
 	private NativeGuestExecutor? RentNativeGuestExecutor()
 	{
-		// NativeGuestExecutor emits a Win32 wait loop and creates it with
-		// kernel32!CreateThread. POSIX hosts use the established inline entry
-		// path until the worker loop has a pthread/eventfd implementation.
-		if (!OperatingSystem.IsWindows() || NativeGuestWorkersDisabled)
+		// Windows uses the kernel32 wait loop; POSIX uses the same emitted loop
+		// with the calls routed through Win64->SysV thunks (worker semaphores +
+		// managed UnmanagedCallersOnly stubs, see EnsureWorkerLoopImports).
+		if (NativeGuestWorkersDisabled)
 		{
 			return null;
 		}
@@ -332,6 +332,9 @@ public sealed partial class DirectExecutionBackend
 		// calls through register-shuffling thunks (shared by all workers).
 		private static nint _posixPrologueThunk;
 		private static nint _posixEpilogueThunk;
+		private static nint _posixWaitEventThunk;
+		private static nint _posixSignalEventThunk;
+		private static nint _posixExitThreadThunk;
 		private static readonly object PosixThunkGate = new();
 		private GCHandle _selfHandle;
 		private void* _controlBlock;
@@ -380,7 +383,7 @@ public sealed partial class DirectExecutionBackend
 
 		public static NativeGuestExecutor? TryCreate(DirectExecutionBackend backend)
 		{
-			if (!EnsureKernel32Exports())
+			if (!EnsureWorkerLoopImports())
 			{
 				return null;
 			}
@@ -393,21 +396,78 @@ public sealed partial class DirectExecutionBackend
 			return executor;
 		}
 
-		private static bool EnsureKernel32Exports()
+		// Resolves the three kernel32 entry points the emitted loop embeds. On
+		// POSIX the same Win64-ABI call sites are kept and each import is a
+		// Win64->SysV thunk wrapping a managed UnmanagedCallersOnly stub, so the
+		// emitter below stays byte-identical across platforms.
+		private static bool EnsureWorkerLoopImports()
 		{
 			if (_exitThreadAddress != 0)
 			{
 				return _waitForSingleObjectAddress != 0 && _setEventAddress != 0;
 			}
-			nint kernel32 = GetModuleHandle("kernel32.dll");
-			if (kernel32 == 0)
+			if (OperatingSystem.IsWindows())
 			{
-				return false;
+				nint kernel32 = GetModuleHandle("kernel32.dll");
+				if (kernel32 == 0)
+				{
+					return false;
+				}
+				_waitForSingleObjectAddress = GetProcAddress(kernel32, "WaitForSingleObject");
+				_setEventAddress = GetProcAddress(kernel32, "SetEvent");
+				_exitThreadAddress = GetProcAddress(kernel32, "ExitThread");
+				return _waitForSingleObjectAddress != 0 && _setEventAddress != 0 && _exitThreadAddress != 0;
 			}
-			_waitForSingleObjectAddress = GetProcAddress(kernel32, "WaitForSingleObject");
-			_setEventAddress = GetProcAddress(kernel32, "SetEvent");
-			_exitThreadAddress = GetProcAddress(kernel32, "ExitThread");
+
+			lock (PosixThunkGate)
+			{
+				if (_posixExitThreadThunk == 0)
+				{
+					_posixWaitEventThunk = PosixHostStubs.CreateWin64ToSysVThunk(
+						(nint)(delegate* unmanaged<nint, uint, int>)&WaitForEventPosix);
+					_posixSignalEventThunk = PosixHostStubs.CreateWin64ToSysVThunk(
+						(nint)(delegate* unmanaged<nint, int>)&SignalEventPosix);
+					_posixExitThreadThunk = PosixHostStubs.CreateWin64ToSysVThunk(
+						(nint)(delegate* unmanaged<nint, void>)&ExitThreadPosix);
+				}
+			}
+			_waitForSingleObjectAddress = _posixWaitEventThunk;
+			_setEventAddress = _posixSignalEventThunk;
+			_exitThreadAddress = _posixExitThreadThunk;
 			return _waitForSingleObjectAddress != 0 && _setEventAddress != 0 && _exitThreadAddress != 0;
+		}
+
+		// SysV stubs behind the Win64->SysV thunks. WaitForSingleObject returns
+		// WAIT_OBJECT_0 (0) on success and the emitted loop ignores the value;
+		// INFINITE (0xFFFFFFFF) maps to the wait-forever sentinel.
+		[UnmanagedCallersOnly]
+		private static int WaitForEventPosix(nint handle, uint timeoutMilliseconds)
+		{
+			_ = PosixHostStubs.WaitWorkerEvent(
+				handle,
+				timeoutMilliseconds == 0xFFFFFFFFu ? -1 : unchecked((int)timeoutMilliseconds));
+			return 0;
+		}
+
+		[UnmanagedCallersOnly]
+		private static int SignalEventPosix(nint handle)
+		{
+			_ = PosixHostStubs.SignalWorkerEvent(handle);
+			return 1;
+		}
+
+		[UnmanagedCallersOnly]
+		private static void ExitThreadPosix(nint exitCode)
+		{
+			PosixHostStubs.pthread_exit(exitCode);
+		}
+
+		// Used by the backend constructor to build the worker abort stub's
+		// SetEvent import before any executor exists.
+		internal static nint CreateSignalEventWin64Thunk()
+		{
+			return PosixHostStubs.CreateWin64ToSysVThunk(
+				(nint)(delegate* unmanaged<nint, int>)&SignalEventPosix);
 		}
 
 		private bool Initialize()
@@ -547,6 +607,45 @@ public sealed partial class DirectExecutionBackend
 
 		private bool StartWorkerThread()
 		{
+			if (!OperatingSystem.IsWindows())
+			{
+				// The loop stub ignores the pthread argument and never returns
+				// (pthread_exit), so it doubles as the start routine directly.
+				var attr = Marshal.AllocHGlobal(256);
+				try
+				{
+					if (PosixHostStubs.pthread_attr_init(attr) != 0)
+					{
+						return false;
+					}
+					if (PosixHostStubs.pthread_attr_setstacksize(attr, WorkerStackReservation) != 0)
+					{
+						_ = PosixHostStubs.pthread_attr_destroy(attr);
+						return false;
+					}
+
+					nint thread = 0;
+					var rc = PosixHostStubs.pthread_create(&thread, attr, (nint)_loopStub, 0);
+					_ = PosixHostStubs.pthread_attr_destroy(attr);
+					if (rc != 0)
+					{
+						return false;
+					}
+
+					_threadHandle = thread;
+					_nativeThreadId = 0;
+				}
+				finally
+				{
+					Marshal.FreeHGlobal(attr);
+				}
+				if (LogThreadMode)
+				{
+					TraceThreadMode($"worker_created native_tid=posix loop=0x{(ulong)_loopStub:X16}");
+				}
+				return true;
+			}
+
 			_threadHandle = CreateThread(
 				0,
 				WorkerStackReservation,
@@ -597,7 +696,22 @@ public sealed partial class DirectExecutionBackend
 			// TBB abort stub SetEvent's without ExitRun — _entered stays true.
 			if (_entered)
 			{
-				var waitRc = WaitForSingleObject(_threadHandle, 500u);
+				uint waitRc;
+				if (OperatingSystem.IsWindows())
+				{
+					waitRc = WaitForSingleObject(_threadHandle, 500u);
+				}
+				else
+				{
+					// The abort victim parks in guest code with asynchronous
+					// cancellation enabled (set in EnterRun), so cancel + join
+					// mirrors the TerminateThread+wait below. Killed-thread libc
+					// state is accepted collateral, same as Windows.
+					_ = PosixHostStubs.pthread_cancel(_threadHandle);
+					waitRc = PosixHostStubs.pthread_join(_threadHandle, null) == 0
+						? 0u
+						: 0xFFFFFFFFu;
+				}
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Native guest worker tid={_nativeThreadId} aborted during run; " +
 					$"wait_rc=0x{waitRc:X8} respawning");
@@ -612,14 +726,17 @@ public sealed partial class DirectExecutionBackend
 				_entered = false;
 				if (_threadHandle != 0)
 				{
-					// Abort stub parks (no ExitThread). Force-kill the parked OS
-					// thread so we can recreate the loop without process teardown.
-					if (waitRc != 0u)
+					if (OperatingSystem.IsWindows())
 					{
-						_ = TerminateThread(_threadHandle, unchecked((uint)(-1)));
-						_ = WaitForSingleObject(_threadHandle, 1000u);
+						// Abort stub parks (no ExitThread). Force-kill the parked OS
+						// thread so we can recreate the loop without process teardown.
+						if (waitRc != 0u)
+						{
+							_ = TerminateThread(_threadHandle, unchecked((uint)(-1)));
+							_ = WaitForSingleObject(_threadHandle, 1000u);
+						}
 					}
-					CloseHandle(_threadHandle);
+					_ = CloseHandle(_threadHandle);
 					_threadHandle = 0;
 					_nativeThreadId = 0;
 				}
@@ -730,6 +847,15 @@ public sealed partial class DirectExecutionBackend
 		private nint EnterRun()
 		{
 			var backend = _backend;
+			if (!OperatingSystem.IsWindows())
+			{
+				// Enable asynchronous cancellation on the worker thread so the
+				// abort path (Run) can kill a victim parked mid-guest-code.
+				int oldCancelType;
+				_ = PosixHostStubs.pthread_setcanceltype(
+					PosixHostStubs.PthreadCancelAsynchronous,
+					&oldCancelType);
+			}
 			_prevBackend = _activeExecutionBackend;
 			_prevContext = _activeCpuContext;
 			_prevSentinel = _activeEntryReturnSentinelRip;
@@ -841,9 +967,20 @@ public sealed partial class DirectExecutionBackend
 			var exited = _threadHandle == 0;
 			if (_threadHandle != 0)
 			{
-				exited = WaitForSingleObject(_threadHandle, 1000u) == 0u;
-				CloseHandle(_threadHandle);
+				if (OperatingSystem.IsWindows())
+				{
+					exited = WaitForSingleObject(_threadHandle, 1000u) == 0u;
+				}
+				else
+				{
+					// Teardown only happens after guest quiescence, so the worker
+					// is parked in the loop wait (not in guest code) and processes
+					// the stop flag promptly; pthread_join returns immediately.
+					exited = PosixHostStubs.pthread_join(_threadHandle, null) == 0;
+				}
+				_ = CloseHandle(_threadHandle);
 				_threadHandle = 0;
+				_nativeThreadId = 0;
 			}
 			if (!exited)
 			{

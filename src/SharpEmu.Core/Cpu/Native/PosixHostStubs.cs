@@ -274,7 +274,7 @@ internal static unsafe class PosixHostStubs
 
         // Linux: call pthread_getspecific, preserving the registers that are
         // volatile in SysV but non-volatile in Win64 (rsi, rdi).
-        var pthreadGetSpecific = ResolveLibcExport("pthread_getspecific");
+        var pthreadGetSpecific = GetLibcExport("pthread_getspecific");
         Emit(page, ref offset, 0x56);                                               // push rsi
         Emit(page, ref offset, 0x57);                                               // push rdi
         Emit(page, ref offset, 0x48, 0x83, 0xEC, 0x08);                             // sub rsp, 8
@@ -305,7 +305,7 @@ internal static unsafe class PosixHostStubs
 
     private static nint EmitSwitchToThread(byte* page, ref int offset)
     {
-        var schedYield = ResolveLibcExport("sched_yield");
+        var schedYield = GetLibcExport("sched_yield");
         var start = (nint)(page + offset);
         Emit(page, ref offset, 0x56);                                               // push rsi
         Emit(page, ref offset, 0x57);                                               // push rdi
@@ -323,7 +323,7 @@ internal static unsafe class PosixHostStubs
     private static nint EmitSleep(byte* page, ref int offset)
     {
         // void Sleep(DWORD milliseconds in ecx) -> usleep(microseconds in edi).
-        var usleep = ResolveLibcExport("usleep");
+        var usleep = GetLibcExport("usleep");
         var start = (nint)(page + offset);
         Emit(page, ref offset, 0x56);                                               // push rsi
         Emit(page, ref offset, 0x57);                                               // push rdi
@@ -342,7 +342,7 @@ internal static unsafe class PosixHostStubs
         return start;
     }
 
-    private static nint ResolveLibcExport(string name)
+    public static nint GetLibcExport(string name)
     {
         var libc = NativeLibrary.Load(OperatingSystem.IsMacOS() ? "libSystem.dylib" : "libc.so.6");
         return NativeLibrary.GetExport(libc, name);
@@ -422,4 +422,33 @@ internal static unsafe class PosixHostStubs
 
     [DllImport("libc")]
     private static extern int sem_destroy(nint semaphore);
+
+    // pthread primitives for native guest workers on POSIX hosts. pthread_t is
+    // pointer-sized on both macOS and Linux x86-64.
+    [DllImport("libc")]
+    public static extern int pthread_create(nint* thread, nint attr, nint startRoutine, nint arg);
+
+    [DllImport("libc")]
+    public static extern int pthread_join(nint thread, nint* retval);
+
+    [DllImport("libc")]
+    public static extern int pthread_cancel(nint thread);
+
+    [DllImport("libc")]
+    public static extern int pthread_attr_init(nint attr);
+
+    [DllImport("libc")]
+    public static extern int pthread_attr_setstacksize(nint attr, nuint stackSize);
+
+    [DllImport("libc")]
+    public static extern int pthread_attr_destroy(nint attr);
+
+    /// <summary>PTHREAD_CANCEL_ASYNCHRONOUS so a parked abort victim dies promptly.</summary>
+    public const int PthreadCancelAsynchronous = 1;
+
+    [DllImport("libc")]
+    public static extern int pthread_setcanceltype(int type, int* oldtype);
+
+    [DllImport("libc")]
+    public static extern void pthread_exit(nint value);
 }

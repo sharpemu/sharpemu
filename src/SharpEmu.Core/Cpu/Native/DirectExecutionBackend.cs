@@ -1066,8 +1066,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = TlsAlloc();
 		_hostRspSlotTlsIndex = TlsAlloc();
-		_workerDoneEventTlsIndex = OperatingSystem.IsWindows() ? TlsAlloc() : uint.MaxValue;
-		_tbbAbortEligibleTlsIndex = OperatingSystem.IsWindows() ? TlsAlloc() : uint.MaxValue;
+		_workerDoneEventTlsIndex = TlsAlloc();
+		_tbbAbortEligibleTlsIndex = TlsAlloc();
 		if (_guestTlsBaseTlsIndex == uint.MaxValue || _hostRspSlotTlsIndex == uint.MaxValue)
 		{
 			throw new OutOfMemoryException("Failed to allocate native TLS slots");
@@ -1101,6 +1101,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_queryPerformanceCounterAddress = PosixHostStubs.QueryPerformanceCounterStubAddress;
 			_switchToThreadAddress = PosixHostStubs.SwitchToThreadStubAddress;
 			_sleepAddress = PosixHostStubs.SleepStubAddress;
+			// The worker abort stub needs SetEvent as well; route it through
+			// the same Win64->SysV thunk the worker loop uses.
+			_setEventAddress = NativeGuestExecutor.CreateSignalEventWin64Thunk();
 		}
 		_tlsBaseAddress = (nint)VirtualAlloc(null, 4096u, 12288u, 4u);
 		if (_tlsBaseAddress == 0)
@@ -1127,9 +1130,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			Console.Error.WriteLine(
 				"[LOADER][WARN] Worker abort stub unavailable; TBB execute-fault recover will use host_exit");
 		}
+		WarmUpWorkerAbortStub(_workerAbortStub);
 		SetupExceptionHandler();
 		// Cover the Astro TBB spawn storm (often 8–12 concurrent tbb_thead).
 		PrewarmNativeGuestWorkers(Math.Max(NativeWorkerMaxConcurrent, 4));
+	}
+
+	/// <summary>
+	/// Runs the worker abort stub once on a disposable thread so Rosetta 2
+	/// translates its bytes: entering never-translated code from a signal
+	/// resume silently fails under Rosetta (see WarmUpPosixSignalPath), which
+	/// would leave the TBB fault recovery parked without SetEvent and wedge
+	/// the renting thread. The warmup caller's TLS done-event slot is unset,
+	/// so the stub skips SetEvent and parks; async cancellation reclaims it.
+	/// </summary>
+	private unsafe void WarmUpWorkerAbortStub(nint stub)
+	{
+		if (stub < 0x10000 || OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		var attr = Marshal.AllocHGlobal(256);
+		try
+		{
+			if (PosixHostStubs.pthread_attr_init(attr) != 0)
+			{
+				return;
+			}
+			_ = PosixHostStubs.pthread_attr_setstacksize(attr, 1024u * 1024u);
+			nint thread = 0;
+			if (PosixHostStubs.pthread_create(&thread, attr, stub, 0) == 0)
+			{
+				Thread.Sleep(100);
+				_ = PosixHostStubs.pthread_cancel(thread);
+				_ = PosixHostStubs.pthread_join(thread, null);
+				Console.Error.WriteLine("[LOADER][INFO] Worker abort stub warmed (translated) on a disposable thread");
+			}
+			_ = PosixHostStubs.pthread_attr_destroy(attr);
+		}
+		finally
+		{
+			Marshal.FreeHGlobal(attr);
+		}
 	}
 
 	public bool TryExecute(CpuContext context, ulong entryPoint, Generation generation, IReadOnlyDictionary<ulong, string> importStubs, IReadOnlyDictionary<string, ulong> runtimeSymbols, CpuExecutionOptions executionOptions, out OrbisGen2Result result)
@@ -2464,18 +2507,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	/// </summary>
 	private unsafe nint CreateWorkerAbortStub()
 	{
-		if (!OperatingSystem.IsWindows() ||
-			_workerDoneEventTlsIndex == uint.MaxValue ||
+		if (_workerDoneEventTlsIndex == uint.MaxValue ||
 			_tlsGetValueAddress == 0 ||
 			_setEventAddress == 0)
 		{
 			return 0;
 		}
 
-		nint kernel32 = GetModuleHandle("kernel32.dll");
+		nint kernel32 = OperatingSystem.IsWindows() ? GetModuleHandle("kernel32.dll") : 0;
 		nint getStdHandle = kernel32 != 0 ? GetProcAddress(kernel32, "GetStdHandle") : 0;
 		nint writeFile = kernel32 != 0 ? GetProcAddress(kernel32, "WriteFile") : 0;
 		nint flushFileBuffers = kernel32 != 0 ? GetProcAddress(kernel32, "FlushFileBuffers") : 0;
+		nint pthreadExitPosix = OperatingSystem.IsWindows() ? 0 : PosixHostStubs.GetLibcExport("pthread_exit");
 
 		const uint stubSize = 256u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 4u);
@@ -2555,10 +2598,26 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		// Park: do not ExitThread (process-wide silent die after VEH redirect).
+		// On POSIX the stub runs after sigreturn (plain thread context), so it
+		// can terminate itself with pthread_exit right after SetEvent: the
+		// renter sees the abort, joins the dead thread and respawns — no
+		// parked thread to cancel, no async-cancel libc hazard.
 		int parkOffset = offset;
-		EmitByte(code, ref offset, 0xF3); EmitByte(code, ref offset, 0x90); // pause
-		EmitByte(code, ref offset, 0xEB);
-		EmitByte(code, ref offset, unchecked((byte)(parkOffset - (offset + 1)))); // jmp park
+		if (OperatingSystem.IsWindows())
+		{
+			EmitByte(code, ref offset, 0xF3); EmitByte(code, ref offset, 0x90); // pause
+			EmitByte(code, ref offset, 0xEB);
+			EmitByte(code, ref offset, unchecked((byte)(parkOffset - (offset + 1)))); // jmp park
+		}
+		else
+		{
+			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xFF); // xor rdi, rdi
+			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
+			*(nint*)(code + offset) = pthreadExitPosix;
+			offset += sizeof(nint);
+			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0); // call pthread_exit
+			EmitByte(code, ref offset, 0xCC);                                   // int3 (never returns)
+		}
 
 		if (msgAbsSlot >= 0)
 		{
