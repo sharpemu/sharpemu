@@ -411,7 +411,7 @@ internal sealed class ShaderProgramCache
         if (resources.Info.UsesDeviceAddresses)
         {
             ShaderCacheCounters.CountDeviceAddressProgram();
-            if (VideoOut.BufferUploadProfile.Enabled)
+            if (VideoOut.BufferUploadProfile.Enabled || SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled)
             {
                 var accesses = plan.Memory.Entries.Where(memory => !memory.PlanningOnly &&
                     memory.Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or MemoryResourceKind.Global).ToArray();
@@ -460,6 +460,7 @@ internal sealed class ShaderProgramCache
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
                     WaveSize = 32,
+                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
@@ -475,6 +476,7 @@ internal sealed class ShaderProgramCache
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
                     WaveSize = 32,
+                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     PixelOutputs = options.PixelOutputs,
@@ -490,6 +492,7 @@ internal sealed class ShaderProgramCache
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
                     WaveSize = info.WaveSize,
+                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     ComputeSystemRegisters = options.ComputeSystemRegisters,
                     LocalSizeX = Math.Max(info.ThreadsX, 1),

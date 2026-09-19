@@ -22,6 +22,7 @@ public sealed class ShaderCompileRequest
 {
     public const uint UnboundedThreadCount = uint.MaxValue;
     public const int WrittenRangeDwordCount = 3;
+    public bool TraceDeviceAddressFaults { get; init; }
 
     public ShaderCompileRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout bindings)
     {

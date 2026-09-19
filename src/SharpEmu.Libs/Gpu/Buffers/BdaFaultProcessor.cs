@@ -25,6 +25,8 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
     private readonly ulong _faultBufferSize;
     private readonly GpuBuffer _faultBuffer;
     private readonly GpuBuffer _downloadBuffer;
+    private readonly GpuBuffer? _traceDownloadBuffer;
+    private bool _traceInitialized;
     private readonly ulong[] _faultAreas = new ulong[MaxPendingFaults];
     private readonly DescriptorSet[] _sets = new DescriptorSet[MaxPendingFaults];
     private readonly DescriptorSetLayout _layout;
@@ -41,7 +43,10 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         _pageSize = 1UL << pageBits;
         _pageCount = pageCount;
         _faultBufferSize = pageCount / 8;
-        _faultBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, _faultBufferSize);
+        _faultBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags,
+            _faultBufferSize + (GuestGpuMemoryHook.TraceEnabled ? 32UL : 0UL));
+        if (GuestGpuMemoryHook.TraceEnabled)
+            _traceDownloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * 256);
         _downloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * PageFaultAreaSize);
 
         var vk = device.Vk;
@@ -160,7 +165,18 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         vk.UpdateDescriptorSets(device.Device, 2 * MaxPendingFaults, writes, 0, null);
     }
 
-    public GpuBuffer FaultBuffer => _faultBuffer;
+    public GpuBuffer FaultBuffer
+    {
+        get
+        {
+            if (_traceDownloadBuffer is not null && !_traceInitialized)
+            {
+                _faultBuffer.Fill(_faultBufferSize, 32, 0);
+                _traceInitialized = true;
+            }
+            return _faultBuffer;
+        }
+    }
 
     public void ProcessFaultBuffer()
     {
@@ -205,8 +221,22 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             0, null, 1, &postBarrier, 0, null);
 
         var area = _currentArea;
+        var scanTick = _scheduler.CurrentTick;
+        if (_traceDownloadBuffer is not null)
+        {
+            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, 32,
+                destinationAfter: AccessFlags.HostReadBit);
+            _faultBuffer.Fill(_faultBufferSize, 32, 0);
+        }
         _scheduler.QueueCompletionAction(() =>
         {
+            if (_traceDownloadBuffer is not null)
+            {
+                _traceDownloadBuffer.Invalidate(area * 256UL, 32);
+                var record = MemoryMarshal.Cast<byte, uint>(_traceDownloadBuffer.Mapped.Slice((int)area * 256, 32));
+                if (record[0] != 0)
+                    Console.Error.WriteLine($"[GPU][DEVICE_ADDRESS_FAULT] scan_tick={scanTick} hash=0x{((ulong)record[2] << 32 | record[1]):X16} pc=0x{record[3]:X} address=0x{((ulong)record[5] << 32 | record[4]):X16} stage={record[6]}");
+            }
             _downloadBuffer.Invalidate(offset, PageFaultAreaSize);
             _faultRanges.Clear();
             var faults = MemoryMarshal.Cast<byte, ulong>(_downloadBuffer.Mapped.Slice((int)offset, (int)PageFaultAreaSize));
@@ -214,6 +244,10 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             for (var index = 1; index <= count; index++)
             {
                 _faultRanges.Add(faults[index], _pageSize);
+                GuestGpuMemoryHook.SelectDeviceFaultTracePage(faults[index]);
+                if (SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Traces(faults[index], _pageSize))
+                    SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(faults[index], _pageSize,
+                        $"device-address-fault scan_tick={scanTick} callback_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(faults[index], _pageSize)} reported_count={(uint)faults[0]} retained_count={count}");
                 Console.Error.WriteLine($"[GPU][INFO] Accessed non-GPU cached memory at 0x{faults[index]:X16}");
             }
 
@@ -225,6 +259,9 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
                 }
 
                 _ = _cache.FindBuffer(start, size);
+                if (SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Traces(start, size))
+                    SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(start, size,
+                        $"device-address-fault-prepared scan_tick={scanTick} submission_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(start, size)}");
             });
             _faultAreas[area] = 0;
         });
@@ -241,6 +278,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         vk.DestroyDescriptorPool(_device.Device, _pool, null);
         vk.DestroyDescriptorSetLayout(_device.Device, _layout, null);
         _downloadBuffer.Dispose();
+        _traceDownloadBuffer?.Dispose();
         _faultBuffer.Dispose();
     }
 

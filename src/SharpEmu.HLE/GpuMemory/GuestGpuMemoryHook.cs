@@ -6,6 +6,21 @@ namespace SharpEmu.HLE.GpuMemory;
 public static class GuestGpuMemoryHook
 {
     private static readonly ulong _tracePage = ParseTracePage();
+    private static readonly bool _traceFirstDeviceFault = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GPU_MEMORY_ADDRESS"), "auto", StringComparison.OrdinalIgnoreCase);
+    private static long _selectedTracePage;
+
+    public static void SelectDeviceFaultTracePage(ulong address)
+    {
+        if (!_traceFirstDeviceFault || !TrySelectTracePage(ref _selectedTracePage, address)) return;
+        Trace(address, 1, "device-address-trace-selected");
+    }
+
+    internal static bool TrySelectTracePage(ref long selectedPage, ulong address)
+    {
+        var page = address & ~(TrackerLayout.PageBytes - 1);
+        return page != 0 && Interlocked.CompareExchange(ref selectedPage, unchecked((long)page), 0) == 0;
+    }
 
     private static ulong ParseTracePage()
     {
@@ -17,8 +32,13 @@ public static class GuestGpuMemoryHook
             ? address & ~(TrackerLayout.PageBytes - 1) : 0;
     }
 
+    public static ulong TraceAddress =>
+        _traceFirstDeviceFault ? unchecked((ulong)Interlocked.Read(ref _selectedTracePage)) : _tracePage;
+
+    public static bool TraceEnabled => _traceFirstDeviceFault || _tracePage != 0;
+
     public static bool Traces(ulong address, ulong size) =>
-        OverlapsTracePage(_tracePage, address, size);
+        OverlapsTracePage(TraceAddress, address, size);
 
     internal static bool OverlapsTracePage(ulong page, ulong address, ulong size) =>
         page != 0 && size != 0 && (address <= page
@@ -55,6 +75,7 @@ public static class GuestGpuMemoryHook
             Interlocked.Exchange(ref _faultsResolved, 0);
             Interlocked.Exchange(ref _faultsDeclined, 0);
             Interlocked.Exchange(ref _summaryTaken, 0);
+            Interlocked.Exchange(ref _selectedTracePage, 0);
         }
 
         _current = memory;

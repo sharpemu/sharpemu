@@ -478,6 +478,8 @@ public static partial class Gen5SpirvTranslator
 
         // Resolves a guest address through the page table. A missing page records a
         // fault and resolves to an invalid pointer; an address past the table reads as unmapped.
+        private uint _deviceAddressInstructionPc;
+
         private (uint Pointer, uint Valid) ResolveDeviceAddress(uint address64)
         {
             var masked = And64(address64, ULong(DeviceAddressMask));
@@ -495,6 +497,22 @@ public static partial class Gen5SpirvTranslator
             var mapped = _module.AddInstruction(SpirvOp.INotEqual, _boolType, entry, ULong(0));
             EmitConditional(LogicalAnd(inTable, LogicalNot(mapped)), () =>
             {
+                if (_request.TraceDeviceAddressFaults)
+                {
+                    var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _faultBuffer, 0);
+                    var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(8));
+                    var claim = _module.AddInstruction(SpirvOp.AtomicCompareExchange, _uintType,
+                        BlockWordPointer(_faultBuffer, recordStart), UInt(1), UInt(0), UInt(0), UInt(1), UInt(0));
+                    EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, claim, UInt(0)), () =>
+                    {
+                        uint[] values = [UInt((uint)_request.Hash), UInt((uint)(_request.Hash >> 32)),
+                            UInt(_deviceAddressInstructionPc), Narrow(address64),
+                            Narrow(_module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, address64, ULong(32))),
+                            UInt((uint)_request.Stage), UInt(0)];
+                        for (var index = 0; index < values.Length; index++)
+                            Store(BlockWordPointer(_faultBuffer, IAdd(recordStart, UInt((uint)index + 1))), values[index]);
+                    });
+                }
                 var word = ShiftRightLogical(pageIndex, UInt(5));
                 var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
                 EmitConditional(IsBlockWordInRange(_faultBuffer, word), () =>
@@ -636,6 +654,7 @@ public static partial class Gen5SpirvTranslator
 
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)
         {
+            _deviceAddressInstructionPc = instruction.Pc;
             error = string.Empty;
             var request = _request;
             var dynamicOffset = control.DynamicOffsetRegister is { } register ? LoadS(register) : UInt(0);
@@ -717,6 +736,7 @@ public static partial class Gen5SpirvTranslator
 
         private bool TryEmitLayoutGlobalMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
         {
+            _deviceAddressInstructionPc = instruction.Pc;
             error = string.Empty;
             var request = _request;
             if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))

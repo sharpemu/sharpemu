@@ -481,11 +481,18 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     // Uploads every mapped range before a BDA draw; the fault pass runs at the next collection.
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
     {
+        var traceAddress = GuestGpuMemoryHook.TraceAddress;
+        var traceCovered = false;
         foreach (var span in mapped)
         {
+            if (traceAddress != 0 && GuestGpuMemoryHook.Traces(span.Address, span.Size))
+                traceCovered = true;
             SynchronizeBuffersInRange(span.Address, span.Size);
         }
 
+        if (traceAddress != 0)
+            GuestGpuMemoryHook.Trace(traceAddress, 1,
+                $"device-address-preparation covered={traceCovered} registered={IsRegionRegistered(traceAddress, 1)} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
         _faultProcessPending = true;
     }
 
@@ -505,6 +512,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish)
             {
+                if (GuestGpuMemoryHook.Traces(start, finish - start))
+                    GuestGpuMemoryHook.Trace(start, finish - start,
+                        $"device-address-touch buffer={_buffers.Values[index]} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
                 // Clean buffers remain in use through their device addresses.
                 TouchBuffer(buffer);
                 // Device-address reads reuse persistent buffers; track writes after each upload.
@@ -561,6 +571,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 return false;
             }
 
+            if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
+                GuestGpuMemoryHook.Trace(buffer.CpuAddress, buffer.Size,
+                    $"device-address-collection buffer={bufferIdentifier} dirty={dirty} aggressive={aggressive} cutoff_tick={tick - age} collection_tick={tick} used_bytes={_totalUsedMemory}");
             if (dirty)
             {
                 CollectDirtyPieces(buffer, copies, "garbage collection");
@@ -794,6 +807,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var sizePages = lastExclusive - first;
+        if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
+            GuestGpuMemoryHook.Trace(buffer.CpuAddress, buffer.Size,
+                $"device-address-registration insert={insert} buffer={bufferIdentifier} submission_tick={_scheduler.CurrentTick} collection_tick={_gcTick}");
         if (insert)
         {
             if (!_buffers.TryAdd(buffer.CpuAddress, bufferIdentifier))
@@ -1024,6 +1040,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     {
         var newBuffer = _slots[newBufferIdentifier];
         var overlap = _slots[overlappingBufferIdentifier];
+        if (GuestGpuMemoryHook.Traces(overlap.CpuAddress, overlap.Size))
+            GuestGpuMemoryHook.Trace(overlap.CpuAddress, overlap.Size,
+                $"device-address-merge old={overlappingBufferIdentifier} replacement={newBufferIdentifier} submission_tick={_scheduler.CurrentTick}");
         if (accumulateStreamScore)
         {
             newBuffer.AddStreamScore(overlap.StreamScore + 1);

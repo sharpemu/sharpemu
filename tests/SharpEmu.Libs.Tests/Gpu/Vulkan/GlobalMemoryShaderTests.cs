@@ -28,18 +28,23 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
     private const uint DestinationRegister = 12;
 
     [Theory]
-    [InlineData(false, 14u)]
-    [InlineData(true, 14u)]
-    [InlineData(false, 8u)]
-    [InlineData(true, 8u)]
-    public void InactiveDeviceAddressLoadsDoNotFault(bool flatAddress, uint opcode)
+    [InlineData(false, true, 14u)]
+    [InlineData(true, true, 14u)]
+    [InlineData(false, false, 14u)]
+    [InlineData(true, false, 14u)]
+    [InlineData(false, true, 8u)]
+    [InlineData(true, true, 8u)]
+    [InlineData(false, false, 8u)]
+    [InlineData(true, false, 8u)]
+    public void MissingDevicePageRecordsOnlyActiveLaneAccesses(bool flatAddress, bool laneEnabled, uint opcode)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
-        var shader = CompileShader(flatAddress, opcode, false, DestinationRegister, false);
+        var shader = CompileShader(flatAddress, opcode, false, DestinationRegister, laneEnabled);
         var initial = CreateInput();
-        var result = RunOnce(vulkan, shader, initial, missingDevicePage: true);
-        Assert.Equal(ExpectedResult(initial, opcode, false, DestinationRegister, false), result);
+        var result = RunOnce(vulkan, shader, initial, traceMissingPage: true, expectFault: laneEnabled);
+        if (!laneEnabled)
+            Assert.Equal(ExpectedResult(initial, opcode, false, DestinationRegister, false), result);
     }
 
     public static IEnumerable<object[]> MemoryCases()
@@ -307,7 +312,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
 
     private sealed record ShaderFixture(ShaderResourcePlan Plan, uint[] UserData, uint LocalSizeX);
 
-    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool missingDevicePage = false)
+    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool traceMissingPage = false, bool expectFault = true)
     {
         bool ReadWordFromFixture(ulong address, out uint value)
         {
@@ -328,6 +333,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
+            TraceDeviceAddressFaults = traceMissingPage,
             LocalSizeX = fixture.LocalSizeX,
             ThreadCountX = threadCount,
             ThreadCountY = 1,
@@ -345,8 +351,8 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         {
             var pageCount = (BufferAddress >> Gen5SpirvTranslator.DeviceAddressPageBits) + 1;
             bindings[DescriptorBindingKind.DeviceAddressPageTable] =
-                [runner.CreatePageTable(pageCount, missingDevicePage ? [] : [(BufferAddress, records, 0ul)])];
-            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint))];
+                [runner.CreatePageTable(pageCount, traceMissingPage ? [] : [(BufferAddress, records, 0ul)])];
+            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint) + (traceMissingPage ? 32UL : 0UL))];
         }
 
         var flattenedTable = snapshot.FlattenedResourceTable.ToArray();
@@ -358,10 +364,23 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         }
         harness.Run(() => runner.Dispatch(fixture.UserData, bindings, 1, flattenedTable: flattenedTable));
         var result = harness.ReadBack(records.Handle, 0, BufferBytes);
-        if (missingDevicePage)
+        if (traceMissingPage)
         {
             var faults = bindings[DescriptorBindingKind.FaultBuffer][0];
-            Assert.All(harness.ReadBack(faults.Handle, 0, faults.Size), value => Assert.Equal(0, value));
+            var diagnostic = harness.ReadBack(faults.Handle, faults.Size - 32, 32);
+            Assert.Equal(expectFault ? 1u : 0u, ReadWord(diagnostic, 0));
+            if (expectFault)
+            {
+                Assert.Equal(plan.Hash, (ulong)ReadWord(diagnostic, 4) | ((ulong)ReadWord(diagnostic, 8) << 32));
+                var access = Assert.Single(plan.Graph.Program.Instructions, instruction => instruction.Control is Gen5GlobalMemoryControl);
+                Assert.Equal(access.Pc, ReadWord(diagnostic, 12));
+                Assert.Equal(BufferAddress + MemoryOffset, (ulong)ReadWord(diagnostic, 16) | ((ulong)ReadWord(diagnostic, 20) << 32));
+                Assert.Equal((uint)plan.Stage, ReadWord(diagnostic, 24));
+            }
+            else
+            {
+                Assert.All(harness.ReadBack(faults.Handle, 0, faults.Size), value => Assert.Equal(0, value));
+            }
         }
         harness.AssertNoValidationMessages();
         vulkan.AssertNoValidationMessages();

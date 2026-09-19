@@ -10,6 +10,17 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 [Collection(GpuMemoryStateCollection.Name)]
 public sealed class GuestGpuMemoryHookTests
 {
+    [Fact]
+    public void AutomaticTraceSelectionKeepsTheFirstValidPage()
+    {
+        long selectedPage = 0;
+        Assert.False(GuestGpuMemoryHook.TrySelectTracePage(ref selectedPage, 0));
+        Assert.True(GuestGpuMemoryHook.TrySelectTracePage(ref selectedPage, 0x12345));
+        Assert.Equal(0x12000L, selectedPage);
+        Assert.False(GuestGpuMemoryHook.TrySelectTracePage(ref selectedPage, 0x56000));
+        Assert.Equal(0x12000L, selectedPage);
+    }
+
     [Theory]
     [InlineData(0UL, 0x1000UL, 0x1000UL, false)]
     [InlineData(0x2000UL, 0x2000UL, 0UL, false)]

@@ -316,6 +316,22 @@ internal static unsafe partial class VulkanVideoPresenter
             var memory = GuestGpuMemoryHook.Current ?? throw SubmissionScheduler.Fatal("A device-address program needs the guest GPU memory registry.");
             var spans = new List<GuestSpan>();
             memory.ForEachSpan((address, size) => spans.Add(new GuestSpan(address, size)));
+            var traceAddress = GuestGpuMemoryHook.TraceAddress;
+            if (traceAddress != 0)
+            {
+                foreach (var stage in preparation.Stages)
+                {
+                    if (!stage.Program.UsesDeviceAddresses) continue;
+                    GuestGpuMemoryHook.Trace(traceAddress, 1,
+                        $"device-address-program submission_tick={_scheduler.CurrentTick} stage={stage.Program.Stage} hash=0x{stage.Program.Hash:X16} shader=0x{stage.Stage.ShaderBase:X16} ranges={stage.Stage.Resources.DeviceAddressRanges.Length}");
+                    foreach (var range in stage.Stage.Resources.DeviceAddressRanges)
+                        GuestGpuMemoryHook.Trace(traceAddress, 1,
+                            $"device-address-range submission_tick={_scheduler.CurrentTick} hash=0x{stage.Program.Hash:X16} handle={range.Handle} base=0x{range.Base:X16} size=0x{range.Size:X} planned={range.Planned} written={range.Written}");
+                }
+            }
+            if (traceAddress != 0 && !memory.Covers(traceAddress, 1))
+                GuestGpuMemoryHook.Trace(traceAddress, 1,
+                    $"device-address-mapping-check readable={_guestMemory.CanRead(traceAddress, 1)} backed={_guestBacking.IsBackedView(traceAddress)}");
             _bufferCache.PrepareBda(spans);
         }
 
