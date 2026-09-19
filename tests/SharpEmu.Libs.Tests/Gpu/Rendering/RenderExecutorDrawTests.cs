@@ -549,6 +549,30 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("get_graphics_programs pixelActive=False", _pipelines.Calls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DepthOnlyDraw_WithRetainedExportFormat_DoesNotActivatePixelShader(bool indexed)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.RenderTargetMask = 0;
+        banks.Context.ShaderInterface.DepthExportFormat = 4;
+        banks.Context.ShaderInterface.DepthShaderControl = default;
+
+        if (indexed)
+        {
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+        else
+        {
+            _executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Assert.Single(_host.BegunRenderings);
+        Assert.False(Assert.Single(_pipelines.PipelineRequests).PixelActive);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("prepare_bindings Pixel", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void MultisampleResolveMode_ResolvesSlotZeroIntoSlotOneInsteadOfDrawing()
     {

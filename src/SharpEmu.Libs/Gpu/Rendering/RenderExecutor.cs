@@ -433,7 +433,8 @@ public sealed partial class RenderExecutor
     private static bool PixelShaderHasDepthOrCoverageSideEffects(ShaderInterfaceRegisters shaderInterface)
     {
         var control = shaderInterface.DepthShaderControl;
-        return shaderInterface.DepthExportFormat != 0 || control.KillEnable || control.DepthExportEnable ||
+        // The export format describes data; it does not enable shader execution.
+        return control.KillEnable || control.DepthExportEnable ||
                control.MaskExportEnable || control.DualExportEnable || control.ExecuteOnNoop;
     }
 
