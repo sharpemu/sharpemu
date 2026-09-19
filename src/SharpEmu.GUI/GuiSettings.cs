@@ -55,6 +55,9 @@ public sealed class GuiSettings
 
     public bool CheckForUpdatesOnStartup { get; set; } = true;
 
+    /// <summary>Whether an available update may open its confirmation window at startup.</summary>
+    public bool ShowUpdateNotifications { get; set; } = true;
+
     public string WindowMode { get; set; } = "Windowed";
 
     public string Resolution { get; set; } = "1920x1080";

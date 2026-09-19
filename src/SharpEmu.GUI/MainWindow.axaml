@@ -1295,6 +1295,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                         </Grid>
                       </Border>
+
+                      <local:SettingRow x:Name="UpdateReminderRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Updater.Reminder.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Updater.Reminder.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="UpdateReminderToggle"
+                                      Classes="optionToggle"
+                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
+                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
+                                      IsChecked="True" />
+                      </local:SettingRow>
                       
                       <!--Github-->
                       <Border Classes="optionsInfoRow">
