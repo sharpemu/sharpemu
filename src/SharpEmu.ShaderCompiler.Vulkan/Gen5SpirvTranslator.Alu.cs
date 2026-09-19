@@ -1006,6 +1006,13 @@ public static partial class Gen5SpirvTranslator
                         vector);
                     break;
                 }
+                case "VCvtPkU16U32":
+                {
+                    var low = Ext(38, _uintType, GetRawSource(instruction, 0), UInt(0xFFFF));
+                    var high = Ext(38, _uintType, GetRawSource(instruction, 1), UInt(0xFFFF));
+                    result = BitwiseOr(low, ShiftLeftLogical(high, UInt(16)));
+                    break;
+                }
                 case "VCvtPkI16I32":
                 {
                     var minimum = Bitcast(_intType, UInt(0xFFFF8000));

@@ -1070,6 +1070,13 @@ public sealed partial class ScalarValueGraph
                     return Binary(ScalarOperation.IMul32, Low24(Source(0)), Low24(Source(1)));
                 case "VMulI32I24":
                     return Binary(ScalarOperation.IMul32, SignedLow24(Source(0)), SignedLow24(Source(1)));
+                case "VCvtPkU16U32":
+                {
+                    var low = Binary(ScalarOperation.UMin32, Source(0), _graph.Constant(0xFFFFu));
+                    var high = Binary(ScalarOperation.UMin32, Source(1), _graph.Constant(0xFFFFu));
+                    return Binary(ScalarOperation.Or32, low,
+                        Binary(ScalarOperation.ShiftLeft32, high, _graph.Constant(16u)));
+                }
                 case "VCvtPkI16I32":
                 {
                     ScalarValue ClampSigned16(ScalarValue value) =>

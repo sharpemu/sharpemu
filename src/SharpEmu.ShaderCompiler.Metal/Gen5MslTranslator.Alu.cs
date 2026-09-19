@@ -249,6 +249,8 @@ public static partial class Gen5MslTranslator
                     EmitCvtPkU8F32(instruction),
                 "VCvtPkrtzF16F32" =>
                     EmitCvtPkrtzF16F32(instruction),
+                "VCvtPkU16U32" =>
+                    $"(min({RawSource(instruction, 0)}, 65535u) | (min({RawSource(instruction, 1)}, 65535u) << 16u))",
                 "VCvtPkI16I32" =>
                     $"((as_type<uint>(clamp(as_type<int>({RawSource(instruction, 0)}), -32768, 32767)) & 0xFFFFu) | " +
                     $"(as_type<uint>(clamp(as_type<int>({RawSource(instruction, 1)}), -32768, 32767)) << 16u))",
