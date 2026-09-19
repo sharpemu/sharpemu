@@ -773,6 +773,7 @@ public static class SaveDataExports
 
             if (!existed && !create && !createIfMissing)
             {
+                TraceSaveData($"{operation}.not_found user={userId} title={titleId} dir={dirName} mount_mode=0x{mountMode:X} root='{savePath}'");
                 return SetReturn(ctx, OrbisSaveDataErrorNotFound);
             }
 
@@ -792,6 +793,7 @@ public static class SaveDataExports
                 if (_mounts.Values.Any(entry =>
                         string.Equals(entry.DirName, dirName, StringComparison.Ordinal)))
                 {
+                    TraceSaveData($"{operation}.busy user={userId} title={titleId} dir={dirName} mount_mode=0x{mountMode:X}");
                     return SetReturn(ctx, OrbisSaveDataErrorMountBusy);
                 }
 
