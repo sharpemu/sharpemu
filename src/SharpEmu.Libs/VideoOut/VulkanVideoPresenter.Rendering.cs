@@ -188,11 +188,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // The part of the range that is mapped from its start; unmapped starts are fatal as the executor cannot bind them.
         public ulong ClampMappedSize(ulong address, ulong size)
+            => ClampMappedSize(address, size, null, -1);
+
+        private ulong ClampMappedSize(ulong address, ulong size, PreparedStageBindings? prepared, int bufferIndex)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferMappedRangeValidation);
             if (address == 0 || size == 0 || size > ulong.MaxValue - address || !_guestMemory.CanRead(address, 1))
             {
-                throw SubmissionScheduler.Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.");
+                var context = string.Empty;
+                if (prepared is not null)
+                {
+                    var resource = prepared.Resources.Info.Buffers[bufferIndex];
+                    var words = prepared.Stage.Resources.Buffers[bufferIndex];
+                    context = $" stage={prepared.Program.Stage} hash=0x{prepared.Program.Hash:X16} shader=0x{prepared.Stage.ShaderBase:X16} " +
+                        $"buffer={bufferIndex} source={resource.Source} pc=0x{resource.FirstUsePc:X} " +
+                        $"descriptor=[{string.Join(",", words.Select(word => $"{word:X8}"))}] " +
+                        $"user_data=[{string.Join(",", prepared.Stage.Resources.UserData.Select(word => $"{word:X8}"))}]";
+                }
+                throw SubmissionScheduler.Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.{context}");
             }
 
             if (_guestMemory.CanRead(address, size))

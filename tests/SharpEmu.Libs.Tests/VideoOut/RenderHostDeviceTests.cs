@@ -375,6 +375,64 @@ public sealed unsafe class RenderHostDeviceTests : IClassFixture<HeadlessVulkanF
         harness.Shutdown();
     }
 
+    [Fact]
+    public void PrepareBindings_UnmappedBufferReportsItsDescriptorSource()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        var info = new ShaderResourceInfo
+        {
+            Buffers = [new BufferResource { Read = true, Source = 17, FirstUsePc = 0x4C }],
+        };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Pixel, 3, info);
+        var snapshot = new ResourceSnapshot
+        {
+            Buffers = [[0x600, 0xF000, 32, 0]],
+            UserData = [0x12345678],
+        };
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var failure = Assert.Throws<SchedulerFatalException>(() =>
+                presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000)));
+            Assert.Contains("address=0x0000F00000000600", failure.Message);
+            Assert.Contains("stage=Pixel", failure.Message);
+            Assert.Contains($"hash=0x{program.Hash:X16}", failure.Message);
+            Assert.Contains("shader=0x0000000012340000", failure.Message);
+            Assert.Contains("buffer=0 source=17 pc=0x4C", failure.Message);
+            Assert.Contains("descriptor=[00000600,0000F000,00000020,00000000]", failure.Message);
+            Assert.Contains("user_data=[12345678]", failure.Message);
+        });
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
+    public void PrepareBindings_InvalidAnisotropyStillFailsWithSourceDiagnostics()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        var info = new ShaderResourceInfo
+        {
+            Samplers = [new SamplerResource { Source = 17, FirstUsePc = 0x64 }],
+        };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Pixel, 3, info);
+        var snapshot = new ResourceSnapshot
+        {
+            Samplers = [[0x65358C00, 0xC2400000, 0x002B813F, 0xA1B003AC]],
+            UserData = [0x12345678],
+        };
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var failure = Assert.Throws<SchedulerFatalException>(() =>
+                presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000)));
+            Assert.Contains("anisotropy ratio is unknown: ratio=6", failure.Message);
+        });
+        presenter.Harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

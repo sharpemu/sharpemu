@@ -122,7 +122,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Compare bits stay only on depth-compare samplers; a forced point sampler drops its filters.
-        private Sampler ResolveSampler(SamplerResource sampler, uint[] words, ShaderProgramInfo program, int index)
+        private Sampler ResolveSampler(SamplerResource sampler, uint[] words, ShaderProgramInfo program, int index, ShaderStageResources stage)
         {
             if (words.Length < 4)
             {
@@ -146,7 +146,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            return _samplerStore.GetSampler(new SamplerDescriptorWords(native));
+            var descriptor = new SamplerDescriptorWords(native);
+            if (descriptor.MaxAnisotropyRatio > 4 &&
+                (descriptor.MagnifyFilter >= (uint)SamplerFilter.AnisotropicPoint ||
+                 descriptor.MinifyFilter >= (uint)SamplerFilter.AnisotropicPoint))
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][ERROR] Sampler source: stage={program.Stage} hash=0x{program.Hash:X16} shader=0x{stage.ShaderBase:X16} " +
+                    $"sampler={index} source={sampler.Source} pc=0x{sampler.FirstUsePc:X} " +
+                    $"descriptor=[{string.Join(",", words.Select(word => $"{word:X8}"))}] " +
+                    $"user_data=[{string.Join(",", stage.Resources.UserData.Select(word => $"{word:X8}"))}]");
+            }
+
+            return _samplerStore.GetSampler(descriptor);
         }
 
         // The guest textures the movie path matches; built only while a decoded frame is active.
@@ -198,7 +210,7 @@ internal static unsafe partial class VulkanVideoPresenter
             descriptors.Samplers = new Sampler[info.Samplers.Count];
             for (var index = 0; index < info.Samplers.Count; index++)
             {
-                descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index);
+                descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage);
             }
 
             var shaderData = new uint[layout.ShaderDataDwordCount];
@@ -287,7 +299,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                var size = ClampMappedSize(descriptor.Address, requested);
+                var size = ClampMappedSize(descriptor.Address, requested, prepared, index);
                 sources[index] = (descriptor, _bufferCache.FindBuffer(descriptor.Address, size));
             }
 
