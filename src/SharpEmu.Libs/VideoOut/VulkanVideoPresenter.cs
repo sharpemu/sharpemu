@@ -11439,7 +11439,7 @@ internal static unsafe class VulkanVideoPresenter
                 (13, _) => Format.R32G32B32A32Sfloat,
                 (14, 4) => Format.R32G32B32A32Uint,
                 (14, 5) => Format.R32G32B32A32Sint,
-                (14, 7) => Format.R32G32B32A32Sfloat,
+                (14, _) => Format.R32G32B32A32Sfloat,
                 (16, 0) => Format.B5G6R5UnormPack16,
                 (17, 0) => Format.R5G5B5A1UnormPack16,
                 (19, 0) => Format.R4G4B4A4UnormPack16,
