@@ -717,10 +717,17 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                var target = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : VccLoRegister;
+                // Same rule as the SPIR-V emitter: the decoder shares this instruction stream, so
+                // a VOP3-encoded compare must reach its named SGPR pair here too. Defaulting to
+                // VCC would silently produce wrong branches with no diagnostic.
+                var target =
+                    instruction.Destinations.Count > 0 &&
+                    instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister
+                        ? instruction.Destinations[0].Value
+                        : instruction.Control is Gen5SdwaControl
+                            { ScalarDestination: { } scalarDestination }
+                            ? scalarDestination
+                            : VccLoRegister;
                 StoreMaskBit(target, active);
             }
 

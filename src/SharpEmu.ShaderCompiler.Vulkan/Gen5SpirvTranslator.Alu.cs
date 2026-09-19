@@ -1815,10 +1815,19 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                var compareDestination = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : 106u;
+                // Prefer the decoded destination: a VOP3-encoded compare names an SGPR pair, and
+                // writing VCC instead would leave that pair stale while corrupting a register the
+                // shader may still be relying on. Plain VOPC leaves Destinations empty and keeps
+                // the VCC default; SDWA is subsumed because it already records a scalar
+                // destination when it is not VCC.
+                var compareDestination =
+                    instruction.Destinations.Count > 0 &&
+                    instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister
+                        ? instruction.Destinations[0].Value
+                        : instruction.Control is Gen5SdwaControl
+                            { ScalarDestination: { } scalarDestination }
+                            ? scalarDestination
+                            : 106u;
                 StoreWaveMask(compareDestination, activeCondition);
             }
 

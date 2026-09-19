@@ -1016,7 +1016,15 @@ public static class Gen5ShaderTranslator
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = Vop1Name(opcode);
+
+        return FinishDecode(name, $"unknown-vop1 op=0x{opcode:X2}", out error);
+    }
+
+    /// <summary>VOP1 opcode names, split out so the VOP3-encoded aliases (VOP3 opcode 0x180 + n) can</summary>
+    /// <summary>share the table instead of decoding to an unnamed stub.</summary>
+    private static string Vop1Name(uint opcode) =>
+        opcode switch
         {
             0x00 => "VNop",
             0x01 => "VMovB32",
@@ -1056,9 +1064,6 @@ public static class Gen5ShaderTranslator
             0x48 => "VMovrelsd2B32",
             _ => string.Empty,
         };
-
-        return FinishDecode(name, $"unknown-vop1 op=0x{opcode:X2}", out error);
-    }
 
     private static bool DecodeVop2(uint word, out string name, out uint sizeDwords, out string error)
     {
@@ -1139,7 +1144,15 @@ public static class Gen5ShaderTranslator
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = VopcName(opcode);
+
+        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+    }
+
+    /// <summary>VOPC opcode names, split out so the VOP3-encoded aliases (VOP3 opcode 0x000-0x0FF) can</summary>
+    /// <summary>share the table instead of decoding to an unnamed stub.</summary>
+    private static string VopcName(uint opcode) =>
+        opcode switch
         {
             0x00 => "VCmpFF32",
             0x01 => "VCmpLtF32",
@@ -1241,9 +1254,6 @@ public static class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
-    }
-
     private static bool DecodeVop3(
         uint word,
         uint extra,
@@ -1258,6 +1268,29 @@ public static class Gen5ShaderTranslator
         var src2 = (extra >> 18) & 0x1FF;
         sizeDwords = src0 == 0xFF || src1 == 0xFF || src2 == 0xFF ? 3u : 2u;
         error = string.Empty;
+
+        // VOP3 re-encodes the whole VOPC and VOP1 opcode spaces so those instructions can carry
+        // the modifiers the short forms have no room for - abs/neg on a source, clamp, or a
+        // destination other than VCC. The compiler picks the _e64 form for exactly those cases, so
+        // shaders doing anything past a plain comparison land here. Without the aliases they
+        // decoded to an unnamed Vop3Raw stub, which fails translation for the whole program and
+        // silently drops every draw that binds it.
+        //
+        // The VOP3-specific message is deliberate: these tables still have holes (f64 compares,
+        // some VOP1 slots), and reporting the VOPC/VOP1 opcode there would hide which VOP3 opcode
+        // actually needs implementing.
+        if (!isVop3B && opcode <= 0xFF)
+        {
+            name = VopcName(opcode);
+            return FinishDecode(name, $"unknown-vop3 op=0x{opcode:X3}", out error);
+        }
+
+        if (!isVop3B && opcode is >= 0x180 and <= 0x1FF)
+        {
+            name = Vop1Name(opcode - 0x180);
+            return FinishDecode(name, $"unknown-vop3 op=0x{opcode:X3}", out error);
+        }
+
         name = isVop3B
             ? opcode switch
             {
@@ -2161,11 +2194,17 @@ public static class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
-                if (opcode == "VReadlaneB32")
+                if (opcode is "VReadlaneB32" or "VReadfirstlaneB32" ||
+                    (opcode.StartsWith("VCmp", StringComparison.Ordinal) &&
+                        !opcode.StartsWith("VCmpx", StringComparison.Ordinal)))
                 {
-                    // V_READLANE uses the VOP3A vdst byte even though the
-                    // destination register is scalar. Bits 8-14 are the
-                    // distinct sdst field used by VOP3B encodings.
+                    // These use the VOP3A vdst byte even though the destination register is
+                    // scalar. Bits 8-14 are the distinct sdst field used by VOP3B encodings.
+                    //
+                    // A VOP3-encoded compare writes an SGPR pair, which is the whole reason the
+                    // compiler chose the _e64 form over the VOPC one that always targets VCC.
+                    // VCmpx is excluded because GFX10 makes it EXEC-only, and the emitters already
+                    // route it to the wave mask.
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
