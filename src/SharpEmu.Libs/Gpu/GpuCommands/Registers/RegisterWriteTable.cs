@@ -30,8 +30,16 @@ public static class RegisterWriteTable
         WritePacket(banks, in packet, offset, values, Context, ContextIndirect, "context", emptyIsHandled: true);
 
     // A shader packet without values has no writer; the other banks accept it.
-    public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
-        WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+    public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
+    {
+        var consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+        if (Rendering.RenderTrace.Enabled)
+        {
+            for (var index = 0; index < values.Length && index < consumed; index++)
+                TracePixelRegisterWrite(banks, offset + (uint)index, values[index], packet.PacketAddress, "packet");
+        }
+        return consumed;
+    }
 
     public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
@@ -39,8 +47,23 @@ public static class RegisterWriteTable
     public static void WriteContextEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
         WriteEntry(banks, offset, value, ContextIndirect, "context", tableAddress);
 
-    public static void WriteShaderEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
+    public static void WriteShaderEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
+    {
         WriteEntry(banks, offset, value, ShaderIndirect, "shader", tableAddress);
+        if (Rendering.RenderTrace.Enabled)
+            TracePixelRegisterWrite(banks, offset, value, tableAddress, "table");
+    }
+
+    private static void TracePixelRegisterWrite(RegisterBanks banks, uint offset, uint value, ulong address, string source)
+    {
+        if (offset != ShaderRegisterOffset.SpiShaderPgmLoPs && offset != ShaderRegisterOffset.SpiShaderPgmHiPs &&
+            offset != ShaderRegisterOffset.SpiShaderPgmRsrc2Ps &&
+            (offset < ShaderRegisterOffset.SpiShaderUserDataPs0 || offset >= ShaderRegisterOffset.SpiShaderUserDataPs0 + 32))
+            return;
+
+        Rendering.RenderTrace.Write($"PixelRegisterWrite source={source} address=0x{address:X16} register=0x{offset:X4} " +
+            $"value=0x{value:X8} shader=0x{banks.Shader.Pixel.Address:X16}");
+    }
 
     public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
         WriteEntry(banks, offset, value, UserConfigIndirect, "user-config", tableAddress);
