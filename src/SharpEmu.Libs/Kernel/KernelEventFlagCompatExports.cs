@@ -313,6 +313,12 @@ public static class KernelEventFlagCompatExports
                         try
                         {
                             scheduler.Pump(ctx, "sceKernelWaitEventFlag");
+
+                            // Same reason the pump runs out here rather than under the gate: a
+                            // kernel exception queued for this thread is only delivered at an
+                            // import boundary, and a thread parked in this export never reaches
+                            // one. The handler is guest code and sets event flags of its own.
+                            scheduler.TryDeliverPendingGuestException(ctx);
                         }
                         finally
                         {

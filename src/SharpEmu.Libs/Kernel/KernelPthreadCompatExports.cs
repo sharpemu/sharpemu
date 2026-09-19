@@ -1626,26 +1626,54 @@ public static class KernelPthreadCompatExports
         // Non-guest callers have no resumable CPU continuation. Park only
         // those host-side compatibility callers, preserving the same FIFO
         // mutex reacquisition rules as cooperative guest waiters.
-        lock (state.SyncRoot)
+        //
+        // The park is sliced and the lock retaken per slice so the thread can run a kernel
+        // exception raised on it while it waits. The primary guest executor is not cooperative,
+        // so it lands here, and a queued exception for it is only delivered at an import
+        // boundary - which a thread parked inside this export never reaches. IL2CPP suspends
+        // threads by raising on them and waiting for the handler's acknowledgement, so an
+        // uninterruptible park here hangs the collection (#254).
+        var deadline = timed
+            ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
+            : long.MaxValue;
+        while (true)
         {
-            var deadline = timed
-                ? GuestThreadExecution.ComputeDeadlineTimestamp(GetCondWaitTimeout(timeoutUsec))
-                : long.MaxValue;
-            while (waiter.CompletionState == 0)
+            lock (state.SyncRoot)
             {
-                if (!timed)
+                if (waiter.CompletionState != 0)
                 {
-                    Monitor.Wait(state.SyncRoot);
-                    continue;
+                    break;
                 }
 
-                var remaining = GetRemainingTimeout(deadline);
-                if (remaining <= TimeSpan.Zero || !Monitor.Wait(state.SyncRoot, remaining))
+                if (timed)
                 {
-                    CompleteCondWaiterLocked(state, waiter, timedOut: true);
+                    // Re-derived from the deadline each slice: a slice expiring is not the
+                    // overall timeout, so only an exhausted deadline completes the waiter.
+                    var remaining = GetRemainingTimeout(deadline);
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        CompleteCondWaiterLocked(state, waiter, timedOut: true);
+                        break;
+                    }
+
+                    Monitor.Wait(
+                        state.SyncRoot,
+                        remaining < HostCondWaitPumpInterval ? remaining : HostCondWaitPumpInterval);
+                }
+                else
+                {
+                    Monitor.Wait(state.SyncRoot, HostCondWaitPumpInterval);
+                }
+
+                if (waiter.CompletionState != 0)
+                {
                     break;
                 }
             }
+
+            // Outside state.SyncRoot on purpose: the handler is guest code and signals condition
+            // variables of its own.
+            GuestThreadExecution.TryDeliverPendingGuestException(ctx);
         }
 
         if (waiter.MutexWaiter is null)
@@ -2034,6 +2062,12 @@ public static class KernelPthreadCompatExports
 
         return TimeSpan.FromTicks((long)timeoutUsec * 10L);
     }
+
+    // How long a host-side condition-variable park sleeps before it drops the lock to check for
+    // work that has to happen off it (a kernel exception queued for this thread). Short enough
+    // that a suspend request is acknowledged without a visible stall, long enough that an idle
+    // waiter costs nothing measurable.
+    private static readonly TimeSpan HostCondWaitPumpInterval = TimeSpan.FromMilliseconds(50);
 
     private static TimeSpan GetRemainingTimeout(long deadlineTimestamp)
     {

@@ -4895,6 +4895,53 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return 0;
 	}
 
+	/// <summary>
+	/// Delivers a queued kernel exception to the calling thread on demand. TryRaiseGuestException
+	/// queues rather than delivers when the target is a primary/external executor, because running
+	/// the handler concurrently on another managed thread would corrupt that executor's control
+	/// state; it relies on the executor consuming the queue at its next import boundary. A thread
+	/// parked in a host-thread wait is *inside* an import and never reaches one, which strands the
+	/// raiser forever. Blocking exports call this from their wait loop to close that gap.
+	/// </summary>
+	public bool TryDeliverPendingGuestException(CpuContext callerContext)
+	{
+		// This runs from kernel wait loops, so the overwhelmingly common no-exception case must
+		// not take the gate. The count is republished on every mutation of the dictionary.
+		if (Volatile.Read(ref _pendingGuestExceptionCount) == 0)
+		{
+			return false;
+		}
+
+		// Resolve the caller exactly the way the import safe point does, so the two cannot
+		// disagree about which thread they mean.
+		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+		if (threadHandle == 0)
+		{
+			threadHandle = _currentExternalGuestThreadHandle;
+		}
+		if (threadHandle == 0)
+		{
+			return false;
+		}
+
+		lock (_guestThreadGate)
+		{
+			// The count above is process-wide; only this thread's own exception may be run here.
+			if (!_pendingGuestExceptions.ContainsKey(threadHandle))
+			{
+				return false;
+			}
+		}
+
+		// No continuation: the caller's context already carries the guest register state the
+		// collector scans for roots, and unlike an import boundary this delivery does not resume
+		// the guest through a continuation - the export returns to its wait when the handler ends.
+		// DeliverPendingGuestExceptionAtSafePoint re-checks and dequeues under the gate, so losing
+		// the race against another consumer just makes it return without running anything.
+		DeliverPendingGuestExceptionAtSafePoint(callerContext, default);
+		return true;
+	}
+
 	private void DeliverPendingGuestExceptionAtSafePoint(
 		CpuContext currentContext,
 		GuestCpuContinuation interruptedContinuation)

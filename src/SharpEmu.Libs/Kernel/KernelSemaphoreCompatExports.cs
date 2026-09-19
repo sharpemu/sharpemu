@@ -235,16 +235,38 @@ public static class KernelSemaphoreCompatExports
         var deadlineMs = timeoutAddress != 0
             ? Environment.TickCount64 + Math.Max(1L, timeoutUsec / 1000L)
             : long.MaxValue;
-        lock (semaphore.Gate)
+        if (_traceSema)
         {
-            if (_traceSema)
+            TraceSemaphore(
+                $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
+                $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
+        }
+
+        // The gate is taken per attempt rather than held across the whole park so the thread can
+        // run a kernel exception raised on it while it waits (see below). Re-checking Count under
+        // the gate at the top of every attempt keeps that safe: a token that arrives while the
+        // gate is released is observed here instead of being lost.
+        while (true)
+        {
+            lock (semaphore.Gate)
             {
-                TraceSemaphore(
-                    $"wait-host-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} " +
-                    $"count={semaphore.Count} timeout={(timeoutAddress == 0 ? "infinite" : timeoutUsec)} {FormatCallSite(ctx)}");
-            }
-            while (semaphore.Count < needCount)
-            {
+                if (semaphore.Count >= needCount)
+                {
+                    semaphore.Count -= needCount;
+                    semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                    if (_traceSema)
+                    {
+                        TraceSemaphore(
+                            $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
+                    }
+                    if (timeoutAddress != 0)
+                    {
+                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                    }
+
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+                }
+
                 var remaining = deadlineMs - Environment.TickCount64;
                 if (timeoutAddress != 0 && remaining <= 0)
                 {
@@ -256,19 +278,18 @@ public static class KernelSemaphoreCompatExports
                 Monitor.Wait(semaphore.Gate, (int)Math.Min(remaining, 100));
             }
 
-            semaphore.Count -= needCount;
-            semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
-            if (_traceSema)
-            {
-                TraceSemaphore(
-                    $"wait-host-wake handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} {FormatCallSite(ctx)}");
-            }
-            if (timeoutAddress != 0)
-            {
-                _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-            }
-
-            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+            // Deliberately outside the gate. This is the only point in a host-thread wait where
+            // the guest's own signal mechanism can reach the thread: the raiser queued the
+            // exception for delivery at the next import boundary, and a thread parked here is
+            // inside an import and will never reach one. IL2CPP's stop-the-world collector
+            // depends on it - it suspends every thread by raising on it and then waits for the
+            // acknowledgement the handler posts, so a thread that cannot run its handler while
+            // blocked strands the whole collection and hangs the title.
+            //
+            // The handler must not run under semaphore.Gate: it is guest code and signals
+            // semaphores of its own, including, in the collector's case, ones other threads are
+            // parked on through this same path.
+            GuestThreadExecution.TryDeliverPendingGuestException(ctx);
         }
     }
 

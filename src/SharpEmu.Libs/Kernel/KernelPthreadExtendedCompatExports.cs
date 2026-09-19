@@ -1593,7 +1593,12 @@ public static class KernelPthreadExtendedCompatExports
 
                     while (rwlock.WriterThreadId != 0 || rwlock.ReaderTotalCount != 0 || rwlock.CompatWriterTotalCount != 0)
                     {
-                        Monitor.Wait(rwlock.SyncRoot);
+                        // Bounded, so a park that is never pulsed still reaches the delivery
+                        // point below instead of being unreachable for the lifetime of the wait.
+                        if (!Monitor.Wait(rwlock.SyncRoot, HostRwlockWaitPumpInterval))
+                        {
+                            PumpGuestExceptionOffRwlockGate(ctx, rwlock);
+                        }
                     }
 
                     rwlock.WriterThreadId = currentThreadId;
@@ -1626,7 +1631,10 @@ public static class KernelPthreadExtendedCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
-                    Monitor.Wait(rwlock.SyncRoot);
+                    if (!Monitor.Wait(rwlock.SyncRoot, HostRwlockWaitPumpInterval))
+                    {
+                        PumpGuestExceptionOffRwlockGate(ctx, rwlock);
+                    }
                 }
 
                 if (rwlock.WriterThreadId != 0 ||
@@ -1750,6 +1758,32 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         return rwlockAddress;
+    }
+
+    // How long a host-side rwlock park sleeps before it drops the gate to check for work that has
+    // to happen off it. The waits below were untimed, which left a thread parked here unreachable
+    // by the guest's own signal mechanism.
+    private static readonly TimeSpan HostRwlockWaitPumpInterval = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// Drops the rwlock gate, gives the calling thread a chance to run a kernel exception raised
+    /// on it while parked, and retakes the gate.
+    ///
+    /// A queued kernel exception is only delivered at an import boundary, and a thread parked
+    /// inside this export never reaches one. The handler must run off the gate: it is guest code
+    /// and takes rwlocks of its own, including potentially this one.
+    /// </summary>
+    private static void PumpGuestExceptionOffRwlockGate(CpuContext ctx, PthreadRwlockState rwlock)
+    {
+        Monitor.Exit(rwlock.SyncRoot);
+        try
+        {
+            GuestThreadExecution.TryDeliverPendingGuestException(ctx);
+        }
+        finally
+        {
+            Monitor.Enter(rwlock.SyncRoot);
+        }
     }
 
     private static bool TryResolveRwlockState(CpuContext ctx, ulong rwlockAddress, bool createIfZero, out ulong resolvedAddress, [NotNullWhen(true)] out PthreadRwlockState? rwlock)

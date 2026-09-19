@@ -116,6 +116,15 @@ public interface IGuestThreadScheduler
         ulong handler,
         int exceptionType,
         out string? error);
+
+    /// <summary>
+    /// Runs a kernel exception already queued for the calling thread, rather than leaving it for
+    /// that thread's next import boundary. <see cref="TryRaiseGuestException"/> queues instead of
+    /// delivering when the target is a primary/external executor, on the assumption that the
+    /// executor will reach a boundary shortly; a thread parked in a host-thread wait inside an HLE
+    /// export never does. Returns true when a handler was run.
+    /// </summary>
+    bool TryDeliverPendingGuestException(CpuContext callerContext);
 }
 
 public readonly record struct GuestImportCallFrame(
@@ -243,6 +252,18 @@ public static class GuestThreadExecution
             return 0;
         }
     }
+
+    /// <summary>
+    /// Gives the calling thread a chance to run a kernel exception raised on it while it is parked
+    /// inside an HLE wait, so blocking exports stay reachable by the guest's own signal mechanism.
+    ///
+    /// Call this with no kernel-object lock held. The handler is guest code, and a title that
+    /// suspends a thread this way routinely has the handler touch the very object the caller is
+    /// waiting on - IL2CPP's stop-the-world collector acknowledges on one semaphore while the
+    /// interrupted thread waits on another.
+    /// </summary>
+    public static bool TryDeliverPendingGuestException(CpuContext context) =>
+        Scheduler is { } scheduler && scheduler.TryDeliverPendingGuestException(context);
 
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
