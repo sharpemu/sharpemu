@@ -721,6 +721,17 @@ public static partial class Gen5SpirvTranslator
                             GetRawSource(instruction, 1)),
                         GetRawSource(instruction, 2));
                     break;
+                case "VSadU32":
+                {
+                    var s0 = GetRawSource(instruction, 0);
+                    var s1 = GetRawSource(instruction, 1);
+                    var s2 = GetRawSource(instruction, 2);
+                    var max = Ext(41, _uintType, s0, s1);
+                    var min = Ext(38, _uintType, s0, s1);
+                    var diff = _module.AddInstruction(SpirvOp.ISub, _uintType, max, min);
+                    result = IAdd(diff, s2);
+                    break;
+                }
                 case "VMinU32":
                     result = Ext(
                         38,
@@ -2115,6 +2126,33 @@ public static partial class Gen5SpirvTranslator
                                     _module.Constant64(_ulongType, 32)));
                             break;
                         }
+                        case "SMulHiI32":
+                        {
+                            var wideLeft = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, left));
+                            var wideRight = _module.AddInstruction(
+                                SpirvOp.SConvert,
+                                _longType,
+                                Bitcast(_intType, right));
+                            var product = _module.AddInstruction(
+                                SpirvOp.IMul,
+                                _longType,
+                                wideLeft,
+                                wideRight);
+                            result = Bitcast(
+                                _uintType,
+                                _module.AddInstruction(
+                                    SpirvOp.SConvert,
+                                    _intType,
+                                    _module.AddInstruction(
+                                        SpirvOp.ShiftRightArithmetic,
+                                        _longType,
+                                        product,
+                                        _module.Constant64(_longType, 32))));
+                            break;
+                        }
                         case "SAndB32":
                             result = BitwiseAnd(left, right);
                             Store(_scc, IsNotZero(result));
@@ -2233,6 +2271,19 @@ public static partial class Gen5SpirvTranslator
                                     left,
                                     offset,
                                     width);
+                            Store(_scc, IsNotZero(result));
+                            break;
+                        }
+                        case "SAbsdiffI32":
+                        {
+                            var diff = _module.AddInstruction(
+                                SpirvOp.ISub,
+                                _intType,
+                                Bitcast(_intType, left),
+                                Bitcast(_intType, right));
+                            // GLSL.std.450 SAbs (5); 4 is FAbs and float-only.
+                            var absDiff = Ext(5, _intType, diff);
+                            result = Bitcast(_uintType, absDiff);
                             Store(_scc, IsNotZero(result));
                             break;
                         }

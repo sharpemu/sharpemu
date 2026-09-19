@@ -160,4 +160,34 @@ public sealed class MslTranslationTests
             () => Gen5ComputeFixtures.CompileOrThrow(fixture));
         Assert.Contains("pc=0x", exception.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void SadAndMulHiAndAbsdiffTranslateInMsl()
+    {
+        // s_absdiff_i32 s0, s1, s2
+        const uint sAbsdiff = (0b10u << 30) | (0x2Du << 23) | (0u << 16) | (2u << 8) | 1u;
+        // s_mul_hi_i32 s0, s1, s2
+        const uint sMulHiI32 = (0b10u << 30) | (0x36u << 23) | (0u << 16) | (2u << 8) | 1u;
+        // v_sad_u32 v0, v1, v2, v3
+        const uint vSadWord0 = (0x35u << 26) | (0x15Du << 16) | 0u;
+        const uint vSadWord1 = (256u + 1u) | ((256u + 2u) << 9) | ((256u + 3u) << 18);
+
+        var fixture = new Gen5ComputeFixture(
+            "sad-and-mulhi",
+            [
+                sAbsdiff,
+                sMulHiI32,
+                vSadWord0, vSadWord1,
+                0xBF810000, // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 0);
+
+        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        Assert.Contains("abs(as_type<int>(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("mulhi(as_type<int>(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("max(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("min(", shader.Source, StringComparison.Ordinal);
+    }
 }
+

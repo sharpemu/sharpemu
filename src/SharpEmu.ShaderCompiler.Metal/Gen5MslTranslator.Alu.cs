@@ -251,6 +251,8 @@ public static partial class Gen5MslTranslator
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>
                     $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}) + ({RawSource(instruction, 2)}))",
+                "VSadU32" =>
+                    $"((max({RawSource(instruction, 0)}, {RawSource(instruction, 1)}) - min({RawSource(instruction, 0)}, {RawSource(instruction, 1)})) + ({RawSource(instruction, 2)}))",
                 "VAddLshlU32" =>
                     $"((({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)})) << (({RawSource(instruction, 2)}) & 31u))",
                 "VLshlAddU32" =>
@@ -1141,6 +1143,10 @@ public static partial class Gen5MslTranslator
                     resultExpression = $"mulhi({left}, {right})";
                     sccStatement = string.Empty;
                     break;
+                case "SMulHiI32":
+                    resultExpression = AsUInt($"mulhi(as_type<int>({left}), as_type<int>({right}))");
+                    sccStatement = string.Empty;
+                    break;
                 case "SAndB32":
                     resultExpression = $"({left} & {right})";
                     sccStatement = "NONZERO";
@@ -1227,6 +1233,10 @@ public static partial class Gen5MslTranslator
                 case "SMaxI32":
                     resultExpression = $"(uint)max(as_type<int>({left}), as_type<int>({right}))";
                     sccStatement = $"as_type<int>({left}) > as_type<int>({right})";
+                    break;
+                case "SAbsdiffI32":
+                    resultExpression = AsUInt($"abs(as_type<int>({left}) - as_type<int>({right}))");
+                    sccStatement = "NONZERO";
                     break;
                 case "SLshl1AddU32":
                 case "SLshl2AddU32":
