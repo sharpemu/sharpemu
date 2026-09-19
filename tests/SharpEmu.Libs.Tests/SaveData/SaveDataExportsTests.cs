@@ -272,6 +272,23 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
+    public void CreateTransactionResource_DesGuardReturnsSelfReferentialHandle()
+    {
+        const ulong desWorkSize = 0xC0000;
+        var desWorkAddress = TransactionOut + sizeof(ulong);
+
+        Assert.True(_ctx.TryWriteUInt64(TransactionOut, 0));
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataCreateTransactionResource(
+                Reg(rdi: desWorkSize, rsi: desWorkAddress, rdx: TransactionOut)));
+
+        Assert.True(_ctx.TryReadUInt64(TransactionOut, out var resource));
+        Assert.Equal(TransactionOut, resource);
+        Assert.Equal(desWorkAddress, resource + sizeof(ulong));
+    }
+
+    [Fact]
     public void CreateTransactionResource_WithLegacyOutPointer_WritesOnlyRdx()
     {
         const uint sentinel = 0xA5A5A5A5;

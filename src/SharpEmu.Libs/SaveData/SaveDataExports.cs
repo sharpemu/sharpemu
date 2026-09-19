@@ -875,7 +875,7 @@ public static class SaveDataExports
             desResourceAddress <= ulong.MaxValue - sizeof(ulong) &&
             desWorkAddress == desResourceAddress + sizeof(ulong))
         {
-            if (!ctx.TryWriteUInt64(desResourceAddress, 0))
+            if (!ctx.TryWriteUInt64(desResourceAddress, desResourceAddress))
             {
                 return SetReturn(
                     ctx,
@@ -886,7 +886,7 @@ public static class SaveDataExports
                 $"create_transaction_resource_des_guard " +
                 $"work_size=0x{desWorkSize:X} " +
                 $"work=0x{desWorkAddress:X} " +
-                $"resource_addr=0x{desResourceAddress:X} resource=0x0");
+                $"resource_addr=0x{desResourceAddress:X} resource=0x{desResourceAddress:X}");
 
             return SetReturn(ctx, 0);
         }
