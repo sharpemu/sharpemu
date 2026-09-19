@@ -266,6 +266,7 @@ internal static partial class Program
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
+        Log.Info(HostMemoryBudget.Summary);
 
         ebootPath = Path.GetFullPath(ebootPath);
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
@@ -1000,9 +1001,11 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [-f|--fullscreen] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
+        Log.Info("Memory: SHARPEMU_DIRECT_MEMORY_MB overrides guest direct-memory size (default auto-scales for host RAM). SHARPEMU_PENDING_GUEST_WORK_MB / SHARPEMU_RENDER_SCALE also override GPU budgets.");
+        Log.Info("Fullscreen: -f, --f, -fullscreen, or --fullscreen is the same as --window-mode=exclusive.");
     }
 
     /// <summary>
@@ -1088,6 +1091,13 @@ internal static partial class Program
                 windowModeOverride = windowMode;
                 continue;
             }
+
+            if (IsFullscreenFlag(argument))
+            {
+                windowModeOverride = HostWindowMode.ExclusiveFullscreen;
+                continue;
+            }
+
             if (TrySplitOption(argument, "--resolution", out var resolutionText))
             {
                 if (!TryParseResolution(resolutionText, out var windowWidth, out var windowHeight))
@@ -1398,6 +1408,12 @@ internal static partial class Program
         };
         return Enum.IsDefined(mode);
     }
+
+    private static bool IsFullscreenFlag(string argument) =>
+        argument.Equals("-f", StringComparison.OrdinalIgnoreCase) ||
+        argument.Equals("--f", StringComparison.OrdinalIgnoreCase) ||
+        argument.Equals("-fullscreen", StringComparison.OrdinalIgnoreCase) ||
+        argument.Equals("--fullscreen", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryParseScalingMode(string value, out HostScalingMode mode)
     {

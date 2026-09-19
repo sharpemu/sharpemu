@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Numerics;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Gpu;
 
@@ -18,8 +19,10 @@ internal static class GuestDataPool
 {
     public static ArrayPool<byte> Shared { get; } = new BoundedByteArrayPool(
         maxArrayLength: 16 * 1024 * 1024,
-        maxCachedBytes: 256UL * 1024 * 1024,
-        maxArraysPerBucket: 8);
+        maxCachedBytes: HostMemoryBudget.IsConstrained
+            ? 128UL * 1024 * 1024
+            : 256UL * 1024 * 1024,
+        maxArraysPerBucket: HostMemoryBudget.IsConstrained ? 4 : 8);
 
     public static void Trim() => ((BoundedByteArrayPool)Shared).Trim();
 

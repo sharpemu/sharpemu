@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
+using SharpEmu.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -50,7 +51,10 @@ public static partial class KernelMemoryCompatExports
     private const int SeekSet = 0;
     private const int SeekCur = 1;
     private const int SeekEnd = 2;
-    private const ulong DirectMemorySizeBytes = 16384UL * 1024 * 1024;
+    // Host-aware: on ~16 GiB PCs this is smaller than the real PS5 16 GiB pool so
+    // titles that size themselves from sceKernelGetDirectMemorySize do not push
+    // the host into OOM. Override with SHARPEMU_DIRECT_MEMORY_MB.
+    private static readonly ulong DirectMemorySizeBytes = HostMemoryBudget.AdvertisedDirectMemoryBytes;
     private const ulong UnsetMainDirectMemoryPoolBase = ulong.MaxValue;
     private const ulong FlexibleMemorySizeBytes = 448UL * 1024 * 1024;
     private const int OrbisVirtualQueryInfoSize = 72;

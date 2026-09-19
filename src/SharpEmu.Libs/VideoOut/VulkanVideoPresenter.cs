@@ -9,6 +9,7 @@ using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -381,7 +382,8 @@ internal static unsafe class VulkanVideoPresenter
             out var pendingGuestWorkItems) && pendingGuestWorkItems > 0
             ? pendingGuestWorkItems
             : OperatingSystem.IsMacOS() ? 64 : 512;
-    private const ulong MaximumCachedHostBufferBytes = 128UL * 1024 * 1024;
+    private static readonly ulong MaximumCachedHostBufferBytes =
+        HostMemoryBudget.DefaultCachedHostBufferBytes;
     // A captured 4K flip can consume tens of MiB of device-local memory.
     // Retain only a short presentation queue while always preserving the
     // newest generation; older immutable versions are retired immediately.
@@ -392,11 +394,11 @@ internal static unsafe class VulkanVideoPresenter
     // render thread could upload them.  Keep the count cap for small work and
     // independently apply backpressure to the actual retained payload.
     private static readonly ulong _maxPendingGuestWorkBytes =
-        (ulong.TryParse(
-             Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_WORK_MB"),
-             out var pendingGuestWorkMb) && pendingGuestWorkMb > 0
-            ? pendingGuestWorkMb
-            : 256UL) * 1024UL * 1024UL;
+        ulong.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_WORK_MB"),
+            out var pendingGuestWorkMb) && pendingGuestWorkMb > 0
+            ? pendingGuestWorkMb * 1024UL * 1024UL
+            : HostMemoryBudget.DefaultPendingGuestWorkBytes;
     private static readonly int _maxGuestWorkPerRender =
         int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_MAX_GUEST_WORK_PER_RENDER"),
@@ -17534,7 +17536,7 @@ internal static unsafe class VulkanVideoPresenter
             renderResolutionScale > 0 &&
             renderResolutionScale <= 2.0
                 ? renderResolutionScale
-                : 1.0;
+                : HostMemoryBudget.DefaultRenderScale;
 
         private static uint ScaleGuestDimension(uint value) =>
             _renderResolutionScale == 1.0

@@ -4,6 +4,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
@@ -55,11 +56,20 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
     private readonly Dictionary<(ulong Bucket, bool HostVisible), Stack<Allocation>> _bufferPool = new();
     private readonly List<Allocation> _allAllocations = new();
+    private ulong _pooledBytes;
 
     private readonly Stack<DescriptorSet> _freeDescriptorSets = new();
     private readonly List<DescriptorPool> _descriptorPools = new();
     private const uint DescriptorSetsPerPool = 64;
     private const ulong MinimumBufferBucket = 4096;
+    // Busy Demon's Souls loading screens thrash many texture sizes. Without a
+    // cap the free lists retain every bucket forever and native device memory
+    // climbs with each new size class (#618 / #639).
+    private const int MaxBuffersPerBucket = 4;
+    private static readonly ulong MaxPooledBufferBytes =
+        HostMemoryBudget.IsConstrained
+            ? 128UL * 1024 * 1024
+            : 256UL * 1024 * 1024;
 
     public VulkanDetilePass(
         Vk vk,
@@ -348,7 +358,11 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         var bucket = BucketFor(size);
         if (_bufferPool.TryGetValue((bucket, hostVisible), out var free) && free.Count > 0)
         {
-            return free.Pop();
+            var rented = free.Pop();
+            _pooledBytes = rented.Capacity >= _pooledBytes
+                ? 0
+                : _pooledBytes - rented.Capacity;
+            return rented;
         }
 
         return CreateBuffer(bucket, hostVisible);
@@ -368,7 +382,16 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             _bufferPool[key] = free;
         }
 
+        if (free.Count >= MaxBuffersPerBucket ||
+            _pooledBytes + allocation.Capacity > MaxPooledBufferBytes)
+        {
+            DestroyBuffer(allocation.Buffer, allocation.Memory);
+            _allAllocations.Remove(allocation);
+            return;
+        }
+
         free.Push(allocation);
+        _pooledBytes += allocation.Capacity;
     }
 
     private DescriptorSet RentDescriptorSet()
@@ -855,6 +878,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
         _allAllocations.Clear();
         _bufferPool.Clear();
+        _pooledBytes = 0;
         _xorTermBuffers.Clear();
         _blockTermBuffers.Clear();
         _placeholderTermBuffer = default;

@@ -37,8 +37,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     // investigation.
     private const ulong GuestAllocationArenaSize = 0x2000_0000;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
-    private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
-    private const ulong FullCommitRegionLimit = 4UL << 30;
+    // Scaled down on constrained hosts (~16 GiB) so huge non-exec maps can fall
+    // back to reserve + lazy commit instead of pinning multi-GiB host commits.
+    private static readonly ulong LargeDataReserveThreshold = HostMemoryBudget.LargeDataReserveThresholdBytes;
+    private static readonly ulong FullCommitRegionLimit = HostMemoryBudget.FullCommitRegionLimitBytes;
     private const ulong DefaultLazyReservePrimeBytes = 0x0400_0000UL; // 64 MiB
     private const ulong LazyReservePrimeChunkBytes = 0x0200_0000UL; // 32 MiB
     private const int CommittedRangeCacheCapacity = 4;
