@@ -2035,6 +2035,15 @@ public static partial class Gen5SpirvTranslator
                     StoreS(destination, result);
                     Store(_scc, IsNotZero(result));
                     return true;
+                case "SAbsI32":
+                {
+                    var sign = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(0), ShiftRightLogical(left, UInt(31)));
+                    var magnitude = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, left, sign);
+                    result = _module.AddInstruction(SpirvOp.ISub, _uintType, magnitude, sign);
+                    StoreS(destination, result);
+                    Store(_scc, IsNotZero(result));
+                    return true;
+                }
                 case "SWqmB32":
                 {
                     var quadAny = BitwiseAnd(

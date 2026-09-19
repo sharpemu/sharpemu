@@ -1126,6 +1126,14 @@ public static partial class Gen5MslTranslator
                     Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SAbsI32":
+                {
+                    var sign = Temp("uint", $"0u - ({left} >> 31u)");
+                    var result = Temp("uint", $"({left} ^ {sign}) - {sign}");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
                 case "SWqmB32":
                 {
                     var quadAny = Temp(

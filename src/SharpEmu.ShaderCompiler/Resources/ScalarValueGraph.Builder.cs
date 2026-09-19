@@ -484,6 +484,15 @@ public sealed partial class ScalarValueGraph
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.Not32, left));
                     state.Scc = NotZero(state.Scalars[destinationRegister]);
                     return;
+                case "SAbsI32":
+                {
+                    var sign = Binary(ScalarOperation.ISub32, _graph.Constant(0u),
+                        Binary(ScalarOperation.ShiftRightLogical32, left, _graph.Constant(31u)));
+                    var magnitude = Binary(ScalarOperation.ISub32, Binary(ScalarOperation.Xor32, left, sign), sign);
+                    state.WriteScalar(destinationRegister, magnitude);
+                    state.Scc = NotZero(magnitude);
+                    return;
+                }
                 case "SWqmB32":
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.QuadMask32, left));
                     state.Scc = NotZero(state.Scalars[destinationRegister]);
