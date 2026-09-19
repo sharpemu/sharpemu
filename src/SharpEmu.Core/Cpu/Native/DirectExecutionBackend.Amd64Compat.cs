@@ -9,17 +9,21 @@ namespace SharpEmu.Core.Cpu.Native;
 
 // General software fallback for the AMD-only instructions PS5 titles occasionally emit that a
 // Zen 2-only host implements but Intel hosts (and Rosetta 2 on Apple Silicon) do not:
-//   - SSE4a EXTRQ/INSERTQ, immediate form
+//   - SSE4a EXTRQ/INSERTQ, both the immediate and the register forms
 //   - MONITORX/MWAITX
 //
-// This is a direct port of Kyty's Loader::X64InstructionEmulator (TryEmulateSse4a /
-// TryEmulateMonitorxMwaitx). SharpEmu already special-cases exactly one compiled EXTRQ+VPBLENDD
-// byte sequence at load time (Sse4aExtrqBlendPatch), which only helps the one idiom it was
-// reverse-engineered from. This file is a general, fault-time fallback that engages for any
-// immediate-form EXTRQ/INSERTQ or MONITORX/MWAITX the narrower patch (or a title using a
-// different compiler/register allocation) does not cover, complementing rather than replacing
-// it: the load-time patch still avoids paying the fault-and-recover cost on the hot path it was
-// built for, while this method is the safety net for everything else.
+// The SSE4a bit math and MONITORX/MWAITX handling follow Kyty's
+// Loader::X64InstructionEmulator (TryEmulateSse4a / TryEmulateMonitorxMwaitx); the register
+// forms (66 0F 79 /r and F2 0F 79 /r, which take their length/index from a register rather than
+// from immediates) are not in Kyty and are decoded here from the AMD64 definition.
+//
+// SharpEmu already special-cases exactly one compiled EXTRQ+VPBLENDD byte sequence at load time
+// (Sse4aExtrqBlendPatch), which only helps the one idiom it was reverse-engineered from. This
+// file is a general, fault-time fallback that engages for any EXTRQ/INSERTQ or MONITORX/MWAITX
+// the narrower patch (or a title using a different compiler/register allocation) does not cover,
+// complementing rather than replacing it: the load-time patch still avoids paying the
+// fault-and-recover cost on the hot path it was built for, while this method is the safety net
+// for everything else.
 //
 // This is deliberately additive: DirectExecutionBackend.IllegalInstruction.cs (the BMI1/BMI2/ABM
 // fallback) is untouched, and this method is only reached from VectoredHandler after that one
@@ -104,56 +108,78 @@ public sealed partial class DirectExecutionBackend
             return false;
         }
 
-        var isExtrq = instruction.Mnemonic == Mnemonic.Extrq;
-        var isInsertq = instruction.Mnemonic == Mnemonic.Insertq;
-        if (!isExtrq && !isInsertq)
-        {
-            return false;
-        }
-
-        if (isExtrq && instruction.OpCount != 3 || isInsertq && instruction.OpCount != 4)
-        {
-            return false;
-        }
-
         if (instruction.GetOpKind(0) != OpKind.Register ||
             !TryGetXmmOffset(instruction.GetOpRegister(0), out var destOffset))
         {
             return false;
         }
 
+        // Every form except the immediate EXTRQ carries a second XMM operand. INSERTQ takes the
+        // bits to insert from it; the register forms additionally read their length/index out of
+        // it instead of out of immediates.
+        var srcOffset = 0;
+        if (instruction.Code != Code.Extrq_xmm_imm8_imm8 &&
+            (instruction.GetOpKind(1) != OpKind.Register ||
+                !TryGetXmmOffset(instruction.GetOpRegister(1), out srcOffset)))
+        {
+            return false;
+        }
+
+        // Read the destination before writing it: the register forms allow the source and
+        // destination to be the same XMM, and EXTRQ extracts out of its destination either way.
         var destLow = ReadCtxU64(contextRecord, destOffset);
-        if (isExtrq)
+        int length;
+        int index;
+        ulong source;
+        switch (instruction.Code)
         {
-            var length = (int)instruction.GetImmediate(1);
-            var index = (int)instruction.GetImmediate(2);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
-            {
-                return false;
-            }
+            case Code.Extrq_xmm_imm8_imm8:
+                length = (int)instruction.GetImmediate(1);
+                index = (int)instruction.GetImmediate(2);
+                source = destLow;
+                break;
 
-            WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.ExtractBitField(destLow, length, index));
-            WriteCtxU64(contextRecord, destOffset + 8, 0);
+            case Code.Extrq_xmm_xmm:
+                Sse4aBitFieldEmulator.DecodeRegisterControl(
+                    ReadCtxU64(contextRecord, srcOffset), out length, out index);
+                source = destLow;
+                break;
+
+            case Code.Insertq_xmm_xmm_imm8_imm8:
+                length = (int)instruction.GetImmediate(2);
+                index = (int)instruction.GetImmediate(3);
+                source = ReadCtxU64(contextRecord, srcOffset);
+                break;
+
+            // The one asymmetry between the two register forms: INSERTQ's control fields live in
+            // the *high* quadword of the source (xmm2[69:64] length, xmm2[77:72] index) while the
+            // bits it inserts still come from the low one. EXTRQ reads both from the low quadword.
+            case Code.Insertq_xmm_xmm:
+                Sse4aBitFieldEmulator.DecodeRegisterControl(
+                    ReadCtxU64(contextRecord, srcOffset + 8), out length, out index);
+                source = ReadCtxU64(contextRecord, srcOffset);
+                break;
+
+            default:
+                return false;
         }
-        else
+
+        // AMD leaves the result undefined when the field runs off the end of the quadword. Decline
+        // rather than invent one, matching how the BMI fallback refuses anything it does not fully
+        // model, so an encoding we mis-read still reaches the existing diagnostics.
+        if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
         {
-            if (instruction.GetOpKind(1) != OpKind.Register ||
-                !TryGetXmmOffset(instruction.GetOpRegister(1), out var srcOffset))
-            {
-                return false;
-            }
-
-            var length = (int)instruction.GetImmediate(2);
-            var index = (int)instruction.GetImmediate(3);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
-            {
-                return false;
-            }
-
-            WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.InsertBitField(
-                destLow, ReadCtxU64(contextRecord, srcOffset), length, index));
-            WriteCtxU64(contextRecord, destOffset + 8, 0);
+            return false;
         }
+
+        var isExtract = instruction.Code is Code.Extrq_xmm_imm8_imm8 or Code.Extrq_xmm_xmm;
+        WriteCtxU64(
+            contextRecord,
+            destOffset,
+            isExtract
+                ? Sse4aBitFieldEmulator.ExtractBitField(source, length, index)
+                : Sse4aBitFieldEmulator.InsertBitField(destLow, source, length, index));
+        WriteCtxU64(contextRecord, destOffset + 8, 0);
 
         WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
 

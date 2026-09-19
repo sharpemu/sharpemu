@@ -144,4 +144,49 @@ public sealed class Sse4aBitFieldEmulatorTests
 
         Assert.Equal(0xABCD_EF01_0005_6789UL, result);
     }
+
+    [Fact]
+    public void DecodeRegisterControl_TakesLengthFromLowSixBitsAndIndexFromBitsThirteenToEight()
+    {
+        Sse4aBitFieldEmulator.DecodeRegisterControl(0x0000_0000_0000_1020, out var length, out var index);
+
+        Assert.Equal(0x20, length);
+        Assert.Equal(0x10, index);
+    }
+
+    [Fact]
+    public void DecodeRegisterControl_IgnoresEverythingAboveBitFifteen()
+    {
+        // AMD specifies only [5:0] and [13:8] of the controlling quadword; the rest is
+        // "ignored", so a source register carrying unrelated data must decode identically.
+        Sse4aBitFieldEmulator.DecodeRegisterControl(0xDEAD_BEEF_CAFE_1020, out var length, out var index);
+
+        Assert.Equal(0x20, length);
+        Assert.Equal(0x10, index);
+    }
+
+    [Fact]
+    public void DecodeRegisterControl_MasksTheTwoBitsAboveEachSixBitField()
+    {
+        // Bits [7:6] and [15:14] sit outside both fields. Setting them must not widen either
+        // value past 0x3F, which is what makes the decode agree with the immediate form where
+        // the emulator already applies "& 0x3F".
+        Sse4aBitFieldEmulator.DecodeRegisterControl(0x0000_0000_0000_FFFF, out var length, out var index);
+
+        Assert.Equal(0x3F, length);
+        Assert.Equal(0x3F, index);
+    }
+
+    [Fact]
+    public void DecodeRegisterControl_ZeroControlIsTheLengthSixtyFourCase()
+    {
+        Sse4aBitFieldEmulator.DecodeRegisterControl(0, out var length, out var index);
+
+        Assert.Equal(0, length);
+        Assert.Equal(0, index);
+        Assert.True(Sse4aBitFieldEmulator.IsValidBitField(length, index));
+        Assert.Equal(
+            0x1234_5678_9ABC_DEF0UL,
+            Sse4aBitFieldEmulator.ExtractBitField(0x1234_5678_9ABC_DEF0, length, index));
+    }
 }
