@@ -11,7 +11,7 @@ public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset
     public bool WasRestored { get; init; }
 }
 
-public sealed unsafe class SharedBackingViews : IDisposable
+public sealed unsafe partial class SharedBackingViews : IDisposable
 {
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
@@ -19,7 +19,13 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private readonly HostBackingObject? _backing;
     private readonly object _lock = new();
     private readonly SortedList<ulong, ViewRecord> _views = new();
-    private bool _disposed;
+    // Small copies stay under the metadata lock to avoid reservation overhead.
+    private const ulong ConcurrentCopyMinimumBytes = 64 * 1024;
+    private CopyReservation[]? _copyReservations;
+    private int _activeCopies;
+    private int _copyWaiters;
+    private int _mappingWaiters;
+    private volatile bool _disposed;
 
     // Guest command writes and their reads by the render thread reach TryWriteBacking and
     // TryReadBacking millions of times per second, a few bytes at a time, while views
@@ -46,6 +52,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
     {
         lock (_lock)
         {
+            WaitForCopies();
             if (!IsAvailable || !IsWithinBacking(offset, size))
             {
                 return false;
@@ -72,31 +79,34 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
 
         lock (_lock)
-        {
-            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            while (true)
             {
-                var offset = record.Offset + address - record.Address;
-                if (!IsWithinBacking(offset, (ulong)data.Length))
+                if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+                {
+                    var offset = record.Offset + address - record.Address;
+                    if (!IsWithinBacking(offset, (ulong)data.Length))
+                    {
+                        return false;
+                    }
+
+                    if (_activeCopies != 0 && WaitForBufferCopyConflict(offset, data)) continue;
+                    data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                    return true;
+                }
+
+                if (WaitForAnyCopy()) continue;
+                if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
                 {
                     return false;
                 }
 
-                data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                foreach (var (backing, dataOffset, bytes) in pieces)
+                {
+                    data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+                }
+
                 return true;
             }
-
-            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
-            {
-                return false;
-            }
-
-            foreach (var (backing, dataOffset, bytes) in pieces)
-            {
-                data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
-            }
-
-            return true;
-        }
     }
 
     // The lock-free single-view read only; false (with nothing read) for anything else.
@@ -134,85 +144,102 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
 
         lock (_lock)
-        {
-            // A read inside one mapping needs no temporary segment list.
-            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            while (true)
             {
-                var offset = record.Offset + address - record.Address;
-                if (!IsWithinBacking(offset, (ulong)data.Length))
+                // A read inside one mapping needs no temporary segment list.
+                if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+                {
+                    var offset = record.Offset + address - record.Address;
+                    if (!IsWithinBacking(offset, (ulong)data.Length))
+                    {
+                        return false;
+                    }
+
+                    if (_activeCopies != 0 && WaitForBufferCopyConflict(offset, data)) continue;
+                    new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                    return true;
+                }
+
+                if (WaitForAnyCopy()) continue;
+                if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
                 {
                     return false;
                 }
 
-                new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                foreach (var (backing, dataOffset, bytes) in pieces)
+                {
+                    new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
+                }
+
                 return true;
             }
-
-            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
-            {
-                return false;
-            }
-
-            foreach (var (backing, dataOffset, bytes) in pieces)
-            {
-                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
-            }
-
-            return true;
-        }
     }
 
     // Use temporary storage if a copy segment can overwrite another segment's source.
     public bool TryCopyBacking(ulong destination, ulong source, ulong size)
     {
-        lock (_lock)
+        if (size >= ConcurrentCopyMinimumBytes && size <= int.MaxValue &&
+            TryReserveCopy(destination, source, size, out var reservation))
         {
-            if (IsAvailable && size <= int.MaxValue &&
-                TryFindRecord(source, size, out var sourceRecord) &&
-                TryFindRecord(destination, size, out var destinationRecord))
+            using (reservation)
             {
-                var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
-                var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
-                if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                new ReadOnlySpan<byte>((void*)reservation.Source, (int)size)
+                    .CopyTo(new Span<byte>((void*)reservation.Destination, (int)size));
+                return true;
+            }
+        }
+
+        lock (_lock)
+            while (true)
+            {
+                if (IsAvailable && size <= int.MaxValue &&
+                    TryFindRecord(source, size, out var sourceRecord) &&
+                    TryFindRecord(destination, size, out var destinationRecord))
+                {
+                    var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
+                    var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
+                    if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                    {
+                        return false;
+                    }
+
+                    if (_activeCopies != 0 && WaitForCopyConflict(sourceOffset, size, destinationOffset, size)) continue;
+                    // Use the backing alias so CopyTo can detect overlap between different guest views.
+                    new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
+                        .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
+                    return true;
+                }
+
+                if (WaitForAnyCopy()) continue;
+                if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
                 {
                     return false;
                 }
 
-                // Use the backing alias so CopyTo can detect overlap between different guest views.
-                new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
-                    .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
-                return true;
-            }
-
-            if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
-            {
-                return false;
-            }
-
-            var chunks = CreateCopySegments(from, to);
-            if (!HasCrossSegmentOverlap(chunks))
-            {
-                foreach (var (fromPtr, toPtr, bytes) in chunks)
+                var chunks = CreateCopySegments(from, to);
+                if (!HasCrossSegmentOverlap(chunks))
                 {
-                    Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                    foreach (var (fromPtr, toPtr, bytes) in chunks)
+                    {
+                        Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                    }
+
+                    return true;
+                }
+
+                var staging = new byte[size];
+                foreach (var (backing, dataOffset, bytes) in from)
+                {
+                    new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
+                }
+
+                foreach (var (backing, dataOffset, bytes) in to)
+                {
+                    staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
                 }
 
                 return true;
             }
-
-            var staging = new byte[size];
-            foreach (var (backing, dataOffset, bytes) in from)
-            {
-                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
-            }
-
-            foreach (var (backing, dataOffset, bytes) in to)
-            {
-                staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
-            }
-
-            return true;
-        }
     }
 
     public bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection, out HostViewFailure failure)
@@ -221,15 +248,16 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
         bool wasRestored, out HostViewFailure failure)
     {
-        if (!IsAvailable || !IsWithinBacking(offset, size))
-        {
-            failure = IsAvailable ? HostViewFailure.OffsetOutOfBounds : HostViewFailure.BackingUnavailable;
-            return false;
-        }
-
         // Keep the mapping and its record under one lock to prevent disposal between them.
         lock (_lock)
         {
+            WaitForCopies();
+            if (!IsAvailable || !IsWithinBacking(offset, size))
+            {
+                failure = IsAvailable ? HostViewFailure.OffsetOutOfBounds : HostViewFailure.BackingUnavailable;
+                return false;
+            }
+
             if (!_host.TryMapView(_backing!, address, offset, size, protection, out failure))
             {
                 return false;
@@ -256,6 +284,15 @@ public sealed unsafe class SharedBackingViews : IDisposable
     }
 
     public bool Unmap(ulong address, ulong size, out bool holePreserved)
+    {
+        lock (_lock)
+        {
+            WaitForCopies();
+            return UnmapCore(address, size, out holePreserved);
+        }
+    }
+
+    private bool UnmapCore(ulong address, ulong size, out bool holePreserved)
     {
         holePreserved = false;
         if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
@@ -476,6 +513,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
         List<ViewRecord> views;
         lock (_lock)
         {
+            WaitForCopies();
             if (_disposed)
             {
                 return;
