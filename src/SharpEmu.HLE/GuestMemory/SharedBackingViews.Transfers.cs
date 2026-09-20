@@ -37,6 +37,13 @@ public sealed unsafe partial class SharedBackingViews
                 var index = 0;
                 while (index < _copyReservations.Length && _copyReservations[index].Size != 0) index++;
                 if (index == _copyReservations.Length) Array.Resize(ref _copyReservations, checked(index * 2));
+                if (_activeCopies == 0)
+                {
+                    // Close admission before checking access leases. The exchange prevents reordering.
+                    Interlocked.Exchange(ref _copyAccessBlocked, 1);
+                    var spin = new SpinWait();
+                    while (Volatile.Read(ref _activeAccesses) != 0) spin.SpinOnce();
+                }
                 _copyReservations[index] = new CopyReservation(sourceOffset, destinationOffset, size);
                 _activeCopies++;
                 lease = new CopyLease(this, index, AliasBase + sourceOffset, AliasBase + destinationOffset);
@@ -124,6 +131,7 @@ public sealed unsafe partial class SharedBackingViews
         {
             _copyReservations![index] = default;
             _activeCopies--;
+            if (_activeCopies == 0) Volatile.Write(ref _copyAccessBlocked, 0);
             if (_copyWaiters != 0) Monitor.PulseAll(_lock);
         }
     }

@@ -161,6 +161,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public void Dispose()
     {
         Vk.DeviceWaitIdle(Device);
+        _deviceInfo?.Slabs.Destroy();
         Vk.DestroyDevice(Device, null);
         if (_debugUtils is { } debugUtils)
         {

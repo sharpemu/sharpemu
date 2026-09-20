@@ -104,9 +104,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var synchronized = false;
             if (IsCleanReadPage(address, sizeof(uint)))
             {
-                if (TryGetAliasPointer(address, sizeof(uint), out var alias))
+                Span<byte> cachedBytes = stackalloc byte[sizeof(uint)];
+                if (TryReadAliasBytes(address, cachedBytes))
                 {
-                    word = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(alias);
+                    word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(cachedBytes);
                     return true;
                 }
             }
@@ -201,9 +202,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 NoteCleanReadPage(address, size);
             }
 
-            if (TryGetAliasPointer(address, size, out var alias))
+            if (TryReadAliasBytes(address, destination))
             {
-                new ReadOnlySpan<byte>(alias, destination.Length).CopyTo(destination);
                 return true;
             }
 
@@ -213,7 +213,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private const ulong CleanReadPageBytes = 0x1000;
         private const int CleanReadPageSlots = 64;
         private CleanReadPages? _cleanReadPages;
-        private bool _backingAliasAccess;
 
         private sealed class CleanReadPages
         {
@@ -223,10 +222,26 @@ internal static unsafe partial class VulkanVideoPresenter
             public readonly object?[] Snapshots = new object?[CleanReadPageSlots];
         }
 
+        private bool TryReadAliasBytes(ulong address, Span<byte> destination)
+        {
+            if (_guestBacking?.TryEnterBackingAliasAccess() != true) return false;
+            try
+            {
+                if (!TryGetAliasPointer(address, (ulong)destination.Length, out var pointer)) return false;
+                new ReadOnlySpan<byte>(pointer, destination.Length).CopyTo(destination);
+                return true;
+            }
+            finally
+            {
+                // Release the lease before a fallback can wait for a copy reservation.
+                _guestBacking.ExitBackingAliasAccess();
+            }
+        }
+
         private bool TryGetAliasPointer(ulong address, ulong size, out byte* pointer)
         {
             pointer = null;
-            if (!_backingAliasAccess || _cleanReadPages is not { } pages ||
+            if (_cleanReadPages is not { } pages ||
                 !TryGetCleanReadPage(address, size, out var page, out var slot) || pages.Tags[slot] != page + 1 ||
                 _guestBacking.BackingAliasSnapshot is not { } snapshot)
             {
