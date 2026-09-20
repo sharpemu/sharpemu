@@ -231,20 +231,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 int ran;
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
                 {
-                    var aliasAccess = _guestBacking?.TryEnterBackingAliasAccess() == true;
-                    _backingAliasAccess = aliasAccess;
-                    try
-                    {
-                        ran = thread.RunBatch(renderWorkDeadline, CommandItemBatch, _betweenCommandItems!);
-                    }
-                    finally
-                    {
-                        _backingAliasAccess = false;
-                        if (aliasAccess)
-                        {
-                            _guestBacking!.ExitBackingAliasAccess();
-                        }
-                    }
+                    ran = thread.RunBatch(renderWorkDeadline, CommandItemBatch, _betweenCommandItems!);
                 }
 
                 if (ran == 0 || System.Diagnostics.Stopwatch.GetTimestamp() >= renderWorkDeadline)

@@ -11,6 +11,85 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class SharedBackingTransferTests
 {
+    [Fact]
+    public void SingleViewReadsResumeAfterTheLastCopyReservation()
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings();
+        var expected = BitConverter.GetBytes(Marker);
+        var actual = new byte[expected.Length];
+        Assert.True(mapping.Store.TryWriteBacking(mapping.Address, expected));
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, actual));
+        Assert.Equal(expected, actual);
+        Assert.True(mapping.Store.TryEnterAliasAccess());
+        mapping.Store.ExitAliasAccess();
+        Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 8, out var first));
+        try
+        {
+            Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 192, mapping.Address + 128, 8, out var second));
+            try
+            {
+                actual.AsSpan().Clear();
+                Assert.False(mapping.Store.TryReadSingleView(mapping.Address, actual));
+                Assert.All(actual, value => Assert.Equal((byte)0, value));
+            }
+            finally { second.Dispose(); }
+            Assert.False(mapping.Store.TryReadSingleView(mapping.Address, actual));
+            Assert.False(mapping.Store.TryEnterAliasAccess());
+        }
+        finally { first.Dispose(); }
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, actual));
+        Assert.Equal(expected, actual);
+        Assert.True(mapping.Store.TryEnterAliasAccess());
+        mapping.Store.ExitAliasAccess();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CopyReservationWaitsForAnAdmittedAccess(bool aliasAccess)
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings();
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var access = typeof(SharedBackingViews).GetMethod("TryAccessSingleView", flags)!;
+        var active = typeof(SharedBackingViews).GetField("_activeAccesses", flags)!;
+        var blocked = typeof(SharedBackingViews).GetField("_copyAccessBlocked", flags)!;
+        Assert.True(aliasAccess ? mapping.Store.TryEnterAliasAccess() :
+            (bool)access.Invoke(mapping.Store, [mapping.Address, 8UL, 0UL])!);
+        Exception? failure = null;
+        using var reserved = new ManualResetEventSlim();
+        var transfer = new Thread(() =>
+        {
+            try
+            {
+                Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 8, out var reservation));
+                using (reservation) reserved.Set();
+            }
+            catch (Exception exception) { failure = exception; }
+        }) { IsBackground = true };
+        try
+        {
+            transfer.Start();
+            Assert.True(SpinWait.SpinUntil(() => (int)blocked.GetValue(mapping.Store)! != 0 || !transfer.IsAlive,
+                TimeSpan.FromSeconds(10)));
+            Assert.False(reserved.IsSet);
+            Assert.True(transfer.IsAlive);
+            Assert.False(mapping.Store.TryReadSingleView(mapping.Address, new byte[8]));
+            Assert.False(mapping.Store.TryEnterAliasAccess());
+        }
+        finally
+        {
+            // Release the private access lease held by this test. No other lease can enter.
+            if (aliasAccess) mapping.Store.ExitAliasAccess();
+            else active.SetValue(mapping.Store, 0);
+            Assert.True(transfer.Join(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Null(failure);
+        Assert.True(reserved.IsSet);
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, new byte[8]));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
