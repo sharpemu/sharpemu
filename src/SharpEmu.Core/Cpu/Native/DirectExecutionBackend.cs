@@ -359,6 +359,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private string? _probeImportReturn;
 
 	private ulong _probeImportReturnAddress;
+	private ulong _probeImportRootAddress;
 
 	private long _probeImportReturnAddressCount;
 
@@ -1210,6 +1211,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_probeImportReturnAddress = ParseOptionalHexAddress(
 			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_RET_ADDRESS"));
 		_probeImportReturnAddressCount = 0;
+		InitializeMutexTrace();
+		_probeImportRootAddress = ParseOptionalHexAddress(
+			Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_ROOT_ADDRESS"));
 		_importFilter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_FILTER");
 		_disableImportLoopGuard = !string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"),
