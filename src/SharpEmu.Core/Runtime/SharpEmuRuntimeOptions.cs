@@ -16,6 +16,8 @@ public readonly struct SharpEmuRuntimeOptions
 
     public int ImportTraceLimit { get; init; }
 
+    public bool AdoptStartupAddressReservations { get; init; }
+
     /// <summary>
     /// An optional debugger to attach to guest execution. Flows through to
     /// <see cref="CpuExecutionOptions.DebugHook"/>. Null (the default) runs with

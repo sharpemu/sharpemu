@@ -95,7 +95,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         };
         var virtualMemory = new PhysicalVirtualMemory(
             viewHost: HostViewMemory.Create(),
-            preReserveGuestAddressSpace: true);
+            preReserveGuestAddressSpace: true,
+            adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.

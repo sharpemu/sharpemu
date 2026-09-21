@@ -32,11 +32,18 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly List<(ulong Address, ulong Size)> _owned = new();
     private readonly bool _preReserveGuestAddressSpace;
     private bool _disposed;
+    private readonly HostAddressRange? _startupReservation;
 
-    public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false)
+    public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false,
+        HostAddressRange? startupReservation = null)
     {
         _host = host;
         Granularity = host.Granularity;
+        if (startupReservation is { } reservation &&
+            (!IsValidRange(reservation.Address, reservation.Size) ||
+             reservation.Address % Granularity != 0 || reservation.Size % Granularity != 0))
+            throw new ArgumentOutOfRangeException(nameof(startupReservation));
+        _startupReservation = startupReservation;
         // Create lookup views before concurrent fault handlers can read the range table.
         _ = _mapped.Keys;
         _ = _mapped.Values;
@@ -471,7 +478,7 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
-    // Release all mappings and reserved ranges, but keep the backing object for reuse.
+    // Keep the backing object and the startup reservation for reuse.
     public void ReleaseAddressRanges()
     {
         using (EnterMappingLock())
@@ -494,6 +501,12 @@ public sealed class GuestSpaceOwner : IDisposable
 
             foreach (var (address, size) in _owned)
             {
+                if (_startupReservation is { } startupRange && address == startupRange.Address && size == startupRange.Size)
+                {
+                    if (!_host.JoinHoles(address, size))
+                        OnFatal($"Could not restore the startup guest reservation at 0x{address:X16}.");
+                    continue;
+                }
                 if (!_host.FreeOwnedRange(address, size))
                 {
                     OnFatal($"Could not release the owned range at 0x{address:X16}.");
@@ -510,6 +523,13 @@ public sealed class GuestSpaceOwner : IDisposable
 
     private void PreReserveGuestAddressSpace()
     {
+        if (_startupReservation is { } retainedRange)
+        {
+            _owned.Add((retainedRange.Address, retainedRange.Size));
+            AddFreeRange(retainedRange.Address, retainedRange.Size);
+            return;
+        }
+
         if (!_preReserveGuestAddressSpace)
         {
             return;
