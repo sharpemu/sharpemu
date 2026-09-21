@@ -204,6 +204,20 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
+    public void AddressSearchSkipsLargeHostView()
+    {
+        if (OperatingSystem.IsMacOS())
+            return;
+
+        const ulong viewStart = 0x1_0000_0000;
+        const ulong viewSize = 0x4_0000_0000;
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize));
+
+        Assert.True(memory.TryAllocateAtOrAbove(viewStart, 0x1000, false, 0x1000, out var address));
+        Assert.Equal(viewStart + viewSize, address);
+    }
+
+    [Fact]
     public void TryBackFixedRangeRollsBackEarlierGapsWhenLaterGapCannotBeBacked()
     {
         if (OperatingSystem.IsWindows())
@@ -443,10 +457,11 @@ public sealed class GuestMemoryAllocatorTests
         public void Dispose() { }
     }
 
-    private sealed class FakeHostMemory : IHostMemory
+    private sealed class FakeHostMemory(ulong occupiedStart = 0, ulong occupiedSize = 0) : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
-            desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
+            occupiedSize != 0 && desiredAddress >= occupiedStart && desiredAddress - occupiedStart < occupiedSize
+                ? 0 : desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
 
         public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             Allocate(desiredAddress, size, protection);
@@ -469,6 +484,12 @@ public sealed class GuestMemoryAllocatorTests
 
         public bool Query(ulong address, out HostRegionInfo info)
         {
+            if (occupiedSize != 0 && address >= occupiedStart && address - occupiedStart < occupiedSize)
+            {
+                info = new HostRegionInfo(occupiedStart, occupiedStart, occupiedSize,
+                    HostRegionState.Committed, 0x1000, HostPageProtection.ReadWrite, 4, 4);
+                return true;
+            }
             info = default;
             return false;
         }

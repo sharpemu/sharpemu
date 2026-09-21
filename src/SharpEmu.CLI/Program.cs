@@ -6,6 +6,7 @@ using SharpEmu.Core.Cpu;
 using SharpEmu.GUI;
 using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
+using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
 using System.Runtime.InteropServices;
@@ -30,9 +31,6 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
-    private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
     private const int ATTACH_PARENT_PROCESS = -1;
     private const int STD_INPUT_HANDLE = -10;
     private const int STD_OUTPUT_HANDLE = -11;
@@ -312,7 +310,10 @@ internal static partial class Program
 
         try
         {
-            using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
+            using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions with
+            {
+                AdoptStartupAddressReservations = OperatingSystem.IsWindows() && isMitigatedChild,
+            });
 
             OrbisGen2Result result;
             ConsoleCancelEventHandler? cancelHandler = null;
@@ -566,14 +567,9 @@ internal static partial class Program
 
             startupInfoEx.lpAttributeList = attributeList;
 
-            var policy1 = PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF;
-            var policy2 =
-                PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF |
-                PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF;
-
             mitigationPolicies = Marshal.AllocHGlobal(sizeof(ulong) * 2);
-            Marshal.WriteInt64(mitigationPolicies, unchecked((long)policy1));
-            Marshal.WriteInt64(nint.Add(mitigationPolicies, sizeof(long)), unchecked((long)policy2));
+            Marshal.WriteInt64(mitigationPolicies, unchecked((long)GuestProcessMitigationPolicy.Primary));
+            Marshal.WriteInt64(nint.Add(mitigationPolicies, sizeof(long)), unchecked((long)GuestProcessMitigationPolicy.Secondary));
 
             if (!UpdateProcThreadAttribute(
                 attributeList,
@@ -598,7 +594,7 @@ internal static partial class Program
                 0,
                 0,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
+                EXTENDED_STARTUPINFO_PRESENT | WindowsGuestAddressReservation.CreateSuspended,
                 0,
                 Environment.CurrentDirectory,
                 ref startupInfoEx,
@@ -622,6 +618,7 @@ internal static partial class Program
                     jobHandle = 0;
                 }
 
+                WindowsGuestAddressReservation.PrepareAndResume(processInfo.hProcess, processInfo.hThread);
                 ConsoleCancelEventHandler? cancelHandler = null;
                 EventHandler? processExitHandler = null;
                 cancelHandler = (_, eventArgs) =>
@@ -647,6 +644,12 @@ internal static partial class Program
 
                 childExitCode = unchecked((int)exitCode);
                 Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception exception)
+            {
+                childExitCode = 5;
+                Console.Error.WriteLine($"[ERROR] Guest process preparation failed: {exception.Message}");
                 return true;
             }
             finally
