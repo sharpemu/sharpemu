@@ -133,8 +133,14 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     public bool SplitHole(ulong address, ulong size) =>
         VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
 
-    public bool JoinHoles(ulong address, ulong size) =>
-        VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+    public bool JoinHoles(ulong address, ulong size)
+    {
+        if (VirtualQuery((void*)address, out var region, (nuint)sizeof(MemoryBasicInformation)) != 0 &&
+            region.BaseAddress == address && region.AllocationBase == address &&
+            region.State == MEM_RESERVE && region.RegionSize == size)
+            return true;
+        return VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+    }
 
     public bool FreeHole(ulong address, ulong size) =>
         VirtualFree((void*)address, 0, MEM_RELEASE);
