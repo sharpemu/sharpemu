@@ -1862,6 +1862,7 @@ public sealed partial class DirectExecutionBackend
 	private static bool IsImportLoopGuardBoundary(string nid) =>
 		nid is
 			"1jfXLRVzisc" or // sceKernelUsleep
+			"1j3S3n-tTW4" or // sceKernelGetTscFrequency (polling/time base query)
 			"WKAXJ4XBPQ4" or // scePthreadCondWait
 			"BmMjYxmew1w" or // scePthreadCondTimedwait
 			"Op8TBGY5KHg" or // pthread_cond_wait
@@ -1870,7 +1871,8 @@ public sealed partial class DirectExecutionBackend
 			"lLMT9vJAck0" or // clock_gettime
 			"-2IRUCO--PM" or // sceKernelReadTsc
 			"4J2sUJmuHZQ" or // sceKernelGetProcessTime
-			"fgxnMeTNUtY";   // sceKernelGetProcessTimeCounter
+			"fgxnMeTNUtY" or // sceKernelGetProcessTimeCounter
+			"yH17Q6NWtVg";   // sceUserServiceGetEvent (non-blocking event poll)
 
 	private void ResetImportLoopPattern()
 	{

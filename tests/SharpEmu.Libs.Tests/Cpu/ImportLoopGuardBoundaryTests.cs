@@ -30,11 +30,13 @@ public sealed class ImportLoopGuardBoundaryTests
 
     [Theory]
     [InlineData("1jfXLRVzisc")]
+    [InlineData("1j3S3n-tTW4")]
     [InlineData("WKAXJ4XBPQ4")]
     [InlineData("BmMjYxmew1w")]
     [InlineData("Op8TBGY5KHg")]
     [InlineData("27bAgiJmOh0")]
-    public void ExistingWait_ClearsExpiredHistory(string nid)
+    [InlineData("yH17Q6NWtVg")]
+    public void ProgressBoundary_ClearsExpiredHistory(string nid)
     {
         AssertBoundaryClearsExpiredHistory(nid);
     }
