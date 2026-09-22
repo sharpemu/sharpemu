@@ -869,6 +869,13 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "QhCbS4X9Rl8",
+        ExportName = "sceAgcDcbSetMarker",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetDrawCommandBufferMarker(CpuContext ctx) => DcbPushMarker(ctx);
+
+    [SysAbiExport(
         Nid = "cpCILPya5Zk",
         ExportName = "sceAgcAcbPushMarker",
         Target = Generation.Gen5,
