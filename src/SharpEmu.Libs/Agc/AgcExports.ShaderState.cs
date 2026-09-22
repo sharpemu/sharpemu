@@ -347,8 +347,15 @@ public static partial class AgcExports
     }
     #pragma warning restore SHEM004
 
-    // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
     #pragma warning disable SHEM004
+    [SysAbiExport(
+        Nid = "nApJjpKNBl4",
+        ExportName = "sceAgcFuseShaderHalves",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int FuseShaderHalvesLegacy(CpuContext context) =>
+        FuseShaderHalvesCore(context, legacy: true);
+
     [SysAbiExport(
         Nid = "fd5Bp5tGTgo",
         ExportName = "sceAgcFuseShaderHalves",
@@ -356,13 +363,6 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int FuseShaderHalves(CpuContext ctx) => FuseShaderHalvesCore(ctx, legacy: false);
     #pragma warning restore SHEM004
-
-    [SysAbiExport(
-        Nid = "nApJjpKNBl4",
-        ExportName = "sceAgcFuseShaderHalves",
-        Target = Generation.Gen5,
-        LibraryName = "libSceAgc")]
-    public static int FuseShaderHalvesLegacy(CpuContext ctx) => FuseShaderHalvesCore(ctx, legacy: true);
 
     private static int FuseShaderHalvesCore(CpuContext ctx, bool legacy)
     {
@@ -449,18 +449,15 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        if (isGeometryPair || legacy)
+        if (!MergeFusedResourceRegisters(ctx, frontAddress, fusedRegistersAddress, registerCount,
+                isGeometryPair, legacy))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
         {
             if (!TryReadUInt64(ctx, frontAddress + ShaderShRegistersOffset, out var frontRegistersAddress) ||
                 !TryReadByte(ctx, frontAddress + ShaderNumShRegistersOffset, out var frontRegisterCount))
-            {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
-
-            var merged = legacy
-                ? MergeLegacyFusedShaderRegisters(ctx, frontRegistersAddress, frontRegisterCount, fusedRegistersAddress, registerCount, isGeometryPair)
-                : MergeFusedUserScalarCount(ctx, frontRegistersAddress, frontRegisterCount, fusedRegistersAddress, registerCount);
-            if (!merged)
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -506,6 +503,105 @@ public static partial class AgcExports
             $"continuation=0x{backCodeAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool MergeFusedResourceRegisters(
+        CpuContext context, ulong frontAddress, ulong destinationAddress, byte destinationCount,
+        bool isGeometryPair, bool preserveSharedAllocation)
+    {
+        if (!TryReadUInt64(context, frontAddress + ShaderShRegistersOffset, out var sourceAddress) ||
+            !TryReadByte(context, frontAddress + ShaderNumShRegistersOffset, out var sourceCount))
+        {
+            return false;
+        }
+
+        var resourceOffset = isGeometryPair ? SpiShaderPgmRsrc1Gs : SpiShaderPgmRsrc1Hs;
+        if (!TryReadFusedResourceEntries(context, sourceAddress, sourceCount, resourceOffset,
+                out var sourceFirst, out var sourceSecond) ||
+            !TryReadFusedResourceEntries(context, destinationAddress, destinationCount, resourceOffset,
+                out var destinationFirst, out var destinationSecond))
+        {
+            return false;
+        }
+
+        if (sourceFirst == 0 || sourceSecond == 0 || destinationFirst == 0 || destinationSecond == 0)
+        {
+            return true;
+        }
+
+        if (!TryReadUInt32(context, sourceFirst + 4, out var frontFirst) ||
+            !TryReadUInt32(context, sourceSecond + 4, out var frontSecond) ||
+            !TryReadUInt32(context, destinationFirst + 4, out var backFirst) ||
+            !TryReadUInt32(context, destinationSecond + 4, out var backSecond))
+        {
+            return false;
+        }
+
+        uint sharedAllocation;
+        if (preserveSharedAllocation)
+        {
+            sharedAllocation = Math.Max(frontSecond >> 28, backSecond >> 28);
+        }
+        else
+        {
+            var frontPrivate = ((frontFirst & 0x3F) + 1) * 4;
+            var backPrivate = ((backFirst & 0x3F) + 1) * 4;
+            var frontTotal = frontPrivate + (frontSecond >> 28) * 8;
+            var backTotal = backPrivate + (backSecond >> 28) * 8;
+            var maximumTotal = Math.Max(frontTotal, backTotal);
+            sharedAllocation = Math.Max(frontPrivate, backPrivate) >= maximumTotal
+                ? 0 : (maximumTotal - Math.Min(frontTotal, backTotal) + 7) / 64;
+        }
+
+        var mergedFirst = MergeMaximumRegisterField(backFirst, frontFirst, 0, 0x3F);
+        mergedFirst = MergeMaximumRegisterField(mergedFirst, frontFirst, isGeometryPair ? 29 : 28, 3);
+        var mergedSecond = (backSecond & 0x0FFFFFFF) | ((sharedAllocation & 15) << 28);
+        if (isGeometryPair)
+        {
+            mergedSecond = MergeMaximumRegisterField(mergedSecond, frontSecond, 16, 3);
+            mergedSecond = (mergedSecond & ~(1u << 18)) | (frontSecond & (1u << 18));
+        }
+
+        const uint frontOwnedFields = 0x0800003E;
+        mergedSecond = (mergedSecond & ~frontOwnedFields) | (frontSecond & frontOwnedFields);
+        return TryWriteUInt32(context, destinationFirst + 4, mergedFirst) &&
+            TryWriteUInt32(context, destinationSecond + 4, mergedSecond);
+    }
+
+    private static uint MergeMaximumRegisterField(uint destination, uint source, int shift, uint mask)
+    {
+        var maximum = Math.Max((destination >> shift) & mask, (source >> shift) & mask);
+        return (destination & ~(mask << shift)) | (maximum << shift);
+    }
+
+    private static bool TryReadFusedResourceEntries(
+        CpuContext context, ulong address, byte count, uint resourceOffset,
+        out ulong firstEntry, out ulong secondEntry)
+    {
+        firstEntry = 0;
+        secondEntry = 0;
+        Span<byte> entry = stackalloc byte[8];
+        for (var index = 0; index < count; index++)
+        {
+            var offset = (ulong)index * 8;
+            if (address == 0 || address > ulong.MaxValue - offset - 7 ||
+                !context.Memory.TryRead(address + offset, entry))
+            {
+                return false;
+            }
+
+            var registerOffset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry);
+            if (registerOffset == resourceOffset && firstEntry == 0)
+            {
+                firstEntry = address + offset;
+            }
+            else if (registerOffset == resourceOffset + 1 && secondEntry == 0)
+            {
+                secondEntry = address + offset;
+            }
+        }
+
+        return true;
     }
 
     [SysAbiExport(
@@ -1262,64 +1358,6 @@ public static partial class AgcExports
 
     private static uint UserScalarCount(uint rsrc2) => ((rsrc2 >> 1) & 0x1Fu) | (((rsrc2 >> 27) & 1u) << 5);
 
-    private static bool MergeFusedUserScalarCount(CpuContext ctx, ulong frontRegisters, int frontCount, ulong fusedRegisters, int fusedCount)
-    {
-        if (!TryFindShaderRegister(ctx, frontRegisters, frontCount, SpiShaderPgmRsrc2Gs, 0, out var frontEntry) ||
-            !TryFindShaderRegister(ctx, fusedRegisters, fusedCount, SpiShaderPgmRsrc2Gs, 0, out var fusedEntry))
-        {
-            return true;
-        }
-
-        if (!TryReadUInt32(ctx, frontEntry + sizeof(uint), out var front) ||
-            !TryReadUInt32(ctx, fusedEntry + sizeof(uint), out var fused))
-        {
-            return false;
-        }
-
-        var count = Math.Max(UserScalarCount(front), UserScalarCount(fused));
-        var merged = (fused & ~((0x1Fu << 1) | (1u << 27))) | ((count & 0x1Fu) << 1) | ((count >> 5) << 27);
-        return merged == fused || TryWriteUInt32(ctx, fusedEntry + sizeof(uint), merged);
-    }
-
-    private static bool MergeLegacyFusedShaderRegisters(
-        CpuContext ctx, ulong frontRegisters, int frontCount, ulong fusedRegisters, int fusedCount, bool geometry)
-    {
-        var rsrc1Offset = geometry ? SpiShaderPgmRsrc1Gs : SpiShaderPgmRsrc1Hs;
-        var rsrc2Offset = geometry ? SpiShaderPgmRsrc2Gs : ShaderRegisterOffset.SpiShaderPgmRsrc2Hs;
-        if (!TryFindShaderRegister(ctx, frontRegisters, frontCount, rsrc1Offset, 0, out var frontEntry1) ||
-            !TryFindShaderRegister(ctx, frontRegisters, frontCount, rsrc2Offset, 0, out var frontEntry2) ||
-            !TryFindShaderRegister(ctx, fusedRegisters, fusedCount, rsrc1Offset, 0, out var fusedEntry1) ||
-            !TryFindShaderRegister(ctx, fusedRegisters, fusedCount, rsrc2Offset, 0, out var fusedEntry2))
-        {
-            return true;
-        }
-
-        if (!TryReadUInt32(ctx, frontEntry1 + sizeof(uint), out var front1) ||
-            !TryReadUInt32(ctx, frontEntry2 + sizeof(uint), out var front2) ||
-            !TryReadUInt32(ctx, fusedEntry1 + sizeof(uint), out var fused1) ||
-            !TryReadUInt32(ctx, fusedEntry2 + sizeof(uint), out var fused2))
-        {
-            return false;
-        }
-
-        // The older export takes maximum allocations, but user SGPRs and the
-        // ES component flag belong to the front half, not the back half.
-        fused1 = MergeMaxField(fused1, front1, 0, 0x3Fu);
-        fused1 = MergeMaxField(fused1, front1, geometry ? 29 : 28, 3u);
-        fused2 = MergeMaxField(fused2, front2, 28, 0xFu);
-        if (geometry)
-        {
-            fused2 = MergeMaxField(fused2, front2, 16, 3u);
-            fused2 = (fused2 & ~0x0004_0000u) | (front2 & 0x0004_0000u);
-        }
-
-        fused2 = (fused2 & ~0x0800_003Eu) | (front2 & 0x0800_003Eu);
-        return TryWriteUInt32(ctx, fusedEntry1 + sizeof(uint), fused1) &&
-               TryWriteUInt32(ctx, fusedEntry2 + sizeof(uint), fused2);
-
-        static uint MergeMaxField(uint destination, uint source, int shift, uint mask) =>
-            (destination & ~(mask << shift)) | (Math.Max((destination >> shift) & mask, (source >> shift) & mask) << shift);
-    }
 
     private static bool TryFindShaderRegister(
         CpuContext ctx,
