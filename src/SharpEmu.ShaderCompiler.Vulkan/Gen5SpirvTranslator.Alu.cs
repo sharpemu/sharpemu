@@ -453,6 +453,30 @@ public static partial class Gen5SpirvTranslator
                         _uintType,
                         GetRawSource(instruction, 0));
                     break;
+                case "VFfbhU32":
+                {
+                    var source = GetRawSource(instruction, 0);
+                    var msb = Bitcast(
+                        _uintType,
+                        Ext(75, _intType, source));
+                    var position = _module.AddInstruction(
+                        SpirvOp.ISub,
+                        _uintType,
+                        UInt(31),
+                        msb);
+                    var nonzero = _module.AddInstruction(
+                        SpirvOp.INotEqual,
+                        _boolType,
+                        source,
+                        UInt(0));
+                    result = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        nonzero,
+                        position,
+                        UInt(uint.MaxValue));
+                    break;
+                }
                 case "VFfblB32":
                     result = Bitcast(
                         _uintType,
@@ -680,6 +704,31 @@ public static partial class Gen5SpirvTranslator
                         SpirvOp.ShiftRightLogical,
                         reverse: true);
                     break;
+                case "VLshrrevB64":
+                {
+                    // V_LSHRREV_B64 writes a VGPR pair. Source 0 supplies the
+                    // shift count; source 1 is the 64-bit value to shift.
+                    var shift = _module.AddInstruction(
+                        SpirvOp.UConvert,
+                        _ulongType,
+                        BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
+                    var shifted = ShiftRightLogical64(
+                        GetRawSource64(instruction, 1),
+                        shift);
+                    result = _module.AddInstruction(
+                        SpirvOp.UConvert,
+                        _uintType,
+                        shifted);
+                    StoreV(
+                        destination + 1,
+                        _module.AddInstruction(
+                            SpirvOp.UConvert,
+                            _uintType,
+                            ShiftRightLogical64(
+                                shifted,
+                                _module.Constant64(_ulongType, 32))));
+                    break;
+                }
                 case "VLshlB32":
                     result = EmitIntegerBinary(instruction, SpirvOp.ShiftLeftLogical);
                     break;
@@ -1009,6 +1058,18 @@ public static partial class Gen5SpirvTranslator
                         BitwiseAnd(
                             _module.AddInstruction(SpirvOp.Not, _uintType, mask),
                             source));
+                    break;
+                }
+                case "VAlignbitB32":
+                {
+                    var high = GetRawSource(instruction, 0);
+                    var low = GetRawSource(instruction, 1);
+                    var shift = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    var lowPart = ShiftRightLogical(low, shift);
+                    var inverse = BitwiseAnd(ISubU(UInt(32), shift), UInt(31));
+                    var highPartRaw = ShiftLeftLogical(high, inverse);
+                    var highPart = SelectU(IsNotZero(shift), highPartRaw, UInt(0));
+                    result = BitwiseOr(lowPart, highPart);
                     break;
                 }
                 case "VCvtPkrtzF16F32":
@@ -1791,11 +1852,33 @@ public static partial class Gen5SpirvTranslator
                 var right = compare64
                     ? GetRawSource64(instruction, 1)
                     : GetRawSource(instruction, 1);
-                var signed = opcode.EndsWith("I32", StringComparison.Ordinal);
+                var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var signed = signed16 ||
+                    opcode.EndsWith("I32", StringComparison.Ordinal) ||
+                    opcode.EndsWith("I64", StringComparison.Ordinal);
+                if (signed16)
+                {
+                    left = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, left),
+                        UInt(0),
+                        UInt(16));
+                    right = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, right),
+                        UInt(0),
+                        UInt(16));
+                }
                 if (signed)
                 {
-                    left = Bitcast(_intType, left);
-                    right = Bitcast(_intType, right);
+                    if (!signed16)
+                    {
+                        var signedType = compare64 ? _longType : _intType;
+                        left = Bitcast(signedType, left);
+                        right = Bitcast(signedType, right);
+                    }
                 }
 
                 var operation = opcode switch
@@ -1804,7 +1887,14 @@ public static partial class Gen5SpirvTranslator
                     "VCmpEqU32" or "VCmpxEqU32" => SpirvOp.IEqual,
                     "VCmpNeI32" or "VCmpxNeI32" or
                     "VCmpNeU32" or "VCmpxNeU32" => SpirvOp.INotEqual,
-                    "VCmpxNeU64" => SpirvOp.INotEqual,
+                    "VCmpEqI16" or "VCmpxEqI16" => SpirvOp.IEqual,
+                    "VCmpNeI16" or "VCmpxNeI16" => SpirvOp.INotEqual,
+                    "VCmpNeU64" or "VCmpxNeU64" or
+                    "VCmpNeI64" or "VCmpxNeI64" => SpirvOp.INotEqual,
+                    "VCmpLtI16" or "VCmpxLtI16" => SpirvOp.SLessThan,
+                    "VCmpLeI16" or "VCmpxLeI16" => SpirvOp.SLessThanEqual,
+                    "VCmpGtI16" or "VCmpxGtI16" => SpirvOp.SGreaterThan,
+                    "VCmpGeI16" or "VCmpxGeI16" => SpirvOp.SGreaterThanEqual,
                     "VCmpLtI32" or "VCmpxLtI32" => SpirvOp.SLessThan,
                     "VCmpLeI32" or "VCmpxLeI32" => SpirvOp.SLessThanEqual,
                     "VCmpGtI32" or "VCmpxGtI32" => SpirvOp.SGreaterThan,

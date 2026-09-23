@@ -107,6 +107,35 @@ public sealed class Gen5ShaderTranslatorTests
     }
 
     [Fact]
+    public void SopkSetregB32DecodesScalarSourceWithoutDestination()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        Span<byte> code = stackalloc byte[2 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(code, 0xB9851234u);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[sizeof(uint)..], 0xBF810000u);
+        Assert.True(memory.TryWrite(ProgramAddress, code));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Sopk, instruction.Encoding);
+        Assert.Equal("SSetregB32", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(2, instruction.Sources.Count);
+        Assert.Equal(Gen5OperandKind.ScalarRegister, instruction.Sources[0].Kind);
+        Assert.Equal(5u, instruction.Sources[0].Value);
+        Assert.Equal(Gen5OperandKind.EncodedConstant, instruction.Sources[1].Kind);
+        Assert.Equal(0x1234u, instruction.Sources[1].Value);
+    }
+
+    [Fact]
     public void FusedProgramContinuesAfterSetProgramCounter()
     {
         const ulong continuationAddress = ProgramAddress + 0x100;

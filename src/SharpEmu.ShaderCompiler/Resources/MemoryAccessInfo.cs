@@ -158,6 +158,10 @@ public sealed class MemoryAccessTable
                     table.Add(FromImage(instruction, image));
                     break;
                 case Gen5DataShareControl share:
+                    if (instruction.Opcode is "DsSwizzleB32" or "DsBpermuteB32")
+                    {
+                        break;
+                    }
                     table.Add(new MemoryAccessInfo
                     {
                         Pc = instruction.Pc,
@@ -241,7 +245,11 @@ public sealed class MemoryAccessTable
         {
             Pc = instruction.Pc,
             Opcode = opcode,
-            Kind = control.UsesFlatAddress ? MemoryResourceKind.Flat : MemoryResourceKind.Global,
+            Kind = opcode.StartsWith("Scratch", StringComparison.Ordinal)
+                ? MemoryResourceKind.Scratch
+                : control.UsesFlatAddress
+                    ? MemoryResourceKind.Flat
+                    : MemoryResourceKind.Global,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
             DataDwords = Math.Max(control.DwordCount, 1u),
@@ -257,6 +265,22 @@ public sealed class MemoryAccessTable
     private static MemoryAccessInfo FromImage(Gen5ShaderInstruction instruction, Gen5ImageControl control)
     {
         var opcode = instruction.Opcode;
+        if (opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
+        {
+            // The current backends return a deterministic miss for raw GFX10
+            // BVH traversal. Do not materialize its descriptor as a texture;
+            // BVH descriptors do not use the regular image descriptor layout.
+            return new MemoryAccessInfo
+            {
+                Pc = instruction.Pc,
+                Opcode = opcode,
+                Kind = MemoryResourceKind.None,
+                Access = MemoryAccess.None,
+                DataDwords = 4,
+                ComponentCount = 4,
+            };
+        }
+
         var atomic = opcode.StartsWith("ImageAtomic", StringComparison.Ordinal);
         var store = opcode.StartsWith("ImageStore", StringComparison.Ordinal);
         var sampled = opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||

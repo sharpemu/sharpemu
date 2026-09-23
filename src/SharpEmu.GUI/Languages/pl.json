@@ -63,6 +63,7 @@
   "Options.Env.Group.Debug": "Debugowanie",
   "Options.Env.Group.General": "Ogólne",
   "Options.Env.RenderDoc.Desc": "Załaduj API RenderDoc w aplikacji, aby można było przechwytywać klatki z wnętrza emulatora.\nNaciśnij F12 podczas działania gry, aby przechwycić jedną klatkę; przechwycone klatki trafiają do user/logs/capture_logs/<TITLE_ID>.\nWymaga zainstalowanego RenderDoc. Spowalnia GPU i zawiesza niektóre tytuły, więc zostaw wyłączone, chyba że debugujesz.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Gdy RenderDoc jest włączony, inne konfliktujące nakładki mogą powodować utratę urządzenia. Włączenie tej opcji może rozwiązać problem.",
   "Options.DefaultProfile.Label": "Domyślna nazwa profilu",
   "Options.DefaultProfile.Desc": "Nazwa używana, gdy gra prosi o wprowadzenie tekstu. Domyślnie Sharp.",
   "Options.Section.Emulation": "EMULACJA",

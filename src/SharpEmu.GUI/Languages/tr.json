@@ -211,6 +211,7 @@
   "Options.Env.Group.Debug": "Hata Ayıklama",
   "Options.Env.Group.General": "Genel",
   "Options.Env.RenderDoc.Desc": "RenderDoc uygulama içi API'sini yükler, böylece kareler emülatörün içinden yakalanabilir.\nOyun çalışırken F12'a basınca bir kare yakalanır; kayıtlar user/logs/capture_logs/<TITLE_ID> altına düşer.\nRenderDoc'un kurulu olmasını gerektirir. GPU'yu yavaşlatır ve bazı oyunları kilitler, hata ayıklamıyorsanız kapalı bırakın.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc ayarı açıkken diğer çakışan overlayler device loss'a sebebiyet verebiliyor. Bu ayarı açmak bunu düzeltebilir.",
   "Options.DefaultProfile.Label": "Varsayilan profil adi",
   "Options.DefaultProfile.Desc": "Oyun metin girisi istediginde kullanilacak ad. Varsayilan deger Sharp'tir.",
   "Common.Save": "Kaydet",

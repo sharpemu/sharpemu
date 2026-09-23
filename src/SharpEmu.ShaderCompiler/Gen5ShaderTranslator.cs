@@ -776,6 +776,7 @@ public static partial class Gen5ShaderTranslator
             0x0E => "SCmpkLeU32",
             0x0F => "SAddkI32",
             0x10 => "SMulkI32",
+            0x13 => "SSetregB32",
             // RDNA2 uses four SOPK forms to wait for one counter.
             // The selected counter does not change the translated operation.
             0x17 or 0x18 or 0x19 or 0x1A => "SWaitcnt",
@@ -824,6 +825,7 @@ public static partial class Gen5ShaderTranslator
             0x36 => "VCosF32",
             0x37 => "VNotB32",
             0x38 => "VBfrevB32",
+            0x39 => "VFfbhU32",
             0x3A => "VFfblB32",
             0x42 => "VMovreldB32",
             0x43 => "VMovrelsB32",
@@ -962,6 +964,13 @@ public static partial class Gen5ShaderTranslator
             0x86 => "VCmpGeI32",
             0x87 => "VCmpTI32",
             0x88 => "VCmpClassF32",
+            0x89 => "VCmpLtI16",
+            0x8A => "VCmpEqI16",
+            0x8B => "VCmpLeI16",
+            0x8C => "VCmpGtI16",
+            0x8D => "VCmpNeI16",
+            0x8E => "VCmpGeI16",
+            0x98 => "VCmpxClassF32",
             0x90 => "VCmpxFI32",
             0x91 => "VCmpxLtI32",
             0x92 => "VCmpxEqI32",
@@ -970,6 +979,12 @@ public static partial class Gen5ShaderTranslator
             0x95 => "VCmpxNeI32",
             0x96 => "VCmpxGeI32",
             0x97 => "VCmpxTI32",
+            0x99 => "VCmpxLtI16",
+            0x9A => "VCmpxEqI16",
+            0x9B => "VCmpxLeI16",
+            0x9C => "VCmpxGtI16",
+            0x9D => "VCmpxNeI16",
+            0x9E => "VCmpxGeI16",
             0xC0 => "VCmpFU32",
             0xC1 => "VCmpLtU32",
             0xC2 => "VCmpEqU32",
@@ -1002,6 +1017,7 @@ public static partial class Gen5ShaderTranslator
             0xDD => "VCmpxLgF16",
             0xDE => "VCmpxGeF16",
             0xDF => "VCmpxOF16",
+            0xE5 => "VCmpNeU64",
             0xE8 => "VCmpUF16",
             0xE9 => "VCmpNgeF16",
             0xEA => "VCmpNlgF16",
@@ -1011,6 +1027,7 @@ public static partial class Gen5ShaderTranslator
             0xEE => "VCmpNltF16",
             0xEF => "VCmpTruF16",
             0xF5 => "VCmpxNeU64",
+            0xB5 => "VCmpxNeI64",
             0xF8 => "VCmpxUF16",
             0xF9 => "VCmpxNgeF16",
             0xFA => "VCmpxNlgF16",
@@ -1051,6 +1068,7 @@ public static partial class Gen5ShaderTranslator
             }
             : opcode switch
         {
+            0x0B5 => "VCmpxNeI64",
             0x101 => "VCndmaskB32",
             0x103 => "VAddF32",
             0x104 => "VSubF32",
@@ -1068,6 +1086,7 @@ public static partial class Gen5ShaderTranslator
             0x146 => "VCubetcF32",
             0x147 => "VCubemaF32",
             0x14A => "VBfiB32",
+            0x14E => "VAlignbitB32",
             0x14B => "VFmaF32",
             0x151 => "VMin3F32",
             0x152 => "VMin3I32",
@@ -1109,6 +1128,7 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
+            0x300 => "VLshrrevB64",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
@@ -1226,6 +1246,7 @@ public static partial class Gen5ShaderTranslator
             0x77 => "DsRead2B64",
             0xB0 => "DsWriteAddtidB32",
             0xB1 => "DsReadAddtidB32",
+            0xB3 => "DsBpermuteB32",
             0xDE => "DsWriteB96",
             0xDF => "DsWriteB128",
             0xFE => "DsReadB96",
@@ -1345,6 +1366,7 @@ public static partial class Gen5ShaderTranslator
             0x3D => "BufferAtomicDec",
             0x3F => "BufferAtomicFmin",
             0x40 => "BufferAtomicFmax",
+            0x50 => "BufferAtomicSwapX2",
             0x5A => "BufferAtomicOrX2",
             _ => $"MubufRaw{opcode:X2}",
         };
@@ -1366,6 +1388,7 @@ public static partial class Gen5ShaderTranslator
         var prefix = segment switch
         {
             0x0 => "Flat",
+            0x1 => "Scratch",
             0x2 => "Global",
             _ => string.Empty,
         };
@@ -1457,7 +1480,9 @@ public static partial class Gen5ShaderTranslator
 
     private static bool DecodeMimg(uint word, out string name, out uint sizeDwords, out string error)
     {
-        var opcode = (word >> 18) & 0x7F;
+        // RDNA2 MIMG OP[7] is bit 0 while OP[6:0] occupies bits 24:18.
+        // Ignoring bit 0 aliases 0xE6/0xE7 BVH operations to 0x66/0x67.
+        var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
         sizeDwords = 2 + ((word >> 1) & 0x3);
         error = string.Empty;
         name = opcode switch
@@ -1545,6 +1570,8 @@ public static partial class Gen5ShaderTranslator
             0xB9 => "ImageSampleCClAO",
             0xBD => "ImageSampleCBAO",
             0xBE => "ImageSampleCBClAO",
+            0xE6 => "ImageBvhIntersectRay",
+            0xE7 => "ImageBvh64IntersectRay",
             _ => string.Empty,
         };
 
@@ -1832,6 +1859,14 @@ public static partial class Gen5ShaderTranslator
                     {
                         sources = [.. sources, Gen5Operand.Scalar(scalarSource)];
                     }
+                }
+                else if (opcode == "SSetregB32")
+                {
+                    sources =
+                    [
+                        Gen5Operand.Scalar((word >> 16) & 0x7F),
+                        new Gen5Operand(Gen5OperandKind.EncodedConstant, word & 0xFFFF),
+                    ];
                 }
                 else
                 {
@@ -2160,6 +2195,10 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorData1),
                     ],
                     "DsSwizzleB32" => [Gen5Operand.Vector(vectorData0)],
+                    "DsBpermuteB32" => [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Vector(vectorData0),
+                    ],
                     // DS_CMPST operand order is reversed vs buffer/image cmpswap:
                     // DATA0 holds the comparator, DATA1 holds the new value.
                     "DsCmpstB32" or "DsCmpstRtnB32" => [
@@ -2185,7 +2224,8 @@ public static partial class Gen5ShaderTranslator
                     "DsAppend" or "DsConsume" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
-                    "DsReadB32" or "DsReadI8" or "DsReadAddtidB32" or "DsSwizzleB32" => [
+                    "DsReadB32" or "DsReadI8" or "DsReadAddtidB32" or
+                    "DsSwizzleB32" or "DsBpermuteB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsReadB64" or "DsRead2B32" or "DsRead2St64B32" => [
@@ -2228,9 +2268,14 @@ public static partial class Gen5ShaderTranslator
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",
                     StringComparison.Ordinal);
+                var usesScratchAddress = opcode.StartsWith(
+                    "Scratch",
+                    StringComparison.Ordinal);
                 var memoryOpcode = usesFlatAddress
                     ? "Global" + opcode["Flat".Length..]
-                    : opcode;
+                    : usesScratchAddress
+                        ? "Global" + opcode["Scratch".Length..]
+                        : opcode;
                 var dwordCount = memoryOpcode switch
                 {
                     "GlobalLoadUbyte" or
@@ -2265,6 +2310,10 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorAddress + 1),
                     ]
+                    : usesScratchAddress && scalarAddress < 125
+                        ? [Gen5Operand.Scalar(scalarAddress)]
+                        : usesScratchAddress
+                            ? [Gen5Operand.Vector(vectorAddress)]
                     :
                     [
                         Gen5Operand.Vector(vectorAddress),
@@ -2343,7 +2392,7 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreDwordx2" => 2u,
                     "BufferStoreDwordx3" => 3u,
                     "BufferStoreDwordx4" => 4u,
-                    "BufferAtomicCmpswap" or "BufferAtomicOrX2" => 2u,
+                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicOrX2" => 2u,
                     _ when opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) => 1u,
                     _ => 0u,
                 };
@@ -2442,7 +2491,11 @@ public static partial class Gen5ShaderTranslator
                 sources = imageSources;
                 destinations = opcode.StartsWith("ImageStore", StringComparison.Ordinal)
                     ? []
-                    : [Gen5Operand.Vector(vectorData)];
+                    : opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay"
+                        ? Enumerable.Range((int)vectorData, 4)
+                            .Select(index => Gen5Operand.Vector((uint)index))
+                            .ToArray()
+                        : [Gen5Operand.Vector(vectorData)];
                 var dimension = (word >> 3) & 0x7;
                 control = new Gen5ImageControl(
                     (word >> 8) & 0xF,

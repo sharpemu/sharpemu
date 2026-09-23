@@ -342,6 +342,10 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "SHARPEMU_RENDERDOC",
                 EnvRenderDocToggle.IsChecked == true);
+        EnvDisableVkImplicitLayersToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle(
+                "SHARPEMU_VK_DISABLE_IMPLICITS",
+                EnvDisableVkImplicitLayersToggle.IsChecked == true);
         DefaultProfileBox.TextChanged += (_, _) =>
             _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
@@ -1261,6 +1265,8 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
         EnvRenderDocToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
+        EnvDisableVkImplicitLayersToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("SHARPEMU_VK_DISABLE_IMPLICITS");
         DefaultProfileBox.Text = _settings.DefaultProfile;
         WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         LoadHostDisplayOptions();
@@ -2469,6 +2475,13 @@ public partial class MainWindow : Window
 
             Environment.SetEnvironmentVariable(name, value);
             _appliedEnvironmentVariables.Add(name);
+        }
+
+        if (RenderDocCapture.ApplyVulkanLoaderEnvironment())
+        {
+            _appliedEnvironmentVariables.Add("VK_LOADER_DEBUG");
+            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_DISABLE");
+            _appliedEnvironmentVariables.Add("VK_LOADER_LAYERS_ALLOW");
         }
 
         Environment.SetEnvironmentVariable(

@@ -60,6 +60,16 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Fact]
+    public void BufferAtomicSwapX2_EmitsAtomicExchange()
+    {
+        var opcodes = CompileComputeOpcodes(
+            [0xE1404000, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.Contains((ushort)SpirvOp.AtomicExchange, opcodes);
+    }
+
+    [Fact]
     public void DataShareAtomics_EmitAtomicOpcodes()
     {
         // DS_ADD_RTN_U32 v3, v0, v1; DS_CMPST_RTN_B32 v3, v0, v1, v2; DS_MAX_U32 v0, v1.

@@ -23,6 +23,19 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
+            {
+                // Metal has no bound representation of GFX10's raw BVH
+                // descriptor in this backend. Preserve the hardware miss
+                // fallback used by the Vulkan path and keep the shader valid.
+                for (uint component = 0; component < 4; component++)
+                {
+                    StoreVector(image.VectorData + component, "0u");
+                }
+
+                return true;
+            }
+
             string texture;
             string samplerName;
             string kind;

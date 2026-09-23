@@ -74,6 +74,19 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void BufferAtomicSwapX2_UsesTwoDataRegisters()
+    {
+        // BUFFER_ATOMIC_SWAP_X2 v[1:2], off, s[0:3], 128 glc
+        var instruction = DecodeSingle(0xE1404000, 0x80000100);
+
+        Assert.Equal("BufferAtomicSwapX2", instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(1u, control.VectorData);
+        Assert.Equal(new[] { Gen5Operand.Vector(1), Gen5Operand.Vector(2) }, instruction.Destinations);
+    }
+
+    [Fact]
     public void ImageAtomicAdd_KeepsDataRegisterAsDestination()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc
@@ -197,6 +210,48 @@ public sealed class Gen5ShaderAtomicDecodeTests
             new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(3) },
             instruction.Sources);
         Assert.Empty(instruction.Destinations);
+    }
+
+    [Fact]
+    public void VCmpNeU64_DecodesVectorRegisterPairs()
+    {
+        // V_CMP_NE_U64 v[0:1], v[3:4].
+        var instruction = DecodeSingle(0x7DCA0700);
+
+        Assert.Equal("VCmpNeU64", instruction.Opcode);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(3) },
+            instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+    }
+
+    [Fact]
+    public void VFfbhU32_DecodesVop1Opcode39()
+    {
+        // V_FFBH_U32 v1, v2.
+        var instruction = DecodeSingle(0x7E027302);
+
+        Assert.Equal("VFfbhU32", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(2) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Fact]
+    public void VCmpxClassF32_DecodesVopcOpcode98()
+    {
+        var instruction = DecodeSingle(0x7D300702);
+
+        Assert.Equal("VCmpxClassF32", instruction.Opcode);
+    }
+
+    [Fact]
+    public void VAlignbitB32_DecodesVop3Opcode14E()
+    {
+        var instruction = DecodeSingle(0xD14E0001, 0x040E0502);
+
+        Assert.Equal("VAlignbitB32", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Vector(3) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
     }
 
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)

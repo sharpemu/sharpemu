@@ -117,6 +117,7 @@ public static class ResourceMaterializer
             evaluateTable: true, out var values, out var table, out var activeSources,
             additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount)))
         {
+            SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
             return false;
         }
 
@@ -212,6 +213,126 @@ public static class ResourceMaterializer
             snapshot.Samplers[index] = values[cursor++].Dwords;
         snapshot.UserData = inputs.UserData.ToArray();
         return true;
+    }
+
+    private static string DiagnoseSnapshotEvaluationFailure(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        IReadOnlyList<bool> activeSources)
+    {
+        var cleanEvaluator = new RuntimeValueEvaluator(
+            plan,
+            inputs.WithReader(inputs.ReadCleanMemory));
+        var evaluator = new RuntimeValueEvaluator(
+            plan,
+            inputs,
+            plan.CleanFlatSlots,
+            cleanEvaluator);
+
+        foreach (var sourceIndex in plan.MaterializationSources)
+        {
+            if (sourceIndex >= plan.DescriptorSources.Count)
+            {
+                return $"descriptor source {sourceIndex} is outside the source table";
+            }
+
+            if (activeSources.Count != 0 && !activeSources[(int)sourceIndex])
+            {
+                continue;
+            }
+
+            var source = plan.DescriptorSources[(int)sourceIndex];
+            for (var dword = 0; dword < source.Dwords.Length; dword++)
+            {
+                if (!evaluator.Evaluate(source.Dwords[dword], out _))
+                {
+                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated: " +
+                        DescribeEvaluationValue(plan, inputs, evaluator, source.Dwords[dword]);
+                }
+            }
+        }
+
+        foreach (var read in plan.TableReads)
+        {
+            var clean = read.FlatOffset < plan.CleanFlatSlots.Count &&
+                plan.CleanFlatSlots[(int)read.FlatOffset] != 0;
+            var selected = clean ? cleanEvaluator : evaluator;
+            if (read.FlatOffset >= plan.TableReads.Count || !selected.Evaluate(read.Value, out _))
+            {
+                return $"resource table read {read.FlatOffset} cannot be evaluated: " +
+                    DescribeEvaluationValue(plan, inputs, selected, read.Value);
+            }
+        }
+
+        return "descriptor snapshot evaluation failed without an isolated source";
+    }
+
+    private static string DescribeEvaluationValue(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        RuntimeValueEvaluator evaluator,
+        ScalarValue value,
+        int depth = 0)
+    {
+        if (depth >= 6)
+        {
+            return value.ToString();
+        }
+
+        if (value.Kind == ScalarValueKind.ResourceTableWord)
+        {
+            var slot = (int)value.Payload;
+            if ((uint)slot < plan.TableReads.Count)
+            {
+                var read = plan.TableReads[slot];
+                return $"table-slot={slot} flat={read.FlatOffset} value=" +
+                    DescribeEvaluationValue(plan, inputs, evaluator, read.Value, depth + 1);
+            }
+
+            return $"table-slot={slot} (outside table)";
+        }
+
+        if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord &&
+            value.MemoryIndex >= 0 && value.MemoryIndex < plan.Memory.Count)
+        {
+            var memory = plan.Memory[value.MemoryIndex];
+            var detail = $"{value.Kind} memory={value.MemoryIndex} pc=0x{memory.Pc:X8} " +
+                $"opcode={memory.Opcode} offset={memory.Offset} operands=[{string.Join(", ", value.Operands.Select(operand =>
+                    DescribeEvaluationValue(plan, inputs, evaluator, operand, depth + 1)))}]";
+            if (value.Operands.Length >= 2 && value.Operands[0].Operands.Length >= 2 &&
+                evaluator.EvaluateWide(value.Operands[0].Operands[0], out var low) &&
+                evaluator.EvaluateWide(value.Operands[0].Operands[1], out var high) &&
+                evaluator.EvaluateWide(value.Operands[1], out var dynamicOffset))
+            {
+                var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+                var relative = (long)(int)memory.Offset + (uint)dynamicOffset;
+                if (relative >= 0 && baseAddress <= AddressMask - (ulong)relative)
+                {
+                    var address = (baseAddress + (ulong)relative) & ~3ul;
+                    var regular = inputs.ReadMemory is not null && inputs.ReadMemory(address, out _);
+                    var clean = inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(address, out _);
+                    detail += $" base=0x{baseAddress:X16} dynamic=0x{dynamicOffset:X} " +
+                        $"address=0x{address:X16} readable={regular} clean={clean}";
+                }
+            }
+
+            return detail;
+        }
+
+        if (value.Kind is ScalarValueKind.AddressHandle or ScalarValueKind.BufferHandle or
+            ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle)
+        {
+            return $"{value.Kind}[{string.Join(", ", value.Operands.Select(operand =>
+                DescribeEvaluationValue(plan, inputs, evaluator, operand, depth + 1)))}]";
+        }
+
+        if (value.Kind is ScalarValueKind.Phi or ScalarValueKind.Select or ScalarValueKind.Operation)
+        {
+            return $"{value} operands=[{string.Join(", ", value.Operands.Select(operand =>
+                DescribeEvaluationValue(plan, inputs, evaluator, operand, depth + 1)))}]";
+        }
+
+        return value.ToString();
     }
 
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>

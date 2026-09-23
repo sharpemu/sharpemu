@@ -63,6 +63,7 @@
   "Options.Env.Group.Debug": "Silumine",
   "Options.Env.Group.General": "Üldine",
   "Options.Env.RenderDoc.Desc": "Laadib RenderDoc'i rakendusesisese API, et kaadreid saaks hõivata otse emulaatorist.\nVajuta mängu käigus F12 ühe kaadri hõivamiseks; hõivatised salvestatakse kausta user/logs/capture_logs/<TITLE_ID>.\nNõuab paigaldatud RenderDoc'i. Aeglustab GPU-d ja põhjustab mõningate mängude hangumist, seega hoia välja lülitatuna, kui sa ei silu.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Kui RenderDoc on lubatud, võivad teised konfliktis overlay'd põhjustada device loss'i. Selle valiku lubamine võib probleemi lahendada.",
   "Options.DefaultProfile.Label": "Vaikimisi profiili nimi",
   "Options.DefaultProfile.Desc": "Nimi, mida kasutatakse, kui mäng küsib tekstisisestust. Vaikimisi Sharp.",
   "Options.Section.Emulation": "EMULATSIOON",

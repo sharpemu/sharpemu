@@ -993,6 +993,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Classes="optionToggle" />
                         </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
+                                          Label="SHARPEMU_VK_DISABLE_IMPLICITS"
+                                          Description="{Binding [Options.Env.DisableVkImplicitLayers.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameEnvDisableVkImplicitLayersToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
+                        <local:SettingRow Classes="optionRow"
                                           Label="SHARPEMU_VK_VALIDATION"
                                           Description="{Binding [Options.Env.VkValidation.Desc],
                                                                 Source={x:Static local:Localization.Instance},
@@ -1560,6 +1568,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="EnvRenderDocRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_RENDERDOC"
                                         Description="{Binding [Options.Env.RenderDoc.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvRenderDocToggle" Classes="optionToggle" />
+                      </local:SettingRow>
+
+                      <local:SettingRow Classes="optionRow"
+                                        LabelFontFamily="Consolas,monospace"
+                                        Label="SHARPEMU_VK_DISABLE_IMPLICITS"
+                                        Description="{Binding [Options.Env.DisableVkImplicitLayers.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="EnvDisableVkImplicitLayersToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="EnvVkValidationRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"

@@ -58,6 +58,7 @@
   "Options.Env.Group.Debug": "Hibakeresés",
   "Options.Env.Group.General": "Általános",
   "Options.Env.RenderDoc.Desc": "Betölti a RenderDoc alkalmazáson belüli API-ját, így képkockák rögzíthetők az emulátorból.\nNyomd meg az F12-et futó játék közben egy képkocka rögzítéséhez; a felvételek a user/logs/capture_logs/<TITLE_ID> mappába kerülnek.\nTelepített RenderDocot igényel. Lassítja a GPU-t és egyes játékokat lefagyaszt, ezért hagyd kikapcsolva, hacsak nem hibakeresel.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Ha a RenderDoc engedélyezve van, más ütköző overlayek device loss hibát okozhatnak. Ennek a beállításnak az engedélyezése megoldhatja a problémát.",
   "Options.Section.Emulation": "EMULÁCIÓ",
   "Options.Section.Logging": "LOGOLÁS",
   "Options.Section.Launcher": "INDITÓ",

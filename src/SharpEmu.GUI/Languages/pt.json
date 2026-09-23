@@ -58,6 +58,7 @@
   "Options.Env.Group.Debug": "Depuração",
   "Options.Env.Group.General": "Geral",
   "Options.Env.RenderDoc.Desc": "Carrega a API in-application do RenderDoc para capturar frames a partir do emulador.\nPrime F12 enquanto o jogo corre para capturar um frame; as capturas vão para user/logs/capture_logs/<TITLE_ID>.\nRequer o RenderDoc instalado. Torna a GPU mais lenta e bloqueia alguns títulos, por isso deixa desativado a menos que estejas a depurar.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Quando o RenderDoc está ativado, outros overlays em conflito podem causar perda do dispositivo. Ativar esta opção pode corrigir o problema.",
   "Options.Section.Emulation": "EMULAÇÃO",
   "Options.Section.Logging": "REGISTOS",
   "Options.Section.Launcher": "LANÇADOR",

@@ -47,6 +47,7 @@
   "Options.Env.Group.Debug": "Xətaların araşdırılması",
   "Options.Env.Group.General": "Ümumi",
   "Options.Env.RenderDoc.Desc": "Kadrları emulyatorun daxilindən çəkmək üçün RenderDoc tətbiqdaxili API-sini yükləyin.\nOyun işləyərkən bir kadr çəkmək üçün F10 düyməsini basın; çəkilən kadrlar user/logs/capture_logs/<TITLE_ID> qovluğunda saxlanılır.\nRenderDoc quraşdırılmalıdır. GPU-nu ləngidir və bəzi oyunların donmasına səbəb olur, buna görə xətaları araşdırmadıqda söndürülmüş saxlayın.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "RenderDoc aktiv olduqda digər ziddiyyətli overlay-lər device loss-a səbəb ola bilər. Bu seçimi aktivləşdirmək problemi həll edə bilər.",
   "Options.Env.GuestImageCpuSync.Desc": "Emulyasiya olunan sistemdə oyunun öz CPU kodunun yenidən yazdığı təsvir səthlərini təkrar yükləyin.\nAdətən söndürülmüş saxlayın. CPU ilə çəkilən səthləri ekranda görünməyən oyunlar üçün aktivləşdirin.\nPerformansı azaldır və GTA V kimi bəzi oyunların işini pisləşdirir.",
   "Options.Env.ForceSubmitOrphanPreambles.Desc": "GPU əmr buferlərinin giriş əmrlərini hədəf növbəsi onları qəbul etmədikdə belə ötürün.\nAdətən söndürülmüş saxlayın. Heç vaxt siqnal verməyən GPU sinxronlaşdırma səddini gözləyərkən donan oyunlar üçün aktivləşdirin.",
   "Options.DefaultProfile.Label": "Standart profil adı",

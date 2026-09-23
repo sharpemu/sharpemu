@@ -475,7 +475,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 Console.Error.WriteLine(
                     "[SHARPEMU][ERROR] A guest shader compiled to invalid SPIR-V."
-                    + "The shader module was created without an API-level error. {dumpHint}");
+                    + $"The shader module was created without an API-level error. {dumpHint}");
             }
 
             return Vk.False;
@@ -829,12 +829,17 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthClipControlExtension = (byte*)SilkMarshal.StringToPtr(DepthClipControlExtensionName);
             var depthClipEnableExtension = (byte*)SilkMarshal.StringToPtr(DepthClipEnableExtensionName);
             var barycentricExtension = (byte*)SilkMarshal.StringToPtr(FragmentShaderBarycentricExtensionName);
+            var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             try
             {
                 var extensions = stackalloc byte*[12];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
+                if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
+                {
+                    extensions[extensionCount++] = viewportIndexLayerExtension;
+                }
                 if (_supportsFragmentShaderBarycentric)
                 {
                     extensions[extensionCount++] = barycentricExtension;
@@ -975,6 +980,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)depthClipEnableExtension);
                 SilkMarshal.Free((nint)pushDescriptorExtension);
                 SilkMarshal.Free((nint)barycentricExtension);
+                SilkMarshal.Free((nint)viewportIndexLayerExtension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);

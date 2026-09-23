@@ -61,5 +61,41 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.Select, _uintType, sourceActive, value, UInt(0)));
             return true;
         }
+
+        private bool TryEmitDataShareBpermute(Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count != 2 || instruction.Destinations.Count != 1)
+            {
+                error = "invalid data-share bpermute operands";
+                return false;
+            }
+            if (_subgroupInvocationIdInput == 0)
+            {
+                error = "data-share bpermute requires subgroup lane access";
+                return false;
+            }
+
+            var lane = Load(_uintType, _subgroupInvocationIdInput);
+            var address = IAdd(GetRawSource(instruction, 0), UInt(control.SingleOffsetBytes));
+            var index = BitwiseAnd(ShiftRightLogical(address, UInt(2)), UInt(31));
+            var sourceLane = BitwiseOr(BitwiseAnd(lane, UInt(~31u)), index);
+
+            // DS_BPERMUTE reads only from active lanes in the current 32-lane half-wave.
+            var ballot = _module.AddInstruction(SpirvOp.GroupNonUniformBallot, _uvec4Type,
+                UInt(3), Load(_boolType, _exec));
+            var sourceWord = _module.AddInstruction(SpirvOp.VectorExtractDynamic, _uintType,
+                ballot, ShiftRightLogical(sourceLane, UInt(5)));
+            var sourceActive = IsNotZero(BitwiseAnd(ShiftRightLogical(sourceWord,
+                BitwiseAnd(sourceLane, UInt(31))), UInt(1)));
+            var safeSourceLane = _module.AddInstruction(SpirvOp.Select, _uintType,
+                sourceActive, sourceLane, lane);
+            var value = _module.AddInstruction(SpirvOp.GroupNonUniformShuffle, _uintType,
+                UInt(3), GetRawSource(instruction, 1), safeSourceLane);
+            StoreV(instruction.Destinations[0].Value,
+                _module.AddInstruction(SpirvOp.Select, _uintType, sourceActive, value, UInt(0)));
+            return true;
+        }
     }
 }

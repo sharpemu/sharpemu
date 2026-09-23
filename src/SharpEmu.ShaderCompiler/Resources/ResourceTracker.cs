@@ -485,7 +485,9 @@ public sealed partial class ResourceTracker
         {
             if (memory.Kind == MemoryResourceKind.Scratch)
             {
-                throw Failure(memory.Pc, "scratch operations are not supported");
+                // Scratch is invocation-private shader storage. It has no host
+                // resource handle or descriptor-table binding to materialize.
+                return;
             }
 
             if (access.Handle is null || access.Handle.Kind != ScalarValueKind.AddressHandle)

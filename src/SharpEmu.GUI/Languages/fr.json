@@ -58,6 +58,7 @@
   "Options.Env.Group.Debug": "Débogage",
   "Options.Env.Group.General": "Général",
   "Options.Env.RenderDoc.Desc": "Charge l'API in-application de RenderDoc afin de capturer des images depuis l'émulateur.\nAppuyez sur F12 pendant le jeu pour capturer une image ; les captures sont écrites dans user/logs/capture_logs/<TITLE_ID>.\nNécessite l'installation de RenderDoc. Ralentit le GPU et bloque certains jeux : laissez cette option désactivée sauf en cas de débogage.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Lorsque RenderDoc est activé, d'autres overlays en conflit peuvent provoquer une perte du périphérique. Activer cette option peut corriger le problème.",
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",
   "Options.Section.Launcher": "LANCEUR",

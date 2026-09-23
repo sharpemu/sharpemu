@@ -182,6 +182,7 @@
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "Generale",
   "Options.Env.RenderDoc.Desc": "Carica l'API in-application di RenderDoc per catturare i frame dall'interno dell'emulatore.\nPremi F12 mentre il gioco è in esecuzione per catturare un frame; le catture finiscono in user/logs/capture_logs/<TITLE_ID>.\nRichiede RenderDoc installato. Rallenta la GPU e blocca alcuni titoli, quindi lascialo disattivato se non stai facendo debug.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Quando RenderDoc è attivo, altri overlay in conflitto possono causare una perdita del dispositivo. Abilitare questa opzione può risolvere il problema.",
   "Common.Save": "Salva",
   "Common.Cancel": "Annulla",
   "Options.About": "Informazioni",

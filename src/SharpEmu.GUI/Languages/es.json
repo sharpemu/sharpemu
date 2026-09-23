@@ -187,6 +187,7 @@
   "Options.Env.Group.Debug": "Depuración",
   "Options.Env.Group.General": "General",
   "Options.Env.RenderDoc.Desc": "Carga la API in-application de RenderDoc para poder capturar fotogramas desde el emulador.\nPulsa F12 mientras el juego se ejecuta para capturar un fotograma; las capturas se guardan en user/logs/capture_logs/<TITLE_ID>.\nRequiere tener RenderDoc instalado. Ralentiza la GPU y bloquea algunos títulos, así que déjalo desactivado salvo que estés depurando.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Cuando RenderDoc está activado, otros overlays en conflicto pueden provocar una pérdida del dispositivo. Activar esta opción puede solucionar el problema.",
   "Common.Save": "Guardar",
   "Common.Cancel": "Cancelar",
   "Updater.Auto.Label": "Buscar actualizaciones al iniciar",

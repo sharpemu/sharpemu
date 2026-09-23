@@ -61,6 +61,7 @@
   "Options.Env.Group.Debug": "Отладка",
   "Options.Env.Group.General": "Общие",
   "Options.Env.RenderDoc.Desc": "Загружает внутренний API RenderDoc, чтобы кадры можно было захватывать из эмулятора.\nНажмите F12 во время игры, чтобы захватить один кадр; захваты сохраняются в user/logs/capture_logs/<TITLE_ID>.\nТребует установленного RenderDoc. Замедляет GPU и подвешивает некоторые игры, поэтому оставьте выключенным, если не занимаетесь отладкой.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "Когда RenderDoc включён, другие конфликтующие оверлеи могут вызвать потерю устройства. Включение этой настройки может решить проблему.",
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
   "Options.Section.Launcher": "ЛАУНЧЕР",

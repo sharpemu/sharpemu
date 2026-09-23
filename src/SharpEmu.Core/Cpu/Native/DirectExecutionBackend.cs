@@ -2610,6 +2610,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC3); // mov rbx,rax
 		EmitByte(code, ref offset, 0x48); // sub rsp, 0x20
 		EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xEC);
@@ -2639,6 +2640,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x5E);
 		EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x5D);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xD8); // mov rax,rbx
 		EmitByte(code, ref offset, 0x5B);
 		EmitByte(code, ref offset, 0xC3);
 

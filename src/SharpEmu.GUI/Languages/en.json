@@ -63,6 +63,7 @@
   "Options.Env.Group.Debug": "Debug",
   "Options.Env.Group.General": "General",
   "Options.Env.RenderDoc.Desc": "Load the RenderDoc in-application API so frames can be captured from inside the emulator.\nPress F12 while the game runs to capture one frame; captures land in user/logs/capture_logs/<TITLE_ID>.\nRequires RenderDoc to be installed. Slows the GPU down and hangs some titles, so leave it off unless you are debugging.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "When RenderDoc is enabled, other conflicting overlays can cause device loss. Enabling this option may fix it.",
   "Options.DefaultProfile.Label": "Default profile name",
   "Options.DefaultProfile.Desc": "Name used when a game asks for text input. Defaults to Sharp.",
   "Options.Section.Emulation": "EMULATION",

@@ -50,6 +50,7 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
+        RenderDocCapture.ApplyVulkanLoaderEnvironment();
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
         try

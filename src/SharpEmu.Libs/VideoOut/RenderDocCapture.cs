@@ -37,6 +37,22 @@ public static unsafe class RenderDocCapture
 
     public static bool IsAvailable => _api is not null;
 
+    public static bool ApplyVulkanLoaderEnvironment()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_VK_DISABLE_IMPLICITS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        Environment.SetEnvironmentVariable("VK_LOADER_DEBUG", "error,warn,layer");
+        Environment.SetEnvironmentVariable("VK_LOADER_LAYERS_DISABLE", "~implicit~");
+        Environment.SetEnvironmentVariable("VK_LOADER_LAYERS_ALLOW", "*RENDERDOC*");
+        return true;
+    }
+
     public static void Initialize()
     {
         if (_initialized)

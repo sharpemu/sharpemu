@@ -177,6 +177,7 @@
   "Options.Env.Group.Debug": "تصحيح الأخطاء",
   "Options.Env.Group.General": "عام",
   "Options.Env.RenderDoc.Desc": "يحمّل واجهة RenderDoc داخل التطبيق حتى يمكن التقاط الإطارات من داخل المحاكي.\nاضغط F12 أثناء تشغيل اللعبة لالتقاط إطار واحد؛ تُحفظ اللقطات في user/logs/capture_logs/<TITLE_ID>.\nيتطلب تثبيت RenderDoc. يبطئ وحدة معالجة الرسوميات ويسبب تعليق بعض الألعاب، لذا اتركه معطلاً ما لم تكن تصحح الأخطاء.",
+  "Options.Env.DisableVkImplicitLayers.Desc": "عند تفعيل RenderDoc، قد تتسبب التراكبات الأخرى المتعارضة في فقدان الجهاز. قد يؤدي تفعيل هذا الخيار إلى حل المشكلة.",
   "Common.Save": "حفظ",
   "Common.Cancel": "إلغاء",
   "Options.About": "حول",

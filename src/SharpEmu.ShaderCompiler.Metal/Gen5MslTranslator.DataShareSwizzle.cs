@@ -45,5 +45,32 @@ public static partial class Gen5MslTranslator
             StoreVector(instruction.Destinations[0].Value, $"{sourceActive} ? {value} : 0u");
             return true;
         }
+
+        private bool TryEmitDataShareBpermute(Gen5ShaderInstruction instruction,
+            Gen5DataShareControl control, out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count != 2 || instruction.Destinations.Count != 1)
+            {
+                error = "invalid data-share bpermute operands";
+                return false;
+            }
+            if (IsSingleLaneStage)
+            {
+                error = "data-share bpermute requires subgroup lane access";
+                return false;
+            }
+
+            var lane = Temp("uint", "sharpemu_lane");
+            var address = Temp("uint", $"{RawSource(instruction, 0)} + {control.SingleOffsetBytes}u");
+            var index = Temp("uint", $"({address} >> 2u) & 31u");
+            var sourceLane = Temp("uint", $"({lane} & ~31u) | {index}");
+            var activeLanes = Temp("uint", "sharpemu_ballot(exec)");
+            var sourceActive = Temp("bool", $"(({activeLanes} >> ({sourceLane} & 31u)) & 1u) != 0u");
+            var safeSourceLane = Temp("uint", $"{sourceActive} ? {sourceLane} : {lane}");
+            var value = Temp("uint", $"simd_shuffle({RawSource(instruction, 1)}, (ushort){safeSourceLane})");
+            StoreVector(instruction.Destinations[0].Value, $"{sourceActive} ? {value} : 0u");
+            return true;
+        }
     }
 }

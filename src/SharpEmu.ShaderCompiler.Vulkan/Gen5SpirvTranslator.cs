@@ -123,6 +123,9 @@ public static partial class Gen5SpirvTranslator
         private uint _lds;
         private uint _ldsElementPointer;
         private uint _ldsDwordMask;
+        private uint _scratch;
+        private uint _scratchElementPointer;
+        private uint _scratchDwordCount;
         private uint _positionOutput;
         private uint _pointSizeOutput;
         private uint _clipDistanceOutput;
@@ -561,11 +564,32 @@ public static partial class Gen5SpirvTranslator
 
             {
                 DeclareLayoutBindings();
+                DeclareScratch();
                 DeclareLds();
                 DeclareWave64Scratch();
                 DeclareStageInterface();
                 return;
             }
+        }
+
+        private void DeclareScratch()
+        {
+            if (!_request.Program.Instructions.Any(static instruction =>
+                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
+            var arrayType = _module.TypeArray(_uintType, _scratchDwordCount);
+            var arrayPointer = _module.TypePointer(SpirvStorageClass.Private, arrayType);
+            _scratchElementPointer = _module.TypePointer(SpirvStorageClass.Private, _uintType);
+            _scratch = _module.AddGlobalVariable(
+                arrayPointer,
+                SpirvStorageClass.Private,
+                _module.ConstantNull(arrayType));
+            _interfaces.Add(_scratch);
+            _module.AddName(_scratch, "scratch");
         }
 
         private void DeclareWave64Scratch()
@@ -1390,6 +1414,7 @@ public static partial class Gen5SpirvTranslator
             }
             if (instruction.Opcode is
                 "SNop" or
+                "SSetregB32" or
                 "SWaitcnt" or
                 "SInstPrefetch" or
                 "STtraceData" or
@@ -1481,9 +1506,7 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitGlobalDataShare(instruction, globalShare, out error);
             }
 
-            if (_lds == 0 ||
-                _ldsElementPointer == 0 ||
-                instruction.Control is not Gen5DataShareControl control)
+            if (instruction.Control is not Gen5DataShareControl control)
             {
                 error = "invalid LDS instruction";
                 return false;
@@ -1493,6 +1516,18 @@ public static partial class Gen5SpirvTranslator
             {
                 case "DsSwizzleB32":
                     return TryEmitDataShareSwizzle(instruction, control, out error);
+                case "DsBpermuteB32":
+                    return TryEmitDataShareBpermute(instruction, control, out error);
+            }
+
+            if (_lds == 0 || _ldsElementPointer == 0)
+            {
+                error = "invalid LDS instruction";
+                return false;
+            }
+
+            switch (instruction.Opcode)
+            {
                 case "DsAppend":
                 case "DsConsume":
                     return TryEmitDataShareWaveCounter(instruction, control, out error);
@@ -1948,7 +1983,7 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 pointer,
                 UInt(scope),
-                UInt(semantics));
+                UInt((semantics & ~0xCu) | 0x2u));
             _module.AddStatement(SpirvOp.Branch, header);
 
             _module.AddLabel(header);
@@ -2006,7 +2041,7 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 pointer,
                 UInt(scope),
-                UInt(semantics));
+                UInt((semantics & ~0xCu) | 0x2u));
             _module.AddStatement(SpirvOp.Branch, header);
 
             _module.AddLabel(header);
@@ -2220,8 +2255,11 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
             {
                 var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
-                if (atomicSuffix == "OrX2")
+                if (atomicSuffix is "SwapX2" or "OrX2")
                 {
+                    var wideAtomicOp = atomicSuffix == "SwapX2"
+                        ? SpirvOp.AtomicExchange
+                        : SpirvOp.AtomicOr;
                     EmitExecConditional(() =>
                     {
                         var secondAddress = IAdd(dwordAddress, UInt(1));
@@ -2233,7 +2271,7 @@ public static partial class Gen5SpirvTranslator
                         EmitConditional(inRange, () =>
                         {
                             var originalLow = EmitAtomic(
-                                SpirvOp.AtomicOr,
+                                wideAtomicOp,
                                 _uintType,
                                 BufferWordPointer(bindingIndex, dwordAddress),
                                 scope: 1,
@@ -2241,7 +2279,7 @@ public static partial class Gen5SpirvTranslator
                                 value: () => LoadV(control.VectorData),
                                 comparator: () => UInt(0));
                             var originalHigh = EmitAtomic(
-                                SpirvOp.AtomicOr,
+                                wideAtomicOp,
                                 _uintType,
                                 BufferWordPointer(bindingIndex, secondAddress),
                                 scope: 1,
@@ -3447,6 +3485,21 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
+            {
+                // The host path does not expose Vulkan ray-query or an
+                // acceleration-structure descriptor for GFX10's raw BVH
+                // texture. Return a deterministic miss instead of rejecting
+                // the complete compute shader. The instruction always writes
+                // four DWORD result registers.
+                for (uint component = 0; component < 4; component++)
+                {
+                    StoreV(image.VectorData + component, UInt(0));
+                }
+
+                return true;
+            }
+
             SpirvImageResource resource;
             uint imageObject;
             uint dstSelect;

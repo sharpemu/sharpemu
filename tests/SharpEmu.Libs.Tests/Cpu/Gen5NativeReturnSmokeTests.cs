@@ -82,7 +82,24 @@ public sealed class Gen5NativeReturnSmokeTests
         ]);
     }
 
-    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null)
+    [Fact]
+    public async Task SyntheticGen5Continuation_PreservesFullReturnValue()
+    {
+        if (!IsSupportedHost)
+            return;
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(nameof(SyntheticGen5Continuation_PreservesFullReturnValue));
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        ExecuteSyntheticGuest(continuation: true);
+    }
+
+    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false)
     {
         using var memory = new PhysicalVirtualMemory();
         var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
@@ -119,6 +136,21 @@ public sealed class Gen5NativeReturnSmokeTests
         Assert.Null(dispatcher.LastNotImplementedInfo);
 
         var callerContext = new CpuContext(new TrackedCpuMemory(memory), Generation.Gen5);
+        if (continuation)
+        {
+            Assert.True(memory.TryAllocateAtOrAbove(0x1_0000_0000, 0x4000, false, 0x4000, out var stack));
+            callerContext[CpuRegister.Rsp] = stack + 0x4000 - sizeof(ulong);
+            // Resume directly into mov rax, imm64; ret through the shared guest return stub.
+            var execute = typeof(DirectExecutionBackend).GetMethod(
+                "ExecuteGuestContinuationEntry", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object?[] arguments = [callerContext, image.EntryPoint + 3, callerContext[CpuRegister.Rsp],
+                "synthetic-native-continuation-return", null];
+            var exitReason = execute.Invoke(backend, arguments);
+            Assert.True(exitReason?.ToString() == "Returned", arguments[4]?.ToString());
+            Assert.Equal(CallbackReturnValue, callerContext[CpuRegister.Rax]);
+            return;
+        }
+
         ulong dataAddress = 0;
         var recoveryCounter = typeof(DirectExecutionBackend).GetField(
             "_sse4aInstructionsEmulated", BindingFlags.Static | BindingFlags.NonPublic)!;

@@ -25,6 +25,7 @@ public partial class MainWindow
         "SHARPEMU_LOG_IO",
         "SHARPEMU_LOG_NP",
         "SHARPEMU_RENDERDOC",
+        "SHARPEMU_VK_DISABLE_IMPLICITS",
         "SHARPEMU_CRASH_CAPTURE",
     ];
 
@@ -502,6 +503,7 @@ public partial class MainWindow
         ("SHARPEMU_LOG_IO", GameEnvLogIoToggle),
         ("SHARPEMU_LOG_NP", GameEnvLogNpToggle),
         ("SHARPEMU_RENDERDOC", GameEnvRenderDocToggle),
+        ("SHARPEMU_VK_DISABLE_IMPLICITS", GameEnvDisableVkImplicitLayersToggle),
         ("SHARPEMU_CRASH_CAPTURE", GameCrashDumpToggle),
     ];
 

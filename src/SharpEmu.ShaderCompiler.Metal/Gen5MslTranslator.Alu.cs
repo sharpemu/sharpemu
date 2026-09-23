@@ -336,6 +336,7 @@ public static partial class Gen5MslTranslator
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
+                "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
@@ -469,6 +470,14 @@ public static partial class Gen5MslTranslator
             var signedRight = $"(as_type<int>(({RawSource(instruction, 1)}) << 8u) >> 8)";
             // Unsigned multiplication preserves the low result bits on overflow.
             return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
+        }
+
+        private string EmitLshrrevB64(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) >> {shift}");
+            StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
+            return $"(uint){shifted}";
         }
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
@@ -732,7 +741,12 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                var signed = opcode.EndsWith("I32", StringComparison.Ordinal);
+                var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var signed = signed16 ||
+                    opcode.EndsWith("I32", StringComparison.Ordinal) ||
+                    opcode.EndsWith("I64", StringComparison.Ordinal);
+                var wide = opcode.EndsWith("I64", StringComparison.Ordinal) ||
+                    opcode.EndsWith("U64", StringComparison.Ordinal);
                 var op = TrimCompare(opcode) switch
                 {
                     "Eq" => "==",
@@ -749,9 +763,15 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                var left = wide ? RawSource64(instruction, 0) : RawSource(instruction, 0);
+                var right = wide ? RawSource64(instruction, 1) : RawSource(instruction, 1);
                 condition = signed
-                    ? $"(as_type<int>({RawSource(instruction, 0)}) {op} as_type<int>({RawSource(instruction, 1)}))"
-                    : $"(({RawSource(instruction, 0)}) {op} ({RawSource(instruction, 1)}))";
+                    ? signed16
+                        ? $"(int(short(({left}) & 0xFFFFu)) {op} int(short(({right}) & 0xFFFFu)))"
+                        : wide
+                        ? $"(as_type<long>({left}) {op} as_type<long>({right}))"
+                        : $"(as_type<int>({left}) {op} as_type<int>({right}))"
+                    : $"(({left}) {op} ({right}))";
             }
 
             // Only EXEC-enabled lanes can pass; balloting the raw condition
