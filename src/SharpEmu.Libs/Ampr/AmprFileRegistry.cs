@@ -15,14 +15,29 @@ internal static class AmprFileRegistry
     private const uint CacheMagicV3 = 0x33495041u; // 'API3'
     private const uint CacheVersionV3 = 3;
 
-    private static readonly ConcurrentDictionary<uint, string> _hostPathsById = new(
+    // Which spelling produced a compatibility id. When two files collide on one
+    // 31-bit id, the better-ranked spelling owns it; only a tie is ambiguous.
+    // Ranking makes the outcome independent of publish order, which the
+    // parallel app0 index and concurrent guest resolves do not guarantee.
+    private enum AliasRank : byte
+    {
+        // The title resolved this exact guest path through APR.
+        Resolved,
+        // "$/" and "/app0/": spellings titles bake into asset tables.
+        GuestPath,
+        // "app0/" and bare relative paths: emulator-side fallbacks.
+        Compatibility,
+    }
+
+    private readonly record struct AliasEntry(string HostPath, AliasRank Rank, bool Ambiguous);
+
+    private static readonly ConcurrentDictionary<uint, AliasEntry> _hostPathsById = new(
         concurrencyLevel: Math.Max(4, Environment.ProcessorCount),
         capacity: 1_048_576);
     private static readonly object _indexGate = new();
     private static readonly object _resolvedFileGate = new();
     private static readonly Dictionary<string, uint> _resolvedIdsByPath = new(HostFsPath.Comparer);
     private static readonly ConcurrentDictionary<uint, string> _resolvedPathsById = new();
-    private static readonly ConcurrentDictionary<uint, byte> _ambiguousCompatibilityIds = new();
     // Resolved handles use a separate range from the 31-bit compatibility hashes.
     // Never reuse a handle while queued reads can still refer to it.
     private static uint _nextResolvedId = 0x80000000;
@@ -62,8 +77,7 @@ internal static class AmprFileRegistry
         // process-local handles used by Register() separate from this path so a
         // title can compare resolved ids with ids baked into its asset tables.
         var fileId = ComputeFileId(guestPath);
-        _hostPathsById[fileId] = hostPath;
-        _ambiguousCompatibilityIds.TryRemove(fileId, out _);
+        PublishCompatibilityPath(fileId, hostPath, AliasRank.Resolved);
         return fileId;
     }
 
@@ -71,8 +85,14 @@ internal static class AmprFileRegistry
     {
         if ((id & 0x80000000) != 0)
             return _resolvedPathsById.TryGetValue(id, out hostPath!);
+        if (_hostPathsById.TryGetValue(id, out var entry) && !entry.Ambiguous)
+        {
+            hostPath = entry.HostPath;
+            return true;
+        }
+
         hostPath = null!;
-        return !_ambiguousCompatibilityIds.ContainsKey(id) && _hostPathsById.TryGetValue(id, out hostPath!);
+        return false;
     }
 
     /// <summary>Test hook: wipe registry state between cases.</summary>
@@ -81,7 +101,6 @@ internal static class AmprFileRegistry
         lock (_indexGate)
         {
             _hostPathsById.Clear();
-            _ambiguousCompatibilityIds.Clear();
             lock (_resolvedFileGate)
             {
                 _resolvedIdsByPath.Clear();
@@ -287,25 +306,48 @@ internal static class AmprFileRegistry
     private static void RegisterApp0Relative(string relative, string hostPath)
     {
         // "$/" + relative
-        Publish(FnvContinueAscii(FnvContinueAscii(OffsetBasis, (byte)'$'), (byte)'/'), relative, hostPath);
+        Publish(FnvContinueAscii(FnvContinueAscii(OffsetBasis, (byte)'$'), (byte)'/'), relative, hostPath, AliasRank.GuestPath);
         // "/app0/" + relative
-        Publish(FnvContinueAsciiPrefix(OffsetBasis, "/app0/"u8), relative, hostPath);
+        Publish(FnvContinueAsciiPrefix(OffsetBasis, "/app0/"u8), relative, hostPath, AliasRank.GuestPath);
         // "app0/" + relative
-        Publish(FnvContinueAsciiPrefix(OffsetBasis, "app0/"u8), relative, hostPath);
+        Publish(FnvContinueAsciiPrefix(OffsetBasis, "app0/"u8), relative, hostPath, AliasRank.Compatibility);
         // bare relative
-        Publish(OffsetBasis, relative, hostPath);
+        Publish(OffsetBasis, relative, hostPath, AliasRank.Compatibility);
     }
 
-    private static void Publish(uint hash, string relative, string hostPath)
+    private static void Publish(uint hash, string relative, string hostPath, AliasRank rank)
     {
-        PublishCompatibilityPath(NormalizeFileId(FnvContinueUtf8(hash, relative)), hostPath);
+        PublishCompatibilityPath(NormalizeFileId(FnvContinueUtf8(hash, relative)), hostPath, rank);
     }
 
-    private static void PublishCompatibilityPath(uint id, string hostPath)
+    private static void PublishCompatibilityPath(uint id, string hostPath, AliasRank rank)
     {
-        var existingPath = _hostPathsById.GetOrAdd(id, hostPath);
-        if (!HostFsPath.Comparer.Equals(existingPath, hostPath))
-            _ambiguousCompatibilityIds.TryAdd(id, 0);
+        var incoming = new AliasEntry(hostPath, rank, Ambiguous: false);
+        while (true)
+        {
+            if (!_hostPathsById.TryGetValue(id, out var existing))
+            {
+                if (_hostPathsById.TryAdd(id, incoming))
+                    return;
+                continue;
+            }
+
+            var merged = MergeAlias(existing, incoming);
+            if (merged == existing || _hostPathsById.TryUpdate(id, merged, existing))
+                return;
+        }
+    }
+
+    private static AliasEntry MergeAlias(AliasEntry existing, AliasEntry incoming)
+    {
+        if (incoming.Rank != existing.Rank)
+            return incoming.Rank < existing.Rank ? incoming : existing;
+        // A title may re-resolve an id; its latest resolve owns it.
+        if (incoming.Rank == AliasRank.Resolved)
+            return incoming;
+        if (existing.Ambiguous || HostFsPath.Comparer.Equals(existing.HostPath, incoming.HostPath))
+            return existing;
+        return existing with { Ambiguous = true };
     }
 
     internal static uint ComputeFileId(string guestPath)
@@ -477,10 +519,11 @@ internal static class AmprFileRegistry
                             : normalizedRoot + Path.DirectorySeparatorChar +
                               entry.Relative.Replace('/', Path.DirectorySeparatorChar);
                         // Normalize cached identifiers to the guest's 31-bit range.
-                        PublishCompatibilityPath(NormalizeFileId(entry.Id0), hostPath);
-                        PublishCompatibilityPath(NormalizeFileId(entry.Id1), hostPath);
-                        PublishCompatibilityPath(NormalizeFileId(entry.Id2), hostPath);
-                        PublishCompatibilityPath(NormalizeFileId(entry.Id3), hostPath);
+                        // Ids are stored in RegisterApp0Relative order: $/ /app0/ app0/ bare.
+                        PublishCompatibilityPath(NormalizeFileId(entry.Id0), hostPath, AliasRank.GuestPath);
+                        PublishCompatibilityPath(NormalizeFileId(entry.Id1), hostPath, AliasRank.GuestPath);
+                        PublishCompatibilityPath(NormalizeFileId(entry.Id2), hostPath, AliasRank.Compatibility);
+                        PublishCompatibilityPath(NormalizeFileId(entry.Id3), hostPath, AliasRank.Compatibility);
                     });
             }
             else
@@ -538,9 +581,9 @@ internal static class AmprFileRegistry
             }
 
             var relatives = new HashSet<string>(HostFsPath.Comparer);
-            foreach (var hostPath in _hostPathsById.Values)
+            foreach (var entry in _hostPathsById.Values)
             {
-                var relative = Path.GetRelativePath(normalizedRoot, hostPath)
+                var relative = Path.GetRelativePath(normalizedRoot, entry.HostPath)
                     .Replace('\\', '/');
                 if (string.IsNullOrEmpty(relative) ||
                     relative.StartsWith("..", StringComparison.Ordinal))

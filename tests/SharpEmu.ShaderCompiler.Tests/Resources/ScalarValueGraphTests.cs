@@ -396,6 +396,27 @@ public sealed class ScalarValueGraphTests
         Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
+    [Theory]
+    [InlineData(32u, 0x1000u)]
+    [InlineData(64u, 0u)]
+    public void VectorCompareKeepsVccHighInWave32(uint waveSize, uint expected)
+    {
+        // Wave32 compilers use VCC_HI (s107) as an ordinary SGPR; a compare writes VCC_LO only.
+        var program = Program(
+            MoveScalar(0, 107, 0x1000),
+            Vopc(4, "VCmpEqU32", Gen5Operand.Scalar(0), 1),
+            MoveScalarRegister(8, 8, 107),
+            MoveScalar(12, 9, 0),
+            MoveScalar(16, 10, 16),
+            MoveScalar(20, 11, 0),
+            BufferLoad(24, 8),
+            EndProgram(32));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 64, waveSize: waveSize);
+
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source, Inputs([]), out var result));
+        Assert.Equal(expected, result.Dwords[0]);
+    }
+
     [Fact]
     public void UniformVectorDerivedValue_IsAccepted()
     {

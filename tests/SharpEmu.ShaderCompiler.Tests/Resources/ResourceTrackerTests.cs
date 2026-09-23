@@ -108,6 +108,26 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void ScalarBufferWithDeviceOnlyDescriptor_ReadsThroughRegisters()
+    {
+        // The descriptor base comes from a lane value: the host cannot bind it, the device reads through it.
+        var program = Program(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, 12, destination: 20),
+            EndProgram(24));
+
+        var plan = Extract(program);
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {
         var program = Program(
@@ -387,10 +407,26 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void WrappedScalarImmediate_DoesNotEnterTheIndirectImageProof()
+    public void MaterialKeyImmediateIsReadAfterTheWrappedSelectorOffset()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(false, materialImmediate: 4)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(IndirectImageProgram(false, materialImmediate: 4));
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.Equal(4u, selector.SelectorOffset);
+        Assert.Equal(4u, selector.MaterialImmediate);
+
+        uint[] userData = [0x1000, 224 << 16, 2, 0, 0x2000, 16 << 16, 4, 0, 7];
+        var memory = LinearMemory();
+        var first = ImageDescriptor();
+        var second = ImageDescriptor();
+        second[0] += 1;
+        WriteImage(memory, 0x2000, first);
+        WriteImage(memory, 0x2020, second);
+        // The dynamic offset selects byte 4 of the record; the immediate moves the key to byte 8.
+        memory.At(0x1000 + 224 + 8) = 1;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read), ref snapshot, ref specialization));
+        Assert.Equal([first, second], snapshot.Images);
     }
 
     [Fact]

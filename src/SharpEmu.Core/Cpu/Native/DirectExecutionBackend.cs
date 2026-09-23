@@ -1554,8 +1554,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				0x75, 0xE7,
 				0xC3,
 			],
+			// strcasecmp: ASCII folding like the HLE export, and the same answer for null
+			// arguments (0 when both are null, 1 otherwise) instead of faulting.
 			"AV6ipCNa4Rw" =>
 			[
+				0x48, 0x85, 0xFF,             // test rdi, rdi
+				0x74, 0x34,                   // jz null
+				0x48, 0x85, 0xF6,             // test rsi, rsi
+				0x74, 0x2F,                   // jz null
 				0x0F, 0xB6, 0x07,
 				0x0F, 0xB6, 0x16,
 				0x8D, 0x48, 0xBF,
@@ -1573,6 +1579,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				0x48, 0xFF, 0xC7,
 				0x48, 0xFF, 0xC6,
 				0xEB, 0xD4,
+				0x48, 0x98,                   // cdqe: sign-extend like the HLE export
+				0xC3,
+				0x31, 0xC0,                   // null: xor eax, eax
+				0x48, 0x39, 0xF7,             // cmp rdi, rsi
+				0x0F, 0x95, 0xC0,             // setne al
 				0xC3,
 			],
 			"viiwFMaNamA" =>
@@ -1823,8 +1834,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static bool IsHlePreferredNid(string nid)
 	{
 		return string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal) ||
-			string.Equals(nid, "Q3VBxCXhUHs", StringComparison.Ordinal) ||
-			string.Equals(nid, "AV6ipCNa4Rw", StringComparison.Ordinal);
+			string.Equals(nid, "Q3VBxCXhUHs", StringComparison.Ordinal);
 	}
 
 	private static bool IsLibcLibrary(string libraryName)

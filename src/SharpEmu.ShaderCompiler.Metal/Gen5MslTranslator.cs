@@ -912,6 +912,8 @@ public static partial class Gen5MslTranslator
                 case "SWaitcnt":
                 case "SInstPrefetch":
                 case "STtraceData":
+                // Wave scheduling priority hint; no effect on results.
+                case "SSetprio":
                 case "SClause":
                 case "VNop":
                 // NGG shaders bracket their exports with s_sendmsg

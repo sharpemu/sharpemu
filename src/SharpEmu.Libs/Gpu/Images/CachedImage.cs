@@ -260,7 +260,9 @@ public sealed unsafe partial class CachedImage : IDisposable
             usage |= ImageUsageFlags.ColorAttachmentBit;
         }
 
-        if (description.Samples == 1)
+        var storageFormat = ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
+        var storageFeatures = storageFormat == Format.Undefined ? features : device.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        if (description.Samples == 1 && (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0)
         {
             usage |= ImageUsageFlags.StorageBit;
         }

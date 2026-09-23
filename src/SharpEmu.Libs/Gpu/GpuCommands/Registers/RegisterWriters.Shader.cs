@@ -83,6 +83,8 @@ internal static partial class RegisterWriters
         indirect[SpiShaderPgmHiLs] = static (banks, _, value) => banks.Shader.Vertex.LocalAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.LocalAddress, value);
         indirect[SpiShaderPgmLoEs] = static (banks, _, value) => banks.Shader.Vertex.ExportAddress = RegisterField.WithLowAddress(banks.Shader.Vertex.ExportAddress, value);
         indirect[SpiShaderPgmHiEs] = static (banks, _, value) => banks.Shader.Vertex.ExportAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.ExportAddress, value);
+        indirect[SpiShaderPgmRsrc1Es] = static (banks, _, value) => banks.Shader.Vertex.ExportResource1 = value;
+        indirect[SpiShaderPgmRsrc2Es] = static (banks, _, value) => banks.Shader.Vertex.ExportResource2 = value;
         indirect[SpiShaderPgmLoGs] = static (banks, _, value) => banks.Shader.Vertex.GeometryAddress = RegisterField.WithLowAddress(banks.Shader.Vertex.GeometryAddress, value);
         indirect[SpiShaderPgmHiGs] = static (banks, _, value) => banks.Shader.Vertex.GeometryAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.GeometryAddress, value);
         indirect[SpiShaderPgmRsrc1Gs] = static (banks, _, value) => banks.Shader.Vertex.GeometryResource1 = GeometryResource1.Decode(value);

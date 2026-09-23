@@ -738,6 +738,7 @@ public static partial class Gen5ShaderTranslator
             0x09 => "SCbranchExecnz",
             0x0A => "SBarrier",
             0x0C => "SWaitcnt",
+            0x0F => "SSetprio",
             0x10 => "SSendmsg",
             0x12 => "STrap",
             0x16 => "STtraceData",
@@ -921,7 +922,13 @@ public static partial class Gen5ShaderTranslator
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = VopcOpcodeName(opcode);
+        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+    }
+
+    // VOPC names, shared by the VOP3 encoding of the same compares (VOP3 opcodes 0x000-0x0FF).
+    private static string VopcOpcodeName(uint opcode) =>
+        opcode switch
         {
             0x00 => "VCmpFF32",
             0x01 => "VCmpLtF32",
@@ -985,6 +992,22 @@ public static partial class Gen5ShaderTranslator
             0x9C => "VCmpxGtI16",
             0x9D => "VCmpxNeI16",
             0x9E => "VCmpxGeI16",
+            0xA0 => "VCmpFI64",
+            0xA1 => "VCmpLtI64",
+            0xA2 => "VCmpEqI64",
+            0xA3 => "VCmpLeI64",
+            0xA4 => "VCmpGtI64",
+            0xA5 => "VCmpNeI64",
+            0xA6 => "VCmpGeI64",
+            0xA7 => "VCmpTI64",
+            0xB0 => "VCmpxFI64",
+            0xB1 => "VCmpxLtI64",
+            0xB2 => "VCmpxEqI64",
+            0xB3 => "VCmpxLeI64",
+            0xB4 => "VCmpxGtI64",
+            0xB5 => "VCmpxNeI64",
+            0xB6 => "VCmpxGeI64",
+            0xB7 => "VCmpxTI64",
             0xC0 => "VCmpFU32",
             0xC1 => "VCmpLtU32",
             0xC2 => "VCmpEqU32",
@@ -1017,7 +1040,14 @@ public static partial class Gen5ShaderTranslator
             0xDD => "VCmpxLgF16",
             0xDE => "VCmpxGeF16",
             0xDF => "VCmpxOF16",
+            0xE0 => "VCmpFU64",
+            0xE1 => "VCmpLtU64",
+            0xE2 => "VCmpEqU64",
+            0xE3 => "VCmpLeU64",
+            0xE4 => "VCmpGtU64",
             0xE5 => "VCmpNeU64",
+            0xE6 => "VCmpGeU64",
+            0xE7 => "VCmpTU64",
             0xE8 => "VCmpUF16",
             0xE9 => "VCmpNgeF16",
             0xEA => "VCmpNlgF16",
@@ -1026,8 +1056,14 @@ public static partial class Gen5ShaderTranslator
             0xED => "VCmpNeqF16",
             0xEE => "VCmpNltF16",
             0xEF => "VCmpTruF16",
+            0xF0 => "VCmpxFU64",
+            0xF1 => "VCmpxLtU64",
+            0xF2 => "VCmpxEqU64",
+            0xF3 => "VCmpxLeU64",
+            0xF4 => "VCmpxGtU64",
             0xF5 => "VCmpxNeU64",
-            0xB5 => "VCmpxNeI64",
+            0xF6 => "VCmpxGeU64",
+            0xF7 => "VCmpxTU64",
             0xF8 => "VCmpxUF16",
             0xF9 => "VCmpxNgeF16",
             0xFA => "VCmpxNlgF16",
@@ -1038,9 +1074,6 @@ public static partial class Gen5ShaderTranslator
             0xFF => "VCmpxTruF16",
             _ => string.Empty,
         };
-
-        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
-    }
 
     private static bool DecodeVop3(
         uint word,
@@ -1056,10 +1089,18 @@ public static partial class Gen5ShaderTranslator
         var src2 = (extra >> 18) & 0x1FF;
         sizeDwords = src0 == 0xFF || src1 == 0xFF || src2 == 0xFF ? 3u : 2u;
         error = string.Empty;
+        if (!isVop3B && opcode < 0x100 && VopcOpcodeName(opcode) is { Length: > 0 } compare)
+        {
+            name = compare;
+            return true;
+        }
+
         name = isVop3B
             ? opcode switch
             {
                 0x128 => "VAddCoCiU32",
+                0x129 => "VSubCoCiU32",
+                0x12A => "VSubrevCoCiU32",
                 0x30F => "VAddCoU32",
                 0x310 => "VSubCoU32",
                 0x319 => "VSubrevCoU32",
@@ -1140,7 +1181,7 @@ public static partial class Gen5ShaderTranslator
     }
 
     private static bool IsVop3BOpcode(uint opcode) =>
-        opcode is 0x128 or 0x16D or 0x16E or 0x176 or 0x177 or 0x30F or 0x310 or 0x319;
+        opcode is 0x128 or 0x129 or 0x12A or 0x16D or 0x16E or 0x176 or 0x177 or 0x30F or 0x310 or 0x319;
 
     private static bool DecodeRaw2(
         uint word,
@@ -1485,6 +1526,14 @@ public static partial class Gen5ShaderTranslator
         var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
         sizeDwords = 2 + ((word >> 1) & 0x3);
         error = string.Empty;
+        // Bit 0 (OPM) holds opcode bit 7.
+        var fullOpcode = opcode | ((word & 1) << 7);
+        if (fullOpcode is 0xE6 or 0xE7)
+        {
+            name = fullOpcode == 0xE6 ? "ImageBvhIntersectRay" : "ImageBvh64IntersectRay";
+            return true;
+        }
+
         name = opcode switch
         {
             0x00 => "ImageLoad",
@@ -2114,6 +2163,23 @@ public static partial class Gen5ShaderTranslator
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
+                if (opcode.StartsWith("VCmp", StringComparison.Ordinal))
+                {
+                    // VOP3 compares take two sources and write their mask to the SGPR pair in
+                    // the vdst byte; GFX10 VCMPX writes EXEC only.
+                    var isExecCompare = opcode.StartsWith("VCmpx", StringComparison.Ordinal);
+                    sources = [sources[0], sources[1]];
+                    destinations = isExecCompare ? [] : [Gen5Operand.Scalar(word & 0xFF)];
+                    control = new Gen5Vop3Control(
+                        (word >> 8) & 0x7,
+                        (extra >> 29) & 0x7,
+                        0,
+                        false,
+                        0,
+                        isExecCompare ? null : word & 0xFF);
+                    break;
+                }
+
                 control = new Gen5Vop3Control(
                     isVop3B ? 0 : (word >> 8) & 0x7,
                     (extra >> 29) & 0x7,
@@ -2152,10 +2218,11 @@ public static partial class Gen5ShaderTranslator
                 var vectorData0 = (extra >> 8) & 0xFF;
                 var vectorData1 = (extra >> 16) & 0xFF;
                 var vectorDestination = (extra >> 24) & 0xFF;
+                // GFX10 DS: offset0 [7:0], offset1 [15:8], bit 16 reserved, GDS [17], op [25:18].
                 control = new Gen5DataShareControl(
                     word & 0xFF,
                     (word >> 8) & 0xFF,
-                    ((word >> 16) & 1) != 0);
+                    ((word >> 17) & 1) != 0);
                 sources = opcode switch
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
@@ -2478,6 +2545,29 @@ public static partial class Gen5ShaderTranslator
                     {
                         addressRegisters.Add((words[wordIndex] >> shift) & 0xFF);
                     }
+                }
+
+                if (opcode.StartsWith("ImageBvh", StringComparison.Ordinal))
+                {
+                    var a16 = ((extra >> 30) & 1) != 0;
+                    var rayControl = new Gen5RayIntersectControl(vectorAddress, addressRegisters, vectorData, scalarResource, a16);
+                    // Node pointer (2 dwords for BVH64), extent, origin, then direction and
+                    // inverse direction, which A16 packs as halves into three dwords.
+                    var addressCount = (opcode == "ImageBvh64IntersectRay" ? 2 : 1) + 1 + 3 + (a16 ? 3 : 6);
+                    var raySources = new List<Gen5Operand>(addressCount + 1);
+                    for (var component = 0; component < addressCount; component++)
+                    {
+                        raySources.Add(Gen5Operand.Vector(rayControl.GetAddressRegister(component)));
+                    }
+
+                    raySources.Add(Gen5Operand.Scalar(scalarResource));
+                    sources = raySources;
+                    destinations = Enumerable
+                        .Range((int)vectorData, (int)Gen5RayIntersectControl.ResultDwords)
+                        .Select(index => Gen5Operand.Vector((uint)index))
+                        .ToArray();
+                    control = rayControl;
+                    break;
                 }
 
                 var imageSources = new List<Gen5Operand>(addressRegisters.Count + 2);

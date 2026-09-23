@@ -39,6 +39,56 @@ public class AmprFileRegistryTests
         Assert.Equal(firstHost, firstResult);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GuestPathSpellingOwnsIdOverCompatibilityAlias(bool reverseOrder)
+    {
+        // Demon's Souls: the cooked "/app0/" id of this animation collides with
+        // the emulator-only "app0/" alias of an unrelated texture.
+        AmprFileRegistry.ClearForTests();
+        const string animation = "characters/c0000_main/animation/a202/_cmn/bp202_weapontakeoutrightshoulder_run.cani";
+        const string texture = "parts/m_8120_ancientking/textures/_ps5/hd_m_8120_ancientking_mud_nml.chunk0.ctxc";
+        var cookedId = AmprFileRegistry.ComputeFileId("/app0/" + animation);
+        Assert.Equal(cookedId, AmprFileRegistry.ComputeFileId("app0/" + texture));
+        var animationHost = Path.Combine(Path.GetTempPath(), "apr-animation.cani");
+        var textureHost = Path.Combine(Path.GetTempPath(), "apr-texture.ctxc");
+
+        if (reverseOrder)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(texture, textureHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests(animation, animationHost);
+        }
+        else
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(animation, animationHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests(texture, textureHost);
+        }
+
+        Assert.True(AmprFileRegistry.TryGetHostPath(cookedId, out var resolved));
+        Assert.Equal(animationHost, resolved);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TitleResolvedPathKeepsIdAgainstLaterCollidingAlias(bool aliasFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string firstPath = "$/assets/bce5a816.bin";
+        const string secondRelative = "assets/1b9e7058.bin";
+        var firstHost = Path.Combine(Path.GetTempPath(), "apr-first.bin");
+        var secondHost = Path.Combine(Path.GetTempPath(), "apr-second.bin");
+
+        if (aliasFirst)
+            AmprFileRegistry.RegisterApp0RelativeForTests(secondRelative, secondHost);
+        var id = AmprFileRegistry.RegisterAprResolvedPath(firstPath, firstHost);
+        AmprFileRegistry.RegisterApp0RelativeForTests(secondRelative, secondHost);
+
+        Assert.True(AmprFileRegistry.TryGetHostPath(id, out var resolved));
+        Assert.Equal(firstHost, resolved);
+    }
+
     [Fact]
     public void ComputeFileId_matches_utf8_fnv1a()
     {

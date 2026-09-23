@@ -52,7 +52,7 @@ public sealed class Gen5DataShareRead64Tests
     public static Gen5ShaderProgram CreatePairedReadbackProgram(bool global, uint firstOffset, uint secondOffset, bool readEnabled)
     {
         var memory = new ShaderMemory();
-        uint[] words = [0xD9DC0000u | (global ? 1u << 16 : 0) | firstOffset | (secondOffset << 8), 0x03000003, 0xBF810000];
+        uint[] words = [0xD9DC0000u | (global ? 1u << 17 : 0) | firstOffset | (secondOffset << 8), 0x03000003, 0xBF810000];
         var bytes = new byte[words.Length * sizeof(uint)];
         for (var index = 0; index < words.Length; index++)
             BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
@@ -100,7 +100,7 @@ public sealed class Gen5DataShareRead64Tests
     {
         const ulong shaderAddress = 0x1000;
         var memory = new ShaderMemory();
-        uint[] words = [0xD9D80000u | (global ? 1u << 16 : 0) | offset, 0x03000003u, 0xBF810000u];
+        uint[] words = [0xD9D80000u | (global ? 1u << 17 : 0) | offset, 0x03000003u, 0xBF810000u];
         var bytes = new byte[words.Length * sizeof(uint)];
         for (var index = 0; index < words.Length; index++)
             BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);

@@ -17,9 +17,11 @@ public sealed partial class ScalarValueGraph
     private readonly Dictionary<string, ScalarValue> _interned = [];
     private readonly List<ScalarValue> _values = [];
 
-    private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount)
+    private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
+        uint waveSize)
     {
         Program = program;
+        WaveSize = waveSize;
         ControlFlow = controlFlow;
         Memory = memory;
         UserDataBase = userDataBase;
@@ -31,6 +33,8 @@ public sealed partial class ScalarValueGraph
     public MemoryAccessTable Memory { get; }
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
+    // A wave32 lane mask fills one SGPR; wave64 fills an aligned pair.
+    public uint WaveSize { get; }
 
     // Index-aligned with Memory.Entries; null when the access has no descriptor value.
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
@@ -44,10 +48,11 @@ public sealed partial class ScalarValueGraph
     public ScalarValue? ResolveInvariantPhi(ScalarValue value) => ScalarValueEquivalence.ResolveInvariantPhi(Memory, value);
 
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
-        var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount);
+        var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
+            waveSize);
         new Builder(graph).Run();
         return graph;
     }

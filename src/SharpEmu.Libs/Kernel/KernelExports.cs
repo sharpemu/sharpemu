@@ -30,6 +30,20 @@ public static class KernelExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    
+    [SysAbiExport(
+        Nid = "NH6xARDOVv8",
+        ExportName = "sceKernelGetOperationMode",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelGetOperationMode(CpuContext ctx)
+    {
+        // SCE_KERNEL_MODE_RELEASE = 0. Reporting retail/release mode keeps guest
+        // code from taking devkit/tool-only branches we do not emulate.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "8zLSfEfW5AU",
         ExportName = "sceCoredumpRegisterCoredumpHandler",

@@ -70,7 +70,7 @@ public sealed class Gen5DataShareWrite64Tests
     public static Gen5ShaderProgram CreateReadbackProgram(bool global, uint firstOffset, uint secondOffset, bool writeEnabled,
         uint secondSource, bool largeStride)
     {
-        uint[] words = [(largeStride ? 0xD93C0000u : 0xD9380000u) | (global ? 1u << 16 : 0) | firstOffset | (secondOffset << 8),
+        uint[] words = [(largeStride ? 0xD93C0000u : 0xD9380000u) | (global ? 1u << 17 : 0) | firstOffset | (secondOffset << 8),
             3u | (10u << 8) | (secondSource << 16), 0xBF810000];
         var bytes = new byte[words.Length * sizeof(uint)];
         for (var index = 0; index < words.Length; index++)

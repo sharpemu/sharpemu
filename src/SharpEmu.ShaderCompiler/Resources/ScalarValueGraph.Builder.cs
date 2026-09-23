@@ -703,6 +703,36 @@ public sealed partial class ScalarValueGraph
 
         // Writes a dword pair; a pair that is a lane mask also keeps its mask value, and a
         // write to EXEC or VCC updates the active mask.
+        // A lane mask a vector instruction writes to an SGPR: in wave32 it fills that register
+        // alone, and the next one keeps its value. It is often live: a pointer's high half, or
+        // VCC_HI, which compilers use as an ordinary SGPR in wave32.
+        private void WriteVectorMask(RegisterState state, uint destinationRegister, ScalarValue low, ScalarValue mask)
+        {
+            if (_graph.WaveSize != 32)
+            {
+                WriteMaskPair(state, destinationRegister, low, _graph.Constant(0u), mask);
+                return;
+            }
+
+            state.WriteScalar(destinationRegister, low);
+            switch (destinationRegister)
+            {
+                case ExecLow:
+                    state.Exec = mask;
+                    break;
+                case VccLow:
+                    state.Vcc = mask;
+                    break;
+                default:
+                    if (!mask.IsUndefined)
+                    {
+                        state.ThreadBits[destinationRegister] = mask;
+                    }
+
+                    break;
+            }
+        }
+
         private void WriteMaskPair(RegisterState state, uint destinationRegister, ScalarValue low, ScalarValue high, ScalarValue mask)
         {
             state.WritePair(destinationRegister, low, high);
@@ -992,7 +1022,8 @@ public sealed partial class ScalarValueGraph
                 }
             }
 
-            if (instruction.Encoding == Gen5ShaderEncoding.Vopc)
+            if (instruction.Encoding == Gen5ShaderEncoding.Vopc ||
+                (instruction.Encoding == Gen5ShaderEncoding.Vop3 && opcode.StartsWith("VCmp", StringComparison.Ordinal)))
             {
                 ApplyVectorCompare(instruction, state);
                 return;
@@ -1003,15 +1034,15 @@ public sealed partial class ScalarValueGraph
                 Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl;
             var value = hasModifiers ? _graph.Undefined(ScalarValueType.U32) : VectorResult(instruction, state);
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } carryDestination } && !hasModifiers &&
-                opcode is "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddCoCiU32" or "VMadU64U32")
+                opcode is "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddCoCiU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or "VMadU64U32")
             {
                 var carry = value.IsUndefined ? _graph.Undefined(ScalarValueType.Bool) : state.CarryOut;
-                WriteMaskPair(state, carryDestination, _graph.Select(carry, _graph.Constant(1u), _graph.Constant(0u)), _graph.Constant(0u), carry);
+                WriteVectorMask(state, carryDestination, _graph.Select(carry, _graph.Constant(1u), _graph.Constant(0u)), carry);
             }
             else if (opcode is "VAddcU32" or "VSubbU32" or "VSubbrevU32" or "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32")
             {
                 var carry = value.IsUndefined ? _graph.Undefined(ScalarValueType.Bool) : state.CarryOut;
-                WriteMaskPair(state, VccLow, _graph.Select(carry, _graph.Constant(1u), _graph.Constant(0u)), _graph.Constant(0u), carry);
+                WriteVectorMask(state, VccLow, _graph.Select(carry, _graph.Constant(1u), _graph.Constant(0u)), carry);
             }
 
             foreach (var destination in instruction.Destinations)
@@ -1214,7 +1245,7 @@ public sealed partial class ScalarValueGraph
             var right = instruction.Sources.Count > 1 ? ReadVectorOperand(instruction.Sources[1], state) : _graph.Undefined(ScalarValueType.U32);
             var updatesExecutionMask = opcode.StartsWith("VCmpx", StringComparison.Ordinal);
             var suffix = opcode[(updatesExecutionMask ? "VCmpx".Length : "VCmp".Length)..];
-            var result = instruction.Control is Gen5SdwaControl
+            var result = instruction.Control is Gen5SdwaControl or Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 }
                 ? _graph.Undefined(ScalarValueType.Bool)
                 : suffix switch
                 {
@@ -1241,18 +1272,18 @@ public sealed partial class ScalarValueGraph
             // Execution-mask comparisons leave the vector condition registers unchanged.
             if (updatesExecutionMask)
             {
-                WriteMaskPair(state, ExecLow, raw, _graph.Constant(0u), masked);
+                WriteVectorMask(state, ExecLow, raw, masked);
                 return;
             }
 
             var scalarDestination = instruction.Destinations.FirstOrDefault(destination => destination.Kind == Gen5OperandKind.ScalarRegister);
             if (scalarDestination.Kind == Gen5OperandKind.ScalarRegister && instruction.Destinations.Count != 0)
             {
-                WriteMaskPair(state, scalarDestination.Value, raw, _graph.Constant(0u), masked);
+                WriteVectorMask(state, scalarDestination.Value, raw, masked);
             }
             else
             {
-                WriteMaskPair(state, VccLow, raw, _graph.Constant(0u), masked);
+                WriteVectorMask(state, VccLow, raw, masked);
             }
         }
 

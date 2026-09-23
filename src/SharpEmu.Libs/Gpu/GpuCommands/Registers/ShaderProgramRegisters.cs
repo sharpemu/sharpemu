@@ -189,7 +189,10 @@ public sealed class VertexStageRegisters
     public GeometryResource2 GeometryResource2;
     public UserScalarRegisters HullUserScalars = new();
     public UserScalarRegisters GeometryUserScalars = new();
-    // The legacy vertex block and the export user scalars are stored, not decoded.
+    // The legacy vertex block and the export resources and user scalars are stored, not
+    // decoded: the merged export stage runs with the geometry resources.
+    public uint ExportResource1;
+    public uint ExportResource2;
     public ulong LegacyVertexAddress;
     public uint LegacyVertexResource1;
     public uint LegacyVertexResource2;

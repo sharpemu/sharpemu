@@ -199,6 +199,21 @@ public sealed record Gen5ImageControl(
             : VectorAddress + (uint)component;
 }
 
+public sealed record Gen5RayIntersectControl(
+    uint VectorAddress,
+    IReadOnlyList<uint> AddressRegisters,
+    uint VectorData,
+    uint ScalarResource,
+    bool A16) : Gen5InstructionControl
+{
+    public const uint ResultDwords = 4;
+
+    public uint GetAddressRegister(int component) =>
+        component < AddressRegisters.Count
+            ? AddressRegisters[component]
+            : VectorAddress + (uint)component;
+}
+
 public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,

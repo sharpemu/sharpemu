@@ -475,7 +475,7 @@ public static class ResourceMaterializer
             Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         foreach (var offset in offsets)
         {
-            if (!ReadScalarBufferWord(material.Dwords, (uint)offset, 0, inputs, out var key))
+            if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))
             {
                 return false;
             }

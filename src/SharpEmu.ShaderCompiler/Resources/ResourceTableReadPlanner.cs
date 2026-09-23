@@ -141,6 +141,13 @@ public sealed class ResourceTableReadPlanner
             return;
         }
 
+        // A read whose address depends on values the host cannot know (a loop over data the
+        // shader loaded itself) cannot be flattened; the shader performs it on the device.
+        if (!new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, 0).Validate(value))
+        {
+            return;
+        }
+
         for (var slot = 0; slot < _reads.Count; slot++)
         {
             if (_graph.Equivalent(value, _reads[slot].Value))

@@ -261,6 +261,10 @@ public sealed partial class ResourceTracker
         return (uint)(_sources.Count - 1);
     }
 
+    private bool IsHostBufferHandle(ScalarValue? handle) =>
+        handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+        handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword));
+
     private uint GetHandleSource(ScalarValue? handle, ScalarValueKind expected, uint width, uint pc, bool sampler = false, bool sampleAdjust = false)
     {
         if (handle is null || handle.Kind != expected)
@@ -470,6 +474,15 @@ public sealed partial class ResourceTracker
 
         if (isBuffer)
         {
+            // A scalar buffer descriptor built from data the shader loads itself cannot be
+            // bound by the host; the device reads through the descriptor in registers.
+            if (memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle))
+            {
+                memory.DeviceDescriptor = true;
+                _info.UsesDeviceAddresses = true;
+                return;
+            }
+
             var source = GetHandleSource(access.Handle, ScalarValueKind.BufferHandle, 4, memory.Pc);
             var resource = AddBuffer(source, memory, memory.Pc);
             if (resource == DescriptorConstants.NoIndex)
@@ -759,7 +772,7 @@ public sealed partial class ResourceTracker
 
         var materialRead = heapOffset.Operands[0];
         var materialMemory = ScalarReadMemory(materialRead, out var materialMemoryIndex);
-        if (materialMemory is null || materialMemory.Offset != 0 || !MemoryIndexBelongsTo(materialMemoryIndex, materialRead))
+        if (materialMemory is null || !MemoryIndexBelongsTo(materialMemoryIndex, materialRead))
         {
             return false;
         }
@@ -798,6 +811,7 @@ public sealed partial class ResourceTracker
             IndirectImage = new IndirectImageSelector(materialSourceIndex, heapSourceIndex, selectorStride, selectorOffset, 0)
             {
                 SelectorValues = IndirectSelectorValues.Create(_plan, selector),
+                MaterialImmediate = materialMemory.Offset,
             },
         };
 

@@ -189,6 +189,8 @@ public static class ShaderRegisterOffset
     public const uint SpiShaderUserAccumEsGs0 = 0x0B2;
     public const uint SpiShaderPgmLoEs = 0x0C8;
     public const uint SpiShaderPgmHiEs = 0x0C9;
+    public const uint SpiShaderPgmRsrc1Es = 0x0CA;
+    public const uint SpiShaderPgmRsrc2Es = 0x0CB;
     public const uint SpiShaderUserDataEs0 = 0x0CC;
     public const uint SpiShaderPgmChksumHs = 0x100;
     public const uint SpiShaderPgmRsrc4Hs = 0x101;

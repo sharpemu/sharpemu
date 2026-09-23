@@ -101,6 +101,58 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void ImageBvhIntersectRay_UsesOpcodeBitSevenFromOpm()
+    {
+        // IMAGE_BVH_INTERSECT_RAY v[12:15], v[0:10], s[4:7] (op 0xE6: word0[24:18]=0x66, OPM=1)
+        var instruction = DecodeSingle(0xF1980F01, 0x00010C00);
+
+        Assert.Equal("ImageBvhIntersectRay", instruction.Opcode);
+        var control = Assert.IsType<Gen5RayIntersectControl>(instruction.Control);
+        Assert.Equal(12u, control.VectorData);
+        Assert.Equal(4u, control.ScalarResource);
+        Assert.Equal(
+            Enumerable.Range(12, 4).Select(index => Gen5Operand.Vector((uint)index)),
+            instruction.Destinations);
+        Assert.Equal(
+            Enumerable.Range(0, 11).Select(index => Gen5Operand.Vector((uint)index)).Append(Gen5Operand.Scalar(4)),
+            instruction.Sources);
+    }
+
+    [Fact]
+    public void DsAppend_ReadsTheGdsBitAtBit17()
+    {
+        // DS_APPEND v0 offset:16 gds (Astro Bot's indirect-dispatch producer)
+        var instruction = DecodeSingle(0xD8FA0010, 0x00000000);
+
+        Assert.Equal("DsAppend", instruction.Opcode);
+        var control = Assert.IsType<Gen5DataShareControl>(instruction.Control);
+        Assert.True(control.Gds);
+        Assert.Equal(16u, control.SingleOffsetBytes);
+    }
+
+    [Fact]
+    public void Vop3CompareGtU64_WritesTheScalarPairInVdst()
+    {
+        // V_CMP_GT_U64 s[4:5], v[0:1], v[2:3] (VOP3 op 0x0E4)
+        var instruction = DecodeSingle(0xD4E40004, 0x00020500);
+
+        Assert.Equal("VCmpGtU64", instruction.Opcode);
+        var control = Assert.IsType<Gen5Vop3Control>(instruction.Control);
+        Assert.Equal(4u, control.ScalarDestination);
+        Assert.Equal(new[] { Gen5Operand.Scalar(4) }, instruction.Destinations);
+        Assert.Equal(new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(2) }, instruction.Sources);
+    }
+
+    [Fact]
+    public void SSetprio_Decodes()
+    {
+        // S_SETPRIO 3 (SOPP op 0x0F)
+        var instruction = DecodeSingle(0xBF8F0003);
+
+        Assert.Equal("SSetprio", instruction.Opcode);
+    }
+
+    [Fact]
     public void DsAddU32_HasAddressAndDataSourcesButNoDestination()
     {
         // DS_ADD_U32 v0, v1
@@ -182,8 +234,8 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Theory]
-    [InlineData(0xD8FA3412u, "DsAppend")]
-    [InlineData(0xD8F63412u, "DsConsume")]
+    [InlineData(0xD8F83412u, "DsAppend")]
+    [InlineData(0xD8F43412u, "DsConsume")]
     public void DsWaveCounter_UsesM0AndReturnsOldValue(uint word, string opcode)
     {
         var instruction = DecodeSingle(word, 0x07000000);

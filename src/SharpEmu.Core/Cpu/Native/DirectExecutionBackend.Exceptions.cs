@@ -127,11 +127,6 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
-			if (TryRecoverAuxiliaryThreadExecuteFault(exceptionRecord, contextRecord, rip))
-			{
-				return -1;
-			}
-
 			if (exceptionCode == 3221225477u && TryHandleLazyCommittedPage(exceptionRecord, rip, rsp))
 			{
 				return -1;
@@ -142,6 +137,13 @@ public sealed partial class DirectExecutionBackend
 				return -1;
 			}
 			if (exceptionCode == 3221225477u && TryResolveGpuFault(exceptionRecord))
+			{
+				return -1;
+			}
+			// Only a fault none of the handlers above resolves aborts a TBB worker: a write
+			// to a lazily committed or GPU-tracked page is routine, and aborting the worker
+			// there strands the guest allocator lock it may hold.
+			if (TryRecoverAuxiliaryThreadExecuteFault(exceptionRecord, contextRecord, rip))
 			{
 				return -1;
 			}

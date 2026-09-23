@@ -162,6 +162,13 @@ public static partial class ImageRequestBuilders
         var depthTile = tile == GuestTileMode.Depth;
         var msaaTile = depthTile || tile == GuestTileMode.RenderTarget;
         var msaaArray = type == GuestImageType.Color2DMsaaArray;
+     
+        if (!multisampled && baseLevel >= levels)
+        {
+            var pastChain = NullTexture(shape);
+            return new TextureRequestResolution(pastChain, false, pastChain.View.Format, 0);
+        }
+
         if ((!multisampled && (baseLevel > viewLastLevel || viewLastLevel >= levels)) ||
             (multisampled &&
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||

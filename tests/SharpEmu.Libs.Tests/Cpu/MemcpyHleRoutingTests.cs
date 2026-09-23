@@ -36,11 +36,13 @@ public sealed class MemcpyHleRoutingTests
     }
 
     [Fact]
-    public void IsHlePreferredNid_PrefersHleForStrcasecmp()
+    public void IsHlePreferredNid_LetsStrcasecmpUseItsIntrinsic()
     {
-        Assert.True(
+        // Demon's Souls calls strcasecmp ~2M times while loading; the HLE round
+        // trip cost ~13s. The intrinsic reproduces the HLE null-argument answer.
+        Assert.False(
             InvokeIsHlePreferredNid(StrcasecmpNid),
-            $"strcasecmp ({StrcasecmpNid}) must route through HLE so null-argument recovery remains active.");
+            $"strcasecmp ({StrcasecmpNid}) should use its null-safe intrinsic stub.");
     }
 
     [Fact]
@@ -62,7 +64,7 @@ public sealed class MemcpyHleRoutingTests
     }
 
     [Fact]
-    public void TryCreateNativeImportIntrinsic_DoesNotClaimStrcasecmp()
+    public void TryCreateNativeImportIntrinsic_ClaimsStrcasecmp()
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
@@ -71,10 +73,13 @@ public sealed class MemcpyHleRoutingTests
 
         var claimed = InvokeTryCreateNativeImportIntrinsic(StrcasecmpNid, out var address);
 
-        Assert.False(
-            claimed,
-            $"strcasecmp ({StrcasecmpNid}) must fall through to the HLE trampoline so a null guest pointer does not fault in the intrinsic stub.");
-        Assert.Equal(0, address);
+        Assert.True(claimed, $"strcasecmp ({StrcasecmpNid}) should receive its intrinsic stub.");
+        Assert.NotEqual(0, address);
+
+        unsafe
+        {
+            Assert.True(HostMemory.Free((void*)address, 0, HostMemory.MEM_RELEASE));
+        }
     }
 
     [Fact]

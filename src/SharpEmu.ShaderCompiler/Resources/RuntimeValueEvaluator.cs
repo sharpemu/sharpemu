@@ -251,6 +251,15 @@ public sealed class RuntimeValueEvaluator
 
         if (_inputs.ReadMemory is null || !_inputs.ReadMemory(address, out var word))
         {
+            // Every read is evaluated up front, including ones in branches the shader skips
+            // when a pointer is null. A load through a null base cannot execute on hardware,
+            // so its value is never used.
+            if ((baseAddress & ~3ul) == 0)
+            {
+                result = 0;
+                return true;
+            }
+
             return false;
         }
 

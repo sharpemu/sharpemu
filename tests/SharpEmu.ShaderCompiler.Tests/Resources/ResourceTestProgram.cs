@@ -133,12 +133,12 @@ internal static class ResourceTestProgram
     }
 
     public static Gen5ShaderInstruction DataShareWrite(uint pc, bool gds) =>
-        new(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [gds ? 1u << 16 : 0u, 0u], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [],
+        new(pc, Gen5ShaderEncoding.Ds, "DsWriteB32", [gds ? 1u << 17 : 0u, 0u], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [],
             new Gen5DataShareControl(0, 0, gds));
 
     // Any DS instruction: sources first (address, data...), then the vector destinations.
     public static Gen5ShaderInstruction DataShare(uint pc, string opcode, bool gds, Gen5Operand[] sources, uint[] destinations, uint offset0 = 0, uint offset1 = 0) =>
-        new(pc, Gen5ShaderEncoding.Ds, opcode, [gds ? 1u << 16 : 0u, 0u], sources, destinations.Select(Gen5Operand.Vector).ToArray(),
+        new(pc, Gen5ShaderEncoding.Ds, opcode, [gds ? 1u << 17 : 0u, 0u], sources, destinations.Select(Gen5Operand.Vector).ToArray(),
             new Gen5DataShareControl(offset0, offset1, gds));
 
     // A global or flat access with explicit data registers: a load writes destination,

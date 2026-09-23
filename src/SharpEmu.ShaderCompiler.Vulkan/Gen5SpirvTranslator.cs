@@ -493,13 +493,10 @@ public static partial class Gen5SpirvTranslator
 
             var scalarArrayType = _module.TypeArray(_uintType, ScalarRegisterCount);
             var vectorArrayType = _module.TypeArray(_uintType, VectorRegisterCount);
-            var packedHalfArrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
             var privateScalarArrayPointer =
                 _module.TypePointer(SpirvStorageClass.Private, scalarArrayType);
             var privateVectorArrayPointer =
                 _module.TypePointer(SpirvStorageClass.Private, vectorArrayType);
-            var privatePackedHalfArrayPointer =
-                _module.TypePointer(SpirvStorageClass.Private, packedHalfArrayType);
             _scalarRegisters = _module.AddGlobalVariable(
                 privateScalarArrayPointer,
                 SpirvStorageClass.Private,
@@ -508,10 +505,6 @@ public static partial class Gen5SpirvTranslator
                 privateVectorArrayPointer,
                 SpirvStorageClass.Private,
                 _module.ConstantNull(vectorArrayType));
-            _packedHalfRegisters = _module.AddGlobalVariable(
-                privatePackedHalfArrayPointer,
-                SpirvStorageClass.Private,
-                _module.ConstantNull(packedHalfArrayType));
             _scc = _module.AddGlobalVariable(
                 _privateBoolPointer,
                 SpirvStorageClass.Private,
@@ -555,7 +548,6 @@ public static partial class Gen5SpirvTranslator
 
             _interfaces.Add(_scalarRegisters);
             _interfaces.Add(_vectorRegisters);
-            _interfaces.Add(_packedHalfRegisters);
             _interfaces.Add(_scc);
             _interfaces.Add(_vcc);
             _interfaces.Add(_exec);
@@ -569,7 +561,6 @@ public static partial class Gen5SpirvTranslator
             _interfaces.Add(_programActive);
             _module.AddName(_scalarRegisters, "sgpr");
             _module.AddName(_vectorRegisters, "vgpr");
-            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
 
             {
                 DeclareLayoutBindings();
@@ -1427,6 +1418,8 @@ public static partial class Gen5SpirvTranslator
                 "SWaitcnt" or
                 "SInstPrefetch" or
                 "STtraceData" or
+                // Wave scheduling priority hint; no effect on results.
+                "SSetprio" or
                 // NGG shaders bracket their exports with s_sendmsg
                 // (GS_ALLOC_REQ/DEALLOC) to reserve hardware export space;
                 // exports are translated directly, so the message is moot.
@@ -1463,6 +1456,12 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Control is Gen5ImageControl image)
             {
                 return TryEmitImage(instruction, image, out error);
+            }
+
+            if (instruction.Control is Gen5RayIntersectControl rayIntersect)
+            {
+                EmitRayIntersectMiss(rayIntersect);
+                return true;
             }
 
             if (instruction.Control is Gen5GlobalMemoryControl globalMemory)
@@ -3486,6 +3485,27 @@ public static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        // BVH nodes are not traversed yet: every ray misses the node it is tested against.
+        // The node type sits in the low three bits of the node pointer. A box node (4-7)
+        // returns four invalid child pointers, a triangle node (0-3) returns t = +inf over
+        // a denominator of 1, so the guest's traversal loop ends with no hit.
+        private void EmitRayIntersectMiss(Gen5RayIntersectControl ray)
+        {
+            var nodeType = BitwiseAnd(LoadV(ray.GetAddressRegister(0)), UInt(7));
+            var isTriangle = _module.AddInstruction(SpirvOp.ULessThan, _boolType, nodeType, UInt(4));
+            uint[] triangleMiss = [0x7F800000u, 0x3F800000u, 0u, 0u];
+            for (var component = 0u; component < Gen5RayIntersectControl.ResultDwords; component++)
+            {
+                var value = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    isTriangle,
+                    UInt(triangleMiss[component]),
+                    UInt(0xFFFFFFFFu));
+                StoreV(ray.VectorData + component, value);
+            }
         }
 
         private bool TryEmitImage(
@@ -5980,8 +6000,28 @@ public static partial class Gen5SpirvTranslator
             _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _privateVec2Pointer,
-                _packedHalfRegisters,
+                PackedHalfRegisters(),
                 UInt(register));
+
+        // Declared on first use. AMD's compiler keeps an unused 4 KiB private array as a
+        // named .bss global: two stages then fail to link, and the driver copies the
+        // NOBITS section as file data and reads past the end of the ELF.
+        private uint PackedHalfRegisters()
+        {
+            if (_packedHalfRegisters != 0)
+            {
+                return _packedHalfRegisters;
+            }
+
+            var arrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
+            _packedHalfRegisters = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.Private, arrayType),
+                SpirvStorageClass.Private,
+                _module.ConstantNull(arrayType));
+            _interfaces.Add(_packedHalfRegisters);
+            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
+            return _packedHalfRegisters;
+        }
 
         private uint LoadS(uint register) => Load(_uintType, ScalarPointer(register));
 
@@ -6340,8 +6380,18 @@ public static partial class Gen5SpirvTranslator
                     mask,
                     CurrentLaneBit()));
 
-        private void StoreWaveMask(uint register, uint condition) =>
+        // In wave32 a lane mask fills its register alone and the next one keeps its value.
+        // That includes VCC and EXEC: compilers use VCC_HI (s107) as an ordinary SGPR.
+        private void StoreWaveMask(uint register, uint condition)
+        {
+            if (_waveLaneCount == 32)
+            {
+                StoreS(register, Narrow(BooleanToWaveMask(condition)));
+                return;
+            }
+
             StoreS64(register, BooleanToWaveMask(condition));
+        }
 
         private void EmitExecConditional(Action emit)
         {

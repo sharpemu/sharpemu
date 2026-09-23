@@ -79,6 +79,7 @@ public static partial class Gen5SpirvTranslator
         private uint _physicalUintPointer;
         private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
+        private uint _deviceBufferWordScratch;
         private uint _pushDataBlockPointer;
         private uint _wordRuntimeArray;
         private uint _addressRuntimeArray;
@@ -213,6 +214,12 @@ public static partial class Gen5SpirvTranslator
                 _module.AddName(_deviceWordScratch, "deviceAddressWord");
                 _interfaces.Add(_deviceEntryScratch);
                 _interfaces.Add(_deviceWordScratch);
+                if (request.Memory.Entries.Any(static memory => memory.DeviceDescriptor))
+                {
+                    _deviceBufferWordScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                    _module.AddName(_deviceBufferWordScratch, "deviceBufferWord");
+                    _interfaces.Add(_deviceBufferWordScratch);
+                }
             }
 
             foreach (var memoryIndex in request.IndirectKeyMemoryIndices)
@@ -654,6 +661,29 @@ public static partial class Gen5SpirvTranslator
 
         // ---- scalar memory ----
 
+        // One dword of a scalar buffer load through the V# in s[descriptor:descriptor+3]:
+        // base in dwords 0-1 (48 bits), stride in dword 1 [29:16], records in dword 2.
+        // A load past the end of the buffer returns zero, as on hardware.
+        private uint LoadDeviceDescriptorBufferWord(uint descriptor, uint byteOffset)
+        {
+            var word1 = LoadS(descriptor + 1);
+            var baseAddress = Pair64(LoadS(descriptor), BitwiseAnd(word1, UInt(0xFFFF)));
+            var stride = BitwiseAnd(ShiftRightLogical(word1, UInt(16)), UInt(0x3FFF));
+            var records = Widen(LoadS(descriptor + 2));
+            var size = _module.AddInstruction(
+                SpirvOp.Select,
+                _ulongType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, stride, UInt(0)),
+                records,
+                _module.AddInstruction(SpirvOp.IMul, _ulongType, records, Widen(stride)));
+            var aligned = Widen(BitwiseAnd(byteOffset, UInt(~3u)));
+            var inRange = ULessThan64(IAdd64(aligned, ULong(sizeof(uint) - 1)), size);
+            Store(_deviceBufferWordScratch, UInt(0));
+            EmitConditional(inRange, () =>
+                Store(_deviceBufferWordScratch, LoadDeviceDword(And64(IAdd64(baseAddress, aligned), ULong(DeviceAddressMask & ~3ul)))));
+            return Load(_uintType, _deviceBufferWordScratch);
+        }
+
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)
         {
             _deviceAddressInstructionPc = instruction.Pc;
@@ -689,6 +719,18 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     value = LoadFlattenedWord(UInt(slot));
+                }
+                else if (entry.Kind == MemoryResourceKind.ScalarBuffer && entry.DeviceDescriptor)
+                {
+                    if (instruction.Sources.Count == 0 || instruction.Sources[0].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "invalid scalar-buffer descriptor";
+                        return false;
+                    }
+
+                    value = LoadDeviceDescriptorBufferWord(
+                        instruction.Sources[0].Value,
+                        IAdd(dynamicOffset, UInt(unchecked((uint)control.ImmediateOffsetBytes + (uint)component * sizeof(uint)))));
                 }
                 else if (entry.Kind == MemoryResourceKind.ScalarBuffer)
                 {

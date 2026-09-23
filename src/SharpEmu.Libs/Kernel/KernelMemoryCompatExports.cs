@@ -122,6 +122,12 @@ public static partial class KernelMemoryCompatExports
     // "/app0/Data.bin" even though that file exists.
     private static readonly HashSet<string> _negativeStatCache = new(HostFsPath.Comparer);
     private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPath.Comparer);
+    // Mount components already found to exist without being reparse points. Titles resolve
+    // every asset path at startup; re-reading each directory's attributes costs seconds.
+    private static readonly ConcurrentDictionary<string, byte> _verifiedMountComponents = new(HostFsPath.Comparer);
+    private static readonly ConcurrentDictionary<string, byte> _verifiedMountDirectories = new(HostFsPath.Comparer);
+    private static readonly ConcurrentDictionary<string, string> _fullMountRoots = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, byte> _aprScannedDirectories = new(HostFsPath.Comparer);
     private static long _nextFileDescriptor = 2;
     private static string _applicationTitleId = "UNKNOWN";
 
@@ -1741,7 +1747,10 @@ public static partial class KernelMemoryCompatExports
             }
 
             var fileId = AmprFileRegistry.RegisterAprResolvedPath(guestPath, hostPath);
-            LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+            if (_logIo)
+            {
+                LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+            }
 
             if (idsAddress != 0 &&
                 !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
@@ -1760,6 +1769,7 @@ public static partial class KernelMemoryCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
 
     // WithPrefix sibling of sceKernelAprResolveFilepathsToIdsAndFileSizes.
     // Resource streamers resolve relative asset paths against a shared directory
@@ -5000,7 +5010,7 @@ public static partial class KernelMemoryCompatExports
         string candidate;
         try
         {
-            fullRoot = Path.GetFullPath(mountRoot);
+            fullRoot = _fullMountRoots.GetOrAdd(mountRoot, static root => Path.GetFullPath(root));
             candidate = Path.GetFullPath(Path.Combine(fullRoot, relative));
         }
         catch (Exception ex) when (
@@ -5047,7 +5057,12 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
-        var relative = Path.GetRelativePath(rootTrimmed, candidate);
+        // Callers pass full paths; one already under the root needs no renormalization.
+        var relative = candidate.Length > rootTrimmed.Length + 1 &&
+            candidate.StartsWith(rootTrimmed, HostFsPath.Comparison) &&
+            candidate[rootTrimmed.Length] == Path.DirectorySeparatorChar
+                ? candidate[(rootTrimmed.Length + 1)..]
+                : Path.GetRelativePath(rootTrimmed, candidate);
         // A leading ".." segment means the candidate is not under the root. Match
         // the segment precisely: bare ".." or a "../" prefix, NOT a legitimate
         // file merely named "..foo". This branch is a defensive fallback (lexical
@@ -5066,13 +5081,46 @@ public static partial class KernelMemoryCompatExports
                      Path.DirectorySeparatorChar,
                      StringSplitOptions.RemoveEmptyEntries))
         {
+            var parent = current;
             current = Path.Combine(current, segment);
+            if (_verifiedMountComponents.ContainsKey(current))
+            {
+                continue;
+            }
+
+            // One listing returns every entry's attributes: verify the whole parent directory
+            // at once. Reparse points stay unverified and are rejected below.
+            if (_verifiedMountDirectories.TryAdd(parent, 0))
+            {
+                try
+                {
+                    foreach (var entry in new DirectoryInfo(parent).EnumerateFileSystemInfos())
+                    {
+                        if ((entry.Attributes & FileAttributes.ReparsePoint) == 0)
+                        {
+                            _verifiedMountComponents.TryAdd(entry.FullName, 0);
+                        }
+                    }
+                }
+                catch (Exception ex) when (
+                    ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                {
+                }
+
+                if (_verifiedMountComponents.ContainsKey(current))
+                {
+                    continue;
+                }
+            }
+
             try
             {
                 if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                 {
                     return true;
                 }
+
+                _verifiedMountComponents.TryAdd(current, 0);
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -6773,6 +6821,27 @@ public static partial class KernelMemoryCompatExports
             return true;
         }
 
+        // One directory listing returns every file's size; titles resolve whole asset
+        // directories at startup, so this replaces one host query per file.
+        if (Path.GetDirectoryName(cachePath) is { } directory && _aprScannedDirectories.TryAdd(directory, 0))
+        {
+            try
+            {
+                foreach (var file in new DirectoryInfo(directory).EnumerateFiles())
+                {
+                    _aprFileSizeCache.TryAdd(file.FullName, file.Length < 0 ? 0UL : unchecked((ulong)file.Length));
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+            }
+
+            if (_aprFileSizeCache.TryGetValue(cachePath, out size))
+            {
+                return true;
+            }
+        }
+
         try
         {
             var fileInfo = new FileInfo(cachePath);
@@ -6976,9 +7045,13 @@ public static partial class KernelMemoryCompatExports
         Console.Error.WriteLine($"[LOADER][TRACE] {message}");
     }
 
+    // Read once: file-heavy titles call LogIoTrace for every resolved path.
+    private static readonly bool _logIo =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal);
+
     private static void LogIoTrace(string operation, string path, string detail)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal))
+        if (!_logIo)
         {
             return;
         }

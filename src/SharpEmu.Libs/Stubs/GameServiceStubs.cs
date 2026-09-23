@@ -124,9 +124,19 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceVoice")]
     public static int VoiceEnd(CpuContext ctx) => Ok(ctx);
 
+
     [SysAbiExport(Nid = "amuBfI-AQc4", ExportName = "sceRudpInit",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
     public static int RudpInit(CpuContext ctx) => Ok(ctx);
+
+        [SysAbiExport(Nid = "6PBNpsgyaxw", ExportName = "sceRudpEnableInternalIOThread",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
+    public static int RudpEnableInternalIOThread(CpuContext ctx) => Ok(ctx);
+
+        [SysAbiExport(Nid = "SUEVes8gvmw", ExportName = "sceRudpSetEventHandler",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
+    public static int RudpSetEventHandler(CpuContext ctx) => Ok(ctx);
+
 
     [SysAbiExport(Nid = "84fDxStrG44", ExportName = "sceDeviceServiceInitialize",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceDeviceService")]

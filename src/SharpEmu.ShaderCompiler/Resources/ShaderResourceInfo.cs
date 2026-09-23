@@ -189,6 +189,8 @@ public sealed record IndirectImageSelector(
     public uint TableOffset { get; init; }
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
+    // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
+    public uint MaterialImmediate { get; init; }
 }
 
 public sealed record DirectImageCandidate(uint Offset, uint Source);

@@ -406,8 +406,8 @@ public sealed class MslTranslationTests
         var fixture = new Gen5ComputeFixture(
             "data-share-wave-counters",
             [
-                0xD8FA0014, 0x07000000, // ds_append v7 offset:20
-                0xD8F60014, 0x08000000, // ds_consume v8 offset:20
+                0xD8F80014, 0x07000000, // ds_append v7 offset:20
+                0xD8F40014, 0x08000000, // ds_consume v8 offset:20
                 0xBF810000,             // s_endpgm
             ],
             StoreScalarResourceBase: 0,

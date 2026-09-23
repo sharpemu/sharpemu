@@ -102,8 +102,8 @@ public sealed class Gen5SpirvAtomicTranslationTests
     {
         var opcodes = CompileComputeOpcodes(
             [
-                0xD8FA0014, 0x07000000,
-                0xD8F60014, 0x08000000,
+                0xD8F80014, 0x07000000,
+                0xD8F40014, 0x08000000,
             ],
             new Dictionary<uint, uint>());
 
@@ -120,8 +120,8 @@ public sealed class Gen5SpirvAtomicTranslationTests
     {
         var opcodes = CompileVertexOpcodes(
             [
-                0xD8FA0014, 0x07000000,
-                0xD8F60014, 0x08000000,
+                0xD8F80014, 0x07000000,
+                0xD8F40014, 0x08000000,
             ]);
 
         // Private graphics storage applies the counter once per active wave.
