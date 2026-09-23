@@ -345,6 +345,10 @@ public static partial class Gen5MslTranslator
                     $"extract_bits({RawSource(instruction, 0)}, ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)",
                 "VBfiB32" =>
                     $"((({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)})) | (~({RawSource(instruction, 0)}) & ({RawSource(instruction, 2)})))",
+                "VAlignbitB32" =>
+                    $"uint(((ulong({RawSource(instruction, 0)}) << 32) | ulong({RawSource(instruction, 1)})) >> (({RawSource(instruction, 2)}) & 31u))",
+                "VAlignbyteB32" =>
+                    $"uint(((ulong({RawSource(instruction, 0)}) << 32) | ulong({RawSource(instruction, 1)})) >> ((({RawSource(instruction, 2)}) & 3u) * 8u))",
                 "VBfmB32" =>
                     $"(((1u << (({RawSource(instruction, 0)}) & 31u)) - 1u) << (({RawSource(instruction, 1)}) & 31u))",
                 "VBfrevB32" => $"reverse_bits({RawSource(instruction, 0)})",

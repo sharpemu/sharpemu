@@ -439,7 +439,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             renderingState.ColorFormats[index] = format;
-            parameters.SetColorMask(index, color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)));
+            // A target the pixel program never exports keeps its contents, as on hardware; the
+            // host output would otherwise write an undefined value (e.g. depth-only passes that
+            // leave a color target bound and export only to the null target).
+            var exported = pixelStage is null || ((pixelStage.PixelColorExportMasks >> (int)(color.Slot * 4)) & 0xFu) != 0;
+            parameters.SetColorMask(index, exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0);
         }
 
         var withDepth = depth.HasTarget;

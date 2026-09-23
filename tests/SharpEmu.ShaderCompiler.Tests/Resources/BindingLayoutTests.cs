@@ -150,15 +150,15 @@ public sealed class BindingLayoutTests
     [Fact]
     public void ImageBindingAbi()
     {
-        Assert.Equal(42u, BindingLayout.ImageBindingCount);
+        Assert.Equal(45u, BindingLayout.ImageBindingCount);
         Assert.Equal(0u, (uint)DescriptorBindingKind.Buffers);
-        Assert.Equal(43u, (uint)DescriptorBindingKind.Samplers);
-        Assert.Equal(44u, (uint)DescriptorBindingKind.GlobalDataShare);
-        Assert.Equal(45u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
-        Assert.Equal(46u, (uint)DescriptorBindingKind.FaultBuffer);
-        Assert.Equal(47u, (uint)DescriptorBindingKind.FlattenedResourceTable);
-        Assert.Equal(48u, (uint)DescriptorBindingKind.ShaderData);
-        Assert.Equal(49u, (uint)DescriptorBindingKind.Count);
+        Assert.Equal(46u, (uint)DescriptorBindingKind.Samplers);
+        Assert.Equal(47u, (uint)DescriptorBindingKind.GlobalDataShare);
+        Assert.Equal(48u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
+        Assert.Equal(49u, (uint)DescriptorBindingKind.FaultBuffer);
+        Assert.Equal(50u, (uint)DescriptorBindingKind.FlattenedResourceTable);
+        Assert.Equal(51u, (uint)DescriptorBindingKind.ShaderData);
+        Assert.Equal(52u, (uint)DescriptorBindingKind.Count);
 
         ImageDimension[] sampledDimensions =
         [
@@ -170,9 +170,9 @@ public sealed class BindingLayoutTests
             ImageDimension.Dim1D, ImageDimension.Dim1DArray, ImageDimension.Dim2D, ImageDimension.Dim2DArray, ImageDimension.Dim3D,
         ];
         var index = 0u;
-        void CheckBinding(ImageResourceClass resourceClass, ImageNumericClass numericClass, ImageDimension dimension, bool atomic, bool cube = false)
+        void CheckBinding(ImageResourceClass resourceClass, ImageNumericClass numericClass, ImageDimension dimension, bool atomic, bool cube = false, bool depthCompare = false)
         {
-            var image = new ImageResource { ResourceClass = resourceClass, NumericClass = numericClass, Dimension = dimension, Atomic = atomic, Cube = cube };
+            var image = new ImageResource { ResourceClass = resourceClass, NumericClass = numericClass, Dimension = dimension, Atomic = atomic, Cube = cube, DepthCompare = depthCompare };
             var kind = ImageDescriptorBinding.ForImage(image);
             Assert.NotNull(kind);
             Assert.Equal(BindingLayout.FirstImageBinding + index, (uint)kind!.Value);
@@ -209,6 +209,10 @@ public sealed class BindingLayoutTests
         foreach (var numericClass in new[] { ImageNumericClass.Float, ImageNumericClass.Uint })
             CheckBinding(ImageResourceClass.Storage, numericClass, ImageDimension.Dim2D, false, cube: true);
         CheckBinding(ImageResourceClass.Storage, ImageNumericClass.Uint, ImageDimension.Dim2D, true, cube: true);
+        // Depth-reference sampling never shares an array with ordinary images.
+        CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false, depthCompare: true);
+        CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2DArray, false, depthCompare: true);
+        CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false, cube: true, depthCompare: true);
 
         Assert.Equal(BindingLayout.ImageBindingCount, index);
 

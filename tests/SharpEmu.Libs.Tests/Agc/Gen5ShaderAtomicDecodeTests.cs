@@ -306,6 +306,16 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
     }
 
+    [Fact]
+    public void VAlignbyteB32_DecodesVop3Opcode14F()
+    {
+        var instruction = DecodeSingle(0xD14F0001, 0x040E0502);
+
+        Assert.Equal("VAlignbyteB32", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Vector(3) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);

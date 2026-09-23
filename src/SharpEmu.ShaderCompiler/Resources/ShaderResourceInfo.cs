@@ -72,6 +72,9 @@ public sealed class ImageResource
     public bool Written { get; set; }
     public bool Atomic { get; set; }
     public bool DepthCompare { get; set; }
+    // Guest compare function (0..7) evaluated in the shader for a depth-compare
+    // image whose format has no Vulkan depth equivalent; -1 when not emulated.
+    public int EmulatedCompareFunction { get; set; } = -1;
     public bool Cube { get; set; }
     public bool R128 { get; set; }
     public uint IndirectRoot { get; set; } = DescriptorConstants.NoIndex;

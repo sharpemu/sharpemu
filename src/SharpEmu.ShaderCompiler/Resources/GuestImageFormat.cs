@@ -8,8 +8,14 @@ namespace SharpEmu.ShaderCompiler.Resources;
 public static class GuestImageFormat
 {
     public const uint Invalid = 0;
+    public const uint Format16Unorm = 7;
     public const uint Format32Uint = 20;
     public const uint Format32Sint = 21;
+    public const uint Format32Float = 22;
+
+    // Only these sample as a Vulkan depth format; comparison sampling of any
+    // other format is evaluated in the shader.
+    public static bool HasDepthEquivalent(uint format) => format is Format16Unorm or Format32Float;
     public const uint Format11x2x10Uint = 34;
     public const uint MaxFormat = 182;
 

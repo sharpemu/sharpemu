@@ -1245,7 +1245,8 @@ public static partial class Gen5SpirvTranslator
                 imageClass.Multisampled,
                 imageClass.Dimension,
                 imageInfo.ConversionFormat,
-                imageInfo.ShaderSwizzle);
+                imageInfo.ShaderSwizzle,
+                imageInfo.EmulatedCompareFunction);
             dstSelect = imageInfo.ShaderSwizzle;
             return true;
         }

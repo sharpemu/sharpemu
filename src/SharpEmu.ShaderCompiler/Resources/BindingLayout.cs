@@ -50,9 +50,35 @@ public static class ImageDescriptorBinding
     private const uint StorageCubeFloatBinding = 40;
     private const uint StorageCubeUintBinding = 41;
     private const uint AtomicCubeUintBinding = 42;
+    // Depth-reference sampling gets its own arrays: validation checks every element
+    // of an array sampled with Dref, so sharing one with color images reports them.
+    private const uint SampledCompare2DBinding = 43;
+    private const uint SampledCompare2DArrayBinding = 44;
+    private const uint SampledCompareCubeBinding = 45;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
+        if (image.DepthCompare && image.ResourceClass == ImageResourceClass.Sampled && !image.Atomic &&
+            image.NumericClass == ImageNumericClass.Float)
+        {
+            if (image.Cube)
+            {
+                return image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray
+                    ? (DescriptorBindingKind)SampledCompareCubeBinding
+                    : null;
+            }
+
+            if (image.Dimension == ImageDimension.Dim2D)
+            {
+                return (DescriptorBindingKind)SampledCompare2DBinding;
+            }
+
+            if (image.Dimension == ImageDimension.Dim2DArray)
+            {
+                return (DescriptorBindingKind)SampledCompare2DArrayBinding;
+            }
+        }
+
         if (image.Cube)
         {
             if (image.Dimension is not (ImageDimension.Dim2D or ImageDimension.Dim2DArray))
@@ -196,7 +222,8 @@ public static class ImageDescriptorBinding
     public static ImageResourceClass ResourceClass(DescriptorBindingKind kind)
     {
         var value = (uint)kind;
-        if (value is >= SampledCubeFloatBinding and <= SampledCubeSintBinding)
+        if (value is >= SampledCubeFloatBinding and <= SampledCubeSintBinding or
+            >= SampledCompare2DBinding and <= SampledCompareCubeBinding)
         {
             return ImageResourceClass.Sampled;
         }
@@ -222,7 +249,7 @@ public static class ImageDescriptorBinding
     public static uint ArrayIndex(DescriptorBindingKind kind) => (uint)kind - BindingLayout.FirstImageBinding;
 
     public static bool IsCube(DescriptorBindingKind kind) =>
-        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding;
+        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding;
 
     private static readonly ImageDimension[] SampledDimensions =
     [
@@ -239,6 +266,15 @@ public static class ImageDescriptorBinding
     public static (ImageResourceClass ResourceClass, ImageNumericClass NumericClass, ImageDimension Dimension, bool Atomic) Describe(DescriptorBindingKind kind)
     {
         var index = (uint)kind;
+        switch (index)
+        {
+            case SampledCompare2DBinding:
+                return (ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false);
+            case SampledCompare2DArrayBinding:
+            case SampledCompareCubeBinding:
+                return (ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2DArray, false);
+        }
+
         if (index is >= SampledCubeFloatBinding and <= SampledCubeSintBinding)
         {
             var numericClass = index switch
@@ -290,7 +326,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 42;
+    public const uint ImageBindingCount = 45;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;

@@ -308,7 +308,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 return new BufferBinding(stream.Handle.Handle, offset);
             }
 
-            var buffer = CreateHostBuffer(data, BufferUsageFlags.IndexBufferBit | BufferUsageFlags.VertexBufferBit, out var memory, out _);
+            // Transient uploads also back storage-buffer descriptors, so match the ring's usage.
+            var buffer = CreateHostBuffer(data, GpuBuffer.AllFlags, out var memory, out _);
             preparation.OverflowBuffers.Add((buffer, memory));
             if (RenderTrace.Enabled)
             {

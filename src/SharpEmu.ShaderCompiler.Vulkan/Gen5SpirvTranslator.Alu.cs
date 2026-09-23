@@ -1063,10 +1063,14 @@ public static partial class Gen5SpirvTranslator
                     break;
                 }
                 case "VAlignbitB32":
+                case "VAlignbyteB32":
                 {
                     var high = GetRawSource(instruction, 0);
                     var low = GetRawSource(instruction, 1);
-                    var shift = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    // ({S0,S1} >> shift)[31:0]; ALIGNBYTE shifts by whole bytes of S2[1:0].
+                    var shift = instruction.Opcode == "VAlignbyteB32"
+                        ? ShiftLeftLogical(BitwiseAnd(GetRawSource(instruction, 2), UInt(3)), UInt(3))
+                        : BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
                     var lowPart = ShiftRightLogical(low, shift);
                     var inverse = BitwiseAnd(ISubU(UInt(32), shift), UInt(31));
                     var highPartRaw = ShiftLeftLogical(high, inverse);
@@ -3183,12 +3187,7 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
             targetLane = BitwiseAnd(targetLane, UInt(31));
-            var shuffled = _module.AddInstruction(
-                SpirvOp.GroupNonUniformShuffle,
-                _uintType,
-                UInt(3),
-                value,
-                targetLane);
+            var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
                 return shuffled;
@@ -3201,12 +3200,7 @@ public static partial class Gen5SpirvTranslator
                 UInt(1),
                 UInt(0));
             var sourceActive = IsNotZero(
-                _module.AddInstruction(
-                    SpirvOp.GroupNonUniformShuffle,
-                    _uintType,
-                    UInt(3),
-                    activeWord,
-                    targetLane));
+                ShuffleLane(activeWord, targetLane));
             return _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
@@ -3226,12 +3220,7 @@ public static partial class Gen5SpirvTranslator
                 targetLane,
                 lane);
             safeTarget = BitwiseAnd(safeTarget, UInt(31));
-            var shuffled = _module.AddInstruction(
-                SpirvOp.GroupNonUniformShuffle,
-                _uintType,
-                UInt(3),
-                value,
-                safeTarget);
+            var shuffled = ShuffleLane(value, safeTarget);
 
             var sourceAvailable = inRange;
             if (!control.FetchInactive)
@@ -3242,12 +3231,7 @@ public static partial class Gen5SpirvTranslator
                     Load(_boolType, _exec),
                     UInt(1),
                     UInt(0));
-                var shuffledActive = _module.AddInstruction(
-                    SpirvOp.GroupNonUniformShuffle,
-                    _uintType,
-                    UInt(3),
-                    activeWord,
-                    safeTarget);
+                var shuffledActive = ShuffleLane(activeWord, safeTarget);
                 sourceAvailable = _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
@@ -4189,12 +4173,7 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(rowBase, selector);
             targetLane = BitwiseAnd(targetLane, UInt(31));
-            var shuffled = _module.AddInstruction(
-                SpirvOp.GroupNonUniformShuffle,
-                _uintType,
-                UInt(3),
-                value,
-                targetLane);
+            var shuffled = ShuffleLane(value, targetLane);
             var fetchInactive = (control.OperandSelect & 1) != 0;
             if (fetchInactive)
             {
@@ -4208,12 +4187,7 @@ public static partial class Gen5SpirvTranslator
                 UInt(1),
                 UInt(0));
             var sourceActive = IsNotZero(
-                _module.AddInstruction(
-                    SpirvOp.GroupNonUniformShuffle,
-                    _uintType,
-                    UInt(3),
-                    activeWord,
-                    targetLane));
+                ShuffleLane(activeWord, targetLane));
             return _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,

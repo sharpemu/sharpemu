@@ -176,7 +176,8 @@ public static partial class Gen5SpirvTranslator
             bool Multisampled,
             SpirvImageDim Dimension,
             uint ConversionFormat,
-            uint ShaderSwizzle);
+            uint ShaderSwizzle,
+            int EmulatedCompareFunction = -1);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -1846,12 +1847,7 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                broadcast = _module.AddInstruction(
-                    SpirvOp.GroupNonUniformShuffle,
-                    _uintType,
-                    UInt(3),
-                    firstValue,
-                    firstLane);
+                broadcast = ShuffleLane(firstValue, firstLane);
             }
 
             var validResult = _module.AddInstruction(
@@ -4005,7 +4001,27 @@ public static partial class Gen5SpirvTranslator
 
                 }
 
-                if (hasCompare)
+                if (hasCompare && resource.EmulatedCompareFunction >= 0)
+                {
+                    // A color format cannot back a Vulkan depth-compare view; compare
+                    // the sampled first channel like RDNA does for such formats.
+                    var texel = _module.AddInstruction(
+                        explicitLod ? SpirvOp.ImageSampleExplicitLod : SpirvOp.ImageSampleImplicitLod,
+                        resource.VectorType,
+                        [.. operands]);
+                    var depth = EmulatedDepthCompare(
+                        reference,
+                        _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, texel, 0u),
+                        resource.EmulatedCompareFunction);
+                    sampled = _module.AddInstruction(
+                        SpirvOp.CompositeConstruct,
+                        resource.VectorType,
+                        depth,
+                        depth,
+                        depth,
+                        Float(1f));
+                }
+                else if (hasCompare)
                 {
                     // The sampler carries the compare; the depth result fills x, y, z.
                     var drefOperands = new List<uint> { imageObject, coordinates, reference };
@@ -4112,13 +4128,15 @@ public static partial class Gen5SpirvTranslator
                     imageObject,
                     coordinates,
                 };
-                if (hasCompare)
+                var emulatedCompare = hasCompare && resource.EmulatedCompareFunction >= 0;
+                if (emulatedCompare)
                 {
-                    operands.Add(reference);
+                    // Gather the first channel and compare each texel in the shader.
+                    operands.Add(UInt(0));
                 }
                 else if (hasCompare)
                 {
-                    operands.Add(UInt(0));
+                    operands.Add(reference);
                 }
                 else
                 {
@@ -4153,10 +4171,24 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 sampled = _module.AddInstruction(
-                    hasCompare ? SpirvOp.ImageDrefGather : SpirvOp.ImageGather,
+                    hasCompare && !emulatedCompare ? SpirvOp.ImageDrefGather : SpirvOp.ImageGather,
                     resource.VectorType,
                     [.. operands]);
-                if (!hasCompare)
+                if (emulatedCompare)
+                {
+                    var gathered = sampled;
+                    var compared = new uint[4];
+                    for (var texel = 0u; texel < 4; texel++)
+                    {
+                        compared[texel] = EmulatedDepthCompare(
+                            reference,
+                            _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, gathered, texel),
+                            resource.EmulatedCompareFunction);
+                    }
+
+                    sampled = _module.AddInstruction(SpirvOp.CompositeConstruct, resource.VectorType, compared);
+                }
+                else if (!hasCompare)
                 {
                     sampled = UnpackImageGather(resource, image.Dmask, sampled);
                 }
@@ -6204,6 +6236,36 @@ public static partial class Gen5SpirvTranslator
             return UInt(0);
         }
 
+        // Reads value from another lane of the host subgroup. Without subgroup
+        // support the invocation is a one-lane wave, so the only lane is itself;
+        // emitting the shuffle there would need a capability the module lacks.
+        // 1.0 when "reference <function> texel" holds, else 0.0. The function is the
+        // guest sampler's depth compare field, which uses VkCompareOp's order.
+        private uint EmulatedDepthCompare(uint reference, uint texel, int function)
+        {
+            SpirvOp op;
+            switch (function)
+            {
+                case 0: return Float(0f);
+                case 7: return Float(1f);
+                case 1: op = SpirvOp.FOrdLessThan; break;
+                case 2: op = SpirvOp.FOrdEqual; break;
+                case 3: op = SpirvOp.FOrdLessThanEqual; break;
+                case 4: op = SpirvOp.FOrdGreaterThan; break;
+                case 5: op = SpirvOp.FUnordNotEqual; break;
+                case 6: op = SpirvOp.FOrdGreaterThanEqual; break;
+                default: throw new InvalidOperationException($"invalid depth compare function {function}");
+            }
+
+            var passed = _module.AddInstruction(op, _boolType, reference, texel);
+            return _module.AddInstruction(SpirvOp.Select, _floatType, passed, Float(1f), Float(0f));
+        }
+
+        private uint ShuffleLane(uint value, uint lane) =>
+            _subgroupInvocationIdInput == 0
+                ? value
+                : _module.AddInstruction(SpirvOp.GroupNonUniformShuffle, _uintType, UInt(3), value, lane);
+
         private uint CurrentLaneBit()
         {
             if (_subgroupInvocationIdInput == 0)
@@ -6439,7 +6501,7 @@ public static partial class Gen5SpirvTranslator
             _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                 instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
-                    "DsAppend" or "DsConsume" or "DsSwizzleB32");
+                    "DsAppend" or "DsConsume" or "DsSwizzleB32" or "DsBpermuteB32");
 
         private bool UsesSubgroupBroadcast() =>
             _request.Program.Instructions.Any(instruction =>

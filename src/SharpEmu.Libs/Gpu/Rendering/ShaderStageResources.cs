@@ -46,6 +46,8 @@ public class ShaderProgramInfo
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
     public uint ParameterExportMask { get; init; }
+    // Four component bits per color target (MRT0 in the low nibble) the pixel program exports.
+    public uint PixelColorExportMasks { get; init; } = uint.MaxValue;
     public int VertexOffsetScalarRegister { get; init; } = NoScalarRegister;
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }

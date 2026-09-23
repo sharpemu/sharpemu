@@ -381,6 +381,46 @@ public sealed class SpirvBindingDeclarationTests
         Assert.Contains((uint)SpirvCapability.GroupNonUniformShuffle, module.Capabilities);
     }
 
+    [Fact]
+    public void DataShareBpermute_DeclaresTheShuffleCapability()
+    {
+        // DS_BPERMUTE_B32 v2, v0, v1 lowers to OpGroupNonUniformShuffle.
+        var program = Program(
+            DataShare(0, "DsBpermuteB32", gds: false, [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], [2]),
+            EndProgram(8));
+        var request = Request(program, ShaderStage.Compute);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var module = new SpirvModuleInspector(shader.Spirv);
+        Assert.Contains((ushort)SpirvOp.GroupNonUniformShuffle, module.Opcodes);
+        Assert.Contains((uint)SpirvCapability.GroupNonUniformShuffle, module.Capabilities);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DppWithoutGraphicsSubgroups_KeepsTheLaneValue(bool enableGraphicsSubgroupOperations)
+    {
+        // V_MOV_B32_DPP8 v1, v0: a one-lane wave reads its own lane, so no shuffle
+        // (and no missing GroupNonUniformShuffle capability) when subgroups are off.
+        var dpp = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vop1, "VMovB32", [0u],
+            [Gen5Operand.Vector(0)], [Gen5Operand.Vector(1)], new Gen5Dpp8Control(0xFAC688, FetchInactive: true));
+        var program = Program(dpp, EndProgram(8));
+        var (plan, resources, layout) = Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
+            EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var module = new SpirvModuleInspector(shader.Spirv);
+        Assert.Equal(
+            module.Opcodes.Contains((ushort)SpirvOp.GroupNonUniformShuffle),
+            module.Capabilities.Contains((uint)SpirvCapability.GroupNonUniformShuffle));
+        Assert.Equal(enableGraphicsSubgroupOperations, module.Opcodes.Contains((ushort)SpirvOp.GroupNonUniformShuffle));
+    }
+
     // A storage image whose descriptor spans two mips, written through a register-selected mip.
     internal static Gen5ShaderProgram DynamicMipStoreProgram()
     {

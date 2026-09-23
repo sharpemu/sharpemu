@@ -25,6 +25,13 @@ public static partial class ImageRequestBuilders
             TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
             _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
         };
+        // Depth-reference sampling needs a depth view even for the placeholder.
+        var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
+        if (depthCompare)
+        {
+            format = Format.D32Sfloat;
+        }
+
         var description = ImageDescription.Create();
         description.PixelFormat = format;
         description.GuestFormat = guestFormat;
@@ -44,10 +51,18 @@ public static partial class ImageRequestBuilders
                 : shape.OneDimensional
                     ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
                     : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D,
-            Aspect = ImageAspectFlags.ColorBit,
+            Aspect = depthCompare ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit,
             Usage = storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit,
         };
         return new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
+    }
+
+    // A depth placeholder reads its value into red, as sampled depth views do.
+    private static TextureRequestResolution NullTextureResolution(in ShaderImageShape shape)
+    {
+        var request = NullTexture(shape);
+        var swizzle = request.Description.IsDepth ? ViewFormatRules.PackDestinationSelect(4, 0, 0, 1) : 0u;
+        return new TextureRequestResolution(request, false, request.View.Format, swizzle);
     }
 
     // Fills the mip layout of a texture from the guest tiling rules.
@@ -143,8 +158,7 @@ public static partial class ImageRequestBuilders
         var storage = shape.Storage;
         if (descriptor.BaseAddress == 0)
         {
-            var nullRequest = NullTexture(shape);
-            return new TextureRequestResolution(nullRequest, false, nullRequest.View.Format, 0);
+            return NullTextureResolution(shape);
         }
 
         var address = descriptor.BaseAddress;
@@ -165,8 +179,7 @@ public static partial class ImageRequestBuilders
      
         if (!multisampled && baseLevel >= levels)
         {
-            var pastChain = NullTexture(shape);
-            return new TextureRequestResolution(pastChain, false, pastChain.View.Format, 0);
+            return NullTextureResolution(shape);
         }
 
         if ((!multisampled && (baseLevel > viewLastLevel || viewLastLevel >= levels)) ||

@@ -102,9 +102,30 @@ public sealed class Gen5ImageTests
             CompileImageOperation(
                 "ImageSampleCLz",
                 dimension: 1,
-                samplerWord0: compareFunction << 12));
+                samplerWord0: compareFunction << 12,
+                unifiedFormat: 22u));
 
         Assert.Contains(instructions, item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
+    }
+
+    [Theory]
+    [InlineData(1u, SpirvOp.FOrdLessThan)]
+    [InlineData(4u, SpirvOp.FOrdGreaterThan)]
+    [InlineData(6u, SpirvOp.FOrdGreaterThanEqual)]
+    public void ImageSampleCompareOnAColorFormatComparesInTheShader(
+        uint compareFunction,
+        SpirvOp expectedComparison)
+    {
+        // RGBA8 has no Vulkan depth-compare view, so the shader samples and compares.
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageSampleCLz",
+                dimension: 1,
+                samplerWord0: compareFunction << 12));
+
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
+        Assert.Contains(instructions, item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
+        Assert.Contains(instructions, item => item.Opcode == expectedComparison);
     }
 
     [Fact]
@@ -115,7 +136,8 @@ public sealed class Gen5ImageTests
                 "ImageSampleCLz",
                 dimension: 1,
                 samplerWord0: 0x00006012,
-                samplerWord2: 0x00500000));
+                samplerWord2: 0x00500000,
+                unifiedFormat: 22u));
 
         Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
         Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageFetch);

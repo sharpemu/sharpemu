@@ -431,6 +431,23 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     }
 
     [Fact]
+    public void NullTexture_ForDepthReferenceSampling_IsADepthView()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var texture = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, false,
+            Descriptor: [], Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float) with { DepthCompare = true });
+
+        var resource = presenter.Run(() => AcquireTexture(presenter, texture));
+        Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
+        var resolution = (TextureRequestResolution)GetFieldValue(resource, "Resolution");
+        Assert.Equal(Format.D32Sfloat, resolution.ViewFormat);
+        presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
     public void ColorTarget_IsFoundInTheStoreAndBoundForTheDraw()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
