@@ -30,6 +30,7 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly SortedList<ulong, OwnedRange> _mapped = new();
     private readonly List<(ulong Address, ulong Size)> _owned = new();
+    private readonly bool _preReserveGuestAddressSpace;
     private bool _disposed;
 
     public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false)
@@ -39,14 +40,8 @@ public sealed class GuestSpaceOwner : IDisposable
         // Create lookup views before concurrent fault handlers can read the range table.
         _ = _mapped.Keys;
         _ = _mapped.Values;
-        if (preReserveGuestAddressSpace)
-        {
-            foreach (var range in _host.ReserveFreeAddressRanges(UserAddressStart, UserAddressEnd, MinimumPreReservedRange))
-            {
-                _owned.Add((range.Address, range.Size));
-                AddFreeRange(range.Address, range.Size);
-            }
-        }
+        _preReserveGuestAddressSpace = preReserveGuestAddressSpace;
+        PreReserveGuestAddressSpace();
         _views = new SharedBackingViews(host, backingSize);
         if (!_views.IsAvailable)
         {
@@ -495,6 +490,22 @@ public sealed class GuestSpaceOwner : IDisposable
             _owned.Clear();
             _free.Clear();
             _mapped.Clear();
+            // A new image load needs the guest address space reserved again.
+            PreReserveGuestAddressSpace();
+        }
+    }
+
+    private void PreReserveGuestAddressSpace()
+    {
+        if (!_preReserveGuestAddressSpace)
+        {
+            return;
+        }
+
+        foreach (var range in _host.ReserveFreeAddressRanges(UserAddressStart, UserAddressEnd, MinimumPreReservedRange))
+        {
+            _owned.Add((range.Address, range.Size));
+            AddFreeRange(range.Address, range.Size);
         }
     }
 

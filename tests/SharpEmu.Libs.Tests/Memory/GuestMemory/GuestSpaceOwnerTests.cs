@@ -422,4 +422,26 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         Assert.Equal(baseAddress, raw.ReserveHole(baseAddress, hole));
         Assert.True(raw.FreeHole(baseAddress, hole));
     }
+
+    [Fact]
+    public void ReleaseAddressRanges_ReservesTheGuestAddressSpaceAgain()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        const ulong start = 0x10_0000_0000;
+        const ulong end = 0xFC_0000_0000;
+        const ulong size = 0x10_0000_0000;
+        const ulong alignment = 0x20_0000;
+        using var owner = new GuestSpaceOwner(HostViewMemory.Create(), BackingSize, preReserveGuestAddressSpace: true);
+        Assert.NotEqual(0UL, owner.FindFreeAddress(start, end, size, alignment));
+
+        owner.ReleaseAddressRanges();
+
+        var address = owner.FindFreeAddress(start, end, size, alignment);
+        Assert.NotEqual(0UL, address);
+        Assert.True(owner.ContainsFreeRange(address, size));
+    }
 }
