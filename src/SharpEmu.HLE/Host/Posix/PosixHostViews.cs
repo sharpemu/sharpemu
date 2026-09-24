@@ -96,6 +96,60 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
         return address;
     }
 
+    // POSIX has no VirtualQuery for foreign host mappings, so find the free
+    // ranges by reserving halves until each attempt fits or falls below the
+    // minimum. Occupied host ranges are few, so this needs few attempts.
+    public IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize)
+    {
+        var reserved = new List<HostAddressRange>();
+        start = AlignUp(start, Granularity);
+        end -= end % Granularity;
+        if (start >= end || minimumSize == 0)
+        {
+            return reserved;
+        }
+
+        lock (PosixViewRegions.Gate)
+        {
+            ReserveFreeAddressRangesLocked(start, end - start, Math.Max(minimumSize, Granularity), reserved);
+        }
+
+        return reserved;
+    }
+
+    private void ReserveFreeAddressRangesLocked(ulong address, ulong size, ulong minimumSize, List<HostAddressRange> reserved)
+    {
+        if (ReserveHoleCore(address, size) == address)
+        {
+            PosixViewRegions.Replace(address, size, HostMemory.MEM_RESERVE, HostMemory.PAGE_NOACCESS);
+            if (reserved.Count != 0 && reserved[^1].Address + reserved[^1].Size == address)
+            {
+                reserved[^1] = reserved[^1] with { Size = reserved[^1].Size + size };
+            }
+            else
+            {
+                reserved.Add(new HostAddressRange(address, size));
+            }
+            return;
+        }
+
+        var half = size / 2;
+        half -= half % Granularity;
+        if (half < minimumSize)
+        {
+            return;
+        }
+
+        ReserveFreeAddressRangesLocked(address, half, minimumSize, reserved);
+        ReserveFreeAddressRangesLocked(address + half, size - half, minimumSize, reserved);
+    }
+
+    private static ulong AlignUp(ulong value, ulong alignment)
+    {
+        var remainder = value % alignment;
+        return remainder == 0 ? value : value + alignment - remainder;
+    }
+
     public bool SplitHole(ulong address, ulong size) => size != 0;
 
     public bool JoinHoles(ulong address, ulong size) => size != 0;

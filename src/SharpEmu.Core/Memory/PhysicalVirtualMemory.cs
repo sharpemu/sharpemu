@@ -1276,6 +1276,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
 
+                // POSIX cannot query foreign host mappings. The free ranges were
+                // reserved at startup, so a failed candidate means the gap is taken.
+                if (!OperatingSystem.IsWindows() && reservedCandidate != 0)
+                {
+                    address = reservedCandidate;
+                    return true;
+                }
+
                 start = candidate + GuestMemoryLayout.GuestPage;
                 if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&

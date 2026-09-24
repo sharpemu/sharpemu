@@ -346,6 +346,43 @@ public sealed unsafe class HostViewMemoryTests
         public uint Alignment2;
     }
 
+    [Fact]
+    public void ReserveFreeAddressRanges_SkipsOccupiedHostRanges()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        const ulong span = 0x400_0000;
+        const ulong minimum = 0x10_0000;
+        var start = ProbeGuestAddress(views, span);
+        var blocker = start + span / 4;
+        var blockerSize = AlignUp(minimum, views.Granularity);
+        Assert.Equal(blocker, views.ReserveHole(blocker, blockerSize));
+
+        var ranges = views.ReserveFreeAddressRanges(start, start + span, minimum);
+        try
+        {
+            Assert.NotEmpty(ranges);
+            Assert.Equal(start, ranges[0].Address);
+            Assert.All(ranges, range => Assert.True(
+                range.Address + range.Size <= blocker || range.Address >= blocker + blockerSize));
+            var reserved = ranges.Aggregate(0UL, (total, range) => total + range.Size);
+            Assert.True(reserved >= span - blockerSize - 2 * minimum, $"Only 0x{reserved:X} bytes were reserved.");
+        }
+        finally
+        {
+            foreach (var range in ranges)
+            {
+                Assert.True(views.FreeHole(range.Address, range.Size));
+            }
+
+            Assert.True(views.FreeHole(blocker, blockerSize));
+        }
+    }
+
     [DllImport("kernel32.dll")]
     private static extern nuint VirtualQuery(void* address, out MemoryBasicInformation info, nuint length);
 }
