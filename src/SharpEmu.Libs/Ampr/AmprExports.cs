@@ -7,6 +7,7 @@ using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace SharpEmu.Libs.Ampr;
@@ -35,6 +36,9 @@ public static class AmprExports
     private const ulong AprMaxAppAddress = 0x0000f00000000000;
     private const ulong KernelEventQueueRecordSize = 0x20;
     private const ulong WriteAddressRecordSize = 0x20;
+    private const ulong WaitAddressRecordSizeWithoutReference = 0x08;
+    private const ulong WaitAddressRecordSizeWith32BitReference = 0x0C;
+    private const ulong WaitAddressRecordSizeWith64BitReference = 0x10;
     private const uint ReadFileRecordType = 0x17;
     private const uint KernelEventQueueRecordType = 2;
     private const uint WriteAddressRecordType = 3;
@@ -55,6 +59,7 @@ public static class AmprExports
         public readonly List<ReadFileCommand> ReadFileCommands = [];
         public readonly List<KernelEventCommand> KernelEventCommands = [];
         public readonly List<WriteAddressCommand> WriteAddressCommands = [];
+        public readonly List<WaitAddressCommand> WaitAddressCommands = [];
         public bool GatherScatterValid;
         public uint GatherScatterFileId;
         public ulong GatherScatterDestination;
@@ -84,6 +89,15 @@ public static class AmprExports
         public ulong RecordOffset;
         public ulong Address;
         public ulong Value;
+    }
+
+    private sealed class WaitAddressCommand
+    {
+        public ulong RecordOffset;
+        public ulong Address;
+        public ulong Reference;
+        public uint Compare;
+        public uint Flush;
     }
 
     private sealed class CachedHostFile : IDisposable
@@ -579,6 +593,37 @@ public static class AmprExports
     }
 
     [SysAbiExport(
+        Nid = "jIlc4p5dSD0",
+        ExportName = "sceAmprMeasureCommandSizeWaitOnAddress",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureCommandSizeWaitOnAddress(CpuContext ctx) => MeasureCommandSizeWaitOnAddress(ctx, legacy: false);
+
+    [SysAbiExport(
+        Nid = "0BMj1hgG+kE",
+        ExportName = "sceAmprMeasureCommandSizeWaitOnAddress_04_00",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureCommandSizeWaitOnAddress0400(CpuContext ctx) => MeasureCommandSizeWaitOnAddress(ctx, legacy: true);
+
+    private static int MeasureCommandSizeWaitOnAddress(CpuContext ctx, bool legacy)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var reference = ctx[CpuRegister.Rsi];
+        var compare = ctx[CpuRegister.Rdx];
+        var flush = ctx[CpuRegister.Rcx];
+        if (!IsValidWaitAddressParameters(address, compare, flush, legacy))
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var recordSize = GetWaitAddressRecordSize(reference);
+        TraceAmpr(ctx, legacy ? "measure_wait_address_04_00" : "measure_wait_address", address, recordSize, reference);
+        ctx[CpuRegister.Rax] = recordSize;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "tZDDEo2tE5k",
         ExportName = "sceAmprCommandBufferGetSize",
         Target = Generation.Gen5,
@@ -769,6 +814,42 @@ public static class AmprExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "V7GQTEeUfhw",
+        ExportName = "sceAmprCommandBufferWaitOnAddress",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferWaitOnAddress(CpuContext ctx) => CommandBufferWaitOnAddress(ctx, legacy: false);
+
+    [SysAbiExport(
+        Nid = "DLfoNxTFNVk",
+        ExportName = "sceAmprCommandBufferWaitOnAddress_04_00",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferWaitOnAddress0400(CpuContext ctx) => CommandBufferWaitOnAddress(ctx, legacy: true);
+
+    private static int CommandBufferWaitOnAddress(CpuContext ctx, bool legacy)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var reference = ctx[CpuRegister.Rdx];
+        var compare = ctx[CpuRegister.Rcx];
+        var flush = ctx[CpuRegister.R8];
+        if (commandBuffer == 0 || !IsValidWaitAddressParameters(address, compare, flush, legacy))
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!AppendWaitAddressRecord(ctx, commandBuffer, address, reference, (uint)compare, (uint)flush))
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAmpr(ctx, legacy ? "wait_address_04_00" : "wait_address", commandBuffer, address, reference);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     public static int CompleteCommandBuffer(CpuContext ctx, ulong commandBuffer)
     {
         return CompleteCommandBuffer(ctx, commandBuffer, out _, out _);
@@ -797,16 +878,18 @@ public static class AmprExports
         ReadFileCommand[] readCommands;
         KernelEventCommand[] kernelEventCommands;
         WriteAddressCommand[] writeAddressCommands;
+        WaitAddressCommand[] waitAddressCommands;
         lock (state)
         {
             writeOffset = state.WriteOffset;
             readCommands = state.ReadFileCommands.ToArray();
             kernelEventCommands = state.KernelEventCommands.ToArray();
             writeAddressCommands = state.WriteAddressCommands.ToArray();
+            waitAddressCommands = state.WaitAddressCommands.ToArray();
         }
 
         var commands = new List<(ulong Offset, int Kind, int Index)>(
-            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length);
+            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length + waitAddressCommands.Length);
         for (var i = 0; i < readCommands.Length; i++)
         {
             commands.Add((readCommands[i].RecordOffset, 0, i));
@@ -818,6 +901,10 @@ public static class AmprExports
         for (var i = 0; i < writeAddressCommands.Length; i++)
         {
             commands.Add((writeAddressCommands[i].RecordOffset, 2, i));
+        }
+        for (var i = 0; i < waitAddressCommands.Length; i++)
+        {
+            commands.Add((waitAddressCommands[i].RecordOffset, 3, i));
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
@@ -856,6 +943,17 @@ public static class AmprExports
                     if (!ctx.TryWriteUInt64(writeCommand.Address, writeCommand.Value))
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                        errorOffset = checked((uint)commandEntry.Offset);
+                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                    }
+                    break;
+
+                case 3:
+                    var waitCommand = waitAddressCommands[commandEntry.Index];
+                    var waitResult = WaitForAddress(ctx, waitCommand);
+                    if (waitResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                    {
+                        executionResult = waitResult;
                         errorOffset = checked((uint)commandEntry.Offset);
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
@@ -957,6 +1055,7 @@ public static class AmprExports
             state.ReadFileCommands.Clear();
             state.KernelEventCommands.Clear();
             state.WriteAddressCommands.Clear();
+            state.WaitAddressCommands.Clear();
             state.GatherScatterValid = false;
             state.GatherScatterFileId = 0;
             state.GatherScatterDestination = 0;
@@ -1023,6 +1122,7 @@ public static class AmprExports
                 state.ReadFileCommands.Clear();
                 state.KernelEventCommands.Clear();
                 state.WriteAddressCommands.Clear();
+                state.WaitAddressCommands.Clear();
                 state.GatherScatterValid = false;
                 state.GatherScatterFileId = 0;
                 state.GatherScatterDestination = 0;
@@ -1044,7 +1144,8 @@ public static class AmprExports
         {
             return state.ReadFileCommands.Count != 0 ||
                    state.KernelEventCommands.Count != 0 ||
-                   state.WriteAddressCommands.Count != 0;
+                   state.WriteAddressCommands.Count != 0 ||
+                   state.WaitAddressCommands.Count != 0;
         }
     }
 
@@ -1513,6 +1614,139 @@ public static class AmprExports
         }
 
         return true;
+    }
+
+    private static bool AppendWaitAddressRecord(
+        CpuContext ctx,
+        ulong commandBuffer,
+        ulong address,
+        ulong reference,
+        uint compare,
+        uint flush)
+    {
+        var recordSize = GetWaitAddressRecordSize(reference);
+        Span<byte> record = stackalloc byte[(int)recordSize];
+        record.Clear();
+
+        var dwordCount = (uint)(recordSize / sizeof(uint));
+        var header = (uint)((address >> 16) & 0xFFFF0000UL);
+        header |= (((dwordCount << 8) + 0xF00u) & 0xEF00u) |
+                  ((compare & 7u) << 13) |
+                  ((flush & 1u) << 12) |
+                  1u;
+        BinaryPrimitives.WriteUInt32LittleEndian(record, header);
+        BinaryPrimitives.WriteUInt32LittleEndian(record[sizeof(uint)..], (uint)address);
+        if (reference != 0)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(record[(2 * sizeof(uint))..], (uint)reference);
+            if (dwordCount == 4)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(record[(3 * sizeof(uint))..], (uint)(reference >> 32));
+            }
+        }
+
+        if (!TryGetCommandBufferState(ctx, commandBuffer, out _, out _, out var state) || state is null)
+        {
+            return false;
+        }
+
+        lock (state)
+        {
+            if (state.Buffer == 0 ||
+                state.WriteOffset > state.Size ||
+                recordSize > state.Size - state.WriteOffset ||
+                !ctx.Memory.TryWrite(state.Buffer + state.WriteOffset, record))
+            {
+                return false;
+            }
+
+            var recordOffset = state.WriteOffset;
+            state.WaitAddressCommands.Add(new WaitAddressCommand
+            {
+                RecordOffset = recordOffset,
+                Address = address,
+                Reference = reference,
+                Compare = compare,
+                Flush = flush,
+            });
+            state.WriteOffset += recordSize;
+            state.CommandCount++;
+            if (!WriteCommandBufferProgress(ctx, commandBuffer, state))
+            {
+                state.WaitAddressCommands.RemoveAt(state.WaitAddressCommands.Count - 1);
+                state.WriteOffset -= recordSize;
+                state.CommandCount--;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static int WaitForAddress(CpuContext ctx, WaitAddressCommand command)
+    {
+        var spinWait = new SpinWait();
+        while (true)
+        {
+            if (command.Flush != 0)
+            {
+                Thread.MemoryBarrier();
+            }
+
+            if (!ctx.TryReadUInt64(command.Address, out var value))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (IsWaitConditionSatisfied(value, command.Reference, command.Compare))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
+            spinWait.SpinOnce();
+        }
+    }
+
+    private static bool IsWaitConditionSatisfied(ulong value, ulong reference, uint compare) => compare switch
+    {
+        0 => value == reference,
+        1 => value > reference,
+        2 => value < reference,
+        3 => value != reference,
+        4 => unchecked((long)(value - reference)) >= 0,
+        5 => unchecked((long)value) > unchecked((long)reference),
+        6 => unchecked((long)value) < unchecked((long)reference),
+        _ => false,
+    };
+
+    private static bool IsValidWaitAddressParameters(ulong address, ulong compare, ulong flush, bool legacy)
+    {
+        var maxCompare = legacy ? 6UL : 3UL;
+        return (address & 7UL) == 0 &&
+               address <= AprMaxAppAddress &&
+               AprMaxAppAddress - address >= sizeof(ulong) &&
+               (!legacy || address != 0) &&
+               compare <= maxCompare &&
+               flush <= 1;
+    }
+
+    private static ulong GetWaitAddressRecordSize(ulong reference)
+    {
+        if (reference == 0)
+        {
+            return WaitAddressRecordSizeWithoutReference;
+        }
+
+        return (reference >> 32) == 0
+            ? WaitAddressRecordSizeWith32BitReference
+            : WaitAddressRecordSizeWith64BitReference;
+    }
+
+    private static int SetAmprResult(CpuContext ctx, OrbisGen2Result result)
+    {
+        var value = (int)result;
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)value);
+        return value;
     }
 
     private static bool AppendCommandBufferRecord(CpuContext ctx, ulong commandBuffer, ReadOnlySpan<byte> record)
