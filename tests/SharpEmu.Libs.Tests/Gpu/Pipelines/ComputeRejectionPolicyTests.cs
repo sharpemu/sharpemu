@@ -74,7 +74,9 @@ public sealed class ComputeRejectionPolicyTests
         var guest = new PipelineTestGuest();
         guest.RegisterProgram(CodeAddress, HeaderAddress,
             [0xF4080000, 0xFA000000, 0xE0000000, 0x80000000, 0xBF810000]);
-        var source = guest.Source(CodeAddress, ShaderStage.Compute, new uint[2]);
+        // The descriptor pointer is mapped nowhere. A null pointer would not do: reads through
+        // a null base are evaluated as zero, because shaders branch around them.
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, [0u, 2u]);
         var cursor = 0u;
         var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
             source, PipelineTestGuest.ComputeOptions(1), false, ref cursor, out _, out _, out _));

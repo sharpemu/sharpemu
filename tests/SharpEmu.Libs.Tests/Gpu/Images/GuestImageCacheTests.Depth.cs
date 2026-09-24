@@ -234,6 +234,9 @@ public sealed unsafe partial class GuestImageCacheTests
     public void UnequalSampleDepthOverlap_RunsTheColorToDepthBlit()
     {
         if (!GatePrerequisites.Ready(_vulkan, sampleRateShading: true)) return;
+        // Z16 with stencil may use any of these; AMD RDNA has no D24S8, so take one the device offers.
+        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count2Bit);
+        if (stencilFormat == Format.Undefined) return;
         using var harness = new CacheHarness(_vulkan);
         using var reader = new MultisampleDepthSampleReader(_vulkan, harness.Scheduler, harness.Worker.Run);
         var address = harness.MapBacked(0x100000, ReadWrite);
@@ -252,7 +255,7 @@ public sealed unsafe partial class GuestImageCacheTests
             harness.Cache.FillBuffer(stencilAddress, stencilSize, 0x41414141u, isGds: false);
         });
 
-        var depth = AsDepthTarget(color, Format.D24UnormS8Uint);
+        var depth = AsDepthTarget(color, stencilFormat);
         depth.Description.Stencil = new GuestSpan(stencilAddress, stencilSize);
         depth.Description.GuestFormat = GuestPixelFormat.Bits16UNorm;
         depth.Description.BytesPerBlock = 2;
@@ -496,18 +499,35 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    private static Format SupportedStencilFormat(SharpEmu.Libs.Tests.Gpu.Vulkan.HeadlessVulkan vulkan, SampleCountFlags samples)
+    {
+        const ImageUsageFlags usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.DepthStencilAttachmentBit;
+        foreach (var format in DepthFormatRule.Find(GuestDepthFormat.Z16)!.StencilAttachmentFormats)
+        {
+            if (vulkan.DeviceInfo.TryGetImageFormatProperties(format, ImageType.Type2D, ImageTiling.Optimal, usage, 0, out var properties) &&
+                (properties.SampleCounts & samples) != 0)
+            {
+                return format;
+            }
+        }
+
+        return Format.Undefined;
+    }
+
     [Fact]
     public void D16Fallback_CopiesDepthIntoStorageColor()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count1Bit);
+        if (stencilFormat == Format.Undefined) return;
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x10000, ReadWrite);
         var depthAddress = address + 0xc000;
         var stencilAddress = address + 0xd000;
         harness.Write(depthAddress, Bytes((ushort)0x0000, (ushort)0x2468, (ushort)0xabcd, (ushort)0xffff));
         harness.Write(stencilAddress, [0x6d, 0x6d, 0x6d, 0x6d]);
-        var depth = LinearRequest(depthAddress, 8, Format.D24UnormS8Uint, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 2, 1);
-        depth = AsDepthTarget(depth, Format.D24UnormS8Uint);
+        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 2, 1);
+        depth = AsDepthTarget(depth, stencilFormat);
         depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
         depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
         var depthId = harness.Acquire(ref depth);

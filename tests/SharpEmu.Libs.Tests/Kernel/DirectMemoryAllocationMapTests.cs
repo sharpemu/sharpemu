@@ -163,9 +163,13 @@ public sealed class DirectMemoryAllocationMapTests
         var allocations = new DirectMemoryAllocationMap(10000);
         for (ulong address = 0; address < 10000; address += 2)
             Allocate(allocations, address, 1);
-        var matches = 0;
-        for (var pass = 0; pass < 2; pass++)
+        // Tiered JIT recompilation can still allocate on this thread during the first measured
+        // passes when the machine is busy; storage allocated by the queries would show in every pass.
+        const int passes = 5;
+        var steadyStateAllocation = long.MaxValue;
+        for (var pass = 0; pass < passes; pass++)
         {
+            var matches = 0;
             var before = GC.GetAllocatedBytesForCurrentThread();
             for (ulong address = 0; address < 10000; address += 2)
             {
@@ -174,10 +178,12 @@ public sealed class DirectMemoryAllocationMapTests
                 if (allocations.TryFindAvailableRange(address, address + 2, 1, out _, out _)) matches++;
             }
             var allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.Equal(15000, matches);
             if (pass != 0)
-                Assert.Equal(0L, allocatedBytes);
+                steadyStateAllocation = Math.Min(steadyStateAllocation, allocatedBytes);
         }
-        Assert.Equal(30000, matches);
+
+        Assert.Equal(0L, steadyStateAllocation);
     }
 
     [Theory]
