@@ -664,7 +664,7 @@ public static partial class Gen5SpirvTranslator
         // One dword of a scalar buffer load through the V# in s[descriptor:descriptor+3]:
         // base in dwords 0-1 (48 bits), stride in dword 1 [29:16], records in dword 2.
         // A load past the end of the buffer returns zero, as on hardware.
-        private uint LoadDeviceDescriptorBufferWord(uint descriptor, uint byteOffset)
+        private (uint BaseAddress, uint Size, uint Stride, uint Word3) LoadDeviceBufferDescriptor(uint descriptor)
         {
             var word1 = LoadS(descriptor + 1);
             var baseAddress = Pair64(LoadS(descriptor), BitwiseAnd(word1, UInt(0xFFFF)));
@@ -676,12 +676,50 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.IEqual, _boolType, stride, UInt(0)),
                 records,
                 _module.AddInstruction(SpirvOp.IMul, _ulongType, records, Widen(stride)));
-            var aligned = Widen(BitwiseAnd(byteOffset, UInt(~3u)));
-            var inRange = ULessThan64(IAdd64(aligned, ULong(sizeof(uint) - 1)), size);
+            return (baseAddress, size, stride, LoadS(descriptor + 3));
+        }
+
+        private uint IsDeviceBufferByteRangeInRange(uint size64, uint byteOffset, uint byteCount) =>
+            ULessThan64(
+                IAdd64(Widen(byteOffset), ULong((ulong)byteCount - 1)),
+                size64);
+
+        private uint IsDeviceBufferElementInRange(uint size64, uint byteOffset, uint lastByteOffset) =>
+            ULessThan64(
+                IAdd64(Widen(byteOffset), Widen(lastByteOffset)),
+                size64);
+
+        private uint LoadDeviceBufferWord(uint baseAddress, uint size64, uint byteOffset)
+            => LoadDeviceBufferWord(baseAddress, size64, byteOffset, _module.ConstantBool(true));
+
+        private uint LoadDeviceBufferWord(uint baseAddress, uint size64, uint byteOffset, uint accessAllowed)
+        {
+            var alignedOffset = BitwiseAnd(byteOffset, UInt(~3u));
+            var inRange = LogicalAnd(
+                accessAllowed,
+                IsDeviceBufferByteRangeInRange(size64, alignedOffset, sizeof(uint)));
+            var address = And64(
+                IAdd64(baseAddress, Widen(alignedOffset)),
+                ULong(DeviceAddressMask & ~3ul));
             Store(_deviceBufferWordScratch, UInt(0));
-            EmitConditional(inRange, () =>
-                Store(_deviceBufferWordScratch, LoadDeviceDword(And64(IAdd64(baseAddress, aligned), ULong(DeviceAddressMask & ~3ul)))));
+            EmitConditional(inRange, () => Store(_deviceBufferWordScratch, LoadDeviceDword(address)));
             return Load(_uintType, _deviceBufferWordScratch);
+        }
+
+        private void StoreDeviceBufferWord(uint baseAddress, uint size64, uint byteOffset, uint value)
+        {
+            var alignedOffset = BitwiseAnd(byteOffset, UInt(~3u));
+            var inRange = IsDeviceBufferByteRangeInRange(size64, alignedOffset, sizeof(uint));
+            var address = And64(
+                IAdd64(baseAddress, Widen(alignedOffset)),
+                ULong(DeviceAddressMask & ~3ul));
+            EmitConditional(inRange, () => StoreDeviceDword(address, value, _module.ConstantBool(true)));
+        }
+
+        private uint LoadDeviceDescriptorBufferWord(uint descriptor, uint byteOffset)
+        {
+            var (baseAddress, size, _, _) = LoadDeviceBufferDescriptor(descriptor);
+            return LoadDeviceBufferWord(baseAddress, size, byteOffset);
         }
 
         private bool TryEmitLayoutScalarMemory(Gen5ShaderInstruction instruction, Gen5ScalarMemoryControl control, out string error)

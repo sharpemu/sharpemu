@@ -265,6 +265,39 @@ public sealed partial class ResourceTracker
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
         handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword));
 
+    private bool IsDeviceLoadedBufferHandle(ScalarValue? handle) =>
+        handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+        handle.Operands.All(dword =>
+            dword.Type == ScalarValueType.U32 &&
+            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarBufferWord(dword))) &&
+        handle.Operands.Any(DependsOnScalarBufferWord);
+
+    private static bool DependsOnScalarBufferWord(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.ScalarBufferWord)
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
+    }
+
     private uint GetHandleSource(ScalarValue? handle, ScalarValueKind expected, uint width, uint pc, bool sampler = false, bool sampleAdjust = false)
     {
         if (handle is null || handle.Kind != expected)
@@ -474,9 +507,10 @@ public sealed partial class ResourceTracker
 
         if (isBuffer)
         {
-            // A scalar buffer descriptor built from data the shader loads itself cannot be
-            // bound by the host; the device reads through the descriptor in registers.
-            if (memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle))
+            // Scalar loads can address buffers that have no host descriptor binding, while
+            // vector buffer descriptors loaded from scalar-buffer data must stay device-side.
+            if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
+                (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
             {
                 memory.DeviceDescriptor = true;
                 _info.UsesDeviceAddresses = true;

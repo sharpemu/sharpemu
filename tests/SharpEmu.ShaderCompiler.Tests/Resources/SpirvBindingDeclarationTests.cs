@@ -105,6 +105,33 @@ public sealed class SpirvBindingDeclarationTests
     }
 
     [Fact]
+    public void BufferDescriptorLoadedByShader_UsesDeviceAddressAccess()
+    {
+        var program = Program(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            MoveScalar(8, 14, 16),
+            MoveScalar(12, 15, 0),
+            ScalarBufferLoad(16, 12, destination: 20, count: 4),
+            BufferLoad(24, 20, dwords: 4),
+            BufferLoad(32, 20, dwords: 3, formatted: true),
+            EndProgram(40));
+        var request = Request(program);
+        var memories = request.Memory.Entries.Where(entry => entry.Pc is 24 or 32).ToArray();
+
+        Assert.Equal(2, memories.Length);
+        Assert.All(memories, memory => Assert.True(
+            memory.DeviceDescriptor,
+            $"kind={memory.Kind} resource={memory.Resource} planningOnly={memory.PlanningOnly}"));
+        Assert.True(request.Resources.Info.UsesDeviceAddresses);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var module = new SpirvModuleInspector(shader.Spirv);
+        Assert.Contains((uint)SpirvCapability.PhysicalStorageBufferAddresses, module.Capabilities);
+        Assert.Contains((ushort)SpirvOp.ConvertUToPtr, module.Opcodes);
+    }
+
+    [Fact]
     public void SpilledUserData_ReadsTheShaderDataBufferInsteadOfPushData()
     {
         var instructions = new List<Gen5ShaderInstruction>();

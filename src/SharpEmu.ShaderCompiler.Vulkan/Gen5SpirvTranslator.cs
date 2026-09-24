@@ -2220,6 +2220,11 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitVertexInputFetch(control, vertexInput, out error);
             }
 
+            if (_request.Memory.Find(instruction.Pc) is { DeviceDescriptor: true })
+            {
+                return TryEmitDeviceDescriptorBufferMemory(instruction, control, out error);
+            }
+
             int bindingIndex;
             uint stride;
             uint descriptorWord3;
@@ -2474,6 +2479,351 @@ public static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        private bool TryEmitDeviceDescriptorBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            error = string.Empty;
+            if (control.Typed || instruction.Opcode.StartsWith("TBuffer", StringComparison.Ordinal))
+            {
+                error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
+                return false;
+            }
+
+            _deviceAddressInstructionPc = instruction.Pc;
+            var (baseAddress, size, stride, descriptorWord3) = LoadDeviceBufferDescriptor(control.ScalarResource);
+            var scalarOffset = instruction.Sources.Count > 2
+                ? GetRawSource(instruction, 2)
+                : UInt(0);
+            var vectorIndex = control.IndexEnabled
+                ? LoadV(control.VectorAddress)
+                : UInt(0);
+            var vectorOffset = control.OffsetEnabled
+                ? LoadV(control.VectorAddress + (control.IndexEnabled ? 1u : 0u))
+                : UInt(0);
+            var byteAddress = IAdd(UInt(unchecked((uint)control.OffsetBytes)), scalarOffset);
+            byteAddress = IAdd(byteAddress, vectorOffset);
+            byteAddress = IAdd(byteAddress, _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, stride));
+
+            if (IsFormatBufferLoad(instruction.Opcode))
+            {
+                EmitDeviceBufferFormatLoad(
+                    baseAddress,
+                    size,
+                    byteAddress,
+                    descriptorWord3,
+                    control.VectorData,
+                    control.DwordCount);
+                return true;
+            }
+
+            if (instruction.Opcode.Contains("Format", StringComparison.Ordinal))
+            {
+                error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
+                return false;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
+            {
+                return TryEmitDeviceDescriptorBufferAtomic(instruction, control, baseAddress, size, byteAddress, out error);
+            }
+
+            if (TryGetSubdwordStoreInfo(instruction.Opcode, out var storeByteCount, out var sourceShift))
+            {
+                EmitExecConditional(() =>
+                {
+                    var inRange = IsDeviceBufferByteRangeInRange(size, byteAddress, storeByteCount);
+                    var address = And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask));
+                    EmitConditional(inRange, () =>
+                        StoreDeviceBytes(address, LoadV(control.VectorData), storeByteCount, sourceShift, _module.ConstantBool(true)));
+                });
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() =>
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        var componentAddress = index == 0
+                            ? byteAddress
+                            : IAdd(byteAddress, UInt(index * sizeof(uint)));
+                        StoreDeviceBufferWord(
+                            baseAddress,
+                            size,
+                            componentAddress,
+                            LoadV(control.VectorData + index));
+                    }
+                });
+                return true;
+            }
+
+            if (TryGetSubdwordLoadInfo(
+                    instruction.Opcode,
+                    out var loadByteCount,
+                    out var signExtend,
+                    out var d16,
+                    out var d16High))
+            {
+                var inRange = IsDeviceBufferByteRangeInRange(size, byteAddress, loadByteCount);
+                var address = And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask));
+                Store(_deviceBufferWordScratch, UInt(0));
+                EmitConditional(inRange, () => Store(
+                    _deviceBufferWordScratch,
+                    LoadSubdwordDeviceValue(
+                        address,
+                        LoadV(control.VectorData),
+                        loadByteCount,
+                        signExtend,
+                        d16,
+                        d16High)));
+                StoreV(control.VectorData, Load(_uintType, _deviceBufferWordScratch));
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal))
+            {
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentAddress = index == 0
+                        ? byteAddress
+                        : IAdd(byteAddress, UInt(index * sizeof(uint)));
+                    StoreV(
+                        control.VectorData + index,
+                        LoadDeviceBufferWord(baseAddress, size, componentAddress));
+                }
+
+                return true;
+            }
+
+            error = $"unsupported device buffer descriptor opcode {instruction.Opcode}";
+            return false;
+        }
+
+        private bool TryEmitDeviceDescriptorBufferAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            out string error)
+        {
+            error = string.Empty;
+            var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
+            if (atomicSuffix is "SwapX2" or "OrX2")
+            {
+                var atomicOp = atomicSuffix == "SwapX2" ? SpirvOp.AtomicExchange : SpirvOp.AtomicOr;
+                EmitExecConditional(() =>
+                {
+                    var valid = IsDeviceBufferByteRangeInRange(size, byteAddress, 2 * sizeof(uint));
+                    var firstAddress = And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask & ~3ul));
+                    var secondAddress = And64(IAdd64(baseAddress, Widen(IAdd(byteAddress, UInt(sizeof(uint))))), ULong(DeviceAddressMask & ~3ul));
+                    EmitConditional(valid, () =>
+                    {
+                        var (firstPointer, firstMapped) = ResolveDeviceAddress(firstAddress);
+                        var (secondPointer, secondMapped) = ResolveDeviceAddress(secondAddress);
+                        var bothMapped = LogicalAnd(firstMapped, secondMapped);
+                        EmitConditional(bothMapped, () =>
+                        {
+                            var originalLow = EmitAtomic(
+                                atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
+                                () => LoadV(control.VectorData), () => UInt(0));
+                            var originalHigh = EmitAtomic(
+                                atomicOp, _uintType, DeviceWordPointer(secondPointer), 1, 0x48,
+                                () => LoadV(control.VectorData + 1), () => UInt(0));
+                            if (control.Glc)
+                            {
+                                StoreV(control.VectorData, originalLow);
+                                StoreV(control.VectorData + 1, originalHigh);
+                            }
+                        });
+                    });
+                });
+                return true;
+            }
+
+            if (atomicSuffix is "Fmin" or "Fmax")
+            {
+                EmitExecConditional(() =>
+                {
+                    var valid = IsDeviceBufferByteRangeInRange(size, byteAddress, sizeof(uint));
+                    var address = And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask & ~3ul));
+                    EmitConditional(valid, () =>
+                    {
+                        var (pointer, mapped) = ResolveDeviceAddress(address);
+                        EmitConditional(mapped, () =>
+                        {
+                            var original = EmitBufferFloatAtomic(
+                                DeviceWordPointer(pointer),
+                                LoadV(control.VectorData),
+                                maxValue: atomicSuffix == "Fmax",
+                                scope: 1,
+                                semantics: 0x48);
+                            if (control.Glc)
+                                StoreV(control.VectorData, original);
+                        });
+                    });
+                });
+                return true;
+            }
+
+            if (!TryGetAtomicOp(atomicSuffix, out var atomicOperation))
+            {
+                error = $"unsupported buffer atomic opcode {instruction.Opcode}";
+                return false;
+            }
+
+            EmitExecConditional(() =>
+            {
+                var valid = IsDeviceBufferByteRangeInRange(size, byteAddress, sizeof(uint));
+                var address = And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask & ~3ul));
+                EmitConditional(valid, () =>
+                {
+                    var (pointer, mapped) = ResolveDeviceAddress(address);
+                    EmitConditional(mapped, () =>
+                    {
+                        var original = EmitAtomic(
+                            atomicOperation,
+                            _uintType,
+                            DeviceWordPointer(pointer),
+                            1,
+                            0x48,
+                            () => LoadV(control.VectorData),
+                            () => LoadV(control.VectorData + 1));
+                        if (control.Glc)
+                            StoreV(control.VectorData, original);
+                    });
+                });
+            });
+            return true;
+        }
+
+        private void EmitDeviceBufferFormatLoad(
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            uint descriptorWord3,
+            uint vectorData,
+            uint componentCount)
+        {
+            var unifiedFormat = BitwiseAnd(
+                ShiftRightLogical(descriptorWord3, UInt(12)),
+                UInt(0x7F));
+            var (dataFormat, numberFormat) = DecodeGfx10BufferFormat(unifiedFormat);
+
+            var canonical = new uint[4];
+            var componentBounds = new uint[4];
+            for (var component = 0; component < canonical.Length; component++)
+            {
+                canonical[component] = LoadGfx10DeviceBufferFormatComponent(
+                    baseAddress,
+                    size,
+                    byteAddress,
+                    dataFormat,
+                    numberFormat,
+                    component,
+                    out componentBounds[component]);
+            }
+
+            var selectors = new uint[componentCount];
+            var inBounds = _module.ConstantBool(true);
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = BitwiseAnd(
+                    ShiftRightLogical(descriptorWord3, UInt(destination * 3)),
+                    UInt(7));
+                selectors[destination] = selector;
+                var selectedInBounds = _module.ConstantBool(true);
+                for (uint component = 0; component < 4; component++)
+                {
+                    selectedInBounds = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _boolType,
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, selector, UInt(component + 4)),
+                        componentBounds[component],
+                        selectedInBounds);
+                }
+
+                inBounds = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, inBounds, selectedInBounds);
+            }
+
+            var one = Gfx10FormatOne(numberFormat);
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = selectors[destination];
+                var constant = SelectUInt(selector, 1, one, UInt(0));
+                var value = constant;
+                value = SelectUInt(selector, 4, canonical[0], value);
+                value = SelectUInt(selector, 5, canonical[1], value);
+                value = SelectUInt(selector, 6, canonical[2], value);
+                value = SelectUInt(selector, 7, canonical[3], value);
+                StoreV(
+                    vectorData + destination,
+                    _module.AddInstruction(SpirvOp.Select, _uintType, inBounds, value, constant));
+            }
+        }
+
+        private uint LoadGfx10DeviceBufferFormatComponent(
+            uint baseAddress,
+            uint size,
+            uint elementAddress,
+            uint dataFormat,
+            uint numberFormat,
+            int component,
+            out uint componentInBounds)
+        {
+            var byteOffset = UInt(0);
+            var bitOffset = UInt(0);
+            var bitCount = UInt(0);
+
+            void SetLayout(uint format, uint bytes, uint bits, uint count)
+            {
+                var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, dataFormat, UInt(format));
+                byteOffset = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(bytes), byteOffset);
+                bitOffset = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(bits), bitOffset);
+                bitCount = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(count), bitCount);
+            }
+
+            foreach (var layout in Gfx10UnifiedFormat.ComponentLayouts)
+            {
+                if (layout.Component == (uint)component)
+                    SetLayout(layout.DataFormat, layout.ByteOffset, layout.BitOffset, layout.BitCount);
+            }
+
+            var componentAddress = IAdd(elementAddress, byteOffset);
+            var componentBytes = ShiftRightLogical(IAdd(IAdd(bitOffset, bitCount), UInt(7)), UInt(3));
+            var lastByteOffset = _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1));
+            var hasComponent = _module.AddInstruction(SpirvOp.INotEqual, _boolType, bitCount, UInt(0));
+            var inRange = IsDeviceBufferElementInRange(size, componentAddress, lastByteOffset);
+            var accessAllowed = LogicalAnd(hasComponent, inRange);
+            componentInBounds = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                LogicalNot(hasComponent),
+                inRange);
+            var packed = UInt(0);
+            for (uint index = 0; index < sizeof(uint); index++)
+            {
+                var address = index == 0 ? componentAddress : IAdd(componentAddress, UInt(index));
+                var word = LoadDeviceBufferWord(baseAddress, size, address, accessAllowed);
+                var shift = ShiftLeftLogical(BitwiseAnd(address, UInt(3)), UInt(3));
+                var value = BitwiseAnd(ShiftRightLogical(word, shift), UInt(0xFF));
+                packed = BitwiseOr(packed, ShiftLeftLogical(value, UInt(index * 8)));
+            }
+
+            var raw = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, packed, bitOffset, bitCount);
+            var converted = ConvertGfx10BufferComponent(raw, bitCount, numberFormat, dataFormat);
+            var valid = _module.AddInstruction(SpirvOp.INotEqual, _boolType, bitCount, UInt(0));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                valid,
+                converted,
+                component == 3 ? Gfx10FormatOne(numberFormat) : UInt(0));
         }
 
         private void EmitBufferFormatLoad(
