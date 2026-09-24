@@ -279,6 +279,30 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(0u, description.StaticParameters.ColorCount);
     }
 
+    [Theory]
+    [InlineData(0x0u, 0x0u)]
+    [InlineData(0xFu, 0xFu)]
+    public void ColorTarget_TheProgramNeverExports_IsNotWritten(uint exportMasks, uint expectedMask)
+    {
+        // Astro Bot's depth-only pattern pass keeps a color target bound but exports only to
+        // the null target; writing the undefined host output drew a rectangle over the movie.
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0xF;
+        var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = exportMasks }));
+        var resolution = new ColorTargetResolution(
+            default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
+        var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
+        rendering.ColorAttachments[0] = new RenderingAttachment(
+            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+
+        var description = ShaderPipelineCache.BuildGraphicsDescription(
+            colors, default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
+
+        Assert.Equal(expectedMask, description.StaticParameters.GetColorMask(0));
+    }
+
     [Fact]
     public void NoAttachments_AtAnUnsupportedSampleCount_AreFatal()
     {
