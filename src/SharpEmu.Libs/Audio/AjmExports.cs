@@ -96,9 +96,15 @@ public static class AjmExports
 
     public static int AjmInitialize(CpuContext ctx)
     {
-        var reserved = ctx[CpuRegister.Rdi];
+        var reservedOrOptions = ctx[CpuRegister.Rdi];
         var outputAddress = ctx[CpuRegister.Rsi];
-        if (reserved != 0 || outputAddress == 0)
+        // The Gen4 AJM ABI requires a zero reserved argument. Gen5 callers
+        // also use this slot for an opaque initialization value (observed as
+        // 0x0000000300000000 in a retail title), which the software backend
+        // does not need to interpret. Keep the output pointer validation for
+        // both generations; only relax the legacy reserved-field check on
+        // Gen5.
+        if ((ctx.TargetGeneration == Generation.Gen4 && reservedOrOptions != 0) || outputAddress == 0)
         {
             return unchecked((int)0x806A0001);
         }
@@ -115,7 +121,8 @@ public static class AjmExports
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
         {
             Console.Error.WriteLine(
-                $"[LOADER][TRACE] ajm.initialize reserved={reserved} out=0x{outputAddress:X16} context={contextId}");
+                $"[LOADER][TRACE] ajm.initialize reserved_or_options=0x{reservedOrOptions:X16} " +
+                $"generation={ctx.TargetGeneration} out=0x{outputAddress:X16} context={contextId}");
         }
 
         ctx[CpuRegister.Rax] = 0;

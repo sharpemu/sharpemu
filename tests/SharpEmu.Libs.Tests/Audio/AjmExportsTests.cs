@@ -52,6 +52,31 @@ public sealed class AjmExportsTests : IDisposable
     }
 
     [Fact]
+    public void Initialize_Gen5AcceptsOpaqueInitializationValueAndWritesContext()
+    {
+        _ctx[CpuRegister.Rdi] = 0x0000000300000000;
+        _ctx[CpuRegister.Rsi] = ContextAddress;
+
+        Assert.Equal(0, AjmExports.AjmInitialize(_ctx));
+        var contextId = ReadUInt32(ContextAddress);
+        Assert.NotEqual(0u, contextId);
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+    }
+
+    [Fact]
+    public void Initialize_Gen4StillRejectsNonzeroReservedValue()
+    {
+        var context = new CpuContext(_memory, Generation.Gen4);
+        const uint sentinel = 0xCCCCCCCC;
+        WriteUInt32(ContextAddress, sentinel);
+        context[CpuRegister.Rdi] = 0x0000000300000000;
+        context[CpuRegister.Rsi] = ContextAddress;
+
+        Assert.Equal(unchecked((int)0x806A0001), AjmExports.AjmInitialize(context));
+        Assert.Equal(sentinel, ReadUInt32(ContextAddress));
+    }
+
+    [Fact]
     public void InstanceCreate_UnregisteredCodecDoesNotWriteOutput()
     {
         var contextId = Initialize();
