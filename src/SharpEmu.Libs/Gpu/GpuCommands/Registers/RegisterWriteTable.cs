@@ -57,7 +57,16 @@ public static class RegisterWriteTable
 
     public static void WriteContextEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
     {
-        WriteEntry(banks, offset, value, ContextIndirect, "context", tableAddress);
+        if (offset < ContextIndirect.Length && ContextIndirect[offset] is null)
+        {
+            // Keep unknown in-bank table values so a later renderer implementation can decode them.
+            banks.Context.UnmodeledTableRegisters[offset] = value;
+        }
+        else
+        {
+            WriteEntry(banks, offset, value, ContextIndirect, "context", tableAddress);
+        }
+
         if (Rendering.RenderTrace.Enabled)
         {
             TraceDepthStateWrite(offset, value, tableAddress, "table");

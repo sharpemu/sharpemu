@@ -375,6 +375,8 @@ public sealed class ContextRegisters
     // The two reserved registers behind the depth block, written by the composite depth binding.
     public uint ReservedDepthRegister1;
     public uint ReservedDepthRegister3;
+    // Preserve context-table values for in-bank registers without a decoded renderer field.
+    public Dictionary<uint, uint> UnmodeledTableRegisters = new();
     public float DepthClearValue;
     public float DepthBoundsMin;
     public float DepthBoundsMax = 1f;
@@ -397,6 +399,7 @@ public sealed class ContextRegisters
         copy.ScreenViewport = ScreenViewport.Copy();
         copy.SampleLocations = SampleLocations.Copy();
         copy.ShaderInterface = ShaderInterface.Copy();
+        copy.UnmodeledTableRegisters = new Dictionary<uint, uint>(UnmodeledTableRegisters);
         return copy;
     }
 

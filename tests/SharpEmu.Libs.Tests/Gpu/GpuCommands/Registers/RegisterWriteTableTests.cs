@@ -211,9 +211,19 @@ public sealed class RegisterWriteTableTests
         Assert.Equal(0xFu, banks.Context.RenderTargetMask);
         Assert.Equal(0x1_0000ul, banks.Shader.Pixel.Address);
         Assert.Equal(1u, banks.IndexTypeAndSize);
-        var error = Assert.Throws<InvalidOperationException>(() => RegisterWriteTable.WriteContextEntry(banks, 0x1B2, 1, 0x5000));
-        Assert.Contains("table register is not supported", error.Message);
-        Assert.Contains("table=0x0000000000005000", error.Message);
+        RegisterWriteTable.WriteContextEntry(banks, 0x024A, 0, 0x5000);
+        Assert.True(banks.Context.UnmodeledTableRegisters.TryGetValue(0x024A, out var value));
+        Assert.Equal(0u, value);
+
+        var clone = banks.Clone();
+        RegisterWriteTable.WriteContextEntry(banks, 0x024A, 1, 0x5000);
+        Assert.Equal(0u, clone.Context.UnmodeledTableRegisters[0x024A]);
+        Assert.Equal(1u, banks.Context.UnmodeledTableRegisters[0x024A]);
+
+        banks.ApplyContextState(ContextStateOperation.Push);
+        RegisterWriteTable.WriteContextEntry(banks, 0x024A, 2, 0x5000);
+        banks.ApplyContextState(ContextStateOperation.Pop);
+        Assert.Equal(1u, banks.Context.UnmodeledTableRegisters[0x024A]);
     }
 
     // Registers without a decoded field are stored so a title that writes them does not stop.
