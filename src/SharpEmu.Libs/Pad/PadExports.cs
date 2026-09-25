@@ -24,10 +24,17 @@ public static class PadExports
     private const int ControllerInformationSize = 0x1C;
     private const int PadDataSize = 0x78;
 
-    // Real firmware hands out small non-negative handles; 0 is valid. Some titles
-    // (Monster Truck Championship) read pad state with handle 0, and rejecting it
-    // leaves their controller/FFB init path polling a never-valid state forever.
-    private static bool IsPrimaryPadHandle(int handle) => handle is 0 or PrimaryPadHandle;
+    // Monster Truck Championship reads pad state with handle 0 before it opens a pad,
+    // and rejecting that leaves its controller/FFB init path polling forever. After a
+    // title opens a pad, handle 0 is a slot it never opened: Unreal Engine polls all four
+    // user slots and treats every valid handle as a connected controller, so accepting
+    // 0 there reports phantom pads that repeat the primary pad's buttons.
+    private static int _padOpened;
+
+    private static bool IsPrimaryPadHandle(int handle) =>
+        handle == PrimaryPadHandle || (handle == 0 && Volatile.Read(ref _padOpened) == 0);
+
+    internal static void ResetOpenedPadForTests() => Volatile.Write(ref _padOpened, 0);
     private static readonly long InputSampleIntervalTicks = Math.Max(1, Stopwatch.Frequency / 1000);
 
     [ThreadStatic]
@@ -128,6 +135,7 @@ public static class PadExports
                 : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense or Xbox controller will be used automatically when plugged in.");
         }
 
+        Volatile.Write(ref _padOpened, 1);
         return ctx.SetReturn(PrimaryPadHandle);
     }
 
