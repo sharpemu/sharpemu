@@ -38,6 +38,8 @@ internal interface IShaderPipelineHost
 
     bool GraphicsSubgroupOperationsEnabled { get; }
 
+    bool PerVertexPixelInputsSupported => true;
+
     RenderHostLimits Limits { get; }
 
     // The sample counts a pipeline without attachments can rasterize at.

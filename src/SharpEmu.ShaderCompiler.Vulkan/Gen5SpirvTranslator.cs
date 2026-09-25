@@ -873,7 +873,7 @@ public static partial class Gen5SpirvTranslator
                     {
                         _module.AddDecoration(variable, SpirvDecoration.PerVertexKhr);
                     }
-                    else if ((cntl & 0x400u) != 0)
+                    else if ((cntl & 0x400u) != 0 || _flatParameterAttributes.Contains(attribute))
                     {
                         _module.AddDecoration(variable, SpirvDecoration.Flat);
                     }

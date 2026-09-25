@@ -10,6 +10,7 @@ public static partial class Gen5SpirvTranslator
     private sealed partial class CompilationContext
     {
         private readonly HashSet<uint> _perVertexAttributes = [];
+        private readonly HashSet<uint> _flatParameterAttributes = [];
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
         private const uint InterpolateAtCentroid = 76;
@@ -24,6 +25,23 @@ public static partial class Gen5SpirvTranslator
                     instruction.Control is Gen5InterpolationControl interpolation)
                 {
                     _perVertexAttributes.Add(interpolation.Attribute);
+                }
+            }
+
+            if (!_request.SupportsPerVertexPixelInputs)
+            {
+                // Reading P0 alone is the provoking vertex value, which a flat input gives.
+                // Other parameters still need the per-vertex values.
+                foreach (var attribute in _perVertexAttributes.ToArray())
+                {
+                    if (_request.Program.Instructions.All(instruction =>
+                            instruction.Control is not Gen5InterpolationControl control ||
+                            control.Attribute != attribute ||
+                            (instruction.Opcode == "VInterpMovF32" && (instruction.Words[0] & 0xFFu) == 2)))
+                    {
+                        _perVertexAttributes.Remove(attribute);
+                        _flatParameterAttributes.Add(attribute);
+                    }
                 }
             }
 

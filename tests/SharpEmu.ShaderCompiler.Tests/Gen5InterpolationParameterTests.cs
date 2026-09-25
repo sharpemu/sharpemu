@@ -79,8 +79,37 @@ public sealed class Gen5InterpolationParameterTests
         Assert.Contains("Pull-model interpolation", error);
     }
 
+    [Fact]
+    public void ProvokingVertexMove_UsesAFlatInputWithoutPerVertexSupport()
+    {
+        var request = Request(2, false, inputCntl: 0x1, supportsPerVertex: false);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Capability &&
+            instruction.Operands[0] == (uint)SpirvCapability.FragmentBarycentricKhr);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.PerVertexKhr);
+        var input = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.Location).Operands[0];
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[0] == input && instruction.Operands[1] == (uint)SpirvDecoration.Flat);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void VertexDifferenceMove_KeepsPerVertexInputWithoutPerVertexSupport(uint selector)
+    {
+        var request = Request(selector, false, inputCntl: 0x1, supportsPerVertex: false);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.PerVertexKhr);
+    }
+
     private static ShaderCompileRequest Request(
-        uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32")
+        uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
+        uint inputCntl = 0x401, bool supportsPerVertex = true)
     {
         var interpolation = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, opcode,
             [selector], [Gen5Operand.Vector(selector)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 2));
@@ -90,8 +119,9 @@ public sealed class Gen5InterpolationParameterTests
         {
             PixelInputAddress = inputs,
             PixelInputEnable = inputs,
-            PixelInputCntl = [0, 0x401],
+            PixelInputCntl = [0, inputCntl],
             PixelCustomInterpolationMask = custom ? 2u : 0u,
+            SupportsPerVertexPixelInputs = supportsPerVertex,
         };
     }
 
