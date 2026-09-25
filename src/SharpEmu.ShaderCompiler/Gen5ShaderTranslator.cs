@@ -832,6 +832,7 @@ public static partial class Gen5ShaderTranslator
             0x43 => "VMovrelsB32",
             0x44 => "VMovrelsdB32",
             0x48 => "VMovrelsd2B32",
+            0x52 => "VCvtU16F16",
             0x56 => "VRsqF16",
             _ => string.Empty,
         };
@@ -1170,6 +1171,8 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
+            // VOP1 opcode 0x52 is available through VOP3 as opcode 0x1D2.
+            0x1D2 => "VCvtU16F16",
             0x300 => "VLshrrevB64",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",

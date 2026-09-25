@@ -152,6 +152,25 @@ public static partial class Gen5SpirvTranslator
                         _uintType,
                         GetFloatSource(instruction, 0));
                     break;
+                case "VCvtU16F16":
+                {
+                    var source = GetFloat16Source(instruction, 0);
+                    var sourceIsNan = _module.AddInstruction(
+                        SpirvOp.IsNan,
+                        _boolType,
+                        source);
+                    source = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _floatType,
+                        sourceIsNan,
+                        Float(0),
+                        source);
+                    var bounded = Ext(43, _floatType, source, Float(0), Float(65535));
+                    result = BitwiseAnd(
+                        _module.AddInstruction(SpirvOp.ConvertFToU, _uintType, bounded),
+                        UInt(0xFFFF));
+                    break;
+                }
                 case "VCvtI32F32":
                 case "VCvtRpiI32F32":
                 case "VCvtFlrI32F32":
