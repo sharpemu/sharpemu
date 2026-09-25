@@ -13,6 +13,7 @@ internal static class PosixViewRegions
 
     internal static void Replace(ulong address, ulong size, uint state, uint protection)
     {
+        HostMemory.OnMappingChanged();
         var end = RoundPageEnd(address, size);
         var replacement = new List<Region>(Regions.Count + 2);
         foreach (var region in Regions)
@@ -50,6 +51,7 @@ internal static class PosixViewRegions
     // Mapping creates the storage. Fault-time protection updates must not allocate.
     internal static void ChangeProtection(ulong address, ulong size, uint protection)
     {
+        HostMemory.OnMappingChanged();
         var end = RoundPageEnd(address, size);
         var pageSize = (ulong)Environment.SystemPageSize;
         foreach (var region in Regions)

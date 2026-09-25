@@ -463,6 +463,29 @@ public sealed partial class DirectExecutionBackend
 		return false;
 	}
 
+	// The committed readable run of host pages that contains address.
+	private unsafe static bool TryQueryReadableRange(ulong address, out ulong start, out ulong end)
+	{
+		start = 0;
+		end = 0;
+		if (address <= 65536 || address >= 140737488355328L ||
+			VirtualQuery((void*)address, out var info, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
+		{
+			return false;
+		}
+
+		var regionEnd = info.BaseAddress + info.RegionSize;
+		if (regionEnd < info.BaseAddress || address > regionEnd - 8 ||
+			info.State != 4096 || !IsReadableProtection(info.Protect))
+		{
+			return false;
+		}
+
+		start = info.BaseAddress;
+		end = regionEnd;
+		return true;
+	}
+
 	private unsafe static bool TryReadStackU64(ulong address, out ulong value)
 	{
 		value = 0uL;

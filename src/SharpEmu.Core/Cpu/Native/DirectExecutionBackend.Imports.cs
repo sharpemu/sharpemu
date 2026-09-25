@@ -238,8 +238,8 @@ public sealed partial class DirectExecutionBackend
 		if (probeTarget &&
 			Interlocked.Increment(ref _probeImportReturnAddressCount) <= 2048)
 		{
-			var frameValue = TryReadStackU64(value4, out var savedRbp) ? savedRbp : 0;
-			var frameReturn = TryReadStackU64(value4 + sizeof(ulong), out var savedReturn)
+			var frameValue = TryReadImportStackU64(value4, out var savedRbp) ? savedRbp : 0;
+			var frameReturn = TryReadImportStackU64(value4 + sizeof(ulong), out var savedReturn)
 				? savedReturn
 				: 0;
 			Console.Error.WriteLine(
@@ -1217,10 +1217,45 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	// Every import reads its stack arguments. On POSIX a region query takes the global region lock,
+	// so keep the last readable range per thread until any mapping changes. The signal handlers
+	// use TryReadStackU64 instead: they must not touch thread-static storage.
+	[ThreadStatic] private static ulong _importReadableStart;
+	[ThreadStatic] private static ulong _importReadableEnd;
+	[ThreadStatic] private static long _importReadableGeneration;
+
+	private unsafe static bool TryReadImportStackU64(ulong address, out ulong value)
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return TryReadHostQword(address, out value);
+		}
+
+		var generation = HostMemory.MappingGeneration;
+		if (generation == _importReadableGeneration &&
+			address >= _importReadableStart && address <= _importReadableEnd - 8)
+		{
+			value = *(ulong*)address;
+			return true;
+		}
+
+		if (!TryQueryReadableRange(address, out var start, out var end))
+		{
+			value = 0;
+			return false;
+		}
+
+		_importReadableStart = start;
+		_importReadableEnd = end;
+		_importReadableGeneration = generation;
+		value = *(ulong*)address;
+		return true;
+	}
+
 	private static ulong ReadImportStackArgument(nint argPackPtr, int index)
 	{
 		var address = checked((ulong)argPackPtr + 104UL + (ulong)index * sizeof(ulong));
-		return TryReadHostQword(address, out var value) ? value : 0;
+		return TryReadImportStackU64(address, out var value) ? value : 0;
 	}
 
 	private static GuestCpuContinuation CaptureImportBoundaryContinuation(

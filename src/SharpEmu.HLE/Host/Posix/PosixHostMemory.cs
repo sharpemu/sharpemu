@@ -328,6 +328,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     }
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions[(ulong)result] = new Region
                 {
                     Base = (ulong)result,
@@ -357,7 +358,8 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     : munmap((nint)address, (nuint)region.Size) == 0;
                 if (released)
                 {
-                    Regions.Remove((ulong)address);
+                    HostMemory.OnMappingChanged();
+                Regions.Remove((ulong)address);
                 }
 
                 return released;
@@ -492,6 +494,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static void SetProtectRangeLocked(Region region, ulong start, ulong size, uint protect)
         {
+            HostMemory.OnMappingChanged();
             if (start == region.Base && size >= region.Size)
             {
                 region.DefaultProtect = protect;

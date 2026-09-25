@@ -16,6 +16,14 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static unsafe class HostMemory
 {
+    private static long _mappingGeneration;
+
+    // Changes whenever a POSIX mapping or its protection changes, so callers can cache a
+    // query result until the address space changes.
+    public static long MappingGeneration => Volatile.Read(ref _mappingGeneration);
+
+    internal static void OnMappingChanged() => Interlocked.Increment(ref _mappingGeneration);
+
     public const uint MEM_COMMIT = 0x1000;
     public const uint MEM_RESERVE = 0x2000;
     public const uint MEM_RELEASE = 0x8000;
@@ -254,6 +262,7 @@ public static unsafe class HostMemory
                     }
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions[(ulong)result] = new Region
                 {
                     Base = (ulong)result,
@@ -277,6 +286,7 @@ public static unsafe class HostMemory
                     return false;
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions.Remove((ulong)address);
                 return munmap((nint)address, (nuint)region.Size) == 0;
             }
@@ -439,6 +449,7 @@ public static unsafe class HostMemory
 
         private static void SetProtectRangeLocked(Region region, ulong start, ulong size, uint protect)
         {
+            HostMemory.OnMappingChanged();
             if (start == region.Base && size >= region.Size)
             {
                 region.DefaultProtect = protect;
