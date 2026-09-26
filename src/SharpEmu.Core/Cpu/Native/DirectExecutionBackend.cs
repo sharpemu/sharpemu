@@ -1196,10 +1196,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_importLoopSignatureWriteIndex = 0;
 		_importLoopPatternHits = 0;
 		_importLoopPatternStartTimestamp = 0;
-		lock (_importResultLogSampleGate)
-		{
-			_importResultLogSamples.Clear();
-		}
+		_importLogSampler.Reset();
 		lock (_lazyCommitRangeGate)
 		{
 			_prtLazyCommitRanges.Clear();

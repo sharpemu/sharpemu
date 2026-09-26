@@ -34,8 +34,7 @@ public sealed partial class DirectExecutionBackend
 	private const ulong StackCheckGuardValue = 0xC0DEC0DECAFEBA00UL;
 	private static long _canaryReturnRecoveries;
 
-	private readonly object _importResultLogSampleGate = new();
-	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	private readonly ImportLogSampler _importLogSampler = new();
 	private int _il2CppExceptionDiagnosticCount;
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
@@ -581,10 +580,19 @@ public sealed partial class DirectExecutionBackend
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
-				if (importStubEntry.Nid == "L-Q3LEjIbgA")
+				// A title that polls an unresolved import retries with no backoff, so
+				// this warning fires once per attempt. Sample it: the head occurrences
+				// still name the missing NID and its arguments.
+				var logUnresolved = _logAllImportResults ||
+					_importLogSampler.ShouldLog(importStubEntry.Nid, UnresolvedImportDiscriminator);
+				if (logUnresolved)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				}
+
+				if (logUnresolved && importStubEntry.Nid == "L-Q3LEjIbgA")
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
 					{
@@ -1548,7 +1556,10 @@ public sealed partial class DirectExecutionBackend
 			!expectedPrivacyInvalidParameter &&
 			!expectedPlayGoChunkEnumerationEnd)
 		{
-			return true;
+			// Unexpected results used to log unconditionally. A failing import the
+			// title polls repeats without bound, so sample these as well rather than
+			// emitting one line per retry.
+			return _logAllImportResults || _importLogSampler.ShouldLog(nid, resultValue);
 		}
 
 		if (!ShouldLogExpectedImportResults())
@@ -1556,17 +1567,18 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		var key = nid + "\0" + resultValue;
-		int count;
-		lock (_importResultLogSampleGate)
-		{
-			_importResultLogSamples.TryGetValue(key, out count);
-			count++;
-			_importResultLogSamples[key] = count;
-		}
-
-		return count <= 8 || count % 10000 == 0;
+		return _logAllImportResults || _importLogSampler.ShouldLog(nid, resultValue);
 	}
+
+	// Results are discriminated by their code; unresolved dispatches have no
+	// result, so they get a reserved slot that no real code occupies.
+	private const long UnresolvedImportDiscriminator = long.MinValue;
+
+	private static readonly bool _logAllImportResults =
+		string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALL_IMPORT_RESULTS"),
+			"1",
+			StringComparison.Ordinal);
 
 	private static bool ShouldLogExpectedImportResults() =>
 		string.Equals(
