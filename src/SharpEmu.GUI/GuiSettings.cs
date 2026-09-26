@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using SharpEmu.Libs;
 
 namespace SharpEmu.GUI;
 
@@ -99,10 +100,14 @@ public sealed class GuiSettings
     /// </summary>
     public string DiscordClientId { get; set; } = "1525606762248540221";
 
-    // The emulator is portable and keeps its data next to the executable;
-    // the GUI follows the same convention.
-    public static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "gui-settings.json");
-
+    // The emulator is portable on Windows/macOS and keeps its data next to
+    // the executable. On Linux, installs commonly land in a root-owned
+    // location (e.g. /opt), so settings follow the XDG Base Directory spec
+    // instead: https://specifications.freedesktop.org/basedir-spec/latest/
+    public static string SettingsPath => OperatingSystem.IsLinux()
+        ? Path.Combine(XdgPaths.ConfigHome, "sharpemu", "gui-settings.json")
+        : Path.Combine(AppContext.BaseDirectory, "gui-settings.json");
+    
     public static GuiSettings Load()
     {
         try
