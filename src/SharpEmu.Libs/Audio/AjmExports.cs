@@ -433,7 +433,7 @@ public static class AjmExports
                     ? 0
                     : OrbisAjmErrorInvalidParameter);
         }
-        catch (InvalidDataException)
+        catch (Exception ex) when (ex is InvalidDataException or IndexOutOfRangeException)
         {
             return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
         }
