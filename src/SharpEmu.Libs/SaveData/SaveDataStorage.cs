@@ -3,6 +3,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SharpEmu.Libs;
 
 namespace SharpEmu.Libs.SaveData;
 
@@ -104,7 +105,9 @@ public static class SaveDataStorage
         Path.Combine(slotDir, "sce_sys", "icon0.png");
 
     /// <summary>
-    /// Replaces characters that are invalid in a host path segment. Empty or
+    /// Percent-encodes characters that are invalid in a host path segment so
+    /// guest names like "Arcade Spirits: …" round-trip on Windows without
+    /// truncating at ':' or colliding when replaced with '_'. Empty or
     /// all-invalid input collapses to "default" so a bad guest name can never
     /// escape the save root or produce an empty segment.
     /// </summary>
@@ -115,15 +118,7 @@ public static class SaveDataStorage
             return "default";
         }
 
-        var invalid = Path.GetInvalidFileNameChars();
-        Span<char> buffer = value.Length <= 128 ? stackalloc char[value.Length] : new char[value.Length];
-        for (var i = 0; i < value.Length; i++)
-        {
-            var ch = value[i];
-            buffer[i] = Array.IndexOf(invalid, ch) >= 0 ? '_' : ch;
-        }
-
-        var sanitized = new string(buffer).Trim();
+        var sanitized = HostFsPath.EncodeInvalidFileNameChars(value).Trim();
         return string.IsNullOrWhiteSpace(sanitized) ? "default" : sanitized;
     }
 
