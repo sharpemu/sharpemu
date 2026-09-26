@@ -208,7 +208,10 @@ public static partial class KernelMemoryCompatExports
     private sealed class OpenDirectory
     {
         public required string Path { get; init; }
+
+        // Child names in GUEST form, not host form: see EnumerateDirectoryEntries.
         public required string[] Entries { get; init; }
+
         public int NextIndex { get; set; }
     }
 
@@ -4966,6 +4969,12 @@ public static partial class KernelMemoryCompatExports
     // prefixes that land back inside /app0 on real hardware. Combining those
     // raw against the app0 root walked out of the game folder entirely, so the
     // title enumerated an unrelated host directory and never found its .pak files.
+    //
+    // Each surviving segment is then encoded for the host filesystem. This is a
+    // no-op except on Windows, where a guest name the host cannot represent (a
+    // ':' in a save filename, say) would otherwise be silently rewritten by the
+    // Win32 layer instead of rejected — see HostFsName. EnumerateDirectoryEntries
+    // decodes on the way back out.
     private static string NormalizeMountRelativePath(string relativePath)
     {
         var segments = relativePath.Split(
@@ -4989,7 +4998,7 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            resolved.Add(segment);
+            resolved.Add(HostFsName.EncodeSegment(segment));
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
@@ -6987,7 +6996,11 @@ public static partial class KernelMemoryCompatExports
 
         var entryBytes = Encoding.UTF8.GetBytes(entryName);
         var nameLength = Math.Min(entryBytes.Length, 255);
-        var entryPath = Path.Combine(directory.Path, entryName);
+        // Entries are held in guest form (see EnumerateDirectoryEntries), so the
+        // name has to go back through the encoder to name a host path again;
+        // otherwise an encoded subdirectory probes as missing and is reported to
+        // the guest as a regular file.
+        var entryPath = Path.Combine(directory.Path, HostFsName.EncodeSegment(entryName));
         var entryType = Directory.Exists(entryPath) ? (byte)4 : (byte)8;
 
         var payload = new byte[512];
@@ -7012,9 +7025,13 @@ public static partial class KernelMemoryCompatExports
         // host dir previously returned EOF on the first call (rax=0), which
         // sent GTA's fiWriteAsyncDataWorker down a path that treated the fd as
         // a pointer (AV at 0xB1 on /download0/cloudcache/).
+        // Names go back out in guest form: the guest re-encodes whatever it reads
+        // here when it opens the entry, so an unencoded host name would resolve
+        // to a different file (or to nothing) on the very next syscall.
         var children = Directory.EnumerateFileSystemEntries(hostPath)
             .Select(Path.GetFileName)
             .Where(static name => !string.IsNullOrEmpty(name))
+            .Select(static name => HostFsName.DecodeSegment(name!))
             .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase);
 
         return new[] { ".", ".." }.Concat(children).ToArray()!;
