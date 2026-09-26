@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
@@ -72,7 +72,11 @@ public static class KernelSemaphoreCompatExports
             Count = initialCount,
         };
 
-        if (!TryWriteUInt32(ctx, semaphoreAddress, handle))
+        // SceKernelSema is a 64-bit opaque pointer, so the whole variable has to be written.
+        // Writing only the low half leaves the guest's upper four bytes holding whatever was
+        // there, which every other kernel-object creator here avoids: sceKernelCreateEventFlag
+        // and sceKernelCreateEqueue both write 64 bits.
+        if (!ctx.TryWriteUInt64(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
