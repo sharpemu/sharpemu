@@ -96,34 +96,49 @@ public static class Ngs2VagDecoder
                 filter = 0;
             }
 
+            // Only 0-12 are meaningful shift factors; the SPU reads the reserved
+            // 13-15 as 9. Without this a frame carrying one decodes to near
+            // silence instead of the waveform the encoder intended.
+            if (shift > 12)
+            {
+                shift = 9;
+            }
+
             // Per-frame loop marker (exact PS-ADPCM values, not bit masks):
-            //   3 = loop start, 6 = loop end + jump back, 1/7 = one-shot end.
+            //   6 = loop start (save the address), 3 = loop end (jump back),
+            //   1 = end marker, 7 = end marker whose own frame decodes as silence.
             var flags = frames[offset + 1];
             var blockStart = outIndex;
-            if (flags == 0x03)
+            if (flags == 0x06)
             {
                 loopStart = blockStart;
             }
 
             var f0 = Coeff0[filter];
             var f1 = Coeff1[filter];
+            var discard = flags == 0x07;
             for (var i = 0; i < 14; i++)
             {
                 var d = frames[offset + 2 + i];
                 for (var nibble = 0; nibble < 2; nibble++)
                 {
-                    var raw = nibble == 0 ? d & 0x0F : d >> 4;
-                    // Sign-extend the 4-bit sample into the top nibble, then scale.
-                    var s = (short)(raw << 12) >> shift;
-                    var predicted = (hist1 * f0 + hist2 * f1) >> 6;
-                    var sample = Math.Clamp(s + predicted, short.MinValue, short.MaxValue);
+                    var sample = 0;
+                    if (!discard)
+                    {
+                        var raw = nibble == 0 ? d & 0x0F : d >> 4;
+                        // Sign-extend the 4-bit sample into the top nibble, then scale.
+                        var s = (short)(raw << 12) >> shift;
+                        var predicted = (hist1 * f0 + hist2 * f1) >> 6;
+                        sample = Math.Clamp(s + predicted, short.MinValue, short.MaxValue);
+                    }
+
                     samples[outIndex++] = (short)sample;
                     hist2 = hist1;
                     hist1 = sample;
                 }
             }
 
-            if (flags == 0x06)
+            if (flags == 0x03)
             {
                 loopEnd = outIndex;
             }
