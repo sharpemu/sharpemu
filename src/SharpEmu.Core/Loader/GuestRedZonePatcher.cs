@@ -20,6 +20,15 @@ internal static class GuestRedZonePatcher
     private const ulong AllocationAlignment = 0x10000;
     private const ulong MaximumRelativeJumpDistance = 0x7FFF_FFFF;
 
+    internal enum SpanRefusal
+    {
+        None,
+        ControlFlow,
+        BranchTargetAfter,
+        StackAfter,
+        TooShort,
+    }
+
     public static PatchResult Patch(
         IVirtualMemory memory,
         PhysicalVirtualMemory physicalMemory,
@@ -56,7 +65,8 @@ internal static class GuestRedZonePatcher
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
-                $"[LOADER] {hostName} red-zone scan: functions={scan.Functions} red_zone={scan.RedZoneFunctions} sites=0.");
+                $"[LOADER] {hostName} red-zone scan: functions={scan.Functions} red_zone={scan.RedZoneFunctions} " +
+                $"sites=0 unrelocatable={scan.UnrelocatableSites}.");
             return scan;
         }
 
@@ -80,14 +90,28 @@ internal static class GuestRedZonePatcher
         var trampolineEnd = trampolineBase + requiredBytes;
         var patched = 0;
         var failed = 0;
+        var previousEnd = 0UL;
         foreach (var site in sites)
         {
+            // Sites are produced in increasing address order. Patching two that
+            // overlap would write one jump over another and send the trampoline
+            // into whatever follows, so refuse rather than corrupt guest code.
+            if (site.Address < previousEnd)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] {hostName} red-zone site 0x{site.Address:X16} overlaps the previous one " +
+                    $"ending at 0x{previousEnd:X16}; left unpatched.");
+                failed++;
+                continue;
+            }
+
             if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, splitVectorStores))
             {
                 failed++;
                 continue;
             }
 
+            previousEnd = site.Address + (ulong)site.ByteLength;
             patched++;
         }
 
@@ -96,11 +120,19 @@ internal static class GuestRedZonePatcher
             CandidateSites = sites.Count,
             PatchedSites = patched,
             FailedSites = failed,
+            UnrelocatableSites = scan.UnrelocatableSites,
+            ControlFlowRefusals = scan.ControlFlowRefusals,
+            BranchTargetRefusals = scan.BranchTargetRefusals,
+            StackRefusals = scan.StackRefusals,
+            TooShortRefusals = scan.TooShortRefusals,
             TrampolineBytes = trampolineCursor - trampolineBase,
         };
         Console.Error.WriteLine(
             $"[LOADER] {hostName} red-zone patch: functions={result.Functions} red_zone={result.RedZoneFunctions} " +
             $"sites={result.PatchedSites}/{result.CandidateSites} failed={result.FailedSites} " +
+            $"unrelocatable={result.UnrelocatableSites} " +
+            $"(control_flow={result.ControlFlowRefusals} branch_target_after={result.BranchTargetRefusals} " +
+            $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals}) " +
             $"rosetta_vector_stores={result.VectorStoreCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
         return result;
@@ -120,6 +152,8 @@ internal static class GuestRedZonePatcher
         var redZoneFunctionCount = 0;
         var instructionCount = 0;
         var vectorStoreCount = 0;
+        var unrelocatableSites = 0;
+        var refusalCounts = new int[5];
 
         foreach (var header in programHeaders)
         {
@@ -169,6 +203,7 @@ internal static class GuestRedZonePatcher
                 functionCount++;
                 instructionCount += decoded.Count;
                 var usesRedZone = protectRedZone && decoded.Any(static entry => UsesRedZone(entry.Instruction));
+
                 if (!usesRedZone && !splitVectorStores)
                 {
                     continue;
@@ -179,22 +214,52 @@ internal static class GuestRedZonePatcher
                     redZoneFunctionCount++;
                 }
                 var branchTargets = CollectBranchTargets(decoded);
+
+                var lastSiteEnd = 0UL;
+
                 for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
                 {
                     var instruction = decoded[instructionIndex].Instruction;
                     if ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
-                        !IsFaultableGuestMemoryInstruction(instruction) ||
-                        !TryBuildPatchSpan(decoded, instructionIndex, branchTargets, out var span))
+                        !IsFaultableGuestMemoryInstruction(instruction))
                     {
                         continue;
                     }
 
+                    // A backward span reaches instructions that an earlier site
+                    // may already have replaced with its own jump. Two jumps
+                    // written over each other corrupt control flow, so a span is
+                    // only usable when it starts at or after the end of the last
+                    // one. Forward spans cannot overlap by construction; the
+                    // check costs nothing and documents the invariant.
+                    var backward = false;
+                    if (!TryBuildPatchSpan(decoded, instructionIndex, branchTargets, out var span, out var refusal))
+                    {
+                        backward = TryBuildEnclosingPatchSpan(decoded, instructionIndex, branchTargets, out span);
+                    }
+
+                    if ((!backward && refusal != SpanRefusal.None) || span.Address < lastSiteEnd)
+                    {
+                        // Refused spans never enter the site list, so they are
+                        // invisible in FailedSites. Count them separately.
+                        unrelocatableSites++;
+                        refusalCounts[(int)refusal]++;
+                        continue;
+                    }
+
                     sites.Add(span);
+                    lastSiteEnd = span.Address + (ulong)span.ByteLength;
                     if (splitVectorStores)
                     {
                         vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
                     }
-                    instructionIndex += span.Instructions.Count - 1;
+
+                    // A backward span already ends at the current instruction, so
+                    // only a forward one consumes the instructions that follow.
+                    if (!backward)
+                    {
+                        instructionIndex += span.Instructions.Count - 1;
+                    }
                 }
             }
         }
@@ -206,6 +271,11 @@ internal static class GuestRedZonePatcher
             Instructions = instructionCount,
             CandidateSites = sites.Count,
             VectorStoreCount = vectorStoreCount,
+            UnrelocatableSites = unrelocatableSites,
+            ControlFlowRefusals = refusalCounts[(int)SpanRefusal.ControlFlow],
+            BranchTargetRefusals = refusalCounts[(int)SpanRefusal.BranchTargetAfter],
+            StackRefusals = refusalCounts[(int)SpanRefusal.StackAfter],
+            TooShortRefusals = refusalCounts[(int)SpanRefusal.TooShort],
         };
         return sites;
     }
@@ -262,20 +332,199 @@ internal static class GuestRedZonePatcher
         return targets;
     }
 
+    /// <summary>
+    /// Runs the enclosing-span search over a raw instruction range, so the
+    /// behaviour can be pinned on the byte sequences that occur in real guest
+    /// code rather than on a mocked decode.
+    /// </summary>
+    internal static bool TryBuildEnclosingSpan(
+        byte[] code,
+        ulong baseAddress,
+        ulong faultAddress,
+        out ulong spanAddress,
+        out int spanLength,
+        out int coreStart,
+        out int coreCount)
+    {
+        spanAddress = 0;
+        spanLength = 0;
+        coreStart = 0;
+        coreCount = 0;
+
+        var decoded = DecodeFunction(code, baseAddress, baseAddress, baseAddress + (ulong)code.Length);
+        var faultIndex = -1;
+        for (var index = 0; index < decoded.Count; index++)
+        {
+            if (decoded[index].Instruction.IP == faultAddress)
+            {
+                faultIndex = index;
+                break;
+            }
+        }
+
+        if (faultIndex < 0)
+        {
+            return false;
+        }
+
+        if (!TryBuildEnclosingPatchSpan(decoded, faultIndex, CollectBranchTargets(decoded), out var site))
+        {
+            return false;
+        }
+
+        spanAddress = site.Address;
+        spanLength = site.ByteLength;
+        coreStart = site.CoreStart;
+        coreCount = site.CoreCount;
+        return true;
+    }
+
+    /// <summary>
+    /// Finds the faultable instructions of a span. The RSP shift has to bracket
+    /// all of them and nothing that reads or writes through RSP, because the
+    /// shift would move such an access by 128 bytes.
+    /// </summary>
+    private static bool TryComputeShiftedCore(IList<Instruction> instructions, out int coreStart, out int coreCount)
+    {
+        coreStart = -1;
+        var coreEnd = -1;
+        for (var index = 0; index < instructions.Count; index++)
+        {
+            if (!IsFaultableGuestMemoryInstruction(instructions[index]))
+            {
+                continue;
+            }
+
+            if (coreStart < 0)
+            {
+                coreStart = index;
+            }
+
+            coreEnd = index;
+        }
+
+        if (coreStart < 0)
+        {
+            coreCount = 0;
+            return false;
+        }
+
+        for (var index = coreStart; index <= coreEnd; index++)
+        {
+            if (TouchesStackPointer(instructions[index]))
+            {
+                coreCount = 0;
+                return false;
+            }
+        }
+
+        coreCount = coreEnd - coreStart + 1;
+        return true;
+    }
+
+    /// <summary>
+    /// Builds a span that <em>ends</em> at the faulting instruction, taking the
+    /// bytes it needs from the instructions before it. The instruction after the
+    /// site is never overwritten, so branches into it keep working - which is
+    /// what the forward search cannot offer when that instruction is a branch
+    /// target or touches RSP.
+    /// </summary>
+    private static bool TryBuildEnclosingPatchSpan(
+        IReadOnlyList<DecodedInstruction> decoded,
+        int faultIndex,
+        IReadOnlySet<ulong> branchTargets,
+        out PatchSite site)
+    {
+        site = default;
+        var faulting = decoded[faultIndex].Instruction;
+        if (faulting.FlowControl != FlowControl.Next || TouchesStackPointer(faulting))
+        {
+            return false;
+        }
+
+        // Starting before the faulting instruction only works when nothing
+        // branches directly to it: such a branch would land inside the new jump.
+        if (branchTargets.Contains(faulting.IP))
+        {
+            return false;
+        }
+
+        var byteLength = faulting.Length;
+        for (var startIndex = faultIndex - 1; startIndex >= 0; startIndex--)
+        {
+            var candidate = decoded[startIndex].Instruction;
+            if (candidate.FlowControl != FlowControl.Next)
+            {
+                return false;
+            }
+
+            byteLength += candidate.Length;
+
+            // A branch target on the first instruction is fine: it lands on the
+            // jump that replaces the span. One in the middle is not, so stop as
+            // soon as the span is long enough rather than growing past it.
+            if (byteLength < MinimumJumpBytes)
+            {
+                if (branchTargets.Contains(candidate.IP))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            var instructions = new List<Instruction>(faultIndex - startIndex + 1);
+            for (var index = startIndex; index <= faultIndex; index++)
+            {
+                instructions.Add(decoded[index].Instruction);
+            }
+
+            if (!TryComputeShiftedCore(instructions, out var coreStart, out var coreCount))
+            {
+                return false;
+            }
+
+            site = new PatchSite(candidate.IP, byteLength, instructions, coreStart, coreCount);
+            return true;
+        }
+
+        return false;
+    }
+
     private static bool TryBuildPatchSpan(
         IReadOnlyList<DecodedInstruction> decoded,
         int startIndex,
         IReadOnlySet<ulong> branchTargets,
-        out PatchSite site)
+        out PatchSite site) =>
+        TryBuildPatchSpan(decoded, startIndex, branchTargets, out site, out _);
+
+    private static bool TryBuildPatchSpan(
+        IReadOnlyList<DecodedInstruction> decoded,
+        int startIndex,
+        IReadOnlySet<ulong> branchTargets,
+        out PatchSite site,
+        out SpanRefusal refusal)
     {
+        refusal = SpanRefusal.None;
         var instructions = new List<Instruction>(3);
         var byteLength = 0;
         for (var index = startIndex; index < decoded.Count && byteLength < MinimumJumpBytes; index++)
         {
             var instruction = decoded[index].Instruction;
-            if (instruction.FlowControl != FlowControl.Next ||
-                (index != startIndex && branchTargets.Contains(instruction.IP)) ||
-                TouchesStackPointer(instruction))
+            if (instruction.FlowControl != FlowControl.Next)
+            {
+                refusal = SpanRefusal.ControlFlow;
+            }
+            else if (index != startIndex && branchTargets.Contains(instruction.IP))
+            {
+                refusal = SpanRefusal.BranchTargetAfter;
+            }
+            else if (TouchesStackPointer(instruction))
+            {
+                refusal = SpanRefusal.StackAfter;
+            }
+
+            if (refusal != SpanRefusal.None)
             {
                 site = default;
                 return false;
@@ -287,11 +536,19 @@ internal static class GuestRedZonePatcher
 
         if (byteLength < MinimumJumpBytes)
         {
+            refusal = SpanRefusal.TooShort;
             site = default;
             return false;
         }
 
-        site = new PatchSite(decoded[startIndex].Instruction.IP, byteLength, instructions);
+        if (!TryComputeShiftedCore(instructions, out var coreStart, out var coreCount))
+        {
+            refusal = SpanRefusal.TooShort;
+            site = default;
+            return false;
+        }
+
+        site = new PatchSite(decoded[startIndex].Instruction.IP, byteLength, instructions, coreStart, coreCount);
         return true;
     }
 
@@ -373,6 +630,30 @@ internal static class GuestRedZonePatcher
         return false;
     }
 
+    private static bool TryEncodeSegment(
+        IList<Instruction> instructions,
+        int start,
+        int count,
+        ulong address,
+        out byte[]? encoded)
+    {
+        encoded = null;
+        if (count <= 0)
+        {
+            return true;
+        }
+
+        var writer = new ListCodeWriter();
+        var segment = instructions.Skip(start).Take(count).ToList();
+        if (!BlockEncoder.TryEncode(64, new InstructionBlock(writer, segment, address), out _, out _, BlockEncoderOptions.None))
+        {
+            return false;
+        }
+
+        encoded = writer.ToArray();
+        return true;
+    }
+
     private static bool TryPatchSite(
         IVirtualMemory memory,
         PatchSite site,
@@ -380,9 +661,25 @@ internal static class GuestRedZonePatcher
         ulong trampolineEnd,
         bool splitVectorStores)
     {
+        // A span that starts before the faulting instruction may relocate an
+        // RSP-relative access, which must run before the shift or it would read
+        // 128 bytes away. Emit such a span as prefix / shifted core / suffix.
+        // A forward span starts at the faulting instruction and never steals a
+        // stack-dependent one, so it keeps the original single-block shape.
+        byte[]? prefix = null;
+        if (site.CoreStart > 0 &&
+            !TryEncodeSegment(site.Instructions, 0, site.CoreStart, trampolineCursor, out prefix))
+        {
+            return false;
+        }
+
+        var prefixLength = prefix?.Length ?? 0;
         var writer = new ListCodeWriter();
-        var relocatedAddress = trampolineCursor + 5;
-        var instructions = splitVectorStores ? RosettaVectorStorePatch.SplitVectorStores(site.Instructions) : site.Instructions;
+        var relocatedAddress = trampolineCursor + (ulong)prefixLength + 5;
+        var core = prefix is null
+            ? site.Instructions
+            : site.Instructions.Skip(site.CoreStart).Take(site.CoreCount).ToList();
+        var instructions = splitVectorStores ? RosettaVectorStorePatch.SplitVectorStores(core) : core;
         var block = new InstructionBlock(writer, instructions, relocatedAddress);
         if (!BlockEncoder.TryEncode(64, block, out _, out _, BlockEncoderOptions.None))
         {
@@ -390,21 +687,22 @@ internal static class GuestRedZonePatcher
         }
 
         var relocated = writer.ToArray();
-        var trampolineLength = checked(5 + relocated.Length + 8 + 5);
+        var trampolineLength = checked(prefixLength + 5 + relocated.Length + 8 + 5);
         if (trampolineCursor > trampolineEnd || (ulong)trampolineLength > trampolineEnd - trampolineCursor)
         {
             return false;
         }
 
         var trampoline = new byte[trampolineLength];
+        prefix?.CopyTo(trampoline, 0);
         // lea rsp,[rsp-128] -- LEA preserves guest flags.
-        trampoline[0] = 0x48;
-        trampoline[1] = 0x8D;
-        trampoline[2] = 0x64;
-        trampoline[3] = 0x24;
-        trampoline[4] = 0x80;
-        relocated.CopyTo(trampoline, 5);
-        var restoreOffset = 5 + relocated.Length;
+        trampoline[prefixLength] = 0x48;
+        trampoline[prefixLength + 1] = 0x8D;
+        trampoline[prefixLength + 2] = 0x64;
+        trampoline[prefixLength + 3] = 0x24;
+        trampoline[prefixLength + 4] = 0x80;
+        relocated.CopyTo(trampoline, prefixLength + 5);
+        var restoreOffset = prefixLength + 5 + relocated.Length;
         // lea rsp,[rsp+128]
         trampoline[restoreOffset] = 0x48;
         trampoline[restoreOffset + 1] = 0x8D;
@@ -543,7 +841,19 @@ internal static class GuestRedZonePatcher
 
     private readonly record struct DecodedInstruction(Instruction Instruction);
 
-    private readonly record struct PatchSite(ulong Address, int ByteLength, IList<Instruction> Instructions);
+    /// <summary>
+    /// A run of guest instructions relocated into one trampoline.
+    /// <paramref name="CoreStart"/> and <paramref name="CoreCount"/> delimit the
+    /// faultable instructions the RSP shift must bracket. Instructions outside
+    /// that core run unshifted, which is what lets a span start before the
+    /// faulting instruction and still relocate an RSP-relative one correctly.
+    /// </summary>
+    private readonly record struct PatchSite(
+        ulong Address,
+        int ByteLength,
+        IList<Instruction> Instructions,
+        int CoreStart,
+        int CoreCount);
 
     internal readonly record struct PatchResult
     {
@@ -560,6 +870,22 @@ internal static class GuestRedZonePatcher
         public int PatchedSites { get; init; }
 
         public int FailedSites { get; init; }
+
+        /// <summary>
+        /// Faultable instructions inside a red-zone function that no trampoline
+        /// span could cover. These stay unprotected and are not counted by
+        /// <see cref="FailedSites"/>, which only tracks sites that were selected
+        /// and then failed to patch.
+        /// </summary>
+        public int UnrelocatableSites { get; init; }
+
+        public int ControlFlowRefusals { get; init; }
+
+        public int BranchTargetRefusals { get; init; }
+
+        public int StackRefusals { get; init; }
+
+        public int TooShortRefusals { get; init; }
 
         public ulong TrampolineBytes { get; init; }
     }

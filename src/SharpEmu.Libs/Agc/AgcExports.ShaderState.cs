@@ -31,7 +31,10 @@ public static partial class AgcExports
     private const ulong ShaderNumShRegistersOffset = 0x5C;
     private const int ShaderStructBytes = 0x60;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
-    private const int MaximumEmbeddedFusedScanBytes = 64 * 1024;
+    // Embedded GS/HS front/back descriptors can sit beyond the first 64 KiB of
+    // the upload. Scan the full shader object size accepted by AGC so the
+    // continuation is registered before resource planning sees the front half.
+    private const int MaximumEmbeddedFusedScanBytes = 1024 * 1024;
     private const ulong FusedShaderImageAlignment = 4;
     private const byte ComputeShaderType = 0;
     private const byte PsShaderType = 1;
@@ -166,27 +169,6 @@ public static partial class AgcExports
             return false;
         }
 
-        var upload = new byte[MaximumEmbeddedFusedScanBytes];
-        var bytesRead = 0;
-        const int readChunkBytes = 4 * 1024;
-        while (bytesRead < upload.Length)
-        {
-            var chunkLength = Math.Min(readChunkBytes, upload.Length - bytesRead);
-            if (!ctx.Memory.TryRead(
-                    entryCodeAddress + (ulong)bytesRead,
-                    upload.AsSpan(bytesRead, chunkLength)))
-            {
-                break;
-            }
-
-            bytesRead += chunkLength;
-        }
-
-        if (bytesRead < ShaderStructBytes)
-        {
-            return false;
-        }
-
         var requiredContinuationType = entryType == GsFrontShaderType
             ? GsBackShaderType
             : HsBackShaderType;
@@ -201,57 +183,95 @@ public static partial class AgcExports
         ulong bestCodeAddress = 0;
         ulong bestHeaderAddress = 0;
         var bestDistance = ulong.MaxValue;
-        for (var offset = 0;
-             offset <= bytesRead - ShaderStructBytes;
-             offset += sizeof(uint))
+
+        bool ScanForContinuation(ulong scanAddress)
         {
-            var descriptor = upload.AsSpan(offset, ShaderStructBytes);
-            if (BinaryPrimitives.ReadUInt32LittleEndian(descriptor) != ShaderFileHeader ||
-                BinaryPrimitives.ReadUInt32LittleEndian(descriptor[sizeof(uint)..]) != ShaderVersion ||
-                descriptor[(int)ShaderTypeOffset] != requiredContinuationType)
+            var upload = new byte[MaximumEmbeddedFusedScanBytes];
+            var bytesRead = 0;
+            const int readChunkBytes = 4 * 1024;
+            while (bytesRead < upload.Length)
             {
-                continue;
+                var chunkLength = Math.Min(readChunkBytes, upload.Length - bytesRead);
+                if (!ctx.Memory.TryRead(
+                        scanAddress + (ulong)bytesRead,
+                        upload.AsSpan(bytesRead, chunkLength)))
+                {
+                    break;
+                }
+
+                bytesRead += chunkLength;
             }
 
-            var continuationCodeAddress = BinaryPrimitives.ReadUInt64LittleEndian(
-                descriptor[(int)ShaderCodeOffset..]);
-            var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
-                descriptor[(int)ShaderSizeOffset..]);
-            if (continuationCodeAddress <= entryCodeAddress ||
-                continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
-                !IsValidDeclaredShaderSize(continuationSize) ||
-                !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
+            if (bytesRead < ShaderStructBytes)
             {
-                continue;
+                return false;
             }
 
-            var continuationSpecialsAddress = BinaryPrimitives.ReadUInt64LittleEndian(
-                descriptor[(int)ShaderSpecialsOffset..]);
-            if (entrySpecialsAddress != 0 && continuationSpecialsAddress != 0)
+            var found = false;
+            for (var offset = 0;
+                 offset <= bytesRead - ShaderStructBytes;
+                 offset += sizeof(uint))
             {
-                if (!TryReadUInt32(
-                        ctx,
-                        entrySpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
-                        out var entryStages) ||
-                    !TryReadUInt32(
-                        ctx,
-                        continuationSpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
-                        out var continuationStages) ||
-                    ((entryStages ^ continuationStages) & waveSizeBit) != 0)
+                var descriptor = upload.AsSpan(offset, ShaderStructBytes);
+                if (BinaryPrimitives.ReadUInt32LittleEndian(descriptor) != ShaderFileHeader ||
+                    BinaryPrimitives.ReadUInt32LittleEndian(descriptor[sizeof(uint)..]) != ShaderVersion ||
+                    descriptor[(int)ShaderTypeOffset] != requiredContinuationType)
                 {
                     continue;
                 }
+
+                var continuationCodeAddress = BinaryPrimitives.ReadUInt64LittleEndian(
+                    descriptor[(int)ShaderCodeOffset..]);
+                var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
+                    descriptor[(int)ShaderSizeOffset..]);
+                if (continuationCodeAddress <= entryCodeAddress ||
+                    continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
+                    !IsValidDeclaredShaderSize(continuationSize) ||
+                    !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
+                {
+                    continue;
+                }
+
+                var continuationSpecialsAddress = BinaryPrimitives.ReadUInt64LittleEndian(
+                    descriptor[(int)ShaderSpecialsOffset..]);
+                if (entrySpecialsAddress != 0 && continuationSpecialsAddress != 0)
+                {
+                    if (!TryReadUInt32(
+                            ctx,
+                            entrySpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
+                            out var entryStages) ||
+                        !TryReadUInt32(
+                            ctx,
+                            continuationSpecialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint),
+                            out var continuationStages) ||
+                        ((entryStages ^ continuationStages) & waveSizeBit) != 0)
+                    {
+                        continue;
+                    }
+                }
+
+                var distance = continuationCodeAddress - entryCodeAddress;
+                if (distance >= bestDistance)
+                {
+                    continue;
+                }
+
+                bestDistance = distance;
+                bestCodeAddress = continuationCodeAddress;
+                bestHeaderAddress = scanAddress + (ulong)offset;
+                found = true;
             }
 
-            var distance = continuationCodeAddress - entryCodeAddress;
-            if (distance >= bestDistance)
-            {
-                continue;
-            }
+            return found;
+        }
 
-            bestDistance = distance;
-            bestCodeAddress = continuationCodeAddress;
-            bestHeaderAddress = entryCodeAddress + (ulong)offset;
+        // Most uploads place the second descriptor beside the code. Some
+        // titles keep both descriptors in the header allocation instead, so
+        // inspect that region as a fallback.
+        ScanForContinuation(entryCodeAddress);
+        if (bestHeaderAddress == 0)
+        {
+            ScanForContinuation(entryHeaderAddress);
         }
 
         if (bestHeaderAddress == 0)

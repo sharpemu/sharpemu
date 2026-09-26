@@ -39,6 +39,17 @@ public static class ResourceMaterializer
         public uint[] FlattenedTable = [];
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
+        public List<BufferCandidateTable> BufferCandidateTables = [];
+    }
+
+    // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
+    // and the run-time offset -> candidate mapping the emitter searches.
+    private sealed class BufferCandidateTable
+    {
+        public int MemoryIndex;
+        public List<uint> Keys = [];
+        public List<uint> Candidates = [];
+        public List<DescriptorWords> Descriptors = [];
     }
 
     public static bool Materialize(
@@ -142,7 +153,10 @@ public static class ResourceMaterializer
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
-                        cleanInputs, [], evaluateTable: false, out var descriptors, out _)) return false;
+                        cleanInputs, [], evaluateTable: false, out var descriptors, out _))
+                    {
+                        return false;
+                    }
                     var directTable = new IndirectImageTable { Resource = (uint)imageIndex };
                     for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
                     {
@@ -161,6 +175,21 @@ public static class ResourceMaterializer
                     }
                     snapshot.Images[imageIndex] = directTable.Descriptors[(int)directTable.Candidates[0]].Dwords;
                     if (directTable.Descriptors.Count > 1) snapshot.IndirectImages.Add(directTable);
+                    continue;
+                }
+                if (indirect.WaveIndexed is { } waveIndexed)
+                {
+                    if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
+                        out var waveSources, out _))
+                        return false;
+                    if (!MaterializeWaveIndexedImage(indirect, waveIndexed, waveSources[0], image, image.R128, inputs, out var waveTable, out failure))
+                        return false;
+                    snapshot.Images[imageIndex] = waveTable.Descriptors[(int)waveTable.Candidates[0]].Dwords;
+                    if (waveTable.Descriptors.Count > 1)
+                    {
+                        waveTable.Resource = (uint)imageIndex;
+                        snapshot.IndirectImages.Add(waveTable);
+                    }
                     continue;
                 }
                 if (indirect.Dense)
@@ -211,7 +240,111 @@ public static class ResourceMaterializer
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
         for (var index = 0; index < snapshot.Samplers.Length; index++)
             snapshot.Samplers[index] = values[cursor++].Dwords;
+
+        // Bounded runtime V# tables: the whole table is read and validated before it is
+        // published, so a single unreadable candidate leaves the previous snapshot intact.
+        foreach (var candidatePlan in plan.BufferCandidateTables)
+        {
+            if (candidatePlan.SourceSrtResource == DescriptorConstants.NoIndex ||
+                !RuntimeValueEvaluator.EvaluateSources(plan, [candidatePlan.SourceSrtResource], inputs, [], evaluateTable: false,
+                    out var srtSources, out _) || srtSources.Count == 0)
+            {
+                return false;
+            }
+
+            if (!MaterializeBufferCandidateTable(plan, candidatePlan, srtSources[0], inputs, out var candidateTable))
+            {
+                return false;
+            }
+
+            snapshot.BufferCandidateTables.Add(candidateTable);
+        }
+
         snapshot.UserData = inputs.UserData.ToArray();
+        return true;
+    }
+
+    // Reads every candidate the loop guard can select from the guest SRT, validates it and
+    // records the run-time probe key (its base-address low dword) -> candidate mapping.
+    // Distinct keys are required so the mapping is unambiguous; identical descriptors share
+    // one candidate.
+    private static bool MaterializeBufferCandidateTable(
+        ShaderResourcePlan plan,
+        BufferCandidateTablePlan table,
+        DescriptorWords srt,
+        ResourceRuntimeInputs inputs,
+        out BufferCandidateTable result)
+    {
+        result = new BufferCandidateTable { MemoryIndex = table.MemoryIndices.Count != 0 ? table.MemoryIndices[0] : -1 };
+        if (srt.DwordCount != 4)
+        {
+            return false;
+        }
+
+        int count;
+        if (table.IsStaticallyBounded)
+        {
+            count = table.Count;
+        }
+        else
+        {
+            if (table.Limit is null)
+            {
+                return false;
+            }
+
+            using var scratch = RuntimeEvaluationScratch.Rent();
+            var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+            if (!evaluator.Evaluate(table.Limit, out var limit) || !table.TryResolveCount(limit, out count))
+            {
+                return false;
+            }
+        }
+
+        if (count <= 0 || count > table.Cap)
+        {
+            return false;
+        }
+
+        var keyToCandidate = new Dictionary<uint, uint>();
+        for (var index = 0; index < count; index++)
+        {
+            var offset = unchecked(table.MinOffset + (uint)index * table.CandidateSpacing);
+            var words = new uint[4];
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                if (!ReadScalarBufferWord(srt.Dwords, offset, dword * sizeof(uint), inputs, out words[dword]))
+                {
+                    return false;
+                }
+            }
+
+            // A descriptor whose reserved bits are set is unbound and reads as zero.
+            if ((words[3] >> 30) != 0)
+            {
+                Array.Clear(words);
+            }
+
+            var descriptor = new DescriptorWords(words);
+            if (keyToCandidate.TryGetValue(words[0], out var existing))
+            {
+                // Two different descriptors sharing one probe key cannot be told apart at
+                // run time; reject precisely instead of guessing.
+                if (!result.Descriptors[(int)existing].SameAs(descriptor))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            var candidate = (uint)result.Descriptors.Count;
+            result.Descriptors.Add(descriptor);
+            keyToCandidate[words[0]] = candidate;
+        }
+
+        result.Keys = [.. keyToCandidate.Keys];
+        result.Candidates = result.Keys.Select(key => keyToCandidate[key]).ToList();
         return true;
     }
 
@@ -569,6 +702,72 @@ public static class ResourceMaterializer
             out failure);
     }
 
+    private static bool MaterializeWaveIndexedImage(
+        IndirectImageSelector indirect,
+        WaveIndexedImageSelector wave,
+        DescriptorWords heap,
+        ImageResource image,
+        bool r128,
+        ResourceRuntimeInputs inputs,
+        out IndirectImageTable result,
+        out ResourceMaterializationFailure failure)
+    {
+        failure = ResourceMaterializationFailure.Other;
+        result = new IndirectImageTable();
+        if (heap.DwordCount != 2 || inputs.ReadCleanMemory is null || wave.IndexStride == 0)
+            return false;
+
+        var baseAddress = (((ulong)heap.Dwords[1] << 32) | heap.Dwords[0]) & AddressMask;
+        if (!TryReadCleanWord(baseAddress, wave.MaskOffset, inputs, out var activeMask))
+            return false;
+
+        var keys = new SortedSet<uint>();
+        for (uint bit = 0; bit < 32; bit++)
+        {
+            if ((activeMask & (1u << (int)bit)) == 0)
+                continue;
+            var indexOffset = (ulong)wave.IndexTableOffset + (ulong)bit * wave.IndexStride;
+            if (!TryReadCleanWord(baseAddress, indexOffset, inputs, out var key))
+                return false;
+            // VCmpxLeI32 0, key suppresses signed-negative indices before ReadFirstLane.
+            if ((key & 0x8000_0000u) == 0)
+                keys.Add(key);
+        }
+
+        var probed = new List<uint[]>(Math.Max(1, keys.Count));
+        var offsets = new List<uint>(Math.Max(1, keys.Count));
+        foreach (var key in keys)
+        {
+            var candidate = new uint[8];
+            var descriptorOffset = (ulong)indirect.TableOffset + ((ulong)key << 5);
+            for (uint dword = 0; dword < candidate.Length; dword++)
+            {
+                if (!TryReadCleanWord(baseAddress, descriptorOffset + dword * sizeof(uint), inputs, out candidate[dword]))
+                    return false;
+            }
+
+            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) || !ReservedImageBitsClear(candidate))
+                Array.Clear(candidate);
+            probed.Add(candidate);
+            offsets.Add(unchecked(indirect.DynamicOffsetBase + (key << 5)));
+        }
+
+        if (probed.Count == 0)
+        {
+            probed.Add(new uint[8]);
+            offsets.Add(0);
+        }
+
+        return FinishIndirectImage(probed, offsets, out result, out failure);
+    }
+
+    private static bool TryReadCleanWord(ulong baseAddress, ulong offset, ResourceRuntimeInputs inputs, out uint word)
+    {
+        word = 0;
+        return offset <= AddressMask && baseAddress <= AddressMask - offset &&
+            inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + offset, out word);
+    }
+
     private static bool FinishIndirectImage(
         IReadOnlyList<uint[]> probed,
         IEnumerable<uint> keys,
@@ -687,6 +886,11 @@ public static class ResourceMaterializer
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
+        foreach (var table in snapshot.BufferCandidateTables)
+        {
+            mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
+        }
+
         // Each draw owns these arrays. Only indirect candidates require a larger table.
         Array.Resize(ref snapshot.Images, imageCount);
         var mappingCursor = snapshot.FlattenedTable.Length;
@@ -794,7 +998,10 @@ public static class ResourceMaterializer
             {
                 images[index] = image with
                 {
-                    NumericClass = baseImage.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float,
+                    // A null-bound atomic keeps its declared numeric class
+                    // (Uint or, since float image atomics were added, Float)
+                    // instead of assuming every atomic image is Uint.
+                    NumericClass = baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
                     Dimension = ImageDimension.Dim2D,
                     Cube = false,
                 };
@@ -810,7 +1017,14 @@ public static class ResourceMaterializer
             }
 
             var format = GuestImageFormat.FormatOf(descriptor);
-            if (baseImage.Atomic && format != GuestImageFormat.Format32Uint)
+            // Integer image atomics (Add/Smax/And/...) only ever operate on a
+            // 32-bit uint UAV. The float image atomics (Fmin/Fmax/Fcmpswap,
+            // MIMG op 0x1D-0x1F) are lowered as a compare-and-swap loop on the
+            // raw bit pattern (Gen5SpirvTranslator) and legitimately target a
+            // 32-bit float-format UAV instead - reject only formats that are
+            // neither.
+            if (baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
+                GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
             {
                 return Fail($"atomic image descriptor {index} uses unsupported format {format}");
             }
@@ -827,7 +1041,8 @@ public static class ResourceMaterializer
                     return Fail($"storage image descriptor {index} uses unsupported format {format}");
                 }
 
-                if (rawSintStorage)
+                // Atomics use the uint view; float min/max compare-exchange its bits.
+                if (rawSintStorage || (baseImage.Atomic && numericClass == ImageNumericClass.Float))
                 {
                     numericClass = ImageNumericClass.Uint;
                 }
@@ -961,7 +1176,71 @@ public static class ResourceMaterializer
             }
         }
 
-        specialization = new ResourceSpecialization { Buffers = buffers, Images = images };
+        // Bounded runtime V# candidates are appended after the plan's buffers; each draw
+        // owns their words and the run-time key mapping sits in the flattened table.
+        var baseBufferCount = buffers.Count;
+        var bufferCursor = snapshot.Buffers.Length;
+        var candidateTables = new List<BufferCandidateTableSpecialization>(snapshot.BufferCandidateTables.Count);
+        foreach (var table in snapshot.BufferCandidateTables)
+        {
+            if (table.Descriptors.Count == 0 || table.Keys.Count == 0)
+            {
+                return Fail("buffer candidate table has no candidates");
+            }
+
+            Array.Resize(ref snapshot.Buffers, bufferCursor + table.Descriptors.Count);
+            for (var candidate = 0; candidate < table.Descriptors.Count; candidate++)
+            {
+                var words = table.Descriptors[candidate].Dwords;
+                if ((words[3] >> 30) != 0)
+                {
+                    Array.Clear(words);
+                }
+
+                snapshot.Buffers[bufferCursor + candidate] = words;
+                var stride = (words[1] >> 16) & 0x3FFF;
+                var swizzleEnabled = (words[1] >> 31) != 0;
+                var indexStride = (words[3] >> 21) & 0x3;
+                var addThreadId = (words[3] >> 23) & 0x1;
+                var packedStride = stride | ((swizzleEnabled ? 1u : 0u) << 14) | (indexStride << 16) | (addThreadId << 20);
+                var swizzle = stride != 0 && ((packedStride >> 14) & 1) != 0;
+                if (stride == 0)
+                {
+                    packedStride &= ~((1u << 14) | (3u << 16));
+                }
+                else if (!swizzle)
+                {
+                    packedStride &= ~(3u << 16);
+                }
+
+                buffers.Add(new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
+            }
+
+            var mappingOffset = (uint)mappingCursor;
+            var order = Enumerable.Range(0, table.Keys.Count).OrderBy(index => table.Keys[index]).ToArray();
+            snapshot.FlattenedTable[(int)mappingOffset] = (uint)table.Keys.Count;
+            for (var entry = 0; entry < order.Length; entry++)
+            {
+                var source = order[entry];
+                var offset = (int)mappingOffset + 1 + entry * 2;
+                snapshot.FlattenedTable[offset] = table.Keys[source];
+                snapshot.FlattenedTable[offset + 1] = table.Candidates[source];
+            }
+
+            mappingCursor += 1 + table.Keys.Count * 2;
+            candidateTables.Add(new BufferCandidateTableSpecialization(
+                (uint)bufferCursor, (uint)table.Descriptors.Count, mappingOffset,
+                (uint)BitOperations.Log2((uint)table.Keys.Count) + 1));
+            bufferCursor += table.Descriptors.Count;
+        }
+
+        specialization = new ResourceSpecialization
+        {
+            BaseBufferCount = baseBufferCount,
+            Buffers = buffers,
+            Images = images,
+            BufferCandidateTables = candidateTables,
+        };
         specializedSnapshot = snapshot;
         return true;
     }
@@ -1026,11 +1305,11 @@ public static class ResourceMaterializer
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
         var source = plan.Info;
-        if (source.Buffers.Count != specialization.Buffers.Count || source.Images.Count > specialization.Images.Count)
+        if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(
                 $"shader resource specialization does not match the plan: hash=0x{plan.Hash:X16} stage={plan.Stage} " +
-                $"buffers={source.Buffers.Count}/{specialization.Buffers.Count} images={source.Images.Count}/{specialization.Images.Count}");
+                $"buffers={source.Buffers.Count}/{specialization.BaseBufferCount} images={source.Images.Count}/{specialization.Images.Count}");
         }
 
         var info = source.Clone();
@@ -1039,6 +1318,32 @@ public static class ResourceMaterializer
             info.Buffers[index].PackedStride = specialization.Buffers[index].PackedStride;
             info.Buffers[index].DescriptorFormat = specialization.Buffers[index].DescriptorFormat;
             info.Buffers[index].DescriptorSwizzle = specialization.Buffers[index].DescriptorSwizzle;
+        }
+
+        // Candidate buffers follow the plan's buffers, one native binding each.
+        for (var index = source.Buffers.Count; index < specialization.Buffers.Count; index++)
+        {
+            var specialized = specialization.Buffers[index];
+            info.Buffers.Add(new BufferResource
+            {
+                Source = DescriptorConstants.NoIndex,
+                Read = true,
+                PackedStride = specialized.PackedStride,
+                DescriptorFormat = specialized.DescriptorFormat,
+                DescriptorSwizzle = specialized.DescriptorSwizzle,
+            });
+        }
+
+        for (var index = 0; index < specialization.BufferCandidateTables.Count; index++)
+        {
+            var table = specialization.BufferCandidateTables[index];
+            info.BufferCandidateTables.Add(new BufferCandidateTableInfo
+            {
+                FirstCandidate = table.FirstCandidate,
+                CandidateCount = table.CandidateCount,
+                MappingOffset = table.MappingOffset,
+                SearchIterations = table.SearchIterations,
+            });
         }
 
         for (var index = 0; index < specialization.Images.Count; index++)

@@ -38,6 +38,7 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
     public IReadOnlyList<byte> CleanFlatSlots { get; private set; } = [];
     public IReadOnlyList<IndirectImageAccess> IndirectImages { get; private set; } = [];
+    public IReadOnlyList<BufferCandidateTablePlan> BufferCandidateTables { get; private set; } = [];
     public bool RequiresSpecializationMemory { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
@@ -86,6 +87,7 @@ public sealed class ShaderResourcePlan
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
         plan.IndirectImages = tracked.IndirectImages;
+        plan.BufferCandidateTables = tracked.BufferCandidateTables;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();
 
         var materialization = new List<uint>();
@@ -129,6 +131,8 @@ public sealed class ShaderResourcePlan
             else if (indirect.Dense)
             {
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
+                if (indirect.WaveIndexed is not null)
+                    plan.MarkHeapReadSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
             }
             else
             {
@@ -168,6 +172,21 @@ public sealed class ShaderResourcePlan
     // The flattened table the host fills per draw: table reads, then the written ranges.
     public int FlattenedTableReservedCount => TableReads.Count + WrittenRangeCount * WrittenRangeDwordCount;
 
+    // A wave-indexed table picks its keys from a mask word read off the same heap.
+    private void MarkHeapReadSlots(DescriptorSource heap, byte[] slots)
+    {
+        for (var slot = 0; slot < TableReads.Count && slot < slots.Length; slot++)
+        {
+            var value = TableReads[slot].Value;
+            if (value.Kind == ScalarValueKind.ScalarAddressWord && value.Operands.Length != 0 &&
+                value.Operands[0].Kind == ScalarValueKind.AddressHandle &&
+                value.Operands[0].Operands.SequenceEqual(heap.Dwords))
+            {
+                slots[slot] = 1;
+            }
+        }
+    }
+
     // Every flattened slot an indirect table's descriptor depends on must be read
     // through the clean reader, including the slots those reads depend on.
     private void MarkCleanFlatSlots(DescriptorSource source, byte[] slots)
@@ -201,6 +220,13 @@ public sealed class ShaderResourcePlan
         }
     }
 
-    public bool ValidateRuntimeValue(ScalarValue value) =>
-        new RuntimeValueValidator(Graph, UserDataBase, UserDataCount, TableReads.Count).Validate(value);
+    public bool ValidateRuntimeValue(ScalarValue value) => ValidateRuntimeValue(value, out _);
+
+    public bool ValidateRuntimeValue(ScalarValue value, out bool controlDependent)
+    {
+        var validator = new RuntimeValueValidator(Graph, UserDataBase, UserDataCount, TableReads.Count);
+        var ok = validator.Validate(value);
+        controlDependent = validator.ControlDependent;
+        return ok;
+    }
 }

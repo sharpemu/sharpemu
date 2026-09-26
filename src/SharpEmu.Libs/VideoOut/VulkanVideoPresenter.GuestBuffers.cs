@@ -89,7 +89,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var (buffer, offset) = _bufferCache.ObtainBuffer(start, size, guestBuffer.Writable, isTexelBuffer: formatted);
             if (formatted && guestBuffer.Writable)
             {
-                _imageCache.InvalidateMemoryFromGpu(guestBuffer.BaseAddress, guestBuffer.Size);
+                _imageCache.InvalidateMemoryForBoundWrite(guestBuffer.BaseAddress, guestBuffer.Size);
             }
             if (offset % _minStorageBufferOffsetAlignment != 0)
             {

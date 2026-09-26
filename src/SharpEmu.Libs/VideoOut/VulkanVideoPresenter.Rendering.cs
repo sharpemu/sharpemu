@@ -50,6 +50,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
             public Dictionary<CachedImage, CachedImage>? StencilStorageImages { get; set; }
 
+            public HashSet<CachedImage>? StencilStorageWriteBackImages { get; set; }
+
+            public List<CachedImage>? FeedbackSnapshots { get; set; }
+
             public bool Committed { get; set; }
 
             public bool CommandsRecorded { get; set; }
@@ -69,13 +73,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         try
                         {
-                            if (CommandsRecorded)
+                            if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
+                                StencilStorageWriteBackImages.Contains(attachment))
                                 attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
                         }
                         finally
                         {
                             owner._scheduler.QueueCompletionAction(storage.Dispose);
                         }
+                    }
+                }
+
+                if (!Committed && FeedbackSnapshots is { } feedbackSnapshots)
+                {
+                    foreach (var snapshot in feedbackSnapshots)
+                    {
+                        snapshot.Dispose();
                     }
                 }
 
@@ -367,6 +380,40 @@ internal static unsafe partial class VulkanVideoPresenter
                 ? entry
                 : throw SubmissionScheduler.Fatal($"The pipeline handle is unknown: pipeline={pipeline.Pipeline} layout={pipeline.Layout}.");
 
+        // Vulkan cannot sample a stencil aspect while the same aspect is attached for writes.
+        // Use a per-draw storage copy for read-only stencil feedback and keep the attachment authoritative.
+        private void PrepareStencilFeedback(TextureResource[] bindings)
+        {
+            if (!_hasBoundDepth)
+            {
+                return;
+            }
+
+            var depthImage = _imageCache.GetImage(_boundDepth.Image);
+            var attachmentView = _boundDepth.Target.Target.Request.View;
+            var writes = _boundDepthLoadState.AttachmentWriteAspects(_boundDepth.Target.Target.Format);
+            if ((writes & ImageAspectFlags.StencilBit) == 0)
+            {
+                return;
+            }
+
+            foreach (var binding in bindings)
+            {
+                if (binding.IsHostMovie || binding.CachedImage is not { } image ||
+                    !ReferenceEquals(image, depthImage) || !ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format) ||
+                    !ViewsOverlap(binding.Request.View, attachmentView))
+                {
+                    continue;
+                }
+
+                var storage = AcquireStencilStorage(binding, image, writeBack: false);
+                binding.CachedImage = storage;
+                binding.Image = storage.Backing.Handle;
+                binding.View = storage.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
+                binding.MipViews = [];
+            }
+        }
+
 
         // The layout each sampled image reads through; a target read by its own draw uses the general layout.
         private void RecordStageTextureTransitions(TextureResource[] bindings)
@@ -403,6 +450,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
             }
+
+            // Create feedback copies after load clears have been materialized;
+            // otherwise a shader would sample the pre-clear contents.
+            PrepareDepthFeedback(bindings);
+            PrepareStencilFeedback(bindings);
 
             var command = BeginBatchedGuestCommands();
             foreach (var binding in bindings)

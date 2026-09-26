@@ -11,6 +11,25 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()
+    {
+        return Program(
+            ScalarLoad(0, 0, 16, immediateOffset: 0x80),
+            Sop1(8, "SFF1I32B32", 18, Gen5Operand.Scalar(16)),
+            Sop2(12, "SMulI32", 106, Gen5Operand.Scalar(18), new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x90)),
+            MoveVectorFromScalar(16, 34, 18),
+            Vop2(20, "VLshlrevB32", 15, Operand(4), Gen5Operand.Vector(34)),
+            Vop3(24, "VLshlAddU32", 16, Gen5Operand.Vector(15), Operand(3), Gen5Operand.Vector(15)),
+            Sop1(32, "SBitset0B32", 16, Gen5Operand.Scalar(18)),
+            Vop2(36, "VAddI32", 15, new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x40), Gen5Operand.Vector(16)),
+            GlobalMemory(40, "GlobalLoadDword", 0, 15, 22, 0),
+            ReadFirstLane(48, 106, 22),
+            Sop2(52, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+            ScalarLoad(56, 0, 4, 8, immediateOffset: 0x100, dynamicOffsetRegister: 106),
+            Image(64, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
+            EndProgram(72));
+    }
+
     public static Gen5ShaderProgram CreateProgram(uint mask = 1, bool split = true, bool bitScan = true)
     {
         var instructions = new List<Gen5ShaderInstruction>
@@ -77,6 +96,52 @@ public sealed class DirectImageTableTests
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         return (plan, snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 });
+    }
+
+    [Fact]
+    public void WaveIndexedDescriptorTableMaterializesOnlyActiveMaskKeys()
+    {
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.True(selector.Dense);
+        Assert.Equal(0u, selector.KeyBound);
+        Assert.Equal(new WaveIndexedImageSelector(0x80, 0x40, 0x90), selector.WaveIndexed);
+
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address == 0x1000 + 0x80)
+            {
+                word = (1u << 1) | (1u << 4);
+                return true;
+            }
+
+            if (address == 0x1000 + 0x40 + 0x90 || address == 0x1000 + 0x40 + 4 * 0x90)
+            {
+                word = address == 0x1000 + 0x40 + 0x90 ? 2u : 5u;
+                return true;
+            }
+
+            if (address < 0x1000 + 0x100 || address >= 0x1000 + 0x100 + 6 * 32)
+                return false;
+            var relative = address - 0x1000 - 0x100;
+            var record = relative / 32;
+            if (record is not (2 or 5))
+                return false;
+            word = (relative % 32 / 4) switch
+            {
+                0 => (record & 1) == 0 ? 0x2000u : 0x1000u,
+                1 => 20u << 20,
+                3 => 0xFACu | (9u << 28),
+                _ => 0,
+            };
+            return true;
+        }
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Equal(2, snapshot.Images.Length);
     }
 
     public static (ResourceSnapshot Snapshot, ShaderCompileRequest Request) PrepareMixedDimensions(uint mask, bool arrayFirst)

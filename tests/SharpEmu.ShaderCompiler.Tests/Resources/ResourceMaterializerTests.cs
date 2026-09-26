@@ -13,6 +13,7 @@ public sealed class ResourceMaterializerTests
     private const uint Format32Float = 22;
     private const uint Format32Sint = 21;
     private const uint Format11x2x10Uint = 34;
+    private const uint Format8x2Uscaled = 16;
     private const uint ImageType2D = 9;
 
     [Theory]
@@ -243,6 +244,25 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(3, snapshot.Samplers.Length);
         Assert.Equal(snapshot.Samplers[1], snapshot.Samplers[2]);
         Assert.NotEqual(snapshot.Samplers[0], snapshot.Samplers[2]);
+    }
+
+    [Fact]
+    public void ScaledImage_MaterializesAsAFloatSampledImage()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, Format8x2Uscaled));
+        instructions.AddRange(SamplerWords(ref pc, 24, 0));
+        instructions.Add(Image(pc, "ImageSample", 16, 24));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        var image = Assert.Single(applied.Info.Images);
+        Assert.Equal(ImageNumericClass.Float, image.NumericClass);
     }
 
     // Three images share one sampler; the packed and signed ones need point filtering,

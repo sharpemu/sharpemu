@@ -90,6 +90,49 @@ public class AmprFileRegistryTests
     }
 
     [Fact]
+    public void AprResolve_UniquePath_ReturnsGuestPathHash()
+    {
+        AmprFileRegistry.ClearForTests();
+        const string guestPath = "/app0/levels/m08_tutorial/a.cmsh";
+        var host = Path.Combine(Path.GetTempPath(), "apr-unique.bin");
+
+        var id = AmprFileRegistry.RegisterAprResolvedPath(guestPath, host);
+
+        Assert.Equal(AmprFileRegistry.ComputeFileId(guestPath), id);
+        Assert.Equal(id, AmprFileRegistry.RegisterAprResolvedPath(guestPath, host));
+        Assert.True(AmprFileRegistry.TryGetHostPath(id, out var result));
+        Assert.Equal(host, result);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AprResolve_CollidingPaths_ReadTheirOwnFiles(bool indexFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string firstPath = "$/assets/bce5a816.bin";
+        const string secondPath = "$/assets/1b9e7058.bin";
+        var firstHost = Path.Combine(Path.GetTempPath(), "apr-first.bin");
+        var secondHost = Path.Combine(Path.GetTempPath(), "apr-second.bin");
+        if (indexFirst)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests("assets/bce5a816.bin", firstHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests("assets/1b9e7058.bin", secondHost);
+        }
+
+        var firstId = AmprFileRegistry.RegisterAprResolvedPath(firstPath, firstHost);
+        var secondId = AmprFileRegistry.RegisterAprResolvedPath(secondPath, secondHost);
+        // A later alias publish of the partner must not re-poison either id.
+        AmprFileRegistry.RegisterApp0RelativeForTests("assets/1b9e7058.bin", secondHost);
+
+        Assert.NotEqual(firstId, secondId);
+        Assert.True(AmprFileRegistry.TryGetHostPath(firstId, out var firstResult));
+        Assert.True(AmprFileRegistry.TryGetHostPath(secondId, out var secondResult));
+        Assert.Equal(firstHost, firstResult);
+        Assert.Equal(secondHost, secondResult);
+    }
+
+    [Fact]
     public void ComputeFileId_matches_utf8_fnv1a()
     {
         const string relative = "CoreData/foo/bar.bin";

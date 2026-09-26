@@ -65,8 +65,42 @@ public sealed partial class ScalarValueGraph
 
     internal ScalarValue Constant(bool value) => Intern($"c1:{value}", () => ScalarValue.ConstantOf(value));
 
-    // One undefined node per type keeps every value built over it stable across visits.
-    internal ScalarValue Undefined(ScalarValueType type) => Intern($"undef:{type}", () => ScalarValue.Undefined(type));
+    /// <summary>
+    /// The instruction the builder is translating, for diagnostics only.
+    /// </summary>
+    /// <remarks>
+    /// Undefined nodes are interned per type, so a single node stands for every
+    /// instruction the builder could not model and carries no origin of its own.
+    /// A resource plan that fails on an undefined dword therefore names no
+    /// culprit, and the builder has about twenty places that produce one. This
+    /// records which instructions actually gave up, so the failure points at an
+    /// opcode instead of a list of candidates.
+    /// </remarks>
+    internal (uint Pc, string Opcode) BuilderInstruction { get; set; }
+
+    private readonly Dictionary<ScalarValue, (uint Pc, string Opcode)> _undefinedOrigins = [];
+
+    /// <summary>
+    /// The instruction an undefined value came from, when origins are tracked.
+    /// </summary>
+    internal bool TryGetUndefinedOrigin(ScalarValue value, out (uint Pc, string Opcode) origin) =>
+        _undefinedOrigins.TryGetValue(value, out origin);
+
+    // Undefined nodes are interned per instruction. Revisiting a block reaches
+    // the same instruction, so graph values stay stable while resource planning
+    // can distinguish a known safe fallback from an unrelated malformed input.
+    internal ScalarValue Undefined(ScalarValueType type)
+    {
+        if (BuilderInstruction.Opcode is null)
+        {
+            return Intern($"undef:{type}", () => ScalarValue.Undefined(type));
+        }
+
+        var instruction = BuilderInstruction;
+        var value = Intern($"undef:{type}:{instruction.Pc:X}", () => ScalarValue.Undefined(type));
+        _undefinedOrigins.TryAdd(value, instruction);
+        return value;
+    }
 
     internal ScalarValue UserData(uint register) => Intern($"ud:{register}", () => ScalarValue.UserData(register));
 
@@ -115,11 +149,25 @@ public sealed partial class ScalarValueGraph
 
     internal ScalarValue Operation(ScalarOperation operation, ScalarValueType type, params ScalarValue[] operands)
     {
+        // Some ALU identities produce a deterministic value even when the other
+        // operand has no tracked provenance. This matters for descriptor setup code
+        // that masks an unused or hardware-defined register before using it. Keep
+        // these identities ahead of the general undefined propagation below.
+        if (TryFoldWithUndefined(operation, type, operands, out var undefinedFolded))
+        {
+            return undefinedFolded;
+        }
+
         foreach (var operand in operands)
         {
             if (operand.IsUndefined)
             {
-                return Undefined(type);
+                // Keep the operation shape when one input lacks provenance. The
+                // runtime validator will still reject the undefined leaf, but
+                // preserving the node lets later symbolic identities eliminate
+                // only the bits that are provably independent of that input and
+                // keeps diagnostics attached to the real instruction graph.
+                return Intern($"op:{operation}:{type}:{Ids(operands)}", () => ScalarValue.MakeOperation(operation, type, operands));
             }
         }
 
@@ -144,6 +192,53 @@ public sealed partial class ScalarValueGraph
         }
 
         return Intern($"op:{operation}:{type}:{Ids(operands)}", () => ScalarValue.MakeOperation(operation, type, operands));
+    }
+
+    private bool TryFoldWithUndefined(ScalarOperation operation, ScalarValueType type, ScalarValue[] operands, out ScalarValue folded)
+    {
+        folded = null!;
+
+        if (operands.Length != 2)
+        {
+            return false;
+        }
+
+        if (operation == ScalarOperation.And32 &&
+            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U32 && operand.ConstantU32 == 0))
+        {
+            folded = Constant(0u);
+            return true;
+        }
+
+        if (operation == ScalarOperation.And64 &&
+            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U64 && operand.ConstantU64 == 0))
+        {
+            folded = Constant(0ul);
+            return true;
+        }
+
+        if (operation == ScalarOperation.Or32 &&
+            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U32 && operand.ConstantU32 == uint.MaxValue))
+        {
+            folded = Constant(uint.MaxValue);
+            return true;
+        }
+
+        if (operation == ScalarOperation.LogicalAnd &&
+            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.Bool && !operand.ConstantBool))
+        {
+            folded = Constant(false);
+            return true;
+        }
+
+        if (operation == ScalarOperation.LogicalOr &&
+            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.Bool && operand.ConstantBool))
+        {
+            folded = Constant(true);
+            return true;
+        }
+
+        return false;
     }
 
     private bool TryFold(ScalarOperation operation, ScalarValueType type, ScalarValue[] operands, out ScalarValue folded)

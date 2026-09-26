@@ -13,6 +13,16 @@ public static partial class KernelMemoryCompatExports
     private const int MemoryAccessDenied = unchecked((int)0x8002000D);
     private const int MemoryFault = unchecked((int)0x8002000E);
     private const int MemoryInvalidArgument = unchecked((int)0x80020016);
+    // Titles use sceKernelReserveVirtualRange as an address-space reservation
+    // primitive. Some of them ask for hundreds of GiB even though only small
+    // portions are ever mapped. Windows cannot always create one contiguous
+    // placeholder that large after the executable and runtime are loaded.
+    private const ulong SparseReservationThreshold = 0x10_0000_0000UL;
+    // macOS reserves 0x10_0000_0000..0x70_0000_0000 for graphics memory (see
+    // DefaultMapSearchBase), so sparse reservations start above that window there.
+    private static ulong SparseReservationBase =>
+        OperatingSystem.IsMacOS() ? 0x70_0000_0000UL : 0x40_0000_0000UL;
+    private const ulong UserAddressLimit = 0xFC_0000_0000UL;
     private static FlexibleBackingPool _flexibleBacking =
         new(GuestMemoryLayout.FlexibleOffset, GuestMemoryLayout.FlexibleBytes);
     private static IGuestBackedSpace? _backingOwner;
@@ -335,7 +345,10 @@ public static partial class KernelMemoryCompatExports
         if (pointer == 0 || !IsValidMapRange(length, alignment))
             return MemoryInvalidArgument;
         if (!ctx.TryReadUInt64(pointer, out var requested))
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual pointer read failed pointer=0x{pointer:X16} size=0x{length:X}");
             return MemoryFault;
+        }
         alignment = alignment == 0 ? OrbisPageSize : alignment;
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, OrbisPageSize) || requested > ulong.MaxValue - length))
@@ -343,13 +356,105 @@ public static partial class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             var space = ResolveBackingSpace(ctx);
-            if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address, reuseReservation: false))
+            var address = 0UL;
+            var sparseSelected = (flags & OrbisKernelMapFixed) == 0 &&
+                TrySelectSparseReservationAddress(requested, length, alignment, flags, out address);
+            var selected = sparseSelected;
+            if (!selected && space is not null)
+            {
+                selected = TrySelectBackingAddress(space, requested, length, alignment, flags,
+                    out address, reuseReservation: false);
+            }
+
+            // A sparse reservation is only a guest mapping-table entry and
+            // intentionally does not need a host backing space yet. The host
+            // range is acquired later when a subrange is committed or mapped.
+            if (!selected || (!sparseSelected && space is null))
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual address selection failed requested=0x{requested:X16} size=0x{length:X} sparse={sparseSelected} backing={space is not null}");
                 return MemoryNoSpace;
+            }
+            if (ShouldTraceDirectMemory())
+                Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual selected address=0x{address:X16} requested=0x{requested:X16} size=0x{length:X} sparse={sparseSelected}");
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, 0, false, false, 0, IsReserved: true));
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] reserve_virtual address=0x{address:X} requested=0x{requested:X} size=0x{length:X} flags=0x{flags:X}");
-            return ctx.TryWriteUInt64(pointer, address) ? 0 : MemoryFault;
+            if (!ctx.TryWriteUInt64(pointer, address))
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] reserve_virtual pointer write failed pointer=0x{pointer:X16} address=0x{address:X16}");
+                return MemoryFault;
+            }
+            return 0;
         }
+    }
+
+    // Keep very large virtual reservations in the guest mapping table without
+    // requiring one equally large host placeholder. Actual backed mappings still
+    // reserve their individual host ranges when they are committed below this
+    // reservation. Fixed reservations never take this path: they must preserve
+    // the exact host address semantics of the original request.
+    private static bool TrySelectSparseReservationAddress(
+        ulong requested,
+        ulong length,
+        ulong alignment,
+        ulong flags,
+        out ulong address)
+    {
+        address = 0;
+        if ((flags & OrbisKernelMapFixed) != 0 || length < SparseReservationThreshold ||
+            length > UserAddressLimit || alignment == 0)
+        {
+            return false;
+        }
+
+        var candidate = requested == 0
+            ? SparseReservationBase
+            : Math.Max(requested, SparseReservationBase);
+        candidate = AlignUp(candidate, alignment);
+        if (candidate == 0)
+        {
+            return false;
+        }
+
+        // The requested address is a hint for a non-fixed reservation. If the
+        // hint is too high to contain the complete range, restart from the
+        // sparse aperture instead of treating the hint as a lower bound.
+        if (candidate > UserAddressLimit - length)
+        {
+            candidate = AlignUp(SparseReservationBase, alignment);
+            if (candidate == 0 || candidate > UserAddressLimit - length)
+                return false;
+        }
+
+        foreach (var region in _mappedRegions.Values)
+        {
+            if (region.Address >= candidate + length)
+            {
+                break;
+            }
+
+            var regionEnd = region.Address + region.Length;
+            if (regionEnd <= candidate)
+            {
+                continue;
+            }
+
+            candidate = AlignUp(regionEnd, alignment);
+            if (candidate == 0 || candidate > UserAddressLimit - length)
+            {
+                return false;
+            }
+        }
+
+        if (candidate == 0 || candidate > UserAddressLimit - length ||
+            _mappedRegions.Values.Any(region =>
+                region.Address < candidate + length && candidate < region.Address + region.Length))
+        {
+            return false;
+        }
+
+        address = candidate;
+        return true;
     }
 
     private static bool HasPhysicalSpan(ulong start, ulong length)

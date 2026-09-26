@@ -297,6 +297,8 @@ public sealed partial class ScalarValueGraph
 
         private void Apply(Gen5ShaderInstruction instruction, RegisterState state)
         {
+            // Lets ScalarValueGraph.Undefined record which instruction gave up.
+            _graph.BuilderInstruction = (instruction.Pc, instruction.Opcode);
             switch (instruction.Encoding)
             {
                 case Gen5ShaderEncoding.Sop1:
@@ -357,6 +359,13 @@ public sealed partial class ScalarValueGraph
                 case "SMovB32":
                     state.WriteScalar(destinationRegister, Read(instruction.Sources[0], state));
                     return;
+                case "SBitreplicateB64B32":
+                {
+                    var replicated = Read(instruction.Sources[0], state);
+                    state.WriteScalar(destinationRegister, replicated);
+                    state.WriteScalar(destinationRegister + 1, replicated);
+                    return;
+                }
                 case "SMovkI32":
                     state.WriteScalar(destinationRegister, _graph.Constant(unchecked((uint)(short)instruction.Sources[0].Value)));
                     return;
@@ -1029,9 +1038,12 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            var hasModifiers = instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
-                Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
-                Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl;
+            var hasModifiers = (instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
+                Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 }) ||
+                (instruction.Control is Gen5SdwaControl sdwa &&
+                (sdwa.AbsoluteMask != 0 || sdwa.NegateMask != 0 || sdwa.OutputModifier != 0 || sdwa.Clamp ||
+                 sdwa.DestinationSelect == 7 || sdwa.Source0Select == 7 || sdwa.Source1Select == 7 || sdwa.DestinationUnused == 3)) ||
+                instruction.Control is Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl;
             var value = hasModifiers ? _graph.Undefined(ScalarValueType.U32) : VectorResult(instruction, state);
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } carryDestination } && !hasModifiers &&
                 opcode is "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddCoCiU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or "VMadU64U32")
@@ -1049,7 +1061,10 @@ public sealed partial class ScalarValueGraph
             {
                 if (destination.Kind == Gen5OperandKind.VectorRegister)
                 {
-                    state.WriteVector(destination.Value, value);
+                    var result = instruction.Control is Gen5SdwaControl destinationSdwa
+                        ? ApplySdwaDestination(destinationSdwa, value, state.ReadVector(destination.Value))
+                        : value;
+                    state.WriteVector(destination.Value, result);
                     // Multi-dword results are not modelled; the second dword is undefined.
                     value = _graph.Undefined(ScalarValueType.U32);
                 }
@@ -1064,7 +1079,9 @@ public sealed partial class ScalarValueGraph
         {
             var opcode = instruction.Opcode;
             var sources = instruction.Sources;
-            ScalarValue Source(int index) => index < sources.Count ? ReadVectorOperand(sources[index], state) : _graph.Undefined(ScalarValueType.U32);
+            ScalarValue Source(int index) => index < sources.Count
+                ? ApplySdwaSource(instruction.Control as Gen5SdwaControl, index, ReadVectorOperand(sources[index], state))
+                : _graph.Undefined(ScalarValueType.U32);
             ScalarValue Shift(ScalarValue value, ScalarValue count, ScalarOperation operation) =>
                 Binary(operation, value, Binary(ScalarOperation.And32, count, _graph.Constant(31u)));
             ScalarValue Low24(ScalarValue value) =>
@@ -1104,6 +1121,26 @@ public sealed partial class ScalarValueGraph
                     var second = Binary64(ScalarOperation.AddCarry32, Extract(first, 0), carryIn);
                     state.CarryOut = Bool(ScalarOperation.LogicalAnd, state.Exec, NotZero(Binary(ScalarOperation.Or32, Extract(first, 1), Extract(second, 1))));
                     return Extract(second, 0);
+                }
+                case "VSubCoCiU32":
+                case "VSubrevCoCiU32":
+                {
+                    var left = opcode == "VSubCoCiU32" ? Source(0) : Source(1);
+                    var right = opcode == "VSubCoCiU32" ? Source(1) : Source(0);
+                    var borrowIn = _graph.Select(
+                        instruction.Sources.Count > 2 ? MaskOf(sources[2], state) : state.Vcc,
+                        _graph.Constant(1u),
+                        _graph.Constant(0u));
+                    var partial = Binary(ScalarOperation.ISub32, left, right);
+                    var result = Binary(ScalarOperation.ISub32, partial, borrowIn);
+                    state.CarryOut = Bool(
+                        ScalarOperation.LogicalAnd,
+                        state.Exec,
+                        Bool(
+                            ScalarOperation.LogicalOr,
+                            Bool(ScalarOperation.UGreaterThan32, right, left),
+                            Bool(ScalarOperation.UGreaterThan32, borrowIn, partial)));
+                    return result;
                 }
                 case "VMulLoU32":
                 case "VMulLoI32":
@@ -1238,6 +1275,68 @@ public sealed partial class ScalarValueGraph
             }
         }
 
+        private ScalarValue ApplySdwaSource(Gen5SdwaControl? control, int sourceIndex, ScalarValue value)
+        {
+            if (control is null || sourceIndex > 1)
+            {
+                return value;
+            }
+
+            var selector = sourceIndex == 0 ? control.Source0Select : control.Source1Select;
+            if (selector == 6)
+            {
+                return value;
+            }
+
+            if (selector > 5)
+            {
+                return _graph.Undefined(ScalarValueType.U32);
+            }
+
+            var width = selector <= 3 ? 8u : 16u;
+            var shift = selector <= 3 ? selector * 8u : (selector - 4u) * 16u;
+            var extracted = Binary(ScalarOperation.And32,
+                Binary(ScalarOperation.ShiftRightLogical32, value, _graph.Constant(shift)),
+                _graph.Constant(width == 8 ? 0xFFu : 0xFFFFu));
+
+            return (sourceIndex == 0 ? control.Source0SignExtend : control.Source1SignExtend)
+                ? _graph.Operation(ScalarOperation.BitFieldSExtract, ScalarValueType.U32, extracted,
+                    _graph.Constant(0u), _graph.Constant(width))
+                : extracted;
+        }
+
+        private ScalarValue ApplySdwaDestination(Gen5SdwaControl control, ScalarValue value, ScalarValue previous)
+        {
+            if (control.DestinationSelect == 6)
+            {
+                return value;
+            }
+
+            if (control.DestinationSelect > 5 || control.DestinationUnused == 3)
+            {
+                return _graph.Undefined(ScalarValueType.U32);
+            }
+
+            var width = control.DestinationSelect <= 3 ? 8u : 16u;
+            var shift = control.DestinationSelect <= 3 ? control.DestinationSelect * 8u : (control.DestinationSelect - 4u) * 16u;
+            var lowMask = width == 8 ? 0xFFu : 0xFFFFu;
+            var fieldMask = lowMask << (int)shift;
+            var positioned = Binary(ScalarOperation.ShiftLeft32,
+                Binary(ScalarOperation.And32, value, _graph.Constant(lowMask)), _graph.Constant(shift));
+
+            return control.DestinationUnused switch
+            {
+                0 => positioned,
+                1 => Binary(ScalarOperation.Or32, positioned,
+                    _graph.Select(NotZero(Binary(ScalarOperation.And32, positioned,
+                        _graph.Constant(1u << (int)(shift + width - 1)))),
+                        _graph.Constant(uint.MaxValue << (int)(shift + width)), _graph.Constant(0u))),
+                2 => Binary(ScalarOperation.Or32,
+                    Binary(ScalarOperation.And32, previous, _graph.Constant(~fieldMask)), positioned),
+                _ => _graph.Undefined(ScalarValueType.U32),
+            };
+        }
+
         private void ApplyVectorCompare(Gen5ShaderInstruction instruction, RegisterState state)
         {
             var opcode = instruction.Opcode;
@@ -1245,6 +1344,27 @@ public sealed partial class ScalarValueGraph
             var right = instruction.Sources.Count > 1 ? ReadVectorOperand(instruction.Sources[1], state) : _graph.Undefined(ScalarValueType.U32);
             var updatesExecutionMask = opcode.StartsWith("VCmpx", StringComparison.Ordinal);
             var suffix = opcode[(updatesExecutionMask ? "VCmpx".Length : "VCmp".Length)..];
+
+            // Integer 16-bit compares consume the low word of their operands. Signed forms
+            // sign-extend it before comparison; floating-point F16 compares use their own path.
+            if (suffix.EndsWith("16", StringComparison.Ordinal) && !suffix.EndsWith("F16", StringComparison.Ordinal))
+            {
+                var signed16 = suffix.EndsWith("I16", StringComparison.Ordinal);
+                ScalarValue Narrow16(ScalarValue value)
+                {
+                    var low = Binary(ScalarOperation.And32, value, _graph.Constant(0xffffu));
+                    return signed16
+                        ? Binary(
+                            ScalarOperation.ShiftRightArithmetic32,
+                            Binary(ScalarOperation.ShiftLeft32, low, _graph.Constant(16u)),
+                            _graph.Constant(16u))
+                        : low;
+                }
+
+                left = Narrow16(left);
+                right = Narrow16(right);
+            }
+
             var result = instruction.Control is Gen5SdwaControl or Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 }
                 ? _graph.Undefined(ScalarValueType.Bool)
                 : suffix switch
@@ -1259,6 +1379,16 @@ public sealed partial class ScalarValueGraph
                     "GtI32" => Bool(ScalarOperation.SGreaterThan32, left, right),
                     "LeI32" => Bool(ScalarOperation.SLessThanEqual32, left, right),
                     "GeI32" => Bool(ScalarOperation.SGreaterThanEqual32, left, right),
+                    "EqU16" or "EqI16" => Bool(ScalarOperation.IEqual32, left, right),
+                    "NeU16" or "NeI16" => Bool(ScalarOperation.INotEqual32, left, right),
+                    "LtU16" => Bool(ScalarOperation.ULessThan32, left, right),
+                    "LeU16" => Bool(ScalarOperation.ULessThanEqual32, left, right),
+                    "GtU16" => Bool(ScalarOperation.UGreaterThan32, left, right),
+                    "GeU16" => Bool(ScalarOperation.UGreaterThanEqual32, left, right),
+                    "LtI16" => Bool(ScalarOperation.SLessThan32, left, right),
+                    "LeI16" => Bool(ScalarOperation.SLessThanEqual32, left, right),
+                    "GtI16" => Bool(ScalarOperation.SGreaterThan32, left, right),
+                    "GeI16" => Bool(ScalarOperation.SGreaterThanEqual32, left, right),
                     "LeF32" => Bool(ScalarOperation.FLessThanEqual, left, right),
                     "GeF32" => Bool(ScalarOperation.FGreaterThanEqual, left, right),
                     "LtF32" => Bool(ScalarOperation.FLessThan, left, right),
@@ -1341,9 +1471,10 @@ public sealed partial class ScalarValueGraph
 
         private void ApplyMemory(Gen5ShaderInstruction instruction, RegisterState state)
         {
+            ScalarValue? vectorRead = null;
             if (_recording && _graph.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
             {
-                _graph.Accesses[memoryIndex] = instruction.Control switch
+                var binding = instruction.Control switch
                 {
                     Gen5BufferMemoryControl buffer => new MemoryAccessBinding(
                         _graph.Handle(ScalarValueKind.BufferHandle, state.Read(buffer.ScalarResource), state.Read(buffer.ScalarResource + 1),
@@ -1363,6 +1494,22 @@ public sealed partial class ScalarValueGraph
                         global.UsesFlatAddress ? null : state.ReadVector(global.VectorAddress)),
                     _ => null,
                 };
+
+                if (binding is not null && instruction.Control is Gen5BufferMemoryControl bufferControl &&
+                    !instruction.Opcode.Contains("Store", StringComparison.Ordinal) &&
+                    instruction.Destinations.FirstOrDefault(destination => destination.Kind == Gen5OperandKind.VectorRegister) is { } vectorDestination)
+                {
+                    var handle = binding.Handle!;
+                    var offset = state.ReadVector(bufferControl.VectorAddress);
+                    // A lane-varying address loads a lane-varying value.
+                    if (!offset.IsUndefined)
+                    {
+                        vectorRead = _graph.MemoryRead(ScalarValueKind.ScalarBufferWord, handle, offset, memoryIndex);
+                        binding = binding with { Read = vectorRead };
+                    }
+                }
+
+                _graph.Accesses[memoryIndex] = binding;
             }
 
             foreach (var destination in instruction.Destinations)
@@ -1370,7 +1517,7 @@ public sealed partial class ScalarValueGraph
                 if (destination.Kind == Gen5OperandKind.VectorRegister)
                 {
                     state.ClearLanes(destination.Value);
-                    state.WriteVector(destination.Value, _graph.Undefined(ScalarValueType.U32));
+                    state.WriteVector(destination.Value, vectorRead ?? _graph.Undefined(ScalarValueType.U32));
                 }
                 else if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
@@ -1549,7 +1696,11 @@ public sealed partial class ScalarValueGraph
             ThreadBits.Remove(register - 1);
             if (register == ExecLow)
             {
-                Exec = _graph.Undefined(ScalarValueType.Bool);
+                // An all-or-nothing constant keeps the mask known, so s_cbranch_execz stays decidable.
+                Exec = value.IsConstant && Scalars[ExecHigh] is { IsConstant: true, ConstantU32: 0 } &&
+                    value.ConstantU32 is 0 or FullWaveMask
+                    ? _graph.Constant(value.ConstantU32 != 0)
+                    : _graph.Undefined(ScalarValueType.Bool);
             }
             else if (register == VccLow)
             {

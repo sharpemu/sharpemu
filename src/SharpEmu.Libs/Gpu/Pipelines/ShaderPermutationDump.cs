@@ -15,7 +15,7 @@ internal static class ShaderPermutationDump
     private static long _sequence;
 
     public static Action<IndirectImageFailure>? CreateFailureCapture(ShaderSource source) =>
-        CompiledShaderDump.ShouldWrite(source.Address) ? CreateEnabledFailureCapture(source) : null;
+        CompiledShaderDump.ShouldWrite(source.Address, source.Hash) ? CreateEnabledFailureCapture(source) : null;
 
     // Keep captured shader state out of the disabled per-draw path.
     private static Action<IndirectImageFailure> CreateEnabledFailureCapture(ShaderSource source) =>
@@ -32,7 +32,7 @@ internal static class ShaderPermutationDump
         uint pushDataCursor,
         ulong programId)
     {
-        if (!CompiledShaderDump.ShouldWrite(source.Address)) return null;
+        if (!CompiledShaderDump.ShouldWrite(source.Address, source.Hash)) return null;
         try
         {
             var sequence = Interlocked.Increment(ref _sequence);
@@ -90,7 +90,7 @@ internal static class ShaderPermutationDump
 
     public static void WriteIndirectImageFailure(ShaderSource source, IndirectImageFailure failure)
     {
-        if (!CompiledShaderDump.ShouldWrite(source.Address)) return;
+        if (!CompiledShaderDump.ShouldWrite(source.Address, source.Hash)) return;
         try
         {
             var sequence = Interlocked.Increment(ref _sequence);

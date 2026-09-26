@@ -24,6 +24,7 @@ public sealed class ImageDescriptionTests
         description.Resources = new SubresourceCount(levels, layers);
         description.Pitch = width;
         description.BytesPerBlock = 4;
+        description.MipLayout[0] = new MipLevelLayout { Size = size, Pitch = width, Height = height };
         return description;
     }
 
@@ -70,8 +71,22 @@ public sealed class ImageDescriptionTests
         volume.Type = GuestImageType.Color3D;
         volume.Extent = new Extent3D(32, 32, 8);
         volume.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32768, Pitch = 32, Height = 32 };
-        Assert.Equal(0, Color(Base, 32768, 32, 32, layers: 8).FindMatchingMipLevel(volume));
+        Assert.Equal(-1, Color(Base, 32768, 32, 32, layers: 8).FindMatchingMipLevel(volume));
         Assert.Equal(-1, Color(Base, 32768, 32, 32, layers: 4).FindMatchingMipLevel(volume));
+    }
+
+    [Fact]
+    public void FindMatchingArraySlice_UsesTheFullMipChainStrideForEachArrayLayer()
+    {
+        const ulong sliceStride = 21504;
+        var container = Color(Base, 2 * sliceStride, 64, 64, levels: 3, layers: 2);
+        container.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 2 * 16384, Pitch = 64, Height = 64 };
+        container.MipLayout[1] = new MipLevelLayout { Offset = 16384, Size = 2 * 4096, Pitch = 32, Height = 32 };
+        container.MipLayout[2] = new MipLevelLayout { Offset = 20480, Size = 2 * 1024, Pitch = 16, Height = 16 };
+
+        var secondLayerMip = Color(Base + sliceStride + 16384, 4096, 32, 32);
+        Assert.Equal(1, secondLayerMip.FindMatchingMipLevel(container));
+        Assert.Equal(1, secondLayerMip.FindMatchingArraySlice(container, 1));
     }
 
     [Fact]

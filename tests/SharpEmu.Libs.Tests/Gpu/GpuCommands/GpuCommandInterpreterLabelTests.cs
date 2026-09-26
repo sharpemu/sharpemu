@@ -322,7 +322,10 @@ public sealed class GpuCommandInterpreterLabelTests
         runner.Run(StreamRunner.CustomPacket(Nop, 0, 0x6875_0781, StreamRunner.Low(Label), StreamRunner.High(Label), 0x9A, 0x04, 0x38));
         Assert.Equal(new[] { "prepare_flip 7 2 1 68", "eop FlipWithInterruptWriteBack32", "flush" }, runner.Host.Calls);
         Assert.Contains("flip event type is unknown", runner.RunExpectingFatal(StreamRunner.CustomPacket(Nop, 0, 0x6875_0781, 0, 0, 0, 0x28, 0x38)).Message);
-        Assert.Contains("marker is unknown", runner.RunExpectingFatal(StreamRunner.CustomPacket(Nop, 0, 0x6875_0001)).Message);
+        // Marker ids with no side effect (Demon's Souls emits 0x6EC and 0x80C) are consumed, not fatal.
+        runner.Host.Calls.Clear();
+        runner.Run(StreamRunner.CustomPacket(Nop, 0, 0x6875_06EC), StreamRunner.CustomPacket(Nop, 0, 0x6875_080C));
+        Assert.Empty(runner.Host.Calls);
     }
 
     [Fact]

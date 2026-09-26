@@ -440,23 +440,15 @@ public sealed partial class GuestImageCache
         ref var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
         var safeToDelete = currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        var requestedBlock = requested.BytesPerBlock * requested.Samples;
+        var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
+        var requestedBlockExtent = requested.BlockExtent;
+        var cachedBlockExtent = cachedInfo.BlockExtent;
 
-        if (requested.Data.Address == cachedInfo.Data.Address)
+        if (requested.Data.Address == cachedInfo.Data.Address &&
+            requestedBlockExtent.Width == cachedBlockExtent.Width && requestedBlockExtent.Height == cachedBlockExtent.Height &&
+            requestedBlock == cachedBlock)
         {
-            var requestedBlock = requested.BytesPerBlock * requested.Samples;
-            var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
-            var requestedBlockExtent = requested.BlockExtent;
-            var cachedBlockExtent = cachedInfo.BlockExtent;
-            if (requestedBlockExtent.Width != cachedBlockExtent.Width || requestedBlockExtent.Height != cachedBlockExtent.Height || requestedBlock != cachedBlock)
-            {
-                if (safeToDelete)
-                {
-                    ReleaseImage(cachedImageIdentifier);
-                }
-
-                return new OverlapResolution(mergedImageIdentifier);
-            }
-
             var depthImageIdentifier = ResolveDepthOverlap(requested, role, cachedImageIdentifier);
             if (depthImageIdentifier.IsValid)
             {
@@ -509,50 +501,32 @@ public sealed partial class GuestImageCache
                 $"type={(uint)requested.Type}/{(uint)cachedInfo.Type} tile={(uint)requested.TileMode}/{(uint)cachedInfo.TileMode}.");
         }
 
-        if (requested.Data.Address > cachedInfo.Data.Address)
+        var requestedMip = requested.FindMatchingMipLevel(cachedInfo);
+        if (requestedMip >= 0)
         {
-            var mip = requested.FindMatchingMipLevel(cachedInfo);
-            if (mip >= 0)
-            {
-                var layer = requested.FindMatchingArraySlice(cachedInfo, mip);
-                if (layer >= 0)
-                {
-                    return new OverlapResolution(cachedImageIdentifier, mip, layer);
-                }
-            }
-
-            if (safeToDelete)
-            {
-                ReleaseImage(cachedImageIdentifier);
-            }
-
-            return new OverlapResolution(ResourceSlotIdentifier.Invalid);
+            var layer = requested.FindMatchingArraySlice(cachedInfo, requestedMip);
+            return new OverlapResolution(cachedImageIdentifier, requestedMip, layer);
         }
 
         var containedMip = cachedInfo.FindMatchingMipLevel(requested);
         if (containedMip >= 0)
         {
             var containedLayer = cachedInfo.FindMatchingArraySlice(requested, containedMip);
-            if (containedLayer >= 0)
+            if (!mergedImageIdentifier.IsValid)
             {
-                if (cached.Binding.IsTarget)
-                {
-                    cached.Binding.NeedsRebind = true;
-                    if (mergedImageIdentifier.IsValid)
-                    {
-                        _slots[mergedImageIdentifier].Binding.IsTarget = true;
-                    }
-
-                    ReleaseImage(cachedImageIdentifier);
-                    return new OverlapResolution(mergedImageIdentifier);
-                }
-
-                if (mergedImageIdentifier.IsValid)
-                {
-                    CopyIntoMip(mergedImageIdentifier, cachedImageIdentifier, (uint)containedMip, (uint)containedLayer);
-                    ReleaseImage(cachedImageIdentifier);
-                }
+                return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
             }
+
+            cached.Binding.NeedsRebind |= cached.Binding.IsBound || cached.Binding.IsTarget;
+            _slots[mergedImageIdentifier].Binding.IsTarget |= cached.Binding.IsTarget;
+            CopyIntoMip(mergedImageIdentifier, cachedImageIdentifier, (uint)containedMip, (uint)containedLayer);
+            ReleaseImage(cachedImageIdentifier);
+            return new OverlapResolution(mergedImageIdentifier);
+        }
+
+        if (requested.Data.Address >= cachedInfo.Data.Address && safeToDelete)
+        {
+            ReleaseImage(cachedImageIdentifier);
         }
 
         return new OverlapResolution(mergedImageIdentifier);
@@ -572,7 +546,17 @@ public sealed partial class GuestImageCache
         }
 
         PopulateFromGuest(expandedImageIdentifier, ImageRequest.Refresh(description, UploadRole(source)), "expand");
-        CopyWholeImage(expandedImageIdentifier, sourceImageIdentifier);
+        var mip = source.Description.FindMatchingMipLevel(description);
+        var layer = source.Description.FindMatchingArraySlice(description, mip);
+        if (layer >= 0)
+        {
+            CopyIntoMip(expandedImageIdentifier, sourceImageIdentifier, (uint)mip, (uint)layer);
+        }
+        else
+        {
+            CopyWholeImage(expandedImageIdentifier, sourceImageIdentifier);
+        }
+
         ReleaseImage(sourceImageIdentifier);
         return expandedImageIdentifier;
     }

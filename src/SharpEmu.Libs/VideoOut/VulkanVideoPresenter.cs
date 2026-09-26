@@ -9,6 +9,7 @@ using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -79,6 +80,15 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static int _nativeSubgroupSize;
     private static int _nativeSubgroupShaderStages;
+    private static int _sharedInt64AtomicsSupported;
+
+    // True when the device supports shaderSharedInt64Atomics, so LDS 64-bit
+    // atomics can be emitted as real 64-bit atomics.
+    internal static bool SharedInt64AtomicsEnabled =>
+        Volatile.Read(ref _sharedInt64AtomicsSupported) != 0;
+
+    private static void SetSharedInt64AtomicsCapability(bool supported) =>
+        Volatile.Write(ref _sharedInt64AtomicsSupported, supported ? 1 : 0);
 
     internal static bool GraphicsSubgroupOperationsEnabled =>
         VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(
@@ -233,6 +243,9 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public string DebugName = "SharpEmu translated";
             public TextureResource[] Textures = [];
+            // Draw-local feedback copies stay alive until the GPU has consumed
+            // the descriptors that reference them.
+            public CachedImage[] FeedbackSnapshots = [];
             // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
             public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
         }

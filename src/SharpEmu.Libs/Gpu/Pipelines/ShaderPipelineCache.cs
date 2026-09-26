@@ -384,6 +384,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 RenderTrace.Write(
                     $"PipelineCache create graphics vertex=0x{vertexProgram.Id:X16} pixel=0x{key.PixelProgramId:X16} colors={key.Rendering.ColorCount} " +
                     $"depth={description.StaticParameters.WithDepth} samples={description.StaticParameters.Samples}");
+
             }
 
             var created = _host.CreateGraphicsPipeline(description);
@@ -443,7 +444,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
             var exported = pixelStage is null || ((pixelStage.PixelColorExportMasks >> (int)(color.Slot * 4)) & 0xFu) != 0;
-            parameters.SetColorMask(index, exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0);
+            var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
+            parameters.SetColorMask(index, colorMask);
+            if (RenderTrace.Enabled && RenderTrace.Pipeline())
+            {
+                RenderTrace.Write(
+                    $"PipelineCache output slot={color.Slot} guestMask=0x{context.RenderTargetMaskForSlot(color.Slot):X} " +
+                    $"exported={(exported ? 1 : 0)} shaderMask=0x{pixelStage?.PixelColorExportMasks ?? 0:X8} " +
+                    $"mapping=0x{color.Resolution.ExportMapping.Packed:X2} hostMask=0x{colorMask:X} format={(int)format}");
+            }
         }
 
         var withDepth = depth.HasTarget;

@@ -12,7 +12,8 @@ public readonly record struct GuestThreadStartRequest(
     ulong AttributeAddress,
     string Name,
     int Priority,
-    ulong AffinityMask);
+    ulong AffinityMask,
+    ulong StackSize = 0);
 
 public readonly record struct GuestThreadSnapshot(
     ulong ThreadHandle,

@@ -94,6 +94,12 @@ public sealed class MemoryAccessInfo
     // through the descriptor in its registers instead of a host-bound buffer.
     public bool DeviceDescriptor { get; set; }
 
+    // The guest V# behind a buffer access, filled in by the resource tracker.
+    // Null until then. Its provenance tells the backend which lowering
+    // strategy to pick; the access shape (Typed/Formatted/Access) completes
+    // the choice via GuestBufferDescriptor.ChooseStrategy.
+    public GuestBufferDescriptor? BufferDescriptor { get; set; }
+
     public bool IsAddressKind =>
         Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or
             MemoryResourceKind.Global or MemoryResourceKind.Scratch;

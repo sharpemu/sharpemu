@@ -102,7 +102,13 @@ internal sealed class ShaderProgramCache
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
+    // Draws that re-bind unchanged resources reuse the last materialization.
+    // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
+    private readonly ResourceMaterializationCache? _materializations =
+        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new();
     private ulong _nextProgramId;
+
+    public ResourceMaterializationCache? Materializations => _materializations;
 
     public ShaderProgramCache(CpuContext context, IGuestGpuBackend compiler, IShaderPipelineHost host)
     {
@@ -211,9 +217,15 @@ internal sealed class ShaderProgramCache
         var captureIndirectImageFailure = ShaderPermutationDump.CreateFailureCapture(source);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
-            if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out var materializationFailure, captureIndirectImageFailure))
+            // Failure capture needs the full walk, so a dump run bypasses the cache.
+            var materialized = _materializations is not null && captureIndirectImageFailure is null
+                ? _materializations.Materialize(entry.Plan, inputs, _host.TryReadResidentGuestBytes, ref snapshot, ref specialization,
+                    out var materializationFailure)
+                : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                    captureIndirectImageFailure);
+            if (!materialized)
             {
-                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16}.";
+                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
                 throw SubmissionScheduler.Fatal(message);
@@ -283,7 +295,7 @@ internal sealed class ShaderProgramCache
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
     {
         var program = Decode(source);
-        var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address);
+        var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
         EmbeddedVertexFetchPlan? fetch = null;
         ShaderVertexInput[] vertexInputs = [];
@@ -521,6 +533,7 @@ internal sealed class ShaderProgramCache
         BindingLayout layout)
     {
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
+        var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
         switch (source.Stage)
         {
             case ShaderStage.Vertex:
@@ -532,6 +545,7 @@ internal sealed class ShaderProgramCache
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    SupportsSharedInt64Atomics = sharedInt64Atomics,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
@@ -557,6 +571,7 @@ internal sealed class ShaderProgramCache
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    SupportsSharedInt64Atomics = sharedInt64Atomics,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
@@ -573,6 +588,7 @@ internal sealed class ShaderProgramCache
                     WaveSize = info.WaveSize,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
+                    SupportsSharedInt64Atomics = sharedInt64Atomics,
                     ComputeSystemRegisters = options.ComputeSystemRegisters,
                     LocalSizeX = Math.Max(info.ThreadsX, 1),
                     LocalSizeY = Math.Max(info.ThreadsY, 1),
@@ -651,7 +667,7 @@ internal sealed class ShaderProgramCache
 // Writes each compiled module and its decoded listing when the dump switch is on.
 internal static class CompiledShaderDump
 {
-    internal static bool ShouldWrite(ulong shaderAddress)
+    internal static bool ShouldWrite(ulong shaderAddress, ulong shaderHash)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal))
         {
@@ -674,6 +690,27 @@ internal static class CompiledShaderDump
             }
         }
 
+        var hashFilter = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV_HASH");
+        if (!string.IsNullOrWhiteSpace(hashFilter))
+        {
+            foreach (var filter in hashFilter.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var span = filter.AsSpan();
+                if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                {
+                    span = span[2..];
+                }
+
+                if (ulong.TryParse(span, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var filteredHash) &&
+                    shaderHash == filteredHash)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         return true;
     }
 
@@ -691,7 +728,7 @@ internal static class CompiledShaderDump
 
     public static void Write(string stage, ulong shaderAddress, ulong hash, IGuestCompiledShader shader, Gen5ShaderProgram program)
     {
-        if (shader.Payload.Length == 0 || !ShouldWrite(shaderAddress)) return;
+        if (shader.Payload.Length == 0 || !ShouldWrite(shaderAddress, hash)) return;
         var basePath = GetBasePath(stage, shaderAddress, hash);
         File.WriteAllBytes($"{basePath}.{shader.PayloadFileExtension}", shader.Payload);
         var lines = new List<string>(program.Instructions.Count + 2)

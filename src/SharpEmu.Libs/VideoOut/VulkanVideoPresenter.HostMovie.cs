@@ -137,8 +137,12 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.MovieFramePolling);
             if (!HostMovieBridge.TryDecodeNextFrame(
-                    advanceClock: _hostMovieLumaTextureAddress != 0 &&
-                                  _hostMovieChromaTextureAddress != 0,
+                    // Once the host bridge owns a movie, advance its clock on
+                    // every presenter tick. Texture discovery can lag behind
+                    // the first decoded frame; tying playback to those two
+                    // addresses leaves the guest stuck forever on attract
+                    // movies when Vulkan selects a different binding layout.
+                    advanceClock: true,
                     out var pixels,
                     out var width,
                     out var height,

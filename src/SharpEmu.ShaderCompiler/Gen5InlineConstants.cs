@@ -11,6 +11,16 @@ public static class Gen5InlineConstants
 {
     public static bool TryDecode(uint encoded, out uint value)
     {
+        // GFX10 scalar sources 235..239 expose the LDS/private base and limit
+        // hardware registers.  The emulator's compute address space starts LDS
+        // at zero, so these control sources have a deterministic zero value until
+        // explicit LDS base modelling is needed.
+        if (encoded is >= 235 and <= 239)
+        {
+            value = 0;
+            return true;
+        }
+
         if (encoded == 125)
         {
             value = 0;

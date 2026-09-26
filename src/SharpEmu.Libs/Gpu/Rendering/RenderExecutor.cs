@@ -37,7 +37,16 @@ public enum GuestIndexType : uint
 // Resolves draw and dispatch state from the register banks and records it through the host.
 public sealed partial class RenderExecutor
 {
-    private const uint PrimitiveShaderStageMask = 0x02002000;
+    // Prospero uses both the full NGG mask and compact primitive-shader masks
+    // when the task/mesh front end has already folded the upper enable bits
+    // away. Little Nightmares also emits 0x2030 for a primitive path with no
+    // geometry shader; the remaining bits describe the fixed NGG setup.
+    // GS_W32_EN (bit 22) and VS_W32_EN (bit 23) only select the wave size;
+    // graphics stages always compile as wave32, so they do not change the path.
+    private const uint VgtShaderStagesWaveSizeBits = (1u << 22) | (1u << 23);
+
+    private static bool IsPrimitiveShaderStageMask(uint stages) =>
+        (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
 
@@ -400,15 +409,16 @@ public sealed partial class RenderExecutor
         var vertex = banks.Shader.Vertex;
         var stages = context.ShaderStages;
         var primitiveShaderVertexPath =
-            stages == PrimitiveShaderStageMask && vertex.ExportAddress != 0 &&
-            shaderInterface.GeometryMaxVerticesOut == 0 && IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType);
-        var unsupportedStageMask = stages != 0 && stages != PrimitiveShaderStageMask;
+            IsPrimitiveShaderStageMask(stages) && vertex.ExportAddress != 0 &&
+            (vertex.GeometryAddress == 0 ||
+             (shaderInterface.GeometryMaxVerticesOut == 0 && IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType)));
+        var unsupportedStageMask = stages != 0 && !IsPrimitiveShaderStageMask(stages);
         var unsupportedGeometryStage = vertex.ExportAddress != 0 && vertex.GeometryAddress != 0 && !primitiveShaderVertexPath;
-        var geometryRegisters =
-            (shaderInterface.PrimitiveShaderSubgroupControl != 0 && shaderInterface.PrimitiveShaderSubgroupControl != 1) ||
-            shaderInterface.GeometryMaxVerticesOut != 0 ||
-            !IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType) ||
-            shaderInterface.MaxOutputPerSubgroup > MaxOutputPerSubgroupLimit;
+        var geometryRegisters = !primitiveShaderVertexPath &&
+            ((shaderInterface.PrimitiveShaderSubgroupControl != 0 && shaderInterface.PrimitiveShaderSubgroupControl != 1) ||
+             shaderInterface.GeometryMaxVerticesOut != 0 ||
+             !IsKnownGeometryOutputPrimitiveType(shaderInterface.GeometryOutputPrimitiveType) ||
+             shaderInterface.MaxOutputPerSubgroup > MaxOutputPerSubgroupLimit);
         if (!unsupportedStageMask && !unsupportedGeometryStage && !geometryRegisters)
         {
             return false;
@@ -416,7 +426,15 @@ public sealed partial class RenderExecutor
 
         if (Interlocked.Exchange(ref _geometryWarningShown, 1) == 0)
         {
-            Console.Error.WriteLine("Warning: the title uses unsupported graphics pipelines; some draw calls were skipped.");
+            Console.Error.WriteLine(
+                "Warning: the title uses unsupported graphics pipelines; some draw calls were skipped. " +
+                $"stages=0x{stages:X8} subgroup=0x{shaderInterface.PrimitiveShaderSubgroupControl:X8} " +
+                $"maxOutput=0x{shaderInterface.MaxOutputPerSubgroup:X8} " +
+                $"maxVerticesOut=0x{shaderInterface.GeometryMaxVerticesOut:X8} " +
+                $"outputPrimitive=0x{shaderInterface.GeometryOutputPrimitiveType:X8} " +
+                $"export=0x{vertex.ExportAddress:X16} geometry=0x{vertex.GeometryAddress:X16} " +
+                $"unsupportedMask={unsupportedStageMask} unsupportedGeometry={unsupportedGeometryStage} " +
+                $"unsupportedRegisters={geometryRegisters}.");
         }
 
         if (RenderTrace.Enabled && RenderTrace.GeometryStageSkip())

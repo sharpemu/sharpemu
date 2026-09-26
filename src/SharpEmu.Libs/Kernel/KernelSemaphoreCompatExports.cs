@@ -52,7 +52,8 @@ public static class KernelSemaphoreCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxSemaphoreNameLength, out var name))
+        if (!KernelMemoryCompatExports.TryReadNullTerminatedUtf8(
+                ctx, nameAddress, MaxSemaphoreNameLength, out var name))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }

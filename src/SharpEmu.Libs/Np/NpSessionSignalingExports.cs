@@ -7,6 +7,8 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpSessionSignalingExports
 {
+    private static int _nextContextId;
+
     [SysAbiExport(
         Nid = "ysmw6J-P8Ak",
         ExportName = "sceNpSessionSignalingInitialize",
@@ -16,5 +18,17 @@ public static class NpSessionSignalingExports
     {
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "aBuX0PX-T7I",
+        ExportName = "sceNpSessionSignalingCreateContext2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingCreateContext2(CpuContext ctx)
+    {
+        var contextId = Interlocked.Increment(ref _nextContextId);
+        ctx[CpuRegister.Rax] = unchecked((ulong)contextId);
+        return contextId;
     }
 }

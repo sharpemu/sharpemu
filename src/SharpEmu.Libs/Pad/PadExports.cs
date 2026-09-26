@@ -644,6 +644,32 @@ public static class PadExports
         return ctx.SetReturn(0);
     }
 
+    [SysAbiExport(
+        Nid = "rIZnR6eSpvk",
+        ExportName = "scePadResetOrientation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadResetOrientation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return IsPrimaryPadHandle(handle)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+    }
+
+    [SysAbiExport(
+        Nid = "fCWdlnmB1Ks",
+        ExportName = "scePadIsRemoteController",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadIsRemoteController(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return IsPrimaryPadHandle(handle)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+    }
+
     private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)
     {
         Span<byte> data = stackalloc byte[PadDataSize];

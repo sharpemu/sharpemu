@@ -201,14 +201,55 @@ public static class TilerShaders
         _ => [X(6, 0x0c0), X(7, 0x200), X(8, 0x800), X(9, 0x2000), X(10, 0x8000), Y(4, 0x030), Y(6, 0x100), Y(7, 0x400), Y(8, 0x1000), Y(9, 0x4000)],
     };
 
-    private static Term[] RenderTargetTerms(uint bytes) => bytes switch
+    private readonly record struct AddressBit(Axis Source, byte Bit);
+
+    private static AddressBit BX(byte bit) => new(Axis.X, bit);
+
+    private static AddressBit BY(byte bit) => new(Axis.Y, bit);
+
+    private static AddressBit[] BXY(byte x, byte y) => [BX(x), BY(y)];
+
+    // PS5 Oberon RB+ R_X addressing. The destination bit index is the array
+    // index. Keep this in lockstep with GnmTiling.RbPlus64KRenderX and
+    // TileGeometry.RenderTargetOffset.
+    private static readonly AddressBit[][][] RenderTargetAddressBits =
+    [
+        [
+            [BX(0)], [BX(1)], [BX(2)], [BX(3)], [BY(0)], [BY(1)], [BY(2)], [BY(3)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(6)], [BY(6)], BXY(7, 8), BXY(8, 7),
+        ],
+        [
+            [], [BX(0)], [BX(1)], [BX(2)], [BY(0)], [BY(1)], [BY(2)], [BX(3)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(3)], [BX(6)], BXY(7, 7), BXY(8, 6),
+        ],
+        [
+            [], [], [BX(0)], [BX(1)], [BY(0)], [BY(1)], [BX(2)], [BY(2)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(3)], [BY(3)], BXY(6, 7), BXY(7, 6),
+        ],
+        [
+            [], [], [], [BX(0)], [BY(0)], [BX(1)], [BX(2)], [BY(1)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(2)], [BX(3)], BXY(7, 3), BXY(6, 6),
+        ],
+        [
+            [], [], [], [], [BX(0)], [BY(0)], [BX(1)], [BY(1)],
+            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(2)], [BY(2)], BXY(6, 3), BXY(3, 6),
+        ],
+    ];
+
+    private static uint RenderTargetOffset(ShaderModuleContext shaderModule, uint x, uint y, uint bytes)
     {
-        1 => [Y(2, 0x008), Y(4, 0x010), Y(3, 0x0a0), Y(5, 0xf00), Y(6, 0x1000), Y(7, 0x4000), X(0, 7), X(3, 0x040), X(5, 0x300), X(4, 0x400), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
-        2 => [Y(4, 0x070), Y(5, 0xf00), Y(8, 0x5000), X(1, 0x00e), X(4, 0x480), X(5, 0x300), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
-        4 => [Y(4, 0x070), Y(5, 0xf00), Y(9, 0x1000), Y(8, 0x4000), X(2, 0x00c), X(5, 0x380), X(4, 0x400), X(6, 0x800), X(9, 0xa000)],
-        8 => [Y(4, 0x010), Y(6, 0x080), Y(5, 0xf00), Y(10, 0x5000), X(3, 0x008), X(4, 0x460), X(5, 0x300), X(6, 0x800), X(10, 0x2000), X(9, 0x8000)],
-        _ => [X(4, 0x410), X(5, 0x340), X(6, 0x800), X(11, 0xa000), Y(5, 0xf20), Y(6, 0x080), Y(10, 0x1000), Y(11, 0x4000)],
-    };
+        uint offset = shaderModule.GetUnsignedConstant(0);
+        var table = RenderTargetAddressBits[Log2(bytes)];
+        for (uint destination = 0; destination < table.Length; destination++)
+        {
+            foreach (var bit in table[destination])
+            {
+                offset = shaderModule.Xor(offset, Bit(shaderModule, bit.Source == Axis.X ? x : y, bit.Bit, destination));
+            }
+        }
+
+        return offset;
+    }
 
     private static Term[] DepthTerms(uint bytes) => bytes switch
     {
@@ -306,7 +347,7 @@ public static class TilerShaders
                 return shaderModule.Xor(Standard64KB3DOffset(shaderModule, x, y, z, bytes), delta);
             }
             case TilerBlockShape.RenderTarget64KB:
-                return shaderModule.Xor(XorTerms(shaderModule, x, y, z, RenderTargetTerms(bytes)), ZSpread(shaderModule, z));
+                return shaderModule.Xor(RenderTargetOffset(shaderModule, x, y, bytes), ZSpread(shaderModule, z));
             case TilerBlockShape.Depth64KB:
                 return shaderModule.Xor(ZSpread(shaderModule, z), XorTerms(shaderModule, x, y, z, DepthTerms(bytes)));
             default:

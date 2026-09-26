@@ -298,6 +298,22 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
+    public void LargeVirtualReservationFallsBackToSparseGuestRange()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong size = 0x8000000000;
+        test.Host.FailReserveHoleWhen = (_, requestedSize) => requestedSize >= size;
+
+        var address = test.Reserve(size);
+        Assert.NotEqual(0UL, address);
+        Assert.Equal((address, address + size), test.Query(address));
+
+        test.Allocate(0, 0x4000);
+        Assert.Equal(address, test.Map(0, 0x4000, address));
+        Assert.Equal((address, address + 0x4000), test.Query(address));
+    }
+
+    [Fact]
     public void AddressSearchUsesTheFullReservationExtent()
     {
         using var test = new BackedKernelMemory();

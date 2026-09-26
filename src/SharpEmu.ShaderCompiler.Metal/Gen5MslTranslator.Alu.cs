@@ -203,7 +203,7 @@ public static partial class Gen5MslTranslator
                 // form is fma(src0, src1, src2) exactly like the SPIR-V translator.
                 "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, {F(instruction, 2)})"),
-                "VFmaF16" => Float16Result(
+                "VFmaF16" or "VFmaMkF16" or "VFmaAkF16" => Float16Result(
                     instruction,
                     destination,
                     $"fma({F16(instruction, 0)}, {F16(instruction, 1)}, {F16(instruction, 2)})"),
@@ -422,8 +422,10 @@ public static partial class Gen5MslTranslator
                     }
                     case "VSubbU32":
                     case "VSubbrevU32":
+                    case "VSubCoCiU32":
+                    case "VSubrevCoCiU32":
                     {
-                        var reverse = instruction.Opcode == "VSubbrevU32";
+                        var reverse = instruction.Opcode is "VSubbrevU32" or "VSubrevCoCiU32";
                         var left = Temp("uint", RawSource(instruction, reverse ? 1 : 0));
                         var right = Temp("uint", RawSource(instruction, reverse ? 0 : 1));
                         var borrowIn = instruction.Sources.Count > 2
@@ -1107,7 +1109,18 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SFlbitI32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var result = Temp(
+                    "uint",
+                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)clz({wide})");
+                StoreScalar(destination, result);
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
+                instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SBfeU64" or "SBfeI64")
             {
                 return TryEmitScalar64(instruction, destination, out error);
@@ -1239,6 +1252,14 @@ public static partial class Gen5MslTranslator
                 case "SSubI32":
                     resultExpression = $"({left} - {right})";
                     sccStatement = $"(((({left} ^ {right})) & ({left} ^ RESULT)) >> 31) != 0u";
+                    break;
+                case "SAddF32":
+                    resultExpression = $"as_type<uint>(as_type<float>({left}) + as_type<float>({right}))";
+                    sccStatement = string.Empty;
+                    break;
+                case "SSubF32":
+                    resultExpression = $"as_type<uint>(as_type<float>({left}) - as_type<float>({right}))";
+                    sccStatement = string.Empty;
                     break;
                 case "SAddcU32":
                 {
@@ -1479,6 +1500,16 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+
+            // S_SWAPPC_B64 is a dynamic call/return operation.  The Gen5
+            // translator has already linearized the reachable shader body,
+            // so there is no host program counter to exchange here.  Its
+            // single pair operand must not be treated as a binary 64-bit op.
+            if (instruction.Opcode == "SSwappcB64")
+            {
+                return true;
+            }
+
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
@@ -1536,12 +1567,15 @@ public static partial class Gen5MslTranslator
                     value = $"({quadAny} * 0xFul)";
                     break;
                 }
-                case "SLshlB64" or "SLshrB64":
+                case "SLshlB64" or "SLshrB64" or "SAshrI64":
                 {
                     var shift = Temp("uint", $"({RawSource(instruction, 1)}) & 63u");
-                    value = instruction.Opcode == "SLshlB64"
-                        ? $"({left} << {shift})"
-                        : $"({left} >> {shift})";
+                    value = instruction.Opcode switch
+                    {
+                        "SLshlB64" => $"({left} << {shift})",
+                        "SLshrB64" => $"({left} >> {shift})",
+                        _ => $"(ulong)(as_type<long>({left}) >> {shift})",
+                    };
                     break;
                 }
                 case "SBfmB64":

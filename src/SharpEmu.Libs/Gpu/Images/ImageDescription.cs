@@ -131,8 +131,29 @@ public struct ImageDescription
     // Return the matching mip level in the containing image, or -1 if none matches.
     public readonly int FindMatchingMipLevel(in ImageDescription container)
     {
-        if (!IsCompatible(container) || TileMode != container.TileMode || Resources.Levels != 1 ||
-            container.Resources.Layers == 0 || container.Resources.Levels > MaxLevels)
+        if (container.Resources.Levels > MaxLevels)
+        {
+            return -1;
+        }
+
+        for (uint level = 0; level < container.Resources.Levels; level++)
+        {
+            if (FindMatchingArraySlice(container, (int)level) >= 0)
+            {
+                return (int)level;
+            }
+        }
+
+        return -1;
+    }
+
+    // Return the matching slice in the containing mip level, or -1 if none matches.
+    public readonly int FindMatchingArraySlice(in ImageDescription container, int mip)
+    {
+        if (!IsCompatible(container) || TileMode != container.TileMode || Type != container.Type || IsVolume ||
+            Resources.Levels != 1 || Resources.Layers == 0 || container.Resources.Layers == 0 || mip < 0 ||
+            (uint)mip >= container.Resources.Levels || container.Resources.Levels > MaxLevels ||
+            !IsValidRange(Data) || !IsValidRange(container.Data) || Data.Address < container.Data.Address || Data.End > container.Data.End)
         {
             return -1;
         }
@@ -143,95 +164,38 @@ public struct ImageDescription
             return -1;
         }
 
-        var mip = -1;
-        for (uint level = 0; level < container.Resources.Levels; level++)
-        {
-            var layout = container.MipLayout[(int)level];
-            if (layout.Size == 0 || layout.Size % container.Resources.Layers != 0 || container.Data.Address > ulong.MaxValue - layout.Offset)
-            {
-                continue;
-            }
-
-            var mipBase = container.Data.Address + layout.Offset;
-            var sliceSize = layout.Size / container.Resources.Layers;
-            if (sliceSize == 0 || mipBase > ulong.MaxValue - layout.Size)
-            {
-                continue;
-            }
-
-            var mipEnd = mipBase + layout.Size;
-            if (Data.Address >= mipBase && Data.Address < mipEnd && (Data.Address - mipBase) % sliceSize == 0)
-            {
-                mip = (int)level;
-                break;
-            }
-        }
-
-        if (mip < 0)
-        {
-            return -1;
-        }
-
-        if (Extent.Width != Math.Max(container.Extent.Width >> mip, 1) || Extent.Height != Math.Max(container.Extent.Height >> mip, 1))
-        {
-            return -1;
-        }
-
-        var mipDepth = Math.Max(container.Extent.Depth >> mip, 1);
-        if (container.Type == GuestImageType.Color3D && Type == GuestImageType.Color2D)
-        {
-            if (Resources.Layers != mipDepth)
-            {
-                return -1;
-            }
-        }
-        else if (Type != container.Type)
-        {
-            return -1;
-        }
-
-        return mip;
-    }
-
-    // Return the matching slice in the containing mip level, or -1 if none matches.
-    public readonly int FindMatchingArraySlice(in ImageDescription container, int mip)
-    {
-        if (!IsCompatible(container) || Type != container.Type || mip < 0 || (uint)mip >= container.Resources.Levels ||
-            container.Resources.Levels > MaxLevels || container.Resources.Layers == 0 || Data.Size == 0)
-        {
-            return -1;
-        }
-
-        if (Extent.Width != Math.Max(container.Extent.Width >> mip, 1) || Extent.Height != Math.Max(container.Extent.Height >> mip, 1))
-        {
-            return -1;
-        }
-
         var layout = container.MipLayout[mip];
-        if (layout.Size == 0 || layout.Size % container.Resources.Layers != 0 || container.Data.Address > ulong.MaxValue - layout.Offset)
+        if (Extent.Width != Math.Max(container.Extent.Width >> mip, 1) || Extent.Height != Math.Max(container.Extent.Height >> mip, 1) ||
+            Extent.Depth != container.Extent.Depth || MipLayout[0].Pitch != layout.Pitch || MipLayout[0].Height != layout.Height ||
+            layout.Size == 0 || layout.Size % container.Resources.Layers != 0 ||
+            container.Data.Size % container.Resources.Layers != 0 || Data.Size % Resources.Layers != 0)
         {
             return -1;
         }
 
-        var sliceSize = layout.Size / container.Resources.Layers;
-        if (sliceSize == 0 || Data.Size % sliceSize != 0)
+        // PS5 array slices contain the whole reversed mip chain, rather than
+        // storing all slices of one mip contiguously.
+        var sliceStride = container.Data.Size / container.Resources.Layers;
+        var childStride = Data.Size / Resources.Layers;
+        if (childStride != layout.Size / container.Resources.Layers || layout.Offset >= sliceStride ||
+            childStride > sliceStride - layout.Offset || (Resources.Layers > 1 && childStride != sliceStride))
         {
             return -1;
         }
 
-        var mipBase = container.Data.Address + layout.Offset;
-        if (Data.Address < mipBase)
+        var addressDelta = Data.Address - container.Data.Address;
+        if (addressDelta < layout.Offset || (addressDelta - layout.Offset) % sliceStride != 0)
         {
             return -1;
         }
 
-        var delta = Data.Address - mipBase;
-        if (delta % Data.Size != 0 || delta / Data.Size > int.MaxValue)
+        var layer = (addressDelta - layout.Offset) / sliceStride;
+        if (layer > int.MaxValue || layer >= container.Resources.Layers || Resources.Layers > container.Resources.Layers - layer)
         {
             return -1;
         }
 
-        return (int)(delta / Data.Size);
+        return (int)layer;
     }
 
     public readonly bool IsSupportedDepthTarget

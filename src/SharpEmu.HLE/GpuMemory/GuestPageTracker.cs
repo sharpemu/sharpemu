@@ -16,12 +16,18 @@ public sealed class GuestPageTracker
     private readonly PageGuard _pages;
     private readonly TrackedRegion?[] _regions = new TrackedRegion?[TrackerLayout.BlockCount];
     private readonly object _regionGate = new();
+    private readonly CpuDirtySummary _cpuDirtySummary = new();
 
     public GuestPageTracker(PageGuard pages) => _pages = pages;
 
     public bool HasCpuDirtyPages(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
+        if (IsKnownCpuClean(vaddr, size))
+        {
+            return false;
+        }
+
         return VisitRegions(vaddr, size, create: true, (region, offset, bytes) =>
         {
             using var _ = region.Lock.Hold();
@@ -341,6 +347,23 @@ public sealed class GuestPageTracker
         }
     }
 
+    // True when every block of the range is tracked and has no CPU-dirty page. A missing
+    // region is not known clean: the precise path creates it, fully dirty.
+    private bool IsKnownCpuClean(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var last = (vaddr + size - 1) / BlockBytes;
+        for (var index = vaddr / BlockBytes; index <= last; index++)
+        {
+            if (Volatile.Read(ref _regions[index]) == null || _cpuDirtySummary.IsDirty(index))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // Visits (region, offset, bytes) per 4 MiB chunk; a true result stops the walk early.
     private bool VisitRegions(ulong vaddr, ulong size, bool create, Func<TrackedRegion, ulong, ulong, bool> visit)
     {
@@ -379,7 +402,7 @@ public sealed class GuestPageTracker
                 return existing;
             }
 
-            var created = new TrackedRegion(_pages, index * BlockBytes);
+            var created = new TrackedRegion(_pages, index * BlockBytes, _cpuDirtySummary);
             Volatile.Write(ref _regions[index], created);
             return created;
         }

@@ -90,6 +90,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
                 "1",
                 StringComparison.Ordinal);
+        private static readonly bool _traceTextureBindingsEnabled =
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS"),
+                "1",
+                StringComparison.Ordinal);
         private static readonly uint _traceGuestImageWidth =
             uint.TryParse(
                 Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_WIDTH"),
@@ -259,6 +264,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private static bool ShouldTraceVulkanResources() =>
             _traceVulkanResourcesEnabled;
 
+        private static bool ShouldTraceTextureBindings() =>
+            _traceTextureBindingsEnabled;
+
         private void RecycleSubmissionUploads(SubmissionUploadResources resources)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceDestroy);
@@ -268,6 +276,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
+            }
+
+            foreach (var snapshot in resources.FeedbackSnapshots)
+            {
+                RetireFeedbackSnapshot(snapshot);
             }
 
             foreach (var (buffer, memory) in resources.OverflowBuffers ?? [])

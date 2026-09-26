@@ -3,6 +3,7 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
@@ -499,6 +500,42 @@ public sealed class ResourceTrackerTests
         Assert.Equal((uint)layout.UserDataRegisters.Count, layout.MemoryOffsetDword);
         Assert.Equal(1u, layout.MemoryOffsetCount);
         Assert.Equal(layout.MemoryOffsetDword + 1, layout.ShaderDataDwordCount);
+    }
+
+    [Fact]
+    public void RuntimeScalarBufferLoad_UsesDeviceAddresses()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 8, count: 4, dynamicOffsetRegister: 2),
+            ScalarBufferLoad(8, 8, destination: 12, count: 1),
+            EndProgram(16));
+        var plan = Extract(program);
+
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.Empty(plan.BufferCandidateTables);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        Assert.Equal(BufferDescriptorProvenance.Runtime, plan.Memory[index].BufferDescriptor!.Provenance);
+        Assert.Equal(MemoryAccessInfo.NoResource, plan.Memory[index].Resource);
+
+        var request = Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    [Fact]
+    public void UnboundedRuntimeFormattedBufferLoad_UsesNullReadFallback()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 8, count: 4, dynamicOffsetRegister: 2),
+            ScalarBufferLoad(8, 8, destination: 12, count: 1),
+            BufferLoad(16, 8, formatted: true),
+            EndProgram(20));
+        var plan = Extract(program);
+
+        Assert.Empty(plan.BufferCandidateTables);
+        var request = Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
     }
 
     [Fact]

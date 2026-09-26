@@ -95,7 +95,8 @@ internal static unsafe partial class VulkanVideoPresenter
             OneDimensional: image.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
             R128: image.R128,
             Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
-            DepthCompare: image.DepthCompare);
+            DepthCompare: image.DepthCompare,
+            Atomic: image.Atomic);
 
         // Render-state discovery for one shader image; the view is acquired later with the draw.
         private TextureResource ResolveImageBinding(ImageResource image, uint[] words, ShaderProgramInfo program, int index)
@@ -114,6 +115,20 @@ internal static unsafe partial class VulkanVideoPresenter
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
+            if (ShouldTraceTextureBindings())
+            {
+                var cached = _imageCache.GetImage(imageIdentifier);
+                var description = cached.Description;
+                Console.Error.WriteLine(
+                    $"TextureBinding stage={program.Stage} hash=0x{program.Hash:X16} index={index} " +
+                    $"address=0x{new TextureDescriptorWords(words).BaseAddress:X16} " +
+                    $"descriptor={descriptor.BaseAddress:X16} size={descriptor.Width + 1}x{descriptor.Height + 1} " +
+                    $"format={(uint)descriptor.Format} tile={(uint)descriptor.TileMode} " +
+                    $"image=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
+                    $"extent={description.Extent.Width}x{description.Extent.Height} pitch={description.Pitch} " +
+                    $"guestFormat={(uint)description.GuestFormat} imageTile={(uint)description.TileMode} " +
+                    $"backing={cached.Backing.Extent.Width}x{cached.Backing.Extent.Height} format={cached.Backing.Format}");
+            }
             return new TextureResource
             {
                 Address = descriptor.BaseAddress,
@@ -400,7 +415,7 @@ internal static unsafe partial class VulkanVideoPresenter
             memoryOffset = (uint)adjustment;
             if (resource.Formatted && resource.Written)
             {
-                _imageCache.InvalidateMemoryFromGpu(address, size);
+                _imageCache.InvalidateMemoryForBoundWrite(address, size);
             }
 
             return new BufferView(buffer.Handle, alignedOffset, size + adjustment);
@@ -462,8 +477,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (!range.Planned)
                 {
-                    if (!range.Written) continue;
-                    throw SubmissionScheduler.Fatal($"A written device-address range cannot be planned: handle={range.Handle} hash=0x{program.Hash:X16}.");
+                    // Per-lane computed writes are validated by the shader's page
+                    // table lookup. There is no host range to pre-map here.
+                    continue;
                 }
 
                 if (range.Size == 0)
@@ -852,6 +868,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DebugName = bindPoint == PipelineBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw",
                 Textures = textures,
+                FeedbackSnapshots = preparation.FeedbackSnapshots?.ToArray() ?? [],
                 OverflowBuffers = preparation.OverflowBuffers.Count == 0 ? null : preparation.OverflowBuffers.ToArray(),
             });
             preparation.OverflowBuffers.Clear();

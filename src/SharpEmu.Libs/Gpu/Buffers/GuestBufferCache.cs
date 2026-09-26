@@ -497,18 +497,23 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var index = _registry.FindFirstOverlappingIndex(guestAddress);
         for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end; index++)
         {
-            var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
+            var identifier = _registry.GetRegisteredIdentifier(index);
+            var buffer = _registry.GetBuffer(identifier);
             var start = Math.Max(buffer.CpuAddress, guestAddress);
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
             if (start < finish)
             {
                 if (GuestGpuMemoryHook.Traces(start, finish - start))
                     GuestGpuMemoryHook.Trace(start, finish - start,
-                        $"device-address-touch buffer={_registry.GetRegisteredIdentifier(index)} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
+                        $"device-address-touch buffer={identifier} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
                 // Clean buffers remain in use through their device addresses.
-                TouchBuffer(buffer);
+                TouchBuffer(identifier);
                 // Device-address reads reuse persistent buffers; track writes after each upload.
-                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+                // A range without CPU-dirty pages has nothing to upload (the same early exit
+                // SynchronizeBuffer takes for this read-only call), and the block summary
+                // answers that without a lock for the common all-clean case.
+                if (_tracker.HasCpuDirtyPages(start, finish - start))
+                    _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
             }
         }
     }
@@ -1052,7 +1057,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
         }
 
-        if (isTexelBuffer && !isWritten)
+        if (isTexelBuffer)
         {
             return RequireImageCache().TrySynchronizeBufferFromImage(buffer, guestAddress, size);
         }

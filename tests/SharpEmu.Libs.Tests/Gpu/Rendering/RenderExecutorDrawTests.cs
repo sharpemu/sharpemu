@@ -165,15 +165,32 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0u)]
-    [InlineData(1u)]
-    public void PrimitiveShaderVertexPath_WithDefaultGeometryStateDraws(uint subgroupControl)
+    [InlineData(0x02002000u, 0u)]
+    [InlineData(0x02002000u, 1u)]
+    [InlineData(0x00002000u, 0u)]
+    [InlineData(0x00002000u, 1u)]
+    public void PrimitiveShaderVertexPath_WithDefaultGeometryStateDraws(uint stageMask, uint subgroupControl)
     {
         var banks = Banks();
-        banks.Context.ShaderStages = 0x02002000;
+        banks.Context.ShaderStages = stageMask;
         banks.Shader.Vertex.GeometryAddress = 0x3000;
         banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = subgroupControl;
         banks.Context.ShaderInterface.MaxOutputPerSubgroup = 0x40;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PrimitiveShaderVertexPath_WithFixedNggStateAndNoGeometryShaderDraws()
+    {
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x00002030;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = 1;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 0xC0;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 3;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+
         _executor.DrawIndexed(1, banks, Indexed(3));
 
         Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));

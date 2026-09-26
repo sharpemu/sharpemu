@@ -17,8 +17,9 @@ public sealed class TrackedRegion
     private PageMask _recentCpuUploads;
     private PageMask _repeatedCpuWrites;
     private PageMask _hotCpuWrites;
+    private readonly CpuDirtySummary? _summary;
 
-    public TrackedRegion(PageGuard pages, ulong baseAddress)
+    public TrackedRegion(PageGuard pages, ulong baseAddress, CpuDirtySummary? summary = null)
     {
         if (baseAddress % BlockBytes != 0)
         {
@@ -26,10 +27,12 @@ public sealed class TrackedRegion
         }
 
         _pages = pages;
+        _summary = summary;
         BaseAddress = baseAddress;
         _cpuDirty.Fill();
         _writable.Fill();
         _readable.Fill();
+        _summary?.Set(BaseAddress / BlockBytes, dirty: true);
     }
 
     public RegionLock Lock { get; } = new();
@@ -205,8 +208,10 @@ public sealed class TrackedRegion
 
     private ref PageMask GetDirtyMask(WriteOrigin side) => ref side == WriteOrigin.Cpu ? ref _cpuDirty : ref _gpuDirty;
 
+    // Every change to the CPU-dirty mask ends here, so it also publishes the block summary.
     private void UpdateCpuProtection(bool track)
     {
+        _summary?.Set(BaseAddress / BlockBytes, _cpuDirty.Any);
         var mask = _cpuDirty ^ _writable;
         _writable = _cpuDirty;
         if (mask.None)

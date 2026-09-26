@@ -66,6 +66,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
+        bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
+
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
         SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts => _noAttachmentSampleCounts;
@@ -75,6 +77,16 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
+            // Resource planning can inspect a dynamic descriptor before the draw has
+            // supplied a valid guest address.  Do not pass an invalid range to the
+            // page tracker: it treats that as an emulator invariant violation and
+            // terminates the process.  A failed read lets the materializer reject or
+            // specialize the source normally.
+            if (!_guestMemory.CanRead(address, sizeof(uint)))
+            {
+                return false;
+            }
+
             if (!_bufferCache.TrySynchronizeCpuRead(address, sizeof(uint),
                 SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead))
             {
@@ -96,6 +108,11 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
             word = 0;
+            if (!_guestMemory.CanRead(address, sizeof(uint)))
+            {
+                return false;
+            }
+
             if (_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) ||
                 _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
                 _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
@@ -111,6 +128,19 @@ internal static unsafe partial class VulkanVideoPresenter
 
             word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
             return true;
+        }
+
+        // The same ownership rules as the two word readers, checked once for a whole range.
+        public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
+        {
+            var size = (ulong)destination.Length;
+            if (_bufferCache.HasGpuDirtyPages(address, size) ||
+                (clean && (_bufferCache.HasGpuDirtyBytes(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+            {
+                return false;
+            }
+
+            return _guestMemory.TryRead(address, destination);
         }
 
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)

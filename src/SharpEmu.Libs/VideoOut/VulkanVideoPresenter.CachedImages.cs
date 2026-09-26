@@ -14,6 +14,18 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 internal static unsafe partial class VulkanVideoPresenter
 {
+    private readonly record struct FeedbackSnapshotKey(
+        Format Format,
+        uint Width,
+        uint Height,
+        uint MipLevels,
+        uint Layers,
+        uint Samples,
+        ImageAspectFlags Aspect);
+
+    private const int FeedbackSnapshotPoolMaxEntriesPerKey = 2;
+    private const ulong FeedbackSnapshotPoolMaxBytes = 256UL * 1024 * 1024;
+
     // Display buffers the guest registered; the only image addresses a flip may capture.
     private static readonly HashSet<ulong> _knownDisplayBuffers = new();
 
@@ -115,12 +127,17 @@ internal static unsafe partial class VulkanVideoPresenter
         public uint DestinationSelect;
         // One view per mip level for a storage image the program indexes by mip; empty otherwise.
         public ImageView[] MipViews = [];
+        // A draw-local copy used when the guest samples a depth aspect while the
+        // same image is attached for writes. It retires with the submission.
+        public bool IsFeedbackSnapshot;
     }
 
     private sealed partial class Presenter
     {
         private readonly List<ResourceSlotIdentifier> _trackedImageBindings = new();
         private static int _guestImageDumpSequence;
+        private readonly Dictionary<FeedbackSnapshotKey, Stack<CachedImage>> _feedbackSnapshotPool = [];
+        private ulong _feedbackSnapshotPoolBytes;
 
         // Shader images for work without color targets: resolve, acquire, transition and release the bindings.
         private TextureResource[] ResolveDrawTextures(IReadOnlyList<GuestDrawTexture> textures)
@@ -576,7 +593,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private CachedImage AcquireStencilStorage(TextureResource binding, CachedImage attachment)
+        private CachedImage AcquireStencilStorage(TextureResource binding, CachedImage attachment, bool writeBack = true)
         {
             var description = binding.Request.Description;
             if (description.Data.Address != attachment.Description.Stencil.Address || description.Data.Size > attachment.Description.Stencil.Size ||
@@ -586,7 +603,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal("The stencil storage request does not cover its attachment's stencil layout.");
             }
 
-            if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier &&
+            if (writeBack && _hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier &&
                 (_boundDepthLoadState.StencilTestEnabled || _boundDepthLoadState.StencilClearEnabled))
             {
                 throw SubmissionScheduler.Fatal("A stencil storage write cannot share an active stencil attachment.");
@@ -595,7 +612,16 @@ internal static unsafe partial class VulkanVideoPresenter
             var preparation = RequirePreparation();
             var stencilImages = preparation.StencilStorageImages ??= new();
             if (stencilImages.TryGetValue(attachment, out var storage))
+            {
+                if (writeBack)
+                {
+                    preparation.StencilStorageWriteBackImages ??= new();
+                    preparation.StencilStorageWriteBackImages.Add(attachment);
+                    storage.Binding.ShaderWrite = true;
+                }
+
                 return storage;
+            }
 
             var sampledRequest = binding.Request with
             {
@@ -603,10 +629,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 View = binding.Request.View with { Usage = ImageUsageFlags.SampledBit },
             };
             _imageCache.AcquireTextureView(binding.ImageIdentifier, sampledRequest);
-            _imageCache.MarkGpuWritten(binding.ImageIdentifier);
+            if (writeBack)
+            {
+                _imageCache.MarkGpuWritten(binding.ImageIdentifier);
+            }
+
             storage = attachment.CreateStencilStorageImage();
             stencilImages.Add(attachment, storage);
-            storage.Binding.ShaderWrite = true;
+            storage.Binding.ShaderWrite = writeBack;
+            if (writeBack)
+            {
+                preparation.StencilStorageWriteBackImages ??= new();
+                preparation.StencilStorageWriteBackImages.Add(attachment);
+            }
             attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
             if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier)
             {
@@ -617,6 +652,182 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return storage;
+        }
+
+        private CachedImage CreateDepthFeedbackSnapshot(CachedImage source, ImageAspectFlags aspect)
+        {
+            if (source.Backing.ImageType != ImageType.Type2D || source.Backing.MipLevels == 0 ||
+                source.Backing.Samples == 0)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"A depth feedback snapshot needs a 2D image: type={source.Backing.ImageType} " +
+                    $"mips={source.Backing.MipLevels} samples={source.Backing.Samples}.");
+            }
+
+            var key = new FeedbackSnapshotKey(
+                source.Backing.Format,
+                source.Backing.Extent.Width,
+                source.Backing.Extent.Height,
+                source.Backing.MipLevels,
+                source.Backing.Layers,
+                source.Backing.Samples,
+                ImageAspectFlags.None);
+            var snapshot = RentFeedbackSnapshot(key);
+            if (snapshot is null)
+            {
+                var description = ImageDescription.Create();
+                description.PixelFormat = source.Backing.Format;
+                description.GuestFormat = source.Description.GuestFormat;
+                description.Type = GuestImageType.Color2D;
+                description.Extent = new Extent3D(source.Backing.Extent.Width, source.Backing.Extent.Height, 1);
+                description.Resources = new SubresourceCount(source.Backing.MipLevels, source.Backing.Layers);
+                description.BytesPerBlock = source.Description.BytesPerBlock == 0 ? 1 : source.Description.BytesPerBlock;
+                description.Samples = source.Backing.Samples;
+                // The snapshot is host-owned. Keeping guest placement empty prevents
+                // the image cache from treating it as guest memory that needs upload.
+                description.Pitch = 0;
+                description.TileMode = GuestTileMode.Linear;
+                snapshot = new CachedImage(_deviceInfo, _scheduler, _guestBacking, description);
+            }
+            var range = new SubresourceRange(0, source.Backing.MipLevels, 0, source.Backing.Layers);
+            if ((aspect & (ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit)) != 0)
+            {
+                snapshot.CopyDepthStencilFrom(
+                    source,
+                    range,
+                    source.Backing.Extent,
+                    aspect & (ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit));
+                var depthView = _boundDepth.Target.Target.Request.View;
+                var writes = _boundDepthLoadState.AttachmentWriteAspects(_boundDepth.Target.Target.Format);
+                source.Transition(
+                    _boundDepthLayout,
+                    AccessFlags.DepthStencilAttachmentReadBit |
+                    (writes != 0 ? AccessFlags.DepthStencilAttachmentWriteBit : 0),
+                    new SubresourceRange(depthView.BaseLevel, depthView.LevelCount, depthView.BaseLayer, depthView.LayerCount),
+                    BeginBatchedGuestCommands());
+                snapshot.Transition(
+                    ImageLayout.DepthStencilReadOnlyOptimal,
+                    AccessFlags.ShaderReadBit,
+                    range,
+                    BeginBatchedGuestCommands());
+            }
+            else
+            {
+                snapshot.CopyFrom(source);
+                snapshot.Transition(
+                    ImageLayout.ShaderReadOnlyOptimal,
+                    AccessFlags.ShaderReadBit,
+                    range,
+                    BeginBatchedGuestCommands());
+            }
+
+            var preparation = RequirePreparation();
+            preparation.FeedbackSnapshots ??= new();
+            preparation.FeedbackSnapshots.Add(snapshot);
+            return snapshot;
+        }
+
+        private CachedImage? RentFeedbackSnapshot(FeedbackSnapshotKey key)
+        {
+            if (!_feedbackSnapshotPool.TryGetValue(key, out var entries) || !entries.TryPop(out var snapshot))
+            {
+                return null;
+            }
+
+            _feedbackSnapshotPoolBytes -= snapshot.Backing.AllocationSize;
+            if (entries.Count == 0)
+            {
+                _feedbackSnapshotPool.Remove(key);
+            }
+
+            return snapshot;
+        }
+
+        private void RetireFeedbackSnapshot(CachedImage snapshot)
+        {
+            var key = new FeedbackSnapshotKey(
+                snapshot.Backing.Format,
+                snapshot.Backing.Extent.Width,
+                snapshot.Backing.Extent.Height,
+                snapshot.Backing.MipLevels,
+                snapshot.Backing.Layers,
+                snapshot.Backing.Samples,
+                ImageAspectFlags.None);
+            var allocation = snapshot.Backing.AllocationSize;
+            _feedbackSnapshotPool.TryGetValue(key, out var entries);
+            if (entries is null && _feedbackSnapshotPoolBytes + allocation <= FeedbackSnapshotPoolMaxBytes)
+            {
+                entries = new Stack<CachedImage>();
+                _feedbackSnapshotPool[key] = entries;
+            }
+
+            if (entries is not null && entries.Count < FeedbackSnapshotPoolMaxEntriesPerKey &&
+                _feedbackSnapshotPoolBytes + allocation <= FeedbackSnapshotPoolMaxBytes)
+            {
+                entries.Push(snapshot);
+                _feedbackSnapshotPoolBytes += allocation;
+                return;
+            }
+
+            snapshot.Dispose();
+        }
+
+        private void DestroyFeedbackSnapshotPool()
+        {
+            foreach (var entries in _feedbackSnapshotPool.Values)
+            {
+                foreach (var snapshot in entries)
+                {
+                    snapshot.Dispose();
+                }
+            }
+
+            _feedbackSnapshotPool.Clear();
+            _feedbackSnapshotPoolBytes = 0;
+        }
+
+        // Vulkan core does not permit a sampled depth aspect to alias a depth
+        // attachment that the same draw may write. Preserve the guest's
+        // read-before-write semantics with a private copy for this draw.
+        private void PrepareDepthFeedback(TextureResource[] bindings)
+        {
+            if (!_hasBoundDepth)
+            {
+                return;
+            }
+
+            var depthImage = _imageCache.GetImage(_boundDepth.Image);
+            var attachmentView = _boundDepth.Target.Target.Request.View;
+            var writes = _boundDepthLoadState.AttachmentWriteAspects(_boundDepth.Target.Target.Format);
+            var writableDepth = writes & ImageAspectFlags.DepthBit;
+            if (writableDepth == 0)
+            {
+                return;
+            }
+
+            foreach (var binding in bindings)
+            {
+                if (binding.IsHostMovie || binding.IsStorage || binding.CachedImage is not { } image ||
+                    !ReferenceEquals(image, depthImage) || !ViewsOverlap(binding.Request.View, attachmentView))
+                {
+                    continue;
+                }
+
+                var sampledAspect = ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format)
+                    ? ImageAspectFlags.StencilBit
+                    : ImageAspectFlags.DepthBit;
+                if ((sampledAspect & writableDepth) == 0)
+                {
+                    continue;
+                }
+
+                var snapshot = CreateDepthFeedbackSnapshot(image, sampledAspect);
+                binding.CachedImage = snapshot;
+                binding.Image = snapshot.Backing.Handle;
+                binding.View = snapshot.GetOrCreateView(binding.Request.View);
+                binding.MipViews = [];
+                binding.IsFeedbackSnapshot = true;
+            }
         }
 
         // The layout each binding reads through; a target read by its own draw uses the general layout.
