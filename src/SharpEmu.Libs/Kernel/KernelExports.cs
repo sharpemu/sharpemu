@@ -1,8 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.HLE;
+using System.Text;
 using System.Threading;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -13,6 +14,27 @@ public static class KernelExports
     private static readonly object _coredumpGate = new();
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
+    private static readonly object _processArgsGate = new();
+    private static int _processArgc;
+    private static ulong _processArgvAddress;
+
+    public static void ConfigureProcessArguments(int argc, ulong argvAddress)
+    {
+        lock (_processArgsGate)
+        {
+            _processArgc = argc;
+            _processArgvAddress = argvAddress;
+        }
+    }
+
+    public static void ResetProcessArguments()
+    {
+        lock (_processArgsGate)
+        {
+            _processArgc = 0;
+            _processArgvAddress = 0;
+        }
+    }
 
     private readonly record struct CxaDestructorEntry(
         ulong Function,
@@ -98,6 +120,87 @@ public static class KernelExports
     {
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "iKJMWrAumPE",
+        ExportName = "getargc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc",
+        PreferLle = true)]
+    public static int GetArgc(CpuContext ctx)
+    {
+        int argc;
+        lock (_processArgsGate)
+        {
+            argc = _processArgc;
+        }
+
+        if (argc <= 0)
+        {
+            EnsureProcessArgumentsFallback(ctx);
+            lock (_processArgsGate)
+            {
+                argc = _processArgc > 0 ? _processArgc : 1;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)argc);
+        return argc;
+    }
+
+    [SysAbiExport(
+        Nid = "FJmglmTMdr4",
+        ExportName = "getargv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc",
+        PreferLle = true)]
+    public static int GetArgv(CpuContext ctx)
+    {
+        ulong argvAddress;
+        lock (_processArgsGate)
+        {
+            argvAddress = _processArgvAddress;
+        }
+
+        if (argvAddress == 0)
+        {
+            EnsureProcessArgumentsFallback(ctx);
+            lock (_processArgsGate)
+            {
+                argvAddress = _processArgvAddress;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = argvAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static void EnsureProcessArgumentsFallback(CpuContext ctx)
+    {
+        lock (_processArgsGate)
+        {
+            if (_processArgvAddress != 0)
+            {
+                return;
+            }
+
+            const string defaultImage = "eboot.bin";
+            var encoded = Encoding.UTF8.GetBytes(defaultImage + '\0');
+            var totalSize = 16UL + (ulong)encoded.Length;
+            if (ctx.Memory is IGuestMemoryAllocator allocator &&
+                allocator.TryAllocateGuestMemory(totalSize, 16, out var allocBase))
+            {
+                var stringAddress = allocBase + 16UL;
+                if (ctx.Memory.TryWrite(stringAddress, encoded) &&
+                    ctx.TryWriteUInt64(allocBase, stringAddress) &&
+                    ctx.TryWriteUInt64(allocBase + 8, 0))
+                {
+                    _processArgc = 1;
+                    _processArgvAddress = allocBase;
+                }
+            }
+        }
     }
 
     [SysAbiExport(
