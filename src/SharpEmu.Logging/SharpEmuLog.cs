@@ -195,6 +195,18 @@ public static class SharpEmuLog
         return !IsTrueLike(raw);
     }
 
+    // Reads SHARPEMU_LOG_MAX_BYTES. Plain byte count (e.g. 52428800 for 50 MiB).
+    // Returns 0 (no cap) when the variable is absent, empty, or not a positive integer.
+    private static long ResolveMaxBytesFromEnvironment()
+    {
+        var raw = Environment.GetEnvironmentVariable("SHARPEMU_LOG_MAX_BYTES");
+        return !string.IsNullOrWhiteSpace(raw) &&
+               long.TryParse(raw.Trim(), out var value) &&
+               value > 0
+            ? value
+            : 0;
+    }
+
     private static ISharpEmuLogSink ResolveSinkFromEnvironment()
     {
         var consoleSink = new ConsoleLogSink(
@@ -206,7 +218,11 @@ public static class SharpEmuLog
         {
             try
             {
-                var fileSink = new FileLogSink(logFilePath, append: true, includeTimestamp: true);
+                var fileSink = new FileLogSink(
+                    logFilePath,
+                    append: true,
+                    includeTimestamp: true,
+                    maxBytes: ResolveMaxBytesFromEnvironment());
                 // The file gets every level; the configured minimum only
                 // limits what reaches the console.
                 _fileCapturesAllLevels = true;
