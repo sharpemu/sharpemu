@@ -19,6 +19,9 @@ public static class KernelPthreadExtendedCompatExports
     private const ulong DefaultStackSize = 0x1_00000UL;
     private const ulong NativeGuestStackSize = 0x20_0000UL;
     private const ulong NativeGuestStackStride = 0x100_0000UL;
+    // Solo scheduling is off on a default-initialised pthread_attr_t; a title has to ask for it.
+    private const int DefaultSoloSched = 0;
+
     private const int DefaultInheritSched = 4;
     private const int DefaultSchedPolicy = 1;
     private const int DefaultSchedPriority = DefaultThreadPriority;
@@ -189,7 +192,8 @@ public static class KernelPthreadExtendedCompatExports
         ulong GuardSize,
         int InheritSched,
         int SchedPolicy,
-        int SchedPriority)
+        int SchedPriority,
+        int SoloSched)
     {
         public static PthreadAttrState Default =>
             new(
@@ -200,7 +204,8 @@ public static class KernelPthreadExtendedCompatExports
                 DefaultGuardSize,
                 DefaultInheritSched,
                 DefaultSchedPolicy,
-                DefaultSchedPriority);
+                DefaultSchedPriority,
+                DefaultSoloSched);
     }
 
     [SysAbiExport(
@@ -833,6 +838,66 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    /// <summary>
+    /// Solo scheduling asks the kernel to give the thread a core to itself. SharpEmu maps guest
+    /// threads onto host threads and does not reserve cores, so the attribute has no scheduling
+    /// effect here - but it is a real attribute with a getter, and a title that sets it and reads
+    /// it back must see what it wrote. Storing it is what makes that true; returning a bare
+    /// success without recording the value would leave the getter reporting the default.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "Dk6FC-TI+7Q",
+        ExportName = "scePthreadAttrSetsolosched",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadAttrSetsolosched(CpuContext ctx)
+    {
+        var attrAddress = ctx[CpuRegister.Rdi];
+        var soloSched = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (attrAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        lock (_stateGate)
+        {
+            var state = GetOrCreateAttrStateLocked(attrAddress);
+            _attrStates[attrAddress] = state with { SoloSched = soloSched };
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "9RnL-m0+diQ",
+        ExportName = "scePthreadAttrGetsolosched",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadAttrGetsolosched(CpuContext ctx)
+    {
+        var attrAddress = ctx[CpuRegister.Rdi];
+        var outSoloSchedAddress = ctx[CpuRegister.Rsi];
+        if (attrAddress == 0 || outSoloSchedAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        PthreadAttrState state;
+        lock (_stateGate)
+        {
+            state = GetOrCreateAttrStateLocked(attrAddress);
+        }
+
+        if (!TryWriteInt32(ctx, outSoloSchedAddress, state.SoloSched))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((uint)state.SoloSched);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
