@@ -36,6 +36,8 @@ public sealed partial class DirectExecutionBackend
 
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	private readonly object _knownUnresolvedNidsGate = new();
+	private readonly HashSet<string> _knownUnresolvedNids = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
@@ -571,33 +573,46 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (!dispatchResolved)
 			{
-				LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
-				if (string.Equals(importStubEntry.Nid, "cfwBSQyr5Ys", StringComparison.Ordinal) &&
-					string.Equals(
-						Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),
-						"1",
-						StringComparison.Ordinal) &&
-					Interlocked.Increment(ref _il2CppExceptionDiagnosticCount) <= 4)
+				bool isFirstOccurrence;
+			lock (_knownUnresolvedNidsGate)
+			{
+				isFirstOccurrence = _knownUnresolvedNids.Add(importStubEntry.Nid);
+			}
+
+			if (isFirstOccurrence)
 				{
-					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
-				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
-				if (importStubEntry.Nid == "L-Q3LEjIbgA")
-				{
-					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
+					LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
+					if (string.Equals(importStubEntry.Nid, "cfwBSQyr5Ys", StringComparison.Ordinal) &&
+						string.Equals(
+							Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),
+							"1",
+							StringComparison.Ordinal) &&
+						Interlocked.Increment(ref _il2CppExceptionDiagnosticCount) <= 4)
 					{
-						int num10 = c;
-						return num10.ToString("X2");
-					}));
-					Console.Error.WriteLine($"[LOADER][WARN] map_direct nid raw len={importStubEntry.Nid.Length} chars=[{value18}]");
-					Delegate function;
-					bool value19 = _moduleManager.TryGetFunction(importStubEntry.Nid, out function);
-					ExportedFunction export2;
-					bool value20 = _moduleManager.TryGetExport(importStubEntry.Nid, out export2);
-					Console.Error.WriteLine($"[LOADER][WARN] map_direct lookup with import nid: function={value19}, export={value20}");
-					Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export3) ? $"[LOADER][WARN] Canonical map_direct exists as {export3.LibraryName}:{export3.Name}, target={export3.Target}, ctx_target={cpuContext.TargetGeneration}" : "[LOADER][WARN] Canonical map_direct export lookup also missing");
+						DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
+					}
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+					if (importStubEntry.Nid == "L-Q3LEjIbgA")
+					{
+						string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
+						{
+							int num10 = c;
+							return num10.ToString("X2");
+						}));
+						Console.Error.WriteLine($"[LOADER][WARN] map_direct nid raw len={importStubEntry.Nid.Length} chars=[{value18}]");
+						Delegate function;
+						bool value19 = _moduleManager.TryGetFunction(importStubEntry.Nid, out function);
+						ExportedFunction export2;
+						bool value20 = _moduleManager.TryGetExport(importStubEntry.Nid, out export2);
+						Console.Error.WriteLine($"[LOADER][WARN] map_direct lookup with import nid: function={value19}, export={value20}");
+						Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export3) ? $"[LOADER][WARN] Canonical map_direct exists as {export3.LibraryName}:{export3.Name}, target={export3.Target}, ctx_target={cpuContext.TargetGeneration}" : "[LOADER][WARN] Canonical map_direct export lookup also missing");
+					}
+				}
+				else
+				{
+					Thread.Yield();
 				}
 			}
 			else if (orbisGen2Result != OrbisGen2Result.ORBIS_GEN2_OK)
