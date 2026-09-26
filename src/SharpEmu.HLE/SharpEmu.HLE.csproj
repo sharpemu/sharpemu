@@ -42,6 +42,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
+             Runtime="NET"
              TaskFactory="TaskHostFactory"
              AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
 
