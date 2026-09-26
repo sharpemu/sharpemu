@@ -67,6 +67,45 @@ public sealed partial class DirectExecutionBackend
 		SetUnhandledExceptionFilter(_unhandledFilterStub);
 	}
 
+	/// <summary>
+	/// Finds an FS/GS segment override at the start of a faulting instruction, skipping any
+	/// operand-size prefixes in front of it.
+	///
+	/// The override is not necessarily the first byte. LLVM's TLS general-dynamic relaxation pads
+	/// the sequence, so a guest thread-pointer load arrives as
+	/// <c>66 66 66 64 48 8B 04 25 00 00 00 00</c> — the <c>0x64</c> sits at index 3. Matching only
+	/// the first byte meant this never fired for the encoding shipping titles actually emit, and
+	/// an unpatched TLS access was reported as an ordinary unmapped-memory read instead.
+	/// </summary>
+	internal static bool TryDetectSegmentOverride(
+		ReadOnlySpan<byte> code,
+		out string segment,
+		out int prefixIndex)
+	{
+		prefixIndex = 0;
+		while (prefixIndex < code.Length && code[prefixIndex] == 0x66)
+		{
+			prefixIndex++;
+		}
+
+		if (prefixIndex < code.Length)
+		{
+			switch (code[prefixIndex])
+			{
+				case 0x64:
+					segment = "FS";
+					return true;
+				case 0x65:
+					segment = "GS";
+					return true;
+			}
+		}
+
+		segment = string.Empty;
+		prefixIndex = -1;
+		return false;
+	}
+
 	private unsafe int UnhandledExceptionFilter(void* exceptionInfo)
 	{
 		try
@@ -363,13 +402,11 @@ public sealed partial class DirectExecutionBackend
 					if (TryReadHostBytes(rip, code))
 					{
 						Console.Error.WriteLine("[LOADER][INFO]   Code at RIP: " + BitConverter.ToString(code).Replace("-", " "));
-						if (code[0] == 100)
+						if (TryDetectSegmentOverride(code, out var segment, out var segmentPrefixIndex))
 						{
-							Console.Error.WriteLine("[LOADER][ERROR]   Detected FS segment prefix - TLS access not patched!");
-						}
-						else if (code[0] == 101)
-						{
-							Console.Error.WriteLine("[LOADER][ERROR]   Detected GS segment prefix - TLS access not patched!");
+							Console.Error.WriteLine(
+								$"[LOADER][ERROR]   Detected {segment} segment prefix at byte {segmentPrefixIndex} - " +
+								"TLS access not patched!");
 						}
 						else if (code[0] == 197 || code[0] == 196)
 						{
