@@ -571,7 +571,7 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (!dispatchResolved)
 			{
-				LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
+				LastError = importStubEntry.MissingHleExportError;
 				if (string.Equals(importStubEntry.Nid, "cfwBSQyr5Ys", StringComparison.Ordinal) &&
 					string.Equals(
 						Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),

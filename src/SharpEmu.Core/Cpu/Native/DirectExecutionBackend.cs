@@ -44,6 +44,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public string Nid { get; }
 
+		// Missing imports can be polled millions of times; build this while
+		// setting up the stub instead of concatenating a new error per dispatch.
+		public string MissingHleExportError { get; }
+
 		public ExportedFunction? Export { get; }
 
 		// Precomputed per-import classification: DispatchImport runs for
@@ -71,6 +75,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			Address = address;
 			Nid = nid;
+			MissingHleExportError = "Missing HLE export for NID: " + nid;
 			Export = export;
 			IsLeaf = isLeaf;
 			IsNoBlockLeaf = isNoBlockLeaf;
