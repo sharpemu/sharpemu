@@ -138,6 +138,79 @@ public sealed class Gen5Float16ArithmeticTests
             error);
     }
 
+    // The native GLSL conversions are used only when the host measured them bit-exact on the
+    // device; otherwise the branchless integer sequences (FindUMsb = GLSL 75) stay in place.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackedFloat16UsesNativeHalfConversionOnlyWhenTheHostMeasuredItExact(bool nativeExact)
+    {
+        var program = Decode(
+        [
+            (0x33u << 26) | (0x10u << 16) | 1u,
+            0xFFu | (258u << 9),
+            0x00002C00u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal("VPkMulF16", program.Instructions[0].Opcode);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, SharpEmu.ShaderCompiler.Resources.ShaderStage.Compute, 0, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            NativeHalfConversionExact = nativeExact,
+        };
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var glsl = ReadGlslExtOpcodes(shader.Spirv);
+
+        // 62 = UnpackHalf2x16, 58 = PackHalf2x16, 75 = FindUMsb.
+        if (nativeExact)
+        {
+            Assert.Contains(62u, glsl);
+            Assert.Contains(58u, glsl);
+        }
+        else
+        {
+            Assert.DoesNotContain(62u, glsl);
+            Assert.DoesNotContain(58u, glsl);
+            Assert.Contains(75u, glsl);
+        }
+    }
+
+    // The GLSL.std.450 instruction number of every ExtInst in the module.
+    private static IReadOnlyList<uint> ReadGlslExtOpcodes(byte[] spirv)
+    {
+        var opcodes = new List<uint>();
+        foreach (var words in ReadInstructionWords(spirv))
+        {
+            if ((ushort)words[0] == (ushort)SpirvOp.ExtInst && words.Length >= 5)
+            {
+                opcodes.Add(words[4]);
+            }
+        }
+
+        return opcodes;
+    }
+
+    private static IEnumerable<uint[]> ReadInstructionWords(byte[] spirv)
+    {
+        Assert.Equal(0x07230203u, BinaryPrimitives.ReadUInt32LittleEndian(spirv));
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var header = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset));
+            var wordCount = checked((int)(header >> 16));
+            Assert.InRange(wordCount, 1, (spirv.Length - offset) / sizeof(uint));
+            var words = new uint[wordCount];
+            for (var index = 0; index < wordCount; index++)
+            {
+                words[index] = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + index * sizeof(uint)));
+            }
+
+            yield return words;
+            offset += wordCount * sizeof(uint);
+        }
+    }
+
     private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
     {
         var memory = new TestCpuMemory(ShaderAddress, words.Count * sizeof(uint));

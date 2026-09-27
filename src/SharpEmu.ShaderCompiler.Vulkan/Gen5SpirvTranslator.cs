@@ -70,6 +70,7 @@ public static partial class Gen5SpirvTranslator
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
         private readonly bool _enableGraphicsSubgroupOperations;
+        private readonly bool _nativeHalfConversionExact;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
 

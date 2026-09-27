@@ -1660,10 +1660,17 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Packed f16 (VOP3P) arithmetic. Each source register holds two f16 values,
-        // one per result lane. Every f16<->f32 conversion is done with the explicit
-        // integer sequences below (EmitHalfToFloat / EmitFloatToHalf) instead of
-        // GLSL UnpackHalf2x16 / PackHalf2x16, whose subnormal and rounding behaviour
-        // is implementation-defined without float-controls execution modes. The two
+        // one per result lane. Every f16<->f32 conversion goes through
+        // EmitHalfToFloat / EmitFloatToHalf, which default to the explicit integer
+        // sequences below rather than GLSL UnpackHalf2x16 / PackHalf2x16, whose
+        // subnormal and rounding behaviour is implementation-defined without
+        // float-controls execution modes. The host switches those two helpers to the
+        // native ext instructions (ShaderCompileRequest.NativeHalfConversionExact) only
+        // after measuring them bit-exact against these sequences on the running device,
+        // because a device capability bit does not promise that: MoltenVK on Apple
+        // silicon reports shaderRoundingModeRTEFloat16 and
+        // shaderSignedZeroInfNanPreserveFloat16 yet not shaderDenormPreserveFloat16.
+        // The two
         // lanes are computed independently: each operand half is widened exactly to
         // f32, op_sel/op_sel_hi pick the source half and neg_lo/neg_hi negate it, the
         // op runs in f32, and the result is rounded back to f16 with round-to-nearest-
@@ -2038,8 +2045,18 @@ public static partial class Gen5SpirvTranslator
         // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
         // Mirrors the branchless HalfToFloat reference validated against System.Half.
+        // With NativeHalfConversionExact the same value comes from GLSL UnpackHalf2x16,
+        // which the driver lowers to one hardware convert instead of ~20 integer ops.
         private uint EmitHalfToFloat(uint halfBits)
         {
+            if (_nativeHalfConversionExact)
+            {
+                var unpacked = Ext(62, _vec2Type, BitwiseAnd(halfBits, UInt(0xFFFF)));
+                return Bitcast(
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 0));
+            }
+
             var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
             var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
             var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
@@ -2069,8 +2086,19 @@ public static partial class Gen5SpirvTranslator
         // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to
         // nearest even (subnormals, overflow-to-Inf and NaN/Inf handled). Mirrors the
         // branchless FloatToHalf reference validated exhaustively against System.Half.
+        // With NativeHalfConversionExact the same value comes from GLSL PackHalf2x16.
         private uint EmitFloatToHalf(uint bits)
         {
+            if (_nativeHalfConversionExact)
+            {
+                var pair = _module.AddInstruction(
+                    SpirvOp.CompositeConstruct,
+                    _vec2Type,
+                    Bitcast(_floatType, bits),
+                    Float(0));
+                return BitwiseAnd(Ext(58, _uintType, pair), UInt(0xFFFF));
+            }
+
             var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
             var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
 

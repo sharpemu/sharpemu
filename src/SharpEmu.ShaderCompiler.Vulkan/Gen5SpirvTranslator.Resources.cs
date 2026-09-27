@@ -111,6 +111,7 @@ public static partial class Gen5SpirvTranslator
                 _stage == Gen5SpirvStage.Pixel &&
                 request.Program.Instructions.Any(static instruction => instruction.Control is Gen5ExportControl { ValidMask: true });
             _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
+            _nativeHalfConversionExact = request.NativeHalfConversionExact;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
