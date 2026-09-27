@@ -15,7 +15,7 @@ internal static class GuestRedZonePatcher
 {
     private const int GuestRedZoneBytes = 128;
     private const int MinimumJumpBytes = 5;
-    private const int EstimatedTrampolineBytesPerSite = 48;
+    private const int EstimatedTrampolineBytesPerSite = 64;
     private const ulong PageSize = 0x1000;
     private const ulong AllocationAlignment = 0x10000;
     private const ulong MaximumRelativeJumpDistance = 0x7FFF_FFFF;
@@ -184,6 +184,7 @@ internal static class GuestRedZonePatcher
                     redZoneFunctionCount++;
                 }
                 var branchTargets = CollectBranchTargets(decoded);
+                var firstUnpatchedIndex = 0;
                 for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
                 {
                     var instruction = decoded[instructionIndex].Instruction;
@@ -191,12 +192,13 @@ internal static class GuestRedZonePatcher
                     if ((!isShaSite &&
                          ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
                           !IsFaultableGuestMemoryInstruction(instruction))) ||
-                        !TryBuildPatchSpan(decoded, instructionIndex, branchTargets, out var span))
+                        !TryBuildPatchSpan(decoded, instructionIndex, firstUnpatchedIndex, branchTargets, out var span, out var lastIndex))
                     {
                         continue;
                     }
 
                     sites.Add(span);
+                    firstUnpatchedIndex = lastIndex + 1;
                     if (splitVectorStores)
                     {
                         vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
@@ -205,7 +207,7 @@ internal static class GuestRedZonePatcher
                     {
                         shaInstructionCount += span.Instructions.Count(static instruction => ShaInstructionRewrite.CanRewrite(instruction));
                     }
-                    instructionIndex += span.Instructions.Count - 1;
+                    instructionIndex = lastIndex;
                 }
             }
         }
@@ -274,23 +276,74 @@ internal static class GuestRedZonePatcher
         return targets;
     }
 
+    // A short faulting access next to a branch or a branch target has no five
+    // bytes of its own to hold the jump. Such a span may start a few
+    // instructions earlier, or end with the branch itself.
+    private const int MaximumLeadInstructions = 3;
+
     private static bool TryBuildPatchSpan(
         IReadOnlyList<DecodedInstruction> decoded,
-        int startIndex,
+        int faultIndex,
+        int firstUnpatchedIndex,
         IReadOnlySet<ulong> branchTargets,
-        out PatchSite site)
+        out PatchSite site,
+        out int lastIndex)
     {
-        var instructions = new List<Instruction>(3);
+        for (var lead = 0; lead <= MaximumLeadInstructions; lead++)
+        {
+            var startIndex = faultIndex - lead;
+            if (startIndex < firstUnpatchedIndex)
+            {
+                break;
+            }
+
+            if (TryBuildPatchSpanFrom(decoded, startIndex, faultIndex, branchTargets, out site, out lastIndex))
+            {
+                return true;
+            }
+        }
+
+        site = default;
+        lastIndex = -1;
+        return false;
+    }
+
+    private static bool TryBuildPatchSpanFrom(
+        IReadOnlyList<DecodedInstruction> decoded,
+        int startIndex,
+        int faultIndex,
+        IReadOnlySet<ulong> branchTargets,
+        out PatchSite site,
+        out int lastIndex)
+    {
+        site = default;
+        lastIndex = -1;
+        var instructions = new List<Instruction>(4);
+        Instruction? terminalBranch = null;
         var byteLength = 0;
-        for (var index = startIndex; index < decoded.Count && byteLength < MinimumJumpBytes; index++)
+        var index = startIndex;
+        for (; index < decoded.Count && (index <= faultIndex || byteLength < MinimumJumpBytes); index++)
         {
             var instruction = decoded[index].Instruction;
-            if (instruction.FlowControl != FlowControl.Next ||
-                (index != startIndex && branchTargets.Contains(instruction.IP)) ||
+            if ((index != startIndex && branchTargets.Contains(instruction.IP)) ||
                 TouchesStackPointer(instruction))
             {
-                site = default;
                 return false;
+            }
+
+            if (instruction.FlowControl != FlowControl.Next)
+            {
+                // Only a direct jump after the faulting access can close the span:
+                // the trampoline restores the stack pointer before it runs.
+                if (index <= faultIndex || !IsRelocatableDirectBranch(instruction))
+                {
+                    return false;
+                }
+
+                terminalBranch = instruction;
+                byteLength += instruction.Length;
+                index++;
+                break;
             }
 
             instructions.Add(instruction);
@@ -299,13 +352,18 @@ internal static class GuestRedZonePatcher
 
         if (byteLength < MinimumJumpBytes)
         {
-            site = default;
             return false;
         }
 
-        site = new PatchSite(decoded[startIndex].Instruction.IP, byteLength, instructions);
+        lastIndex = index - 1;
+        site = new PatchSite(decoded[startIndex].Instruction.IP, byteLength, instructions, terminalBranch);
         return true;
     }
+
+    private static bool IsRelocatableDirectBranch(in Instruction instruction) =>
+        instruction.FlowControl is FlowControl.ConditionalBranch or FlowControl.UnconditionalBranch &&
+        instruction.OpCount == 1 &&
+        instruction.GetOpKind(0) is OpKind.NearBranch16 or OpKind.NearBranch32 or OpKind.NearBranch64;
 
     internal static bool UsesRedZone(in Instruction instruction)
     {
@@ -407,7 +465,25 @@ internal static class GuestRedZonePatcher
         }
 
         var relocated = writer.ToArray();
-        var trampolineLength = checked(5 + relocated.Length + 8 + 5);
+        var branchAddress = relocatedAddress + (ulong)relocated.Length + 8;
+        var relocatedBranch = Array.Empty<byte>();
+        if (site.TerminalBranch is { } branch)
+        {
+            var branchWriter = new ListCodeWriter();
+            if (!BlockEncoder.TryEncode(
+                    64,
+                    new InstructionBlock(branchWriter, [branch], branchAddress),
+                    out _,
+                    out _,
+                    BlockEncoderOptions.None))
+            {
+                return false;
+            }
+
+            relocatedBranch = branchWriter.ToArray();
+        }
+
+        var trampolineLength = checked(5 + relocated.Length + 8 + relocatedBranch.Length + 5);
         if (trampolineCursor > trampolineEnd || (ulong)trampolineLength > trampolineEnd - trampolineCursor)
         {
             return false;
@@ -431,7 +507,10 @@ internal static class GuestRedZonePatcher
         trampoline[restoreOffset + 5] = 0;
         trampoline[restoreOffset + 6] = 0;
         trampoline[restoreOffset + 7] = 0;
-        var returnJumpOffset = restoreOffset + 8;
+        // LEA leaves the flags alone, so a conditional branch still sees the
+        // result of the relocated compare.
+        relocatedBranch.CopyTo(trampoline, restoreOffset + 8);
+        var returnJumpOffset = restoreOffset + 8 + relocatedBranch.Length;
         if (!TryWriteRelativeJump(
                 trampoline.AsSpan(returnJumpOffset, 5),
                 trampolineCursor + (ulong)returnJumpOffset,
@@ -588,7 +667,11 @@ internal static class GuestRedZonePatcher
 
     private readonly record struct DecodedInstruction(Instruction Instruction);
 
-    private readonly record struct PatchSite(ulong Address, int ByteLength, IList<Instruction> Instructions);
+    private readonly record struct PatchSite(
+        ulong Address,
+        int ByteLength,
+        IList<Instruction> Instructions,
+        Instruction? TerminalBranch = null);
 
     internal readonly record struct PatchResult
     {
