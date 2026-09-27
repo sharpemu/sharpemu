@@ -546,8 +546,11 @@ public static partial class AgcExports
 
         var increment = (uint)(incrementRaw & 0xFF);
         var writeConfirm = (uint)(writeConfirmRaw & 0xFF);
+        // A zero destination is legal: titles emit the packet into a template
+        // and set the address later with sceAgcWriteDataPatchSetAddressOrOffset.
+        // Rejecting it returned null, and patching that relocated null pointer
+        // wrote garbage into the label the packet was meant to clear.
         if (commandBufferAddress == 0 ||
-            destinationAddress == 0 ||
             dataAddress == 0 ||
             dwordCount > 0x3FFD)
         {
