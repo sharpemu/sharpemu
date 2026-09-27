@@ -166,6 +166,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     // Metal has no 64-bit workgroup atomics here; keep the non-atomic 32-bit pair.
     bool IShaderPipelineHost.SharedInt64AtomicsEnabled => false;
+    // The Metal backend runs no f16 conversion probe, so it keeps the exact emulation.
+    bool IShaderPipelineHost.NativeHalfConversionExact => false;
 
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 

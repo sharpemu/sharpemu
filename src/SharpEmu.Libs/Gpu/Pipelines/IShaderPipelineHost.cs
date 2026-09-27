@@ -46,6 +46,10 @@ internal interface IShaderPipelineHost
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
 
+    // True when this device's GLSL UnpackHalf2x16 / PackHalf2x16 were measured bit-exact
+    // against the translator's own f16 conversion. False for every host that did not measure it.
+    bool NativeHalfConversionExact => false;
+
     RenderHostLimits Limits { get; }
 
     // The sample counts a pipeline without attachments can rasterize at.

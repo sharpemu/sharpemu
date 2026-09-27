@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -88,6 +89,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
+            ProbeNativeHalfConversion();
             _vulkanReady = true;
             AttachGuestGpuMemory();
             Console.Error.WriteLine(
@@ -704,6 +706,37 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return compute;
+        }
+
+        // Measures GLSL UnpackHalf2x16 / PackHalf2x16 against the translator's own f16 conversion
+        // once per device, before any guest shader is compiled, so the answer is constant for the
+        // process. The spec does not promise it: MoltenVK reports RTE rounding and signed-zero /
+        // Inf / NaN preservation for f16 yet not denorm preservation, so only the device can say.
+        // Never fatal - anything that goes wrong leaves the exact emulation in place.
+        private void ProbeNativeHalfConversion()
+        {
+            if (Interlocked.Exchange(ref _nativeHalfConversionProbed, 1) != 0)
+            {
+                return;
+            }
+
+            var forced = NativeHalfConversionProbe.ReadOverride();
+            if (forced is not null)
+            {
+                Volatile.Write(ref _nativeHalfConversionExact, forced.Value ? 1 : 0);
+                Console.Error.WriteLine(
+                    $"[VK][F16] native half conversion exact={forced.Value} mismatches=unprobed tested=0 " +
+                    "(SHARPEMU_NATIVE_HALF)");
+                return;
+            }
+
+            var result = NativeHalfConversionProbe.Run(_deviceInfo, _scheduler, CurrentRecordingBuffer);
+            Volatile.Write(ref _nativeHalfConversionExact, result.Exact ? 1 : 0);
+            Console.Error.WriteLine(
+                $"[VK][F16] native half conversion exact={result.Exact} " +
+                $"mismatches={result.Mismatches} tested={result.Tested}" +
+                (result.Note is null ? string.Empty : $" note={result.Note}") +
+                (result.Detail is null ? string.Empty : $" first={result.Detail}"));
         }
 
         private bool _supportsFragmentShaderBarycentric;

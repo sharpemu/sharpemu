@@ -96,6 +96,14 @@ internal static unsafe partial class VulkanVideoPresenter
             (ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages),
             Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS"));
 
+    private static int _nativeHalfConversionExact;
+    private static int _nativeHalfConversionProbed;
+
+    // Set once per process by the device-setup probe: GLSL UnpackHalf2x16 / PackHalf2x16 produced
+    // exactly what the translator's integer f16 conversion produces, for every test vector. False
+    // until then, so a device that is never probed keeps the exact emulation.
+    internal static bool NativeHalfConversionExact => Volatile.Read(ref _nativeHalfConversionExact) != 0;
+
     private static void SetNativeSubgroupCapabilities(uint subgroupSize, ShaderStageFlags supportedStages)
     {
         Volatile.Write(ref _nativeSubgroupShaderStages, (int)supportedStages);

@@ -92,6 +92,8 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
 
+        bool IShaderPipelineHost.NativeHalfConversionExact => NativeHalfConversionExact;
+
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
         SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts => _noAttachmentSampleCounts;
