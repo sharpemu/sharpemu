@@ -5566,7 +5566,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static ulong MapGuestThreadAffinity(ulong guestAffinityMask)
 	{
-		if (guestAffinityMask == 0 || guestAffinityMask == ulong.MaxValue)
+		if (guestAffinityMask == 0 || guestAffinityMask == ulong.MaxValue || !GuestAffinityEnabled)
 		{
 			return 0;
 		}
@@ -5626,9 +5626,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	/// <summary>
-	/// Host lanes kept away from guest threads. Measured on a 16-lane host with
-	/// Demon's Souls: reserving 0/4/6/8 lanes gave 6.08/6.78/7.20/5.62 fps, so
-	/// the useful range is a bit over a third of the machine — too few and the
+	/// Guest affinity is not applied to host threads unless
+	/// SHARPEMU_GUEST_AFFINITY=1. A console title pins one spinning worker per
+	/// dedicated core; on a shared host, pinning traps its renderer and any lock
+	/// holder on a lane next to a busy spinner of equal priority, where it waits
+	/// out whole scheduler quanta. Measured with Demon's Souls on a 16-lane host:
+	/// intro 10.6 → 44.7 fps and menus 11.6 → 47.5 fps with pinning off.
+	/// </summary>
+	private static readonly bool GuestAffinityEnabled =
+		Environment.GetEnvironmentVariable("SHARPEMU_GUEST_AFFINITY") == "1";
+
+	/// <summary>
+	/// Host lanes kept away from pinned guest threads. Measured on a 16-lane host
+	/// with Demon's Souls: reserving 0/4/6/8 lanes gave 6.08/6.78/7.20/5.62 fps,
+	/// so the useful range is a bit over a third of the machine — too few and the
 	/// emulator is crowded out, too many and the guest cannot make progress.
 	/// </summary>
 	private static readonly int EmulatorReservedLanes =
