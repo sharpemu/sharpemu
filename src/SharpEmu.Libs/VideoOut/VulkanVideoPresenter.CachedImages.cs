@@ -802,7 +802,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private (VkBuffer Buffer, DeviceMemory Memory) CreateTextureStagingBuffer(byte[] pixels, string debugName)
+        private (VkBuffer Buffer, DeviceMemory Memory) CreateTextureStagingBuffer(ReadOnlySpan<byte> pixels, string debugName)
         {
             var buffer = CreateHostBuffer(pixels, BufferUsageFlags.TransferSrcBit, out var memory, out _);
             SetDebugName(ObjectType.Buffer, buffer.Handle, debugName);

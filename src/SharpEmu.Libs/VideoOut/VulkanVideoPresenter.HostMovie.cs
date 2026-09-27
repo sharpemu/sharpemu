@@ -117,12 +117,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _hostMovieChromaImageDstSelect;
         private bool _hostMovieChromaImageInitialized;
         private byte[]? _hostMovieFramePixels;
-        private byte[]? _hostMovieLumaPixels;
-        private byte[]? _hostMovieChromaPixels;
         private uint _hostMovieFrameWidth;
         private uint _hostMovieFrameHeight;
         private long _hostMovieFrameSerial;
-        private long _hostMovieConvertedFrameSerial = -1;
         private long _hostMovieLumaUploadedFrameSerial = -1;
         private long _hostMovieChromaUploadedFrameSerial = -1;
         private string? _hostMovieFramePath;
@@ -163,7 +160,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 _hostMovieChromaTextureAddress = 0;
                 _hostMovieLumaDstSelect = 0;
                 _hostMovieChromaDstSelect = 0;
-                _hostMovieConvertedFrameSerial = -1;
                 _hostMovieLumaUploadedFrameSerial = -1;
                 _hostMovieChromaUploadedFrameSerial = -1;
             }
@@ -299,9 +295,15 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawTexture texture,
             int plane)
         {
-            EnsureHostMovieYuvFrame();
             var isLuma = plane == 0;
-            var pixels = isLuma ? _hostMovieLumaPixels! : _hostMovieChromaPixels!;
+            var frame = _hostMovieFramePixels ??
+                throw new InvalidOperationException("Host movie frame is unavailable.");
+            var lumaLength = HostMovieYuv420.LumaLength(_hostMovieFrameWidth, _hostMovieFrameHeight);
+            var pixels = isLuma
+                ? frame.AsSpan(0, lumaLength)
+                : frame.AsSpan(
+                    lumaLength,
+                    HostMovieYuv420.ChromaLength(_hostMovieFrameWidth, _hostMovieFrameHeight));
             var width = isLuma
                 ? _hostMovieFrameWidth
                 : (_hostMovieFrameWidth + 1) / 2;
@@ -347,93 +349,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 SamplerState = texture.Sampler,
             };
         }
-
-        private void EnsureHostMovieYuvFrame()
-        {
-            if (_hostMovieConvertedFrameSerial == _hostMovieFrameSerial)
-            {
-                return;
-            }
-
-            var bgra = _hostMovieFramePixels ??
-                throw new InvalidOperationException("Host movie frame is unavailable.");
-            var width = checked((int)_hostMovieFrameWidth);
-            var height = checked((int)_hostMovieFrameHeight);
-            var chromaWidth = (width + 1) / 2;
-            var chromaHeight = (height + 1) / 2;
-            if (_hostMovieLumaPixels?.Length != width * height)
-            {
-                _hostMovieLumaPixels = GC.AllocateUninitializedArray<byte>(width * height);
-            }
-            if (_hostMovieChromaPixels?.Length != chromaWidth * chromaHeight * 2)
-            {
-                _hostMovieChromaPixels =
-                    GC.AllocateUninitializedArray<byte>(chromaWidth * chromaHeight * 2);
-            }
-
-            ConvertBgraToYuv420(
-                bgra,
-                width,
-                height,
-                _hostMovieLumaPixels,
-                _hostMovieChromaPixels);
-            _hostMovieConvertedFrameSerial = _hostMovieFrameSerial;
-        }
-
-        internal static void ConvertBgraToYuv420(
-            ReadOnlySpan<byte> bgra,
-            int width,
-            int height,
-            Span<byte> luma,
-            Span<byte> chroma)
-        {
-            var chromaWidth = (width + 1) / 2;
-            for (var y = 0; y < height; y++)
-            {
-                for (var x = 0; x < width; x++)
-                {
-                    var source = (y * width + x) * 4;
-                    var b = bgra[source];
-                    var g = bgra[source + 1];
-                    var r = bgra[source + 2];
-                    luma[y * width + x] = ClampByte(
-                        (54 * r + 183 * g + 19 * b + 128) >> 8);
-                }
-            }
-
-            for (var y = 0; y < height; y += 2)
-            {
-                for (var x = 0; x < width; x += 2)
-                {
-                    var red = 0;
-                    var green = 0;
-                    var blue = 0;
-                    var samples = 0;
-                    for (var sampleY = y; sampleY < Math.Min(y + 2, height); sampleY++)
-                    {
-                        for (var sampleX = x; sampleX < Math.Min(x + 2, width); sampleX++)
-                        {
-                            var source = (sampleY * width + sampleX) * 4;
-                            blue += bgra[source];
-                            green += bgra[source + 1];
-                            red += bgra[source + 2];
-                            samples++;
-                        }
-                    }
-
-                    red /= samples;
-                    green /= samples;
-                    blue /= samples;
-                    var destination = ((y / 2) * chromaWidth + x / 2) * 2;
-                    chroma[destination] = ClampByte(
-                        ((128 * red - 116 * green - 12 * blue + 128) >> 8) + 128);
-                    chroma[destination + 1] = ClampByte(
-                        ((-29 * red - 99 * green + 128 * blue + 128) >> 8) + 128);
-                }
-            }
-        }
-
-        private static byte ClampByte(int value) => (byte)Math.Clamp(value, 0, 255);
 
         private void EnsureHostMovieImages(
             uint lumaWidth,
