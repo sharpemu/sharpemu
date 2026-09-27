@@ -116,6 +116,9 @@ public sealed class RuntimeValueEvaluator
         {
             case ScalarValueKind.Undefined:
                 return false;
+            case ScalarValueKind.MemoryAperture:
+                result = Gen5InlineConstants.DecodeAperture64((uint)value.Payload) >> 32;
+                return true;
             case ScalarValueKind.UserData:
             {
                 var register = value.UserDataRegister;
@@ -235,7 +238,9 @@ public sealed class RuntimeValueEvaluator
             var size = stride == 0 ? (ulong)(uint)records : (ulong)stride * (uint)records;
             if (aligned > size || size - aligned < sizeof(uint))
             {
-                return false;
+                // An unbound (empty) V# reads as zero; overrunning a bound buffer stays a failure.
+                result = 0;
+                return (uint)records == 0;
             }
 
             address = ((baseAddress & ~3ul) + byteOffset) & ~3ul;
@@ -354,7 +359,10 @@ public sealed class RuntimeValueEvaluator
             {
                 for (var index = 0; index < words.Length; index++)
                 {
-                    if (!evaluator.Evaluate(source.Dwords[index], out words[index])) return false;
+                    if (!evaluator.Evaluate(source.Dwords[index], out words[index]))
+                    {
+                        return false;
+                    }
                 }
             }
 

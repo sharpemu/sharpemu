@@ -44,6 +44,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public bool GraphicsSubgroupOperationsEnabled => true;
 
+    public bool SharedInt64AtomicsEnabled => false;
+
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
     public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping)

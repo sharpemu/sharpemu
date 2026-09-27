@@ -41,6 +41,8 @@ internal sealed class FailingHostViews : IHostViewMemory
 
     public Action<ulong, ulong>? BeforeReserveHole { get; set; }
 
+    public Func<ulong, ulong, bool>? FailReserveHoleWhen { get; set; }
+
     public Action<ulong, ulong>? BeforeChangeAccess { get; set; }
 
     public ulong PageSize => _inner.PageSize;
@@ -69,6 +71,8 @@ internal sealed class FailingHostViews : IHostViewMemory
     public ulong ReserveHole(ulong address, ulong size)
     {
         BeforeReserveHole?.Invoke(address, size);
+        if (FailReserveHoleWhen?.Invoke(address, size) == true)
+            return 0;
         return ShouldFail(Op.ReserveHole) ? 0 : _inner.ReserveHole(address, size);
     }
 

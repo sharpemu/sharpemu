@@ -18,7 +18,12 @@ public static partial class HttpExports
 
     private sealed record HttpContext(int NetMemoryId, int SslContextId, ulong PoolSize);
 
-    private sealed record HttpTemplate(int ContextId, ulong UserAgentAddress, int HttpVersion, bool AutoProxyConfig);
+    private sealed record HttpTemplate(
+        int ContextId,
+        ulong UserAgentAddress,
+        int HttpVersion,
+        bool AutoProxyConfig,
+        uint ConnectTimeoutMicroseconds = 30_000_000);
 
     [SysAbiExport(
         Nid = "A9cVMUtEp4Y",
@@ -76,6 +81,30 @@ public static partial class HttpExports
         return Templates.TryRemove(templateId, out _)
             ? ctx.SetReturn(0)
             : ctx.SetReturn(HttpErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "0S9tTH0uqTU",
+        ExportName = "sceHttpSetConnectTimeOut",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetConnectTimeOut(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var timeoutMicroseconds = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (timeoutMicroseconds == 0)
+        {
+            return ctx.SetReturn(HttpErrorInvalidValue);
+        }
+
+        if (!Templates.TryGetValue(id, out var template))
+        {
+            return ctx.SetReturn(HttpErrorInvalidId);
+        }
+
+        Templates[id] = template with { ConnectTimeoutMicroseconds = timeoutMicroseconds };
+        TraceHttp("set_connect_timeout", id, timeoutMicroseconds, 0, 0, 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(

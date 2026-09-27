@@ -464,6 +464,7 @@ internal static class RenderPhaseProfile
 
         ReportImageUploads();
         BufferUploadProfile.Report();
+        Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
         SharpEmu.HLE.GpuMemory.GpuMemoryAccessProfile.WriteReport();

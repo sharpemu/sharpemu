@@ -965,6 +965,8 @@ public static class AmprExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    private static int _unknownReadFileIdWarnings;
+
     private static int CompleteReadFileRecord(CpuContext ctx, ulong commandBuffer, ReadFileCommand command)
     {
         var fileId = command.FileId;
@@ -982,6 +984,13 @@ public static class AmprExports
 
             if (!AmprFileRegistry.TryGetHostPath(fileId, out hostPath))
             {
+                // An unknown id stalls the guest's stream silently, so warn even without tracing.
+                if (Interlocked.Increment(ref _unknownReadFileIdWarnings) <= 16)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] ampr.read_unknown_file_id id=0x{fileId:X8} size=0x{size:X} offset=0x{fileOffset:X}");
+                }
+
                 TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }

@@ -144,6 +144,15 @@ public sealed class Gen5ImageTests
         Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
     }
 
+    [Fact]
+    public void ImageGatherCompareLzUsesNativeDepthGather()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageGather4CLz", dimension: 1, unifiedFormat: 22u));
+
+        Assert.Contains(instructions, item => item.Opcode == SpirvOp.ImageDrefGather);
+    }
+
     [Theory]
     [InlineData(0xFACu, 0xFu, 4, 5, 6, 7)]
     [InlineData(0x9F5u, 0xFu, 7, 4, 5, 6)]

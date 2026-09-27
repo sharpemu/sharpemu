@@ -198,21 +198,6 @@ public static class PadExports
             : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
 
-    // Orientation is not tracked yet (ScePadData reports the identity quaternion),
-    // so there is nothing to reset; titles recalibrate through this on pause/resume.
-    [SysAbiExport(
-        Nid = "rIZnR6eSpvk",
-        ExportName = "scePadResetOrientation",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libScePad")]
-    public static int PadResetOrientation(CpuContext ctx)
-    {
-        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
-    }
-
     [SysAbiExport(
         Nid = "gjP9-KQzoUk",
         ExportName = "scePadGetControllerInformation",
@@ -681,6 +666,32 @@ public static class PadExports
 
         HostPlatform.Current.Input.ResetLightbar();
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "rIZnR6eSpvk",
+        ExportName = "scePadResetOrientation",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadResetOrientation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return IsPrimaryPadHandle(handle)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+    }
+
+    [SysAbiExport(
+        Nid = "fCWdlnmB1Ks",
+        ExportName = "scePadIsRemoteController",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadIsRemoteController(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return IsPrimaryPadHandle(handle)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
 
     private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)

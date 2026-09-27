@@ -3,6 +3,7 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
@@ -502,6 +503,42 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void RuntimeScalarBufferLoad_UsesDeviceAddresses()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 8, count: 4, dynamicOffsetRegister: 2),
+            ScalarBufferLoad(8, 8, destination: 12, count: 1),
+            EndProgram(16));
+        var plan = Extract(program);
+
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.Empty(plan.BufferCandidateTables);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        Assert.Equal(BufferDescriptorProvenance.Runtime, plan.Memory[index].BufferDescriptor!.Provenance);
+        Assert.Equal(MemoryAccessInfo.NoResource, plan.Memory[index].Resource);
+
+        var request = Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    [Fact]
+    public void UnboundedRuntimeFormattedBufferLoad_UsesNullReadFallback()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 8, count: 4, dynamicOffsetRegister: 2),
+            ScalarBufferLoad(8, 8, destination: 12, count: 1),
+            BufferLoad(16, 8, formatted: true),
+            EndProgram(20));
+        var plan = Extract(program);
+
+        Assert.Empty(plan.BufferCandidateTables);
+        var request = Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    [Fact]
     public void PhiValidation()
     {
         var program = Program(
@@ -605,7 +642,7 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void ResourceLimits_FailBeforeAnyTableIsWritten()
+    public void BuffersPastTheBindingBudget_ReadTheirDescriptorsOnTheDevice()
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -622,8 +659,11 @@ public sealed class ResourceTrackerTests
         }
 
         instructions.Add(EndProgram(pc));
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(Program([.. instructions])));
-        Assert.Contains("buffer resource limit exceeded", error.Message);
+        var plan = Extract(Program([.. instructions]));
+
+        Assert.Equal(ShaderResourceInfo.MaxBuffers, plan.Info.Buffers.Count);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.Single(plan.Memory.Entries, memory => memory.DeviceDescriptor);
     }
 
     [Fact]

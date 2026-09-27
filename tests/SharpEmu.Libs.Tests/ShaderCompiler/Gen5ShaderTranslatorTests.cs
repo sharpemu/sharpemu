@@ -12,6 +12,106 @@ public sealed class Gen5ShaderTranslatorTests
 {
     private const ulong ProgramAddress = 0x1_0000_0000;
 
+    [Fact]
+    public void Vop2OpcodeZeroDecodesAsNoop()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0x00000000u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Vop2, instruction.Encoding);
+        Assert.Equal("VNop", instruction.Opcode);
+        Assert.Equal(0u, instruction.Pc);
+    }
+
+    [Fact]
+    public void Vop2FmamkF16ConsumesLiteralDword()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0x6F104E10u, 0x3C003C00u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Vop2, instruction.Encoding);
+        Assert.Equal("VFmaMkF16", instruction.Opcode);
+        Assert.Equal(2, instruction.Words.Count);
+        Assert.Equal(3, instruction.Sources.Count);
+        Assert.Equal(Gen5OperandKind.LiteralConstant, instruction.Sources[1].Kind);
+        Assert.Equal(0x3C003C00u, instruction.Sources[1].Value);
+    }
+
+    [Fact]
+    public void Sop2ScalarFloatSubtractDecodes()
+    {
+        const uint instructionWord =
+            (2u << 30) | (0x41u << 23) | (3u << 16) | (2u << 8) | 1u;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, instructionWord, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Sop2, instruction.Encoding);
+        Assert.Equal("SSubF32", instruction.Opcode);
+        Assert.Equal(3u, instruction.Destinations[0].Value);
+    }
+
+    [Fact]
+    public void ScalarScratchStoreDwordx2DecodesAsStore()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0xC59B2040u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Smrd, instruction.Encoding);
+        Assert.Equal("ScratchStoreDwordx2", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(4, instruction.Sources.Count);
+        Assert.Equal(32u, instruction.Sources[0].Value);
+        Assert.Equal(54u, instruction.Sources[1].Value);
+        Assert.Equal(55u, instruction.Sources[2].Value);
+        Assert.Equal(64u, instruction.Sources[3].Value);
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(32u, control.ScalarAddress);
+        Assert.Equal(54u, control.SourceVectorRegister);
+        Assert.Equal(64u, control.DynamicOffsetRegister);
+        Assert.True(control.SourceIsScalar);
+    }
+
     [Theory]
     [InlineData(0xD7600005u, 5u)]
     [InlineData(0xD7600065u, 101u)]

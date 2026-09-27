@@ -41,13 +41,17 @@ public static class VertexInputResolver
 
         var attributes = new List<VertexAttributeResource>();
         VertexInputBuffer[] buffers = [];
-        if (metadata.VertexAttributeRegister >= 0)
+        // A shader without input semantics never reads its vertex tables, which may be null.
+        if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
         {
             var attributeTable = ReadTablePointer(userData, metadata.VertexAttributeRegister);
             var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister);
             if (attributeTable == 0 || bufferTable == 0)
             {
-                throw SubmissionScheduler.Fatal($"The vertex table pointer is null: shader=0x{shader.CodeAddress:X16} attributes=0x{attributeTable:X16} buffers=0x{bufferTable:X16}.");
+                throw SubmissionScheduler.Fatal(
+                    $"The vertex table pointer is null: shader=0x{shader.CodeAddress:X16} attributes=0x{attributeTable:X16} buffers=0x{bufferTable:X16} " +
+                    $"attributeRegister={metadata.VertexAttributeRegister} bufferRegister={metadata.VertexBufferRegister} " +
+                    $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
             attributes = ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress);

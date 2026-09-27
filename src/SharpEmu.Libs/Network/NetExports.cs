@@ -25,6 +25,7 @@ public static class NetExports
     private const int NetErrnoAddressInUse = 48;
     private const int NetErrnoNotInitialized = 200;
     private const int MaxNameLength = 256;
+    private static ReadOnlySpan<byte> OfflineMacAddress => [0x02, 0x53, 0x48, 0x41, 0x52, 0x50];
 
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
@@ -114,6 +115,24 @@ public static class NetExports
         }
         _sockets.Clear();
         TraceNet("term", 0, 0, 0, 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "6Oc0bLsIYe0",
+        ExportName = "sceNetGetMacAddress",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetGetMacAddress(CpuContext ctx)
+    {
+        var destinationAddress = ctx[CpuRegister.Rdi];
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (destinationAddress == 0 || flags != 0 || !ctx.Memory.TryWrite(destinationAddress, OfflineMacAddress))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        TraceNet("get_mac_address", 0, destinationAddress, unchecked((ulong)flags), 0);
         return ctx.SetReturn(0);
     }
 

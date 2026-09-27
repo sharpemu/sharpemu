@@ -190,10 +190,25 @@ public sealed partial class GpuCommandInterpreter
                 SubmitFlipWithInterrupt(payload[4], payload[5], Address(payload[1], payload[2]), payload[3]);
                 break;
             default:
-                throw _host.Fatal($"The marker is unknown: offset=0x{packet.Offset:X5} marker=0x{markerId:X} address=0x{packet.PacketAddress:X16}.");
+                // A marker id this interpreter has no side effect for (profiling/debug annotations such as
+                // 0x6EC and 0x80C in Demon's Souls). The packet carries no work, so it is consumed; the id is
+                // reported once so a marker that later turns out to matter is still visible.
+                NoteUnknownMarker(markerId, packet);
+                break;
         }
 
         return packet.Length - 1;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<uint, bool> _reportedUnknownMarkers = new();
+
+    private static void NoteUnknownMarker(uint markerId, in PacketContext packet)
+    {
+        if (_reportedUnknownMarkers.TryAdd(markerId, true))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] command_stream.marker_ignored marker=0x{markerId:X} offset=0x{packet.Offset:X5} address=0x{packet.PacketAddress:X16}");
+        }
     }
 
     internal uint PushMarkerPacket(in PacketContext packet, ReadOnlySpan<uint> payload) => packet.Length - 1;

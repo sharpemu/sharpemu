@@ -5,6 +5,20 @@ using System.Collections.Generic;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
+// Where a FLAT access can land: LDS or scratch when its high dword lies in the shared
+// or private aperture, otherwise global memory.
+public enum FlatAddressSpace : byte
+{
+    // No aperture reaches the address: an ordinary device address.
+    Global,
+    // The address is built from SHARED_BASE/SHARED_LIMIT.
+    Shared,
+    // The address is built from PRIVATE_BASE/PRIVATE_LIMIT.
+    Private,
+    // Both apertures reach the address; the aperture is chosen per lane.
+    SharedOrPrivate,
+}
+
 public enum MemoryResourceKind : byte
 {
     None,
@@ -90,9 +104,19 @@ public sealed class MemoryAccessInfo
     public bool IndexEnabled { get; init; }
     public bool OffsetEnabled { get; init; }
     public bool PlanningOnly { get; set; }
+    // A FLAT access whose address derives from an LDS/scratch aperture. Set by the
+    // device-address planner; such an access is routed per lane like the hardware
+    // and has no device-address range of its own.
+    public FlatAddressSpace AddressSpace { get; set; }
     // A scalar buffer load whose descriptor only exists on the device: the shader reads
     // through the descriptor in its registers instead of a host-bound buffer.
     public bool DeviceDescriptor { get; set; }
+
+    // The guest V# behind a buffer access, filled in by the resource tracker.
+    // Null until then. Its provenance tells the backend which lowering
+    // strategy to pick; the access shape (Typed/Formatted/Access) completes
+    // the choice via GuestBufferDescriptor.ChooseStrategy.
+    public GuestBufferDescriptor? BufferDescriptor { get; set; }
 
     public bool IsAddressKind =>
         Kind is MemoryResourceKind.ScalarAddress or MemoryResourceKind.Flat or
@@ -110,7 +134,7 @@ public sealed class MemoryAccessInfo
         ImageHasMip == other.ImageHasMip && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
         IndexEnabled == other.IndexEnabled && OffsetEnabled == other.OffsetEnabled &&
         Resource == other.Resource && Sampler == other.Sampler && PlanningOnly == other.PlanningOnly &&
-        DeviceDescriptor == other.DeviceDescriptor;
+        DeviceDescriptor == other.DeviceDescriptor && AddressSpace == other.AddressSpace;
 }
 
 // Every memory access of a program, indexed by program counter and component.
@@ -271,9 +295,8 @@ public sealed class MemoryAccessTable
         var opcode = instruction.Opcode;
         if (opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
         {
-            // The current backends return a deterministic miss for raw GFX10
-            // BVH traversal. Do not materialize its descriptor as a texture;
-            // BVH descriptors do not use the regular image descriptor layout.
+            // A BVH T# is not an image descriptor: the backend reads the nodes
+            // through device addresses, so nothing is materialized here.
             return new MemoryAccessInfo
             {
                 Pc = instruction.Pc,

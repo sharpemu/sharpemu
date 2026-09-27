@@ -15,6 +15,7 @@ namespace SharpEmu.Libs.Tests.Fiber;
 /// validation and layout behaviour of <see cref="FiberExports"/>; they do not
 /// exercise a live guest thread scheduler.
 /// </summary>
+[Collection(FiberStateCollection.Name)]
 public sealed class FiberExportsTests
 {
     private const ulong Base = 0x3_0000_0000UL;

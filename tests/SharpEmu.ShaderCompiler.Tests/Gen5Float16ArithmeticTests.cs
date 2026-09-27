@@ -50,6 +50,55 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 
+    [Theory]
+    [InlineData(0x54u, "VRcpF16")]
+    [InlineData(0x55u, "VSqrtF16")]
+    [InlineData(0x57u, "VLogF16")]
+    [InlineData(0x58u, "VExpF16")]
+    [InlineData(0x5Bu, "VFloorF16")]
+    [InlineData(0x5Cu, "VCeilF16")]
+    [InlineData(0x5Du, "VTruncF16")]
+    [InlineData(0x5Eu, "VRndneF16")]
+    [InlineData(0x5Fu, "VFractF16")]
+    [InlineData(0x60u, "VSinF16")]
+    [InlineData(0x61u, "VCosF16")]
+    public void Float16UnaryDecodesAndCompilesInBothEncodings(uint opcode, string name)
+    {
+        // VOP1 v0, v1 (Silent Hill f: v_log_f16), then the VOP3 form v2, v3.
+        var program = Decode(
+        [
+            0x7E000000u | (opcode << 9) | 257u,
+            (0x35u << 26) | ((0x180u + opcode) << 16) | 2u,
+            259u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal([name, name, "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Theory]
+    [InlineData(0x351u, "VMin3F16")]
+    [InlineData(0x354u, "VMax3F16")]
+    [InlineData(0x357u, "VMed3F16")]
+    public void Vop3Float16ThreeOperandMinMaxDecodesAndCompiles(uint opcode, string name)
+    {
+        // Silent Hill's pixel shaders use v_min3_f16.
+        var program = Decode(
+        [
+            (0x35u << 26) | (opcode << 16) | 122u,
+            261u | (262u << 9) | (263u << 18),
+            SEndpgm,
+        ]);
+
+        Assert.Equal(name, program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
     [Fact]
     public void Vop3Float16FmaDecodesAndCompiles()
     {

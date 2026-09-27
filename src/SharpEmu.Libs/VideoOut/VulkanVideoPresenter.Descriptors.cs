@@ -95,7 +95,8 @@ internal static unsafe partial class VulkanVideoPresenter
             OneDimensional: image.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
             R128: image.R128,
             Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
-            DepthCompare: image.DepthCompare);
+            DepthCompare: image.DepthCompare,
+            Atomic: image.Atomic);
 
         // Render-state discovery for one shader image; the view is acquired later with the draw.
         private TextureResource ResolveImageBinding(ImageResource image, uint[] words, ShaderProgramInfo program, int index)
@@ -114,6 +115,20 @@ internal static unsafe partial class VulkanVideoPresenter
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
+            if (ShouldTraceTextureBindings())
+            {
+                var cached = _imageCache.GetImage(imageIdentifier);
+                var description = cached.Description;
+                Console.Error.WriteLine(
+                    $"TextureBinding stage={program.Stage} hash=0x{program.Hash:X16} index={index} " +
+                    $"address=0x{new TextureDescriptorWords(words).BaseAddress:X16} " +
+                    $"descriptor={descriptor.BaseAddress:X16} size={descriptor.Width + 1}x{descriptor.Height + 1} " +
+                    $"format={(uint)descriptor.Format} tile={(uint)descriptor.TileMode} " +
+                    $"image=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
+                    $"extent={description.Extent.Width}x{description.Extent.Height} pitch={description.Pitch} " +
+                    $"guestFormat={(uint)description.GuestFormat} imageTile={(uint)description.TileMode} " +
+                    $"backing={cached.Backing.Extent.Width}x{cached.Backing.Extent.Height} format={cached.Backing.Format}");
+            }
             return new TextureResource
             {
                 Address = descriptor.BaseAddress,
@@ -128,7 +143,31 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Compare bits stay only on depth-compare samplers; a forced point sampler drops its filters.
-        private Sampler ResolveSampler(SamplerResource sampler, uint[] words, ShaderProgramInfo program, int index, ShaderStageResources stage)
+        // A sampler takes the numeric class of the views it samples; integer only when every
+        // paired view is integer, since a float view needs a float border and filtering.
+        private static bool SamplesIntegerViews(ShaderResourceInfo info, TextureResource[] images, int sampler)
+        {
+            var paired = false;
+            foreach (var pair in info.SampledPairs)
+            {
+                if (pair.Sampler != sampler || pair.Image >= images.Length || images[pair.Image].IsHostMovie)
+                {
+                    continue;
+                }
+
+                if (!ViewFormatRules.IsIntegerFormat(images[pair.Image].Request.View.Format))
+                {
+                    return false;
+                }
+
+                paired = true;
+            }
+
+            return paired;
+        }
+
+        private Sampler ResolveSampler(SamplerResource sampler, uint[] words, ShaderProgramInfo program, int index, ShaderStageResources stage,
+            bool integerView)
         {
             if (words.Length < 4)
             {
@@ -164,7 +203,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"user_data=[{string.Join(",", stage.Resources.UserData.Select(word => $"{word:X8}"))}]");
             }
 
-            return _samplerStore.GetSampler(descriptor);
+            return _samplerStore.GetSampler(descriptor, integerView);
         }
 
         // The guest textures the movie path matches; built only while a decoded frame is active.
@@ -216,7 +255,8 @@ internal static unsafe partial class VulkanVideoPresenter
             descriptors.Samplers = new Sampler[info.Samplers.Count];
             for (var index = 0; index < info.Samplers.Count; index++)
             {
-                descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage);
+                descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage,
+                    SamplesIntegerViews(info, descriptors.Images, index));
             }
 
             var shaderData = new uint[layout.ShaderDataDwordCount];
@@ -858,6 +898,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DebugName = bindPoint == PipelineBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw",
                 Textures = textures,
+                FeedbackSnapshots = preparation.FeedbackSnapshots?.ToArray() ?? [],
                 OverflowBuffers = preparation.OverflowBuffers.Count == 0 ? null : preparation.OverflowBuffers.ToArray(),
             });
             preparation.OverflowBuffers.Clear();

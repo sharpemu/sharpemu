@@ -52,6 +52,7 @@ public class ShaderProgramInfo
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }
     public bool HasBitwiseExclusiveOr { get; init; }
+    public Pipelines.ConstantFill? ConstantFill { get; init; }
     public BufferResourceInfo[] Buffers { get; init; } = [];
     public ImageResourceInfo[] Images { get; init; } = [];
     public int SamplerCount { get; init; }

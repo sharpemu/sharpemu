@@ -46,6 +46,17 @@ public static class DeviceAddressRangePlanner
                 continue;
             }
 
+            // A FLAT address built from an aperture base is an LDS or scratch
+            // pointer; the backend routes it per lane, so it owns no device range.
+            if (memory.Kind == MemoryResourceKind.Flat)
+            {
+                memory.AddressSpace = ClassifyFlatAddress(plan, handle.Operands[1], plan.Accesses[index]!.Active);
+                if (memory.AddressSpace != FlatAddressSpace.Global)
+                {
+                    continue;
+                }
+            }
+
             var slot = handles.FindIndex(existing => plan.Graph.Equivalent(existing, handle));
             if (slot < 0)
             {
@@ -77,6 +88,132 @@ public static class DeviceAddressRangePlanner
         }
 
         return ranges;
+    }
+
+    // A FLAT address is local when its high dword provably lies in an aperture.
+    // Two shapes occur: the high dword is clamped between constants inside the
+    // apertures (v_med3_u32 with the hard-coded PS5 bounds), or it derives from an
+    // aperture operand, which shaders often merge into the upper half of a
+    // computed dword with SDWA WORD1.
+    private static FlatAddressSpace ClassifyFlatAddress(ShaderResourcePlan plan, ScalarValue high, ScalarValue? active)
+    {
+        var range = UnsignedRange(plan, high, active, []);
+        var (low, highBound) = IsEmpty(range) ? (0u, uint.MaxValue) : range;
+        var lowShared = Gen5InlineConstants.IsSharedApertureHigh(low);
+        var lowPrivate = Gen5InlineConstants.IsPrivateApertureHigh(low);
+        var highShared = Gen5InlineConstants.IsSharedApertureHigh(highBound);
+        var highPrivate = Gen5InlineConstants.IsPrivateApertureHigh(highBound);
+        // The two apertures are adjacent windows, so bounds inside them keep every
+        // value in between inside them too.
+        if ((lowShared || lowPrivate) && (highShared || highPrivate))
+        {
+            return (lowShared || highShared, lowPrivate || highPrivate) switch
+            {
+                (true, true) => FlatAddressSpace.SharedOrPrivate,
+                (true, false) => FlatAddressSpace.Shared,
+                _ => FlatAddressSpace.Private,
+            };
+        }
+
+        return ClassifyByApertureOperand(high);
+    }
+
+    // Conservative unsigned bounds of a 32-bit value as the access sees it. Phi, Select,
+    // UMin and UMax yield one of their inputs, so a cycle adds nothing (Empty); a select
+    // on the access's own EXEC mask contributes only its active arm.
+    // The mask is the same node when EXEC was not written in between, even when its
+    // value is unknown (an undefined node is never structurally equivalent).
+    private static readonly (uint Low, uint High) Empty = (uint.MaxValue, 0u);
+
+    private static bool IsEmpty((uint Low, uint High) range) => range.Low > range.High;
+
+    private static (uint Low, uint High) Union((uint Low, uint High) left, (uint Low, uint High) right) =>
+        IsEmpty(left) ? right : IsEmpty(right) ? left : (Math.Min(left.Low, right.Low), Math.Max(left.High, right.High));
+
+    private static (uint Low, uint High) UnsignedRange(ShaderResourcePlan plan, ScalarValue value, ScalarValue? active,
+        HashSet<ScalarValue> visiting)
+    {
+        if (value.Kind == ScalarValueKind.Constant && value.Type == ScalarValueType.U32)
+            return (value.ConstantU32, value.ConstantU32);
+        if (value.Kind == ScalarValueKind.MemoryAperture)
+        {
+            var aperture = (uint)(Gen5InlineConstants.DecodeAperture64((uint)value.Payload) >> 32);
+            return (aperture, aperture);
+        }
+
+        if (!visiting.Add(value))
+            return Empty;
+        try
+        {
+            switch (value.Kind)
+            {
+                case ScalarValueKind.Select when value.Operands.Length == 3 &&
+                    active is not null && (ReferenceEquals(value.Operands[0], active) || plan.Graph.Equivalent(value.Operands[0], active)):
+                    return UnsignedRange(plan, value.Operands[1], active, visiting);
+                case ScalarValueKind.Select when value.Operands.Length == 3:
+                    return Union(UnsignedRange(plan, value.Operands[1], active, visiting),
+                        UnsignedRange(plan, value.Operands[2], active, visiting));
+                case ScalarValueKind.Phi:
+                {
+                    var range = Empty;
+                    foreach (var operand in value.Operands)
+                        range = Union(range, UnsignedRange(plan, operand, active, visiting));
+                    return range;
+                }
+                case ScalarValueKind.Operation when value.Operation is ScalarOperation.UMin32 or ScalarOperation.UMax32:
+                {
+                    var left = UnsignedRange(plan, value.Operands[0], active, visiting);
+                    var right = UnsignedRange(plan, value.Operands[1], active, visiting);
+                    if (IsEmpty(left) || IsEmpty(right))
+                        return IsEmpty(left) ? right : left;
+                    return value.Operation == ScalarOperation.UMin32
+                        ? (Math.Min(left.Low, right.Low), Math.Min(left.High, right.High))
+                        : (Math.Max(left.Low, right.Low), Math.Max(left.High, right.High));
+                }
+                default:
+                    return (0, uint.MaxValue);
+            }
+        }
+        finally
+        {
+            visiting.Remove(value);
+        }
+    }
+
+    private static FlatAddressSpace ClassifyByApertureOperand(ScalarValue high)
+    {
+        var shared = false;
+        var @private = false;
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(high);
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value))
+            {
+                continue;
+            }
+
+            if (value.Kind == ScalarValueKind.MemoryAperture)
+            {
+                if (Gen5InlineConstants.IsSharedAperture((uint)value.Payload))
+                    shared = true;
+                else
+                    @private = true;
+                continue;
+            }
+
+            foreach (var operand in value.Operands)
+                pending.Push(operand);
+        }
+
+        return (shared, @private) switch
+        {
+            (true, true) => FlatAddressSpace.SharedOrPrivate,
+            (true, false) => FlatAddressSpace.Shared,
+            (false, true) => FlatAddressSpace.Private,
+            _ => FlatAddressSpace.Global,
+        };
     }
 
     // An access is bounded when its only run-time term is the record's immediate offset:

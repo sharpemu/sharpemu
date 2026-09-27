@@ -52,6 +52,54 @@ public sealed class Gen5VopcF16Tests
     };
 
     [Theory]
+    [InlineData(0xA9u, "VCmpLtU16")]
+    [InlineData(0xAAu, "VCmpEqU16")]
+    [InlineData(0xABu, "VCmpLeU16")]
+    [InlineData(0xACu, "VCmpGtU16")]
+    [InlineData(0xADu, "VCmpNeU16")]
+    [InlineData(0xAEu, "VCmpGeU16")]
+    [InlineData(0xB9u, "VCmpxLtU16")]
+    [InlineData(0xBAu, "VCmpxEqU16")]
+    [InlineData(0xBBu, "VCmpxLeU16")]
+    [InlineData(0xBCu, "VCmpxGtU16")]
+    [InlineData(0xBDu, "VCmpxNeU16")]
+    [InlineData(0xBEu, "VCmpxGeU16")]
+    public void U16CompareOpcodeDecodesAndLowersToSpirv(uint opcode, string expectedName)
+    {
+        var memory = new TestCpuMemory(ShaderAddress, 0x100);
+        Span<byte> shader = stackalloc byte[2 * sizeof(uint)];
+        var word = (0x3Eu << 25) | (opcode << 17) | (1u << 9);
+        BinaryPrimitives.WriteUInt32LittleEndian(shader, word);
+        BinaryPrimitives.WriteUInt32LittleEndian(shader[sizeof(uint)..], SEndpgm);
+        Assert.True(memory.TryWrite(ShaderAddress, shader));
+
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(ctx, ShaderAddress, out var program, out var error), error);
+        var instruction = Assert.Single(program.Instructions, candidate => candidate.Encoding == Gen5ShaderEncoding.Vopc);
+        Assert.Equal(expectedName, instruction.Opcode);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(ResourceTestProgram.Request(program, userDataCount: 0), out var lowered, out error), error);
+        Assert.NotEmpty(lowered.Spirv);
+    }
+
+    [Theory]
+    [InlineData(0x89u, "VCmpLtI16")]
+    [InlineData(0x8Au, "VCmpEqI16")]
+    [InlineData(0x8Bu, "VCmpLeI16")]
+    [InlineData(0x8Cu, "VCmpGtI16")]
+    [InlineData(0x8Du, "VCmpNeI16")]
+    [InlineData(0x8Eu, "VCmpGeI16")]
+    [InlineData(0x99u, "VCmpxLtI16")]
+    [InlineData(0x9Au, "VCmpxEqI16")]
+    [InlineData(0x9Bu, "VCmpxLeI16")]
+    [InlineData(0x9Cu, "VCmpxGtI16")]
+    [InlineData(0x9Du, "VCmpxNeI16")]
+    [InlineData(0x9Eu, "VCmpxGeI16")]
+    public void I16CompareOpcodeDecodesAndLowersToSpirv(uint opcode, string expectedName)
+    {
+        U16CompareOpcodeDecodesAndLowersToSpirv(opcode, expectedName);
+    }
+
+    [Theory]
     [MemberData(nameof(Opcodes))]
     public void F16CompareOpcodeDecodes(uint opcode, string expectedName)
     {

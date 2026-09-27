@@ -2065,6 +2065,13 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "VAzswvTOCzI",
+        ExportName = "unlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixUnlink(CpuContext ctx) => KernelUnlink(ctx);
+
+    [SysAbiExport(
         Nid = "1-LFLmRFxxM",
         ExportName = "sceKernelMkdir",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -2279,6 +2286,16 @@ public static partial class KernelMemoryCompatExports
         if (stream is null)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        // A host movie watchdog may have closed the decoder while the guest
+        // still owns its Bink file descriptor. Return EOF so the guest closes
+        // that descriptor and proceeds to the next movie instead of waiting
+        // forever on a stale native decoder.
+        if (HostMovieBridge.ShouldForceGuestMovieEof(stream.Name))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         long positionBefore;

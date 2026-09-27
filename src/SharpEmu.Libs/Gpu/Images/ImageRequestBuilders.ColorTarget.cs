@@ -122,6 +122,17 @@ public static partial class ImageRequestBuilders
         }
 
         var depth = volume ? words.Depth + 1 : 1;
+        // Some Prospero titles encode a full 3D attachment with SliceMax as
+        // the exclusive depth (one past the last slice). The hardware accepts
+        // that form, while Vulkan needs the actual slice count for a 2D-array
+        // view. Normalize only this exact one-past range; other invalid views
+        // remain rejected below.
+        if (volume && view.BaseLayer == 0 && view.LayerCount == depth + 1)
+        {
+            view = new TargetViewRange(0, depth, depth);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] normalized an exclusive 3D color-target slice range to depth={depth}");
+        }
         var tileMode = words.TileMode;
         var standard4 = tileMode == GuestTileMode.Standard4KB;
         var standard64 = tileMode == GuestTileMode.Standard64KB;

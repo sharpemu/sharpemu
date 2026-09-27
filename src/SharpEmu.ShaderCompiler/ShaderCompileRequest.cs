@@ -54,6 +54,14 @@ public readonly record struct ShaderClipSpaceTransform(
     float HalfExtentX,
     float HalfExtentY);
 
+// One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer
+// candidates plus the flattened key mapping that selects among them.
+public readonly record struct BufferCandidateTableUse(
+    uint FirstCandidate,
+    uint CandidateCount,
+    uint MappingOffset,
+    uint SearchIterations);
+
 // Everything an emitter needs to compile one permutation of a program: the decoded
 // program, its resource plan applied to one specialization, and the binding layout.
 public sealed class ShaderCompileRequest
@@ -97,11 +105,26 @@ public sealed class ShaderCompileRequest
         }
 
         WrittenRangeSlotByMemoryIndex = writtenSlots;
+
+        var candidateTables = new Dictionary<int, BufferCandidateTableUse>();
+        for (var index = 0; index < plan.BufferCandidateTables.Count && index < resources.Info.BufferCandidateTables.Count; index++)
+        {
+            var info = resources.Info.BufferCandidateTables[index];
+            var use = new BufferCandidateTableUse(info.FirstCandidate, info.CandidateCount, info.MappingOffset, info.SearchIterations);
+            foreach (var memoryIndex in plan.BufferCandidateTables[index].MemoryIndices)
+            {
+                candidateTables[memoryIndex] = use;
+            }
+        }
+
+        BufferCandidateTableByMemoryIndex = candidateTables;
     }
 
-    // The flattened table is bound when host reads, written ranges or indirect mappings fill it.
+    // The flattened table is bound when host reads, written ranges, indirect mappings or
+    // bounded buffer candidate mappings fill it.
     public static bool RequiresFlattenedTable(ShaderResourcePlan plan, SpecializedResourceInfo resources) =>
         plan.TableReads.Count != 0 || plan.WrittenRangeCount != 0 ||
+        plan.BufferCandidateTables.Count != 0 ||
         resources.Info.Images.Any(image => image.IndirectSearchIterations != 0);
 
     public Gen5ShaderProgram Program { get; }
@@ -127,12 +150,21 @@ public sealed class ShaderCompileRequest
     // Indirect image accesses: memory index → the memory index of the key read.
     public IReadOnlyDictionary<int, int> IndirectRootByMemoryIndex { get; }
 
+    // Bounded runtime V# accesses: memory index → the candidate run and its key mapping.
+    public IReadOnlyDictionary<int, BufferCandidateTableUse> BufferCandidateTableByMemoryIndex { get; }
+
     // Written device-address accesses: memory index → the flattened slot of their range.
     public IReadOnlyDictionary<int, uint> WrittenRangeSlotByMemoryIndex { get; }
 
     public uint WaveSize { get; init; } = 32;
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
+
+    // The device supports 64-bit integer atomics on workgroup memory
+    // (VkPhysicalDeviceFeatures.shaderSharedInt64Atomics). When set, the LDS
+    // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of
+    // 32-bit ones, which is not atomic as a pair.
+    public bool SupportsSharedInt64Atomics { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];

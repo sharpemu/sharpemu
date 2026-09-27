@@ -160,7 +160,11 @@ public readonly record struct Gen5Operand(Gen5OperandKind Kind, uint Value)
             return new(Gen5OperandKind.LiteralConstant, literal.Value);
         }
 
-        if (encoded <= 105 || encoded is 106 or 107 or 124 or 126 or 127)
+        // 108..123 are the temporary SGPRs (TTMP0..TTMP15).  They use the
+        // same scalar register file as ordinary SGPRs; treating them as
+        // encoded constants loses values in shader continuations that spill
+        // through a temporary register.
+        if (encoded <= 105 || encoded is 106 or 107 or (>= 108 and <= 123) or 124 or 126 or 127)
         {
             return Scalar(encoded);
         }
@@ -223,7 +227,9 @@ public sealed record Gen5GlobalMemoryControl(
     int OffsetBytes,
     bool Glc,
     bool Slc,
-    bool UsesFlatAddress = false) : Gen5InstructionControl;
+    bool UsesFlatAddress = false,
+    uint? DynamicOffsetRegister = null,
+    bool SourceIsScalar = false) : Gen5InstructionControl;
 
 // A typed access carries the unified format from the instruction; a formatted
 // untyped access reads the descriptor format when it executes.

@@ -42,28 +42,30 @@ public enum SamplerBorderColor : uint
     FromTable = 3,
 }
 
-// One Vulkan sampler per distinct guest sampler descriptor, created on first use.
+// One Vulkan sampler per distinct guest sampler descriptor and view numeric class,
+// created on first use. The guest border color has no numeric class; Vulkan's has to
+// match the sampled view, and integer views cannot be filtered.
 public sealed unsafe class SamplerStore : IDisposable
 {
     private readonly GpuDeviceInfo _device;
-    private readonly Dictionary<(uint, uint, uint, uint), Sampler> _samplers = new();
+    private readonly Dictionary<(uint, uint, uint, uint, bool), Sampler> _samplers = new();
     private readonly object _gate = new();
 
     public SamplerStore(GpuDeviceInfo device) => _device = device;
 
     public int Count => _samplers.Count;
 
-    public Sampler GetSampler(in SamplerDescriptorWords words)
+    public Sampler GetSampler(in SamplerDescriptorWords words, bool integerView)
     {
         lock (_gate)
         {
-            var key = (words[0], words[1], words[2], words[3]);
+            var key = (words[0], words[1], words[2], words[3], integerView);
             if (_samplers.TryGetValue(key, out var existing))
             {
                 return existing;
             }
 
-            var sampler = CreateSampler(words);
+            var sampler = CreateSampler(words, integerView);
             _samplers.Add(key, sampler);
             return sampler;
         }
@@ -96,10 +98,10 @@ public sealed unsafe class SamplerStore : IDisposable
         _ => throw SubmissionScheduler.Fatal($"The sampler clamp mode is unknown: clamp={clamp}."),
     };
 
-    private Sampler CreateSampler(in SamplerDescriptorWords words)
+    private Sampler CreateSampler(in SamplerDescriptorWords words, bool integerView)
     {
-        var magnify = words.MagnifyFilter;
-        var minify = words.MinifyFilter;
+        var magnify = integerView ? (uint)SamplerFilter.Point : words.MagnifyFilter;
+        var minify = integerView ? (uint)SamplerFilter.Point : words.MinifyFilter;
         var anisotropic = IsAnisotropic(magnify) || IsAnisotropic(minify);
         var anisotropyRatio = 1.0f;
         if (anisotropic)
@@ -117,6 +119,11 @@ public sealed unsafe class SamplerStore : IDisposable
         }
 
         var mipFilter = (SamplerMipFilter)words.MipFilter;
+        if (integerView && mipFilter == SamplerMipFilter.Linear)
+        {
+            mipFilter = SamplerMipFilter.Point;
+        }
+
         var minLod = 0.0f;
         var maxLod = 0.0f;
         if (mipFilter != SamplerMipFilter.None)
@@ -125,25 +132,20 @@ public sealed unsafe class SamplerStore : IDisposable
             maxLod = words.MaxLod / 256.0f;
         }
 
-        BorderColor border;
-        switch ((SamplerBorderColor)words.BorderColorType)
+        var borderType = (SamplerBorderColor)words.BorderColorType;
+        if (borderType == SamplerBorderColor.FromTable)
         {
-            case SamplerBorderColor.TransparentBlack:
-                border = BorderColor.IntTransparentBlack;
-                break;
-            case SamplerBorderColor.OpaqueBlack:
-                border = BorderColor.IntOpaqueBlack;
-                break;
-            case SamplerBorderColor.OpaqueWhite:
-                border = BorderColor.IntOpaqueWhite;
-                break;
-            case SamplerBorderColor.FromTable:
-                Console.Error.WriteLine($"[LOADER][WARN] A table border color is approximated as transparent black: index={words.BorderColorIndex}.");
-                border = BorderColor.IntTransparentBlack;
-                break;
-            default:
-                throw SubmissionScheduler.Fatal($"The border color type is unknown: type={words.BorderColorType}.");
+            Console.Error.WriteLine($"[LOADER][WARN] A table border color is approximated as transparent black: index={words.BorderColorIndex}.");
+            borderType = SamplerBorderColor.TransparentBlack;
         }
+
+        var border = borderType switch
+        {
+            SamplerBorderColor.TransparentBlack => integerView ? BorderColor.IntTransparentBlack : BorderColor.FloatTransparentBlack,
+            SamplerBorderColor.OpaqueBlack => integerView ? BorderColor.IntOpaqueBlack : BorderColor.FloatOpaqueBlack,
+            SamplerBorderColor.OpaqueWhite => integerView ? BorderColor.IntOpaqueWhite : BorderColor.FloatOpaqueWhite,
+            _ => throw SubmissionScheduler.Fatal($"The border color type is unknown: type={words.BorderColorType}."),
+        };
 
         var info = new SamplerCreateInfo
         {

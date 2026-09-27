@@ -156,6 +156,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly ulong GuestThreadTlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
 
 	private const ulong GuestThreadStackSize = 0x0020_0000UL;
+	private const ulong GuestThreadStackHeadroom = 0x0010_0000UL;
+	private const ulong GuestThreadStackSizeLimit = 0x0400_0000UL;
 
 	private const ulong GuestThreadTlsSize = 0x0001_0000UL;
 
@@ -290,7 +292,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly List<nint> _importHandlerTrampolines = new List<nint>();
 
-	private const int GuestContextTransferFrameQwords = 20;
+	private const int GuestContextTransferFrameQwords = 22;
 
 	private readonly object _guestContextTransferStubGate = new();
 
@@ -1838,7 +1840,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private static bool IsHlePreferredNid(string nid)
 	{
-		return string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal) ||
+		// The shipped libc memset body contains a PS5-specific int 45h path
+		// which is not a Windows host instruction. Use the bounds-aware HLE
+		// implementation instead of redirecting this import to LLE.
+		return string.Equals(nid, "8zTFvBIAIN8", StringComparison.Ordinal) ||
+			string.Equals(nid, "QrZZdJ8XsX0", StringComparison.Ordinal) ||
 			string.Equals(nid, "Q3VBxCXhUHs", StringComparison.Ordinal);
 	}
 
@@ -2145,6 +2151,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			error = $"guest context transfer slot is not writable at 0x{target.Rsp - sizeof(ulong):X16}";
 			return false;
 		}
+		ulong stackBottom = 0;
+		ulong stackTop = 0;
+		if (OperatingSystem.IsWindows() && !TryGetGuestStackBounds(target.Rsp, out stackBottom, out stackTop))
+		{
+			error = $"guest context transfer target rsp=0x{target.Rsp:X16} has no committed host stack mapping";
+			return false;
+		}
 
 		transferStub = GetOrCreateGuestContextTransferStub();
 		if (transferStub == 0)
@@ -2181,6 +2194,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
 		frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
 		frame[19] = target.RestoreFullFpuState ? 1u : 0u;
+		// The TEB stores NT_TIB.StackBase (the high address) at +0x08 and
+		// NT_TIB.StackLimit (the low address) at +0x10. Keep the frame in that
+		// same order so the transfer stub can store the slots straight through.
+		frame[20] = stackTop;
+		frame[21] = stackBottom;
 		return true;
 	}
 
@@ -2248,6 +2266,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 
 			Emit(0x49); Emit(0x89); Emit(0xC3); // mov r11, rax
+			// Fiber switches replace the guest stack without passing through a
+			// guest-entry stub, so keep the Windows TEB bounds in sync here.
+			EmitLoadFromR11Disp32(10, 160);     // r10 = target stack top
+			EmitStackBound(code, ref offset, 10, 8, store: true);
+			EmitLoadFromR11Disp32(10, 168);     // r10 = target stack bottom
+			EmitStackBound(code, ref offset, 10, 16, store: true);
 			// A new >=3.50 fiber receives the SDK-defined MXCSR verbatim. A
 			// resumed fiber follows _sceFiberLongJmp: preserve status bits 0-5
 			// while restoring the saved control bits.
@@ -5347,7 +5371,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			error = "creator context memory is not backed by IVirtualMemory";
 			return false;
 		}
-		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, GuestThreadStackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
+		var requestedStackSize = request.StackSize;
+		if (requestedStackSize > GuestThreadStackSizeLimit)
+		{
+			requestedStackSize = GuestThreadStackSizeLimit;
+		}
+
+		var stackSize = requestedStackSize == 0
+			? GuestThreadStackSize
+			: AlignUp(requestedStackSize + GuestThreadStackHeadroom, 0x1000UL);
+		if (stackSize < GuestThreadStackSize)
+		{
+			stackSize = GuestThreadStackSize;
+		}
+
+		if (!TryMapGuestThreadRegion(virtualMemory, GuestThreadStackBaseAddress, stackSize, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write, out var stackBase, out error))
 		{
 			return false;
 		}
@@ -5364,7 +5402,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			FsBase = tlsBase,
 			GsBase = tlsBase,
 		};
-		context[CpuRegister.Rsp] = stackBase + GuestThreadStackSize - sizeof(ulong);
+		context[CpuRegister.Rsp] = stackBase + stackSize - sizeof(ulong);
 		context[CpuRegister.Rdi] = request.Argument;
 		context[CpuRegister.Rsi] = 0;
 		context[CpuRegister.Rdx] = 0;
@@ -5387,7 +5425,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			AffinityMask = request.AffinityMask,
 			Context = context,
 			StackBase = stackBase,
-			StackSize = GuestThreadStackSize,
+			StackSize = stackSize,
 			State = GuestThreadRunState.Ready,
 		};
 		error = null;
@@ -6790,6 +6828,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					MarkExecutionProgress();
 					continue;
 				}
+				if (AreAllLiveGuestThreadsExpectedlyBlocked())
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] No import progress for {stallWatchdogSeconds}s, but every live guest thread is parked in an expected blocking primitive; continuing.");
+					LogStallWatchdogSnapshot();
+					Console.Error.Flush();
+					MarkExecutionProgress();
+					continue;
+				}
 				if (Interlocked.Exchange(ref _stallWatchdogTriggered, 1) != 0)
 				{
 					continue;
@@ -6855,6 +6902,41 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		return false;
+	}
+
+	private bool AreAllLiveGuestThreadsExpectedlyBlocked()
+	{
+		using (LockGate("AreAllLiveGuestThreadsExpectedlyBlocked"))
+		{
+			var sawBlockedThread = false;
+			foreach (var thread in _guestThreads.Values)
+			{
+				if (thread.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted)
+				{
+					continue;
+				}
+
+				if (thread.State != GuestThreadRunState.Blocked)
+				{
+					return false;
+				}
+
+				if (Volatile.Read(ref thread.LastImportNid) is not (
+					"Op8TBGY5KHg" or // pthread_cond_wait
+					"27bAgiJmOh0" or // pthread_cond_timedwait
+					"WKAXJ4XBPQ4" or // scePthreadCondWait
+					"BmMjYxmew1w" or // scePthreadCondTimedwait
+					"fzyMKs9kim0" or // sceKernelWaitEqueue
+					"Zxa0VhQVTsk"))  // sceKernelWaitSema
+				{
+					return false;
+				}
+
+				sawBlockedThread = true;
+			}
+
+			return sawBlockedThread;
+		}
 	}
 
 	private void StopStallWatchdog()

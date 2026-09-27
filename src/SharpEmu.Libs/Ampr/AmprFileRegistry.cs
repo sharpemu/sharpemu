@@ -38,6 +38,9 @@ internal static class AmprFileRegistry
     private static readonly object _resolvedFileGate = new();
     private static readonly Dictionary<string, uint> _resolvedIdsByPath = new(HostFsPath.Comparer);
     private static readonly ConcurrentDictionary<uint, string> _resolvedPathsById = new();
+    // Ids already handed to the guest; alias publishes must not re-poison them.
+    private static readonly ConcurrentDictionary<uint, string> _aprResolvedPathsById = new();
+    private static readonly ConcurrentDictionary<uint, byte> _loggedAprCollisionIds = new();
     // Resolved handles use a separate range from the 31-bit compatibility hashes.
     // Never reuse a handle while queued reads can still refer to it.
     private static uint _nextResolvedId = 0x80000000;
@@ -67,24 +70,52 @@ internal static class AmprFileRegistry
 
     public static uint RegisterAprResolvedPath(string guestPath, string hostPath)
     {
-        if (TryGetApp0Relative(guestPath, out var relative) && relative.Length != 0)
-        {
-            RegisterApp0Relative(relative, hostPath);
-        }
-
         // APR file ids are part of the guest ABI: ResolveFilepathsToIds returns
         // the 31-bit FNV-1a hash of the guest path. Keep the collision-safe
         // process-local handles used by Register() separate from this path so a
         // title can compare resolved ids with ids baked into its asset tables.
+        // A hash shared by two files (13 /app0/ pairs in Demon's Souls) falls back to a handle.
         var fileId = ComputeFileId(guestPath);
-        PublishCompatibilityPath(fileId, hostPath, AliasRank.Resolved);
-        return fileId;
+        lock (_resolvedFileGate)
+        {
+            if (_aprResolvedPathsById.TryGetValue(fileId, out var claimedPath))
+            {
+                if (IsSameHostFile(claimedPath, hostPath))
+                    return fileId;
+            }
+            else if (!_hostPathsById.TryGetValue(fileId, out var indexed) ||
+                     (!indexed.Ambiguous && IsSameHostFile(indexed.HostPath, hostPath)))
+            {
+                if (TryGetApp0Relative(guestPath, out var relative) && relative.Length != 0)
+                {
+                    RegisterApp0Relative(relative, hostPath);
+                }
+
+                PublishCompatibilityPath(fileId, hostPath, AliasRank.Resolved);
+                _aprResolvedPathsById[fileId] = hostPath;
+                return fileId;
+            }
+        }
+
+        var handle = Register(guestPath, hostPath);
+        if (_loggedAprCollisionIds.TryAdd(fileId, 0))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] ampr.apr_id_collision id=0x{fileId:X8} path='{guestPath}' handle=0x{handle:X8}");
+        }
+
+        return handle;
     }
+
+    private static bool IsSameHostFile(string left, string right) =>
+        HostFsPath.Comparer.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
     public static bool TryGetHostPath(uint id, out string hostPath)
     {
         if ((id & 0x80000000) != 0)
             return _resolvedPathsById.TryGetValue(id, out hostPath!);
+        if (_aprResolvedPathsById.TryGetValue(id, out hostPath!))
+            return true;
         if (_hostPathsById.TryGetValue(id, out var entry) && !entry.Ambiguous)
         {
             hostPath = entry.HostPath;
@@ -101,8 +132,10 @@ internal static class AmprFileRegistry
         lock (_indexGate)
         {
             _hostPathsById.Clear();
+            _loggedAprCollisionIds.Clear();
             lock (_resolvedFileGate)
             {
+                _aprResolvedPathsById.Clear();
                 _resolvedIdsByPath.Clear();
                 _resolvedPathsById.Clear();
                 _nextResolvedId = 0x80000000;
@@ -417,7 +450,23 @@ internal static class AmprFileRegistry
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "SharpEmu",
                 "ampr-index");
-        Directory.CreateDirectory(cacheDir);
+        try
+        {
+            Directory.CreateDirectory(cacheDir);
+            var probePath = Path.Combine(cacheDir, $".write-test-{Environment.ProcessId}");
+            using (File.Create(probePath)) { }
+            File.Delete(probePath);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            // Sandboxed launches and mitigated child processes can lose access
+            // to the profile AppData directory. Keep the index beside the
+            // executable so the next launch can still reuse it.
+            cacheDir = Path.Combine(AppContext.BaseDirectory, "user", "ampr-index");
+            Directory.CreateDirectory(cacheDir);
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] ampr.app0_index_cache_fallback path={cacheDir}: {exception.Message}");
+        }
 
         // Distinct roots must not share a cache file. Folding case is only
         // correct where the host filesystem folds it too.

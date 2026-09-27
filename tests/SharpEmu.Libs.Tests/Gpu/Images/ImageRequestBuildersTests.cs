@@ -127,6 +127,25 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void ColorTarget_VolumeAcceptsExclusiveSliceMax()
+    {
+        var words = RegisterWords.Color(
+            Base,
+            64,
+            64,
+            GuestTileMode.Standard4KB,
+            sliceMax: 64,
+            dimension: 2,
+            depth: 63);
+
+        var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        Assert.Equal(64u, resolution.Value.Request.View.LayerCount);
+        Assert.Equal(64u, resolution.Value.Request.Description.Extent.Depth);
+    }
+
+    [Fact]
     public void ColorTarget_RejectsUnsupportedRegisterStates()
     {
         using var fatal = new FatalScope();

@@ -134,6 +134,13 @@ public static class NpWebApi2Exports
         return Interlocked.Increment(ref _nextPushEventHandle);
     }
 
+    [SysAbiExport(
+        Nid = "QafxeZM3WK4",
+        ExportName = "sceNpWebApi2PushEventDeletePushContext",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventDeletePushContext(CpuContext ctx) => ctx.SetReturn(0);
+
     private static bool IsValidLibraryContextId(int libraryContextId)
     {
         if (libraryContextId <= 0 || libraryContextId >= 0x8000)

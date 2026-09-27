@@ -10,6 +10,87 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DeviceAddressRangePlannerTests
 {
+    // flat_store through (aperture_hi << 32) | offset: the high dword comes from an
+    // aperture operand, so the store targets LDS or scratch and owns no device range.
+    [Theory]
+    [InlineData(Gen5InlineConstants.SharedBase, FlatAddressSpace.Shared)]
+    [InlineData(Gen5InlineConstants.PrivateBase, FlatAddressSpace.Private)]
+    public void FlatAddressFromAnAperture_IsLocalAndHasNoDeviceRange(uint aperture, FlatAddressSpace expected)
+    {
+        var plan = Extract(Program(
+            Sop1(0, "SMovB32", 1, Gen5Operand.Source(aperture)),
+            Vop1(4, "VMovB32", 1, Gen5Operand.Scalar(1)),
+            Vop1(8, "VMovB32", 0, Operand(16)),
+            GlobalAccess(12, "FlatStoreDword", 0, vectorAddress: 0),
+            EndProgram(20)));
+
+        Assert.Empty(plan.DeviceAddressRanges);
+        Assert.True(plan.Memory.TryGetIndex(12, 0, out var index));
+        Assert.Equal(expected, plan.Memory[index].AddressSpace);
+    }
+
+    // A high dword clamped between the hard-coded PS5 aperture bounds
+    // (v_med3_u32 0x80000000, 0x70000000, sp) always lands in LDS or scratch.
+    [Fact]
+    public void FlatAddressClampedIntoTheApertures_IsLocal()
+    {
+        var plan = Extract(Program(
+            Vop3(0, "VMed3U32", 1, Operand(0x8000_0000), Operand(0x7000_0000), Gen5Operand.Vector(7)),
+            Vop1(8, "VMovB32", 0, Operand(16)),
+            GlobalAccess(12, "FlatStoreDword", 0, vectorAddress: 0),
+            EndProgram(20)));
+
+        Assert.Empty(plan.DeviceAddressRanges);
+        Assert.True(plan.Memory.TryGetIndex(12, 0, out var index));
+        Assert.Equal(FlatAddressSpace.SharedOrPrivate, plan.Memory[index].AddressSpace);
+    }
+
+    // After v_cmpx the clamp is a lane-masked write whose inactive lanes keep an
+    // unknown value; those lanes do not store, so the address is still local.
+    [Fact]
+    public void ClampedAddressWrittenUnderTheStoresExecMask_IsLocal()
+    {
+        var plan = Extract(Program(
+            Vopc(0, "VCmpxLtU32", Operand(3), 5),
+            Vop3(4, "VMed3U32", 1, Operand(0x8000_0000), Operand(0x7000_0000), Gen5Operand.Vector(7)),
+            Vop1(12, "VMovB32", 0, Operand(16)),
+            GlobalAccess(16, "FlatStoreDword", 0, vectorAddress: 0),
+            EndProgram(24)));
+
+        Assert.Empty(plan.DeviceAddressRanges);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.Equal(FlatAddressSpace.SharedOrPrivate, plan.Memory[index].AddressSpace);
+    }
+
+    // Without an aperture the same flat store is a device access and keeps its range.
+    [Fact]
+    public void FlatAddressWithoutAperture_StaysGlobal()
+    {
+        var plan = Extract(Program(
+            Vop1(0, "VMovB32", 1, Operand(0)),
+            Vop1(4, "VMovB32", 0, Operand(0x1000)),
+            GlobalAccess(8, "FlatStoreDword", 0, vectorAddress: 0),
+            EndProgram(16)));
+
+        var range = Assert.Single(plan.DeviceAddressRanges);
+        Assert.True(range.Written);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        Assert.Equal(FlatAddressSpace.Global, plan.Memory[index].AddressSpace);
+    }
+
+    // A 32-bit read returns the aperture's high dword; a 64-bit read the full address.
+    [Fact]
+    public void ApertureOperands_DecodeConsistentlyAsHighDwordAndAddress()
+    {
+        Assert.True(Gen5InlineConstants.TryDecode(Gen5InlineConstants.SharedBase, out var shared));
+        Assert.Equal(Gen5InlineConstants.SharedApertureHigh, shared);
+        Assert.True(Gen5InlineConstants.TryDecode(Gen5InlineConstants.PrivateLimit, out var privateLimit));
+        Assert.Equal(Gen5InlineConstants.PrivateApertureHigh, privateLimit);
+        Assert.Equal(0x7000_0000_0000_0000ul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedBase));
+        Assert.Equal(0x7000_0000_FFFF_FFFFul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedLimit));
+        Assert.Equal(0x8000_0000_0000_0000ul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.PrivateBase));
+    }
+
     [Fact]
     public void BoundedOffsets_GiveTheLargestExtent()
     {

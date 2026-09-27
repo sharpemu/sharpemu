@@ -38,6 +38,9 @@ internal interface IShaderPipelineHost
 
     bool GraphicsSubgroupOperationsEnabled { get; }
 
+    // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be
+    // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
+    bool SharedInt64AtomicsEnabled { get; }
     bool PerVertexPixelInputsSupported => true;
 
     RenderHostLimits Limits { get; }
@@ -52,6 +55,11 @@ internal interface IShaderPipelineHost
 
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
+
+    // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
+    // may own the range (or, for a clean read, when a clean word read would be refused);
+    // the resource cache then re-materializes instead of trusting a stale copy.
+    bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) => false;
 
     // Creates the host module of one compiled permutation and returns its handle.
     ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId);

@@ -653,6 +653,7 @@ public sealed unsafe partial class GuestImageCache
         }
 
         DownloadToBuffer(image, buffer, bufferOffset, copySize, plan);
+        image.MarkBufferHoldsGpuContents();
         return true;
     }
 

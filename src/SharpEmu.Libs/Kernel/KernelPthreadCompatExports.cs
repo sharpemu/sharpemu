@@ -39,6 +39,11 @@ public static class KernelPthreadCompatExports
     private static readonly Dictionary<ulong, PthreadCondState> _condStates = new();
     private static readonly Dictionary<ulong, object> _onceGates = new();
     private static readonly Dictionary<ulong, PthreadCondAttrState> _condAttrStates = new();
+    // Only these exact allocation bases are owned by the pthread compatibility
+    // layer. Guest pthread objects are commonly stored inside reusable blocks;
+    // never pass one of those storage addresses to TryFreeGuestMemory when a
+    // stale handle is destroyed.
+    private static readonly ConcurrentDictionary<ulong, byte> _opaqueAllocations = new();
     private static readonly bool _tracePthreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
     private static readonly bool _tracePthreadConds =
@@ -283,7 +288,11 @@ public static class KernelPthreadCompatExports
     public static int PthreadYield(CpuContext ctx)
     {
         _ = ctx;
-        Thread.Yield();
+        if (!Thread.Yield())
+        {
+            Thread.Sleep(0);
+        }
+
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -293,6 +302,13 @@ public static class KernelPthreadCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PosixPthreadYield(CpuContext ctx) => PthreadYield(ctx);
+
+    [SysAbiExport(
+        Nid = "6XG4B33N09g",
+        ExportName = "sched_yield",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int SchedYield(CpuContext ctx) => PthreadYield(ctx);
 
     [SysAbiExport(
         Nid = "GBUY7ywdULE",
@@ -1696,6 +1712,8 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+        _opaqueAllocations[address] = 0;
+
         Span<byte> initialData = stackalloc byte[size];
         initialData.Clear();
         if (ctx.Memory.TryWrite(address, initialData))
@@ -1710,7 +1728,9 @@ public static class KernelPthreadCompatExports
 
     private static void FreeOpaqueObject(CpuContext ctx, ulong address)
     {
-        if (address != 0 && ctx.Memory is IGuestMemoryAllocator allocator)
+        if (address != 0 &&
+            _opaqueAllocations.TryRemove(address, out _) &&
+            ctx.Memory is IGuestMemoryAllocator allocator)
         {
             _ = allocator.TryFreeGuestMemory(address);
         }

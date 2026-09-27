@@ -31,28 +31,32 @@ public sealed class SamplerStoreTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
-    public void GetSampler_CachesByTheFourWords()
+    public void GetSampler_CachesByTheFourWordsAndTheViewClass()
     {
         if (!GatePrerequisites.Ready(_vulkan, samplerAnisotropy: true)) return;
         using var fatal = new FatalScope();
         using var store = new SamplerStore(_vulkan.DeviceInfo);
         var linear = Words(0, 0, (1u << 22) | (1u << 20));
-        var first = store.GetSampler(linear);
+        var first = store.GetSampler(linear, false);
         Assert.NotEqual(0UL, first.Handle);
-        Assert.Equal(first, store.GetSampler(linear));
+        Assert.Equal(first, store.GetSampler(linear, false));
         Assert.Equal(1, store.Count);
 
         var anisotropic = Words(2u << 9, 0, (3u << 22) | (3u << 20) | (2u << 26));
-        Assert.NotEqual(first, store.GetSampler(anisotropic));
+        Assert.NotEqual(first, store.GetSampler(anisotropic, false));
         var unnormalized = Words(1u << 15, 0, (1u << 22) | (1u << 20) | (2u << 26));
-        Assert.NotEqual(first, store.GetSampler(unnormalized));
+        Assert.NotEqual(first, store.GetSampler(unnormalized, false));
         var tableBorder = Words(4, 0, 0, (3u << 30) | 5);
-        Assert.NotEqual(0UL, store.GetSampler(tableBorder).Handle);
+        Assert.NotEqual(0UL, store.GetSampler(tableBorder, false).Handle);
         Assert.Equal(4, store.Count);
 
-        Assert.Throws<SchedulerFatalException>(() => store.GetSampler(Words(5u << 9, 0, (3u << 22) | (3u << 20))));
+        // An integer view gets its own sampler: integer border, no filtering.
+        Assert.NotEqual(first, store.GetSampler(linear, true));
+        Assert.Equal(5, store.Count);
+
+        Assert.Throws<SchedulerFatalException>(() => store.GetSampler(Words(5u << 9, 0, (3u << 22) | (3u << 20)), false));
         Assert.Contains(fatal.Messages, message => message.Contains("anisotropy ratio is unknown"));
-        Assert.Equal(4, store.Count);
+        Assert.Equal(5, store.Count);
         _vulkan.AssertNoValidationMessages();
     }
 }

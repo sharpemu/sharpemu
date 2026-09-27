@@ -130,6 +130,19 @@ public static class ViewFormatRules
         _ => None,
     };
 
+    // Integer views sample raw integers: no filtering, integer border colors.
+    public static bool IsIntegerFormat(Format format) => format is
+        Format.R8Uint or Format.R8Sint or Format.R8G8Uint or Format.R8G8Sint or
+        Format.R8G8B8A8Uint or Format.R8G8B8A8Sint or Format.B8G8R8A8Uint or Format.B8G8R8A8Sint or
+        Format.A8B8G8R8UintPack32 or Format.A8B8G8R8SintPack32 or
+        Format.A2B10G10R10UintPack32 or Format.A2B10G10R10SintPack32 or
+        Format.A2R10G10B10UintPack32 or Format.A2R10G10B10SintPack32 or
+        Format.R16Uint or Format.R16Sint or Format.R16G16Uint or Format.R16G16Sint or
+        Format.R16G16B16A16Uint or Format.R16G16B16A16Sint or
+        Format.R32Uint or Format.R32Sint or Format.R32G32Uint or Format.R32G32Sint or
+        Format.R32G32B32Uint or Format.R32G32B32Sint or Format.R32G32B32A32Uint or Format.R32G32B32A32Sint or
+        Format.S8Uint;
+
     // The bytes of one texel block of a host format; 0 for a format outside the compatibility classes.
     public static uint BlockBytes(Format format)
     {

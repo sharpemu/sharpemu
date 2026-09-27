@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -18,6 +19,7 @@ public sealed partial class RenderExecutor
     private const uint DispatchInitiatorKnownMask = DispatchInitiatorBaseBits | DispatchInitiatorModifierBits;
     private const uint ImageClearDispatchInitiator = 0x61;
     private const uint ImageClearWaveSize = 64;
+    private const uint Format32UInt = 20;
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
 
@@ -77,6 +79,12 @@ public sealed partial class RenderExecutor
         }
 
         if (indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
+        {
+            _host.ResetBindings();
+            return;
+        }
+
+        if (indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
         {
             _host.ResetBindings();
             return;
@@ -143,9 +151,25 @@ public sealed partial class RenderExecutor
             }
 
             _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
+            // The shader's local workgroup axes may have been remapped at compile time
+            // (see Gen5SpirvTranslator.ComputeWorkgroupAxisOrder) so the largest NUM_THREAD
+            // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
+            // counts must be permuted the same way, or vkCmdDispatch would hand group counts
+            // for the wrong physical axis to the pipeline it built with the remapped sizes.
+            var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(
+                input.ThreadsX,
+                input.ThreadsY,
+                input.ThreadsZ);
+            var logicalGroups = new[] { groupsX, groupsY, groupsZ };
+            var physicalGroups = new uint[3];
+            for (var logical = 0; logical < 3; logical++)
+            {
+                physicalGroups[axisOrder[logical]] = logicalGroups[logical];
+            }
+
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
-                _host.Dispatch(groupsX, groupsY, groupsZ);
+                _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
             _host.ShaderAccessBarrier();
         }
@@ -274,6 +298,46 @@ public sealed partial class RenderExecutor
         }
 
         return new ComputeImageClear(descriptor, clear, size);
+    }
+
+    // A constant fill that covers a whole image or DCC metadata becomes a clear. Anything
+    // else, including a fill of plain buffer memory, runs as the guest wrote it.
+    private bool TryConsumeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        var program = input.Stage.Program!;
+        if (program.ConstantFill is not { } fill || program.UserDataBase != 0)
+        {
+            return false;
+        }
+
+        var userData = input.Stage.Resources.UserData;
+        if (fill.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
+            input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 || groupsY != 1 || groupsZ != 1 ||
+            fill.DestinationScalarResource + 4 > userData.Length || fill.SourceScalarResource + 4 > userData.Length)
+        {
+            return false;
+        }
+
+        var destination = BufferDescriptorWords.From(userData.AsSpan((int)fill.DestinationScalarResource, 4).ToArray());
+        var source = BufferDescriptorWords.From(userData.AsSpan((int)fill.SourceScalarResource, 4).ToArray());
+        Span<byte> valueBytes = stackalloc byte[sizeof(uint)];
+        if (destination.Format != Format32UInt || destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId ||
+            (ulong)groupsX * input.ThreadsX != destination.RecordCount || source.RecordCount == 0 ||
+            !_host.TryReadGuest(source.Address, valueBytes))
+        {
+            return false;
+        }
+
+        var value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(valueBytes);
+        var size = (ulong)destination.RecordCount * sizeof(uint);
+        var consumed = _host.TryClearImageFromBuffer(destination.Address, size, value) ||
+                       _host.TryAbsorbDccFill(destination.Address, size, value);
+        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+        {
+            RenderTrace.Write($"Constant fill: shader=0x{program.Hash:X16} address=0x{destination.Address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
+        }
+
+        return consumed;
     }
 
     private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)

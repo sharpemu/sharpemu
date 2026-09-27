@@ -11,6 +11,8 @@ public static class KernelExports
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
     private static readonly object _coredumpGate = new();
+    private const string RepeatedGuestAssertion = "Assertion failed: 0";
+    private static int _repeatedGuestAssertionCount;
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
 
@@ -30,7 +32,8 @@ public static class KernelExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    
+    // KytyPS5 libKernel.cpp KernelGetOperationMode: *mode = 2 (PS5 base console, not Pro),
+    // *submode = 0 (none). Games poll this at high frequency.
     [SysAbiExport(
         Nid = "NH6xARDOVv8",
         ExportName = "sceKernelGetOperationMode",
@@ -38,8 +41,19 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int KernelGetOperationMode(CpuContext ctx)
     {
-        // SCE_KERNEL_MODE_RELEASE = 0. Reporting retail/release mode keeps guest
-        // code from taking devkit/tool-only branches we do not emulate.
+        var modeAddress = ctx[CpuRegister.Rdi];
+        var submodeAddress = ctx[CpuRegister.Rsi];
+
+        if (modeAddress != 0 && !ctx.TryWriteUInt32(modeAddress, 2))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (submodeAddress != 0 && !ctx.TryWriteUInt32(submodeAddress, 0))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -223,7 +237,8 @@ public static class KernelExports
             ctx,
             attrAddress,
             out var priority,
-            out var affinityMask);
+            out var affinityMask,
+            out var requestedStackSize);
         KernelPthreadExtendedCompatExports.RegisterThreadStart(
             threadHandle,
             name,
@@ -252,7 +267,8 @@ public static class KernelExports
                 attrAddress,
                 name,
                 priority,
-                affinityMask);
+                affinityMask,
+                requestedStackSize);
             if (!scheduler.TryStartThread(ctx, request, out var error))
             {
                 Console.Error.WriteLine(
@@ -402,17 +418,40 @@ public static class KernelExports
         ulong fmtPtr = ctx[CpuRegister.Rdi];
         string fmt = ReadCString(ctx, fmtPtr, 4096);
         string outStr = KernelMemoryCompatExports.FormatStringFromVarArgs(ctx, fmt, firstGpArgIndex: 1);
-        if (outStr.EndsWith('\n') || outStr.EndsWith('\r'))
+        var byteCount = System.Text.Encoding.UTF8.GetByteCount(outStr);
+        if (ShouldWriteGuestPrintf(outStr))
         {
-            Console.Write($"[DEBUG][PRINF] {outStr}");
-        }
-        else
-        {
-            Console.WriteLine($"[DEBUG][PRINF] {outStr}");
+            if (outStr.EndsWith('\n') || outStr.EndsWith('\r'))
+            {
+                Console.Write($"[DEBUG][PRINF] {outStr}");
+            }
+            else
+            {
+                Console.WriteLine($"[DEBUG][PRINF] {outStr}");
+            }
         }
 
-        ctx[CpuRegister.Rax] = (ulong)System.Text.Encoding.UTF8.GetByteCount(outStr);
+        ctx[CpuRegister.Rax] = (ulong)byteCount;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Demon\'s Souls can print this same guest-side diagnostic thousands of times during
+    // bootstrap. Printing it does not convey new state and serializes the emulation threads,
+    // but printf must still report its original byte count to the guest.
+    private static bool ShouldWriteGuestPrintf(string text)
+    {
+        if (!string.Equals(text.TrimEnd('\r', '\n'), RepeatedGuestAssertion, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var count = Interlocked.Increment(ref _repeatedGuestAssertionCount);
+        if (count == 2)
+        {
+            Console.WriteLine("[DEBUG][PRINF] Further repeated 'Assertion failed: 0' messages are suppressed.");
+        }
+
+        return count == 1;
     }
 
     [SysAbiExport(
@@ -521,4 +560,5 @@ public static class KernelExports
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
 }
