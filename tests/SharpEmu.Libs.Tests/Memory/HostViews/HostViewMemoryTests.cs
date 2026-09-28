@@ -213,7 +213,7 @@ public sealed unsafe class HostViewMemoryTests
         WindowsHostViews.FailProtectForTests = true;
         try
         {
-            Assert.False(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.ReadWrite, out var failure));
+            Assert.False(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.NoAccess, out var failure));
             Assert.Equal(HostViewFailure.ProtectFailed, failure);
         }
         finally
@@ -312,6 +312,38 @@ public sealed unsafe class HostViewMemoryTests
 
         Assert.True(views.JoinHoles(baseAddress, hole));
         Assert.True(views.FreeHole(baseAddress, hole));
+    }
+
+    [Theory]
+    [InlineData(HostPageProtection.NoAccess, 0x01u)]
+    [InlineData(HostPageProtection.ReadOnly, 0x02u)]
+    [InlineData(HostPageProtection.ReadWrite, 0x04u)]
+    [InlineData(HostPageProtection.Execute, 0x10u)]
+    [InlineData(HostPageProtection.ReadExecute, 0x20u)]
+    [InlineData(HostPageProtection.ReadWriteExecute, 0x40u)]
+    [InlineData(HostPageProtection.ExecuteWriteCopy, 0x80u)]
+    public void MapView_SetsRequestedProtectionOnWindows(HostPageProtection protection, uint expectedProtection)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+        var hole = HoleSize(views);
+        var address = ReserveFreeHole(views, hole);
+        Assert.True(views.SplitHole(address, Segment));
+        var mapped = false;
+        try
+        {
+            mapped = views.TryMapView(backing, address, 0, Segment, protection, out var failure);
+            Assert.True(mapped, failure.ToString());
+            Assert.NotEqual((nuint)0, VirtualQuery((void*)address, out var info, (nuint)sizeof(MemoryBasicInformation)));
+            Assert.Equal(expectedProtection, info.Protect);
+        }
+        finally
+        {
+            if (mapped) Assert.True(views.UnmapView(address, Segment));
+            Assert.True(views.JoinHoles(address, hole));
+            Assert.True(views.FreeHole(address, hole));
+        }
     }
 
     private static HostViewFailure MapFailure(IHostViewMemory views, HostBackingObject backing, ulong address, ulong offset, ulong size)

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.Host.Windows;
 
@@ -176,7 +177,9 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             // A view cannot map as no-access. Map writable, then apply the protection.
             var mapProtection = protection == HostPageProtection.NoAccess ? PAGE_READWRITE : GetNativeProtection(protection);
             var process = GetCurrentProcess();
-            var ptr = MapViewOfFile3(backing.Handle, process, (void*)address, offset, (nuint)size, MEM_REPLACE_PLACEHOLDER, mapProtection, null, 0);
+            void* ptr;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.HostViewNativeMap))
+                ptr = MapViewOfFile3(backing.Handle, process, (void*)address, offset, (nuint)size, MEM_REPLACE_PLACEHOLDER, mapProtection, null, 0);
             if (ptr == null)
             {
                 failure = HostViewFailure.PlaceholderMapFailed;
@@ -190,11 +193,17 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
                 return false;
             }
 
-            if (FailProtectForTests || !VirtualProtect(ptr, (nuint)size, GetNativeProtection(protection), out _))
+            if (protection == HostPageProtection.NoAccess)
             {
-                UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
-                failure = HostViewFailure.ProtectFailed;
-                return false;
+                bool protectedView;
+                using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.HostViewProtection))
+                    protectedView = !FailProtectForTests && VirtualProtect(ptr, (nuint)size, PAGE_NOACCESS, out _);
+                if (!protectedView)
+                {
+                    UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
+                    failure = HostViewFailure.ProtectFailed;
+                    return false;
+                }
             }
 
             failure = HostViewFailure.None;
