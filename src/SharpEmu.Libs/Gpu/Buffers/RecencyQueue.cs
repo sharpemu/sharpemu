@@ -18,6 +18,9 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
     private readonly Queue<int> _freeEntryIndices = new();
     private Item? _first;
     private Item? _last;
+    private Item? _scanNext;
+
+    internal ulong GetLastUseTick(int entryIndex) => _items[entryIndex].Tick;
 
     public int Insert(TSlotIdentifier slot, ulong tick)
     {
@@ -74,6 +77,24 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
         }
     }
 
+    // Continue a bounded collection walk without changing the order or last-use ticks.
+    public void CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        var item = _scanNext ?? _first;
+        for (var examined = 0; item != null && examined < limit; examined++)
+        {
+            if (item.Tick > tick)
+            {
+                _scanNext = null;
+                return;
+            }
+            results.Add(item.Slot);
+            item = item.Next;
+        }
+        _scanNext = item;
+    }
+
     private int AllocateItem()
     {
         if (_freeEntryIndices.Count == 0)
@@ -102,6 +123,8 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
 
     private void UnlinkItem(Item item)
     {
+        if (_scanNext == item)
+            _scanNext = item.Next;
         if (item.Previous != null)
         {
             item.Previous.Next = item.Next;
