@@ -686,6 +686,7 @@ public static class AvPlayerExports
             }
         }
 
+        TracePlaybackTransition(player, "close");
         player.Dispose();
         return SetReturn(ctx, 0);
     }
@@ -785,6 +786,7 @@ public static class AvPlayerExports
             }
             player = foundPlayer;
 
+            TracePlaybackTransition(player, "stop");
             player.ResetPlayback();
             player.Started = false;
             player.Stopped = true;
@@ -1768,6 +1770,7 @@ public static class AvPlayerExports
 
     private static int FinishStream(CpuContext ctx, PlayerState player)
     {
+        TracePlaybackTransition(player, "end-of-stream");
         TraceOnce(
             "video_end",
             $"video_end handle=0x{player.Handle:X16} next_frame={player.NextFrameIndex} " +
@@ -2968,6 +2971,14 @@ public static class AvPlayerExports
     {
         ctx[CpuRegister.Rax] = unchecked((ulong)result);
         return result;
+    }
+
+    private static void TracePlaybackTransition(PlayerState player, string operation)
+    {
+        if (!TraceVideoImages) return;
+        Console.Error.WriteLine($"[AVPLAYER][TRACE] lifecycle operation={operation} handle=0x{player.Handle:X16} " +
+            $"started={player.Started} paused={player.Paused} eos={player.EndOfStream} looping={player.Looping} " +
+            $"videoMs={player.LastVideoTimestamp} clockMs={player.PlaybackClock.ElapsedMilliseconds} frame={player.NextFrameIndex}");
     }
 
     private static void Trace(string message)
