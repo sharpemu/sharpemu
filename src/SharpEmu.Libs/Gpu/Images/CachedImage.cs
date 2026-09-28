@@ -519,9 +519,15 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
         }
 
+        var minLod = new ImageViewMinLodCreateInfoEXT
+        {
+            SType = StructureType.ImageViewMinLodCreateInfoExt,
+            MinLod = normalized.MinLod,
+        };
         var usage = new ImageViewUsageCreateInfo
         {
             SType = StructureType.ImageViewUsageCreateInfo,
+            PNext = normalized.MinLod > 0 && _device.ImageViewMinLodSupported ? &minLod : null,
             Usage = isStorage ? image.Usage : image.Usage & ~ImageUsageFlags.StorageBit,
         };
         var create = new ImageViewCreateInfo

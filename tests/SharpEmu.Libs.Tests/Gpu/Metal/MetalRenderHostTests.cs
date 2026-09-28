@@ -137,7 +137,7 @@ public sealed class MetalRenderHostTests : IDisposable
         private ShaderProgram _pixelProgram;
         private ShaderProgram _computeProgram;
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive)
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound)
         {
             if (!_vertexProgram.IsValid)
             {
@@ -413,7 +413,7 @@ public sealed class MetalRenderHostTests : IDisposable
     {
         var executor = Executor(out var provider);
         var input = provider.GetGraphicsPrograms(_banks.Shader.Vertex, _banks.Shader.Pixel,
-            _banks.Context.ShaderInterface, _banks.Context, [], true).VertexInput;
+            _banks.Context.ShaderInterface, _banks.Context, [], true, false).VertexInput;
         var original = Floats(-1f, -1f, 3f, -1f, -1f, 3f);
         Assert.True(_memory.TryWrite(VertexBase, original));
         if (changedLayout) input.Attributes[0] = input.Attributes[0] with { OffsetBytes = 4 };
@@ -440,7 +440,7 @@ public sealed class MetalRenderHostTests : IDisposable
         var executor = Executor(out var provider);
         provider.ReuseGraphicsPipeline = true;
         var first = provider.GetGraphicsPrograms(_banks.Shader.Vertex, _banks.Shader.Pixel,
-            _banks.Context.ShaderInterface, _banks.Context, [], true).VertexInput;
+            _banks.Context.ShaderInterface, _banks.Context, [], true, false).VertexInput;
         Assert.True(_memory.TryWrite(VertexBase, new byte[24]));
         executor.DrawAuto(1, _banks, new DrawAutoArguments(0, 0, 3, 1, 0, 0, DrawOffsetSource.Packet));
         var address = VertexBase + 64;

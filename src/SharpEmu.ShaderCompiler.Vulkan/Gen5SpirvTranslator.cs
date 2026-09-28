@@ -876,10 +876,68 @@ public static partial class Gen5SpirvTranslator
                     .Distinct()
                     .Order()
                     .ToArray();
+                DeclareInterpolationParameters();
+                // Several PS input slots may read one VS parameter (the guest compiler emits a
+                // slot per use). Relocating a duplicate left it on a location the vertex program
+                // never writes, so it read zero: Astro Bot's save-slot card normals decoded to NaN
+                // and a machine's albedo came out black. Slots of one kind share one host input;
+                // when a V_INTERP_MOV slot is among them, the others read the per-vertex values
+                // (interpolated with the barycentrics, or vertex 0 for a flat slot).
+                var shared = new Dictionary<uint, uint>();
+                bool IsFlatSlot(uint attribute) =>
+                    ((attribute < (uint)_pixelInputCntl.Length ? _pixelInputCntl[attribute] : 0u) & 0x400u) != 0 ||
+                    _flatParameterAttributes.Contains(attribute);
+                foreach (var group in attributes.GroupBy(attribute =>
+                             (attribute < (uint)_pixelInputCntl.Length ? _pixelInputCntl[attribute] : attribute) & 0x1Fu))
+                {
+                    uint? perVertexOwner = null;
+                    foreach (var attribute in group)
+                    {
+                        if (_perVertexAttributes.Contains(attribute))
+                        {
+                            perVertexOwner = attribute;
+                            break;
+                        }
+                    }
+
+                    var owners = new Dictionary<bool, uint>();
+                    foreach (var attribute in group)
+                    {
+                        if (perVertexOwner is { } perVertex)
+                        {
+                            if (attribute != perVertex)
+                            {
+                                shared.Add(attribute, perVertex);
+                                if (!_perVertexAttributes.Contains(attribute))
+                                {
+                                    _perVertexSourcedAttributes.Add(attribute, IsFlatSlot(attribute));
+                                }
+                            }
+
+                            continue;
+                        }
+
+                        var flat = IsFlatSlot(attribute);
+                        if (owners.TryGetValue(flat, out var owner))
+                        {
+                            shared.Add(attribute, owner);
+                        }
+                        else
+                        {
+                            owners.Add(flat, attribute);
+                        }
+                    }
+                }
+
+                if (_perVertexSourcedAttributes.ContainsValue(false))
+                {
+                    DeclarePerspectiveBarycentric();
+                }
+
+                attributes = attributes.Where(attribute => !shared.ContainsKey(attribute)).ToArray();
                 var locations = Gen5PixelInputMapping.ResolveLocations(
                     _pixelInputCntl,
                     attributes);
-                DeclareInterpolationParameters();
                 for (var index = 0; index < attributes.Length; index++)
                 {
                     var attribute = attributes[index];
@@ -910,6 +968,11 @@ public static partial class Gen5SpirvTranslator
 
                     _pixelInputs.Add(attribute, variable);
                     _interfaces.Add(variable);
+                }
+
+                foreach (var (attribute, owner) in shared)
+                {
+                    _pixelInputs.Add(attribute, _pixelInputs[owner]);
                 }
 
                 _fragCoordInput = _module.AddGlobalVariable(
@@ -2495,6 +2558,12 @@ public static partial class Gen5SpirvTranslator
             if (_perVertexAttributes.Contains(interpolation.Attribute))
             {
                 return TryEmitInterpolationParameter(instruction, interpolation, input, destination, out error);
+            }
+
+            if (_perVertexSourcedAttributes.TryGetValue(interpolation.Attribute, out var flatSource))
+            {
+                EmitPerVertexSourcedInterpolation(interpolation, input, destination, flatSource);
+                return true;
             }
 
             var vector = Load(_vec4Type, input);

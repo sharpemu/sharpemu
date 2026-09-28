@@ -451,6 +451,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            RecordSampledColorMetadataClears(bindings);
+
             // Create feedback copies after load clears have been materialized;
             // otherwise a shader would sample the pre-clear contents.
             PrepareDepthFeedback(bindings);
@@ -525,6 +527,45 @@ internal static unsafe partial class VulkanVideoPresenter
             (ulong)attachment.BaseLayer < (ulong)sampled.BaseLayer + sampled.LayerCount;
 
         // Clears the depth view with a transfer so the draw can sample the cleared image.
+        // A DCC fast clear stays pending until the surface binds as a color target. A shader that
+        // samples or writes the surface first must see the cleared contents, and the later bind must
+        // not clear over its writes: Astro Bot's save-slot cards were drawn by compute into a
+        // fast-cleared target, then wiped black by the deferred clear. Only the zero clear code is
+        // materialized here; the register clear color is known only when the surface is a target.
+        private void RecordSampledColorMetadataClears(TextureResource[] bindings)
+        {
+            const byte DccClearToZero = 0x00;
+            foreach (var binding in bindings)
+            {
+                if (binding.IsHostMovie || binding.CachedImage is not { } image || image.Description.Metadata.Kind != MetadataKind.Dcc)
+                {
+                    continue;
+                }
+
+                var metadataAddress = image.Description.Metadata.Range.Address;
+                var view = binding.Request.View;
+                for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount; layer++)
+                {
+                    if (!_imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) || (byte)metadataValue != DccClearToZero)
+                    {
+                        continue;
+                    }
+
+                    EndRendering();
+                    var command = BeginBatchedGuestCommands();
+                    var range = new SubresourceRange(0, 1, layer, 1);
+                    image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
+                    var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
+                    var clearValue = default(ClearColorValue);
+                    _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    if (!_imageCache.SetMetadataSlice(metadataAddress, layer, false))
+                    {
+                        throw SubmissionScheduler.Fatal($"The DCC clear state could not be consumed: metadata=0x{metadataAddress:X16} layer={layer}.");
+                    }
+                }
+            }
+        }
+
         private void RecordSampledDepthClear(CachedImage image, in ImageViewDescription view, Format format)
         {
             var aspects = (_boundDepthLoadState.DepthClearEnabled ? ImageAspectFlags.DepthBit : 0) |

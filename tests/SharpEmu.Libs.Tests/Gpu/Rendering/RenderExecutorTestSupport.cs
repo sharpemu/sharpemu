@@ -414,7 +414,8 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         ShaderInterfaceRegisters shaderInterface,
         ContextRegisters context,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        bool pixelActive)
+        bool pixelActive,
+        bool depthBound)
     {
         Calls.Add($"get_graphics_programs pixelActive={pixelActive}");
         ExportMappings.Add(targetExportMapping.ToArray());

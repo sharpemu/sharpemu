@@ -682,7 +682,8 @@ public sealed partial class RenderExecutor
             context.ShaderInterface,
             context,
             targetExportMapping,
-            state.PixelActive);
+            state.PixelActive,
+            state.Depth.HasTarget);
     }
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]

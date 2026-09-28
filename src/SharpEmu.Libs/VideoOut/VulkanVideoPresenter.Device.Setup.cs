@@ -592,6 +592,12 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
             SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
+            _canRequireComputeSubgroup32 =
+                subgroup.SubgroupSize != RdnaSubgroupSize &&
+                subgroupSizeControl.MinSubgroupSize <= RdnaSubgroupSize &&
+                subgroupSizeControl.MaxSubgroupSize >= RdnaSubgroupSize &&
+                (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;
+            _maxComputeWorkgroupSubgroups = subgroupSizeControl.MaxComputeWorkgroupSubgroups;
             _maxPushDescriptors = pushDescriptorProperties.MaxPushDescriptors;
             _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
@@ -693,6 +699,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
+        private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
+        private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
+        private bool _supportsImageViewMinLod;
 
         private void CreateDevice()
         {
@@ -813,6 +822,40 @@ internal static unsafe partial class VulkanVideoPresenter
                 _supportsFragmentShaderBarycentric = barycentricFeatures.FragmentShaderBarycentric;
             }
 
+            // With maintenance5 a vertex program that writes no PointSize draws 1-pixel points. The
+            // guest sizes points from PA_SU_POINT_SIZE, which is not modelled; without the feature a
+            // point-list pipeline whose program does not export a size is invalid.
+            var maintenance5Features = new PhysicalDeviceMaintenance5FeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceMaintenance5FeaturesKhr,
+            };
+            var supportsMaintenance5 = false;
+            if (IsDeviceExtensionAvailable(Maintenance5ExtensionName))
+            {
+                var maintenance5Query = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &maintenance5Features,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &maintenance5Query);
+                supportsMaintenance5 = maintenance5Features.Maintenance5;
+            }
+
+            var imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
+            };
+            if (IsDeviceExtensionAvailable(ImageViewMinLodExtensionName))
+            {
+                var imageViewMinLodQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &imageViewMinLodFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &imageViewMinLodQuery);
+                _supportsImageViewMinLod = imageViewMinLodFeatures.MinLod;
+            }
+
             // MoltenVK exposes the barycentric builtins, but SPIRV-Cross rejects PerVertexKHR inputs.
             _supportsPerVertexPixelInputs = _supportsFragmentShaderBarycentric &&
                 !IsDeviceExtensionAvailable(PortabilitySubsetExtensionName);
@@ -875,6 +918,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
+            _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
             SetSharedInt64AtomicsCapability(supportsSharedInt64Atomics);
             if (!supportsSharedInt64Atomics)
             {
@@ -919,9 +963,11 @@ internal static unsafe partial class VulkanVideoPresenter
             var depthClipEnableExtension = (byte*)SilkMarshal.StringToPtr(DepthClipEnableExtensionName);
             var barycentricExtension = (byte*)SilkMarshal.StringToPtr(FragmentShaderBarycentricExtensionName);
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
+            var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
+            var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             try
             {
-                var extensions = stackalloc byte*[12];
+                var extensions = stackalloc byte*[14];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -951,6 +997,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (supportsMaintenance8)
                 {
                     extensions[extensionCount++] = maintenance8Extension;
+                }
+
+                if (supportsMaintenance5)
+                {
+                    extensions[extensionCount++] = maintenance5Extension;
+                }
+
+                if (_supportsImageViewMinLod)
+                {
+                    extensions[extensionCount++] = imageViewMinLodExtension;
                 }
 
                 if (supportsRobustness2)
@@ -1011,6 +1067,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     barycentricFeatures.PNext = renderingChain;
                     renderingChain = &barycentricFeatures;
                 }
+                if (supportsMaintenance5)
+                {
+                    maintenance5Features = new PhysicalDeviceMaintenance5FeaturesKHR
+                    {
+                        SType = StructureType.PhysicalDeviceMaintenance5FeaturesKhr,
+                        Maintenance5 = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &maintenance5Features;
+                }
+                if (_supportsImageViewMinLod)
+                {
+                    imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
+                        MinLod = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &imageViewMinLodFeatures;
+                }
                 if (_supportsDepthClipEnable)
                 {
                     depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
@@ -1049,6 +1125,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     SType = StructureType.PhysicalDeviceVulkan13Features,
                     DynamicRendering = true,
                     Synchronization2 = true,
+                    SubgroupSizeControl = _canRequireComputeSubgroup32,
                     PNext = renderingChain,
                 };
                 var features2 = new PhysicalDeviceFeatures2
@@ -1073,6 +1150,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SilkMarshal.Free((nint)swapchainExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
+                SilkMarshal.Free((nint)maintenance5Extension);
+                SilkMarshal.Free((nint)imageViewMinLodExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
@@ -1084,7 +1163,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device);
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

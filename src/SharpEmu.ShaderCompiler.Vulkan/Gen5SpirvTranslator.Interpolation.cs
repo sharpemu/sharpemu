@@ -11,6 +11,9 @@ public static partial class Gen5SpirvTranslator
     {
         private readonly HashSet<uint> _perVertexAttributes = [];
         private readonly HashSet<uint> _flatParameterAttributes = [];
+        // Slots that share a per-vertex input with a V_INTERP_MOV slot; true for a flat slot.
+        private readonly Dictionary<uint, bool> _perVertexSourcedAttributes = [];
+        private uint _perspectiveBarycentric;
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
         private const uint InterpolateAtCentroid = 76;
@@ -88,6 +91,53 @@ public static partial class Gen5SpirvTranslator
                 _module.AddDecoration(_interpolationSampleId, SpirvDecoration.Flat);
                 _interfaces.Add(_interpolationSampleId);
             }
+        }
+
+        // The perspective barycentrics a smooth slot sharing a per-vertex input is rebuilt with.
+        private void DeclarePerspectiveBarycentric()
+        {
+            foreach (var bit in new[] { 0, 1, 2 })
+            {
+                if (_barycentricInputs.TryGetValue(bit, out var existing))
+                {
+                    _perspectiveBarycentric = existing;
+                    return;
+                }
+            }
+
+            _perspectiveBarycentric = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.Input, _vec3Type), SpirvStorageClass.Input);
+            _module.AddDecoration(_perspectiveBarycentric, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.BaryCoordKhr);
+            _interfaces.Add(_perspectiveBarycentric);
+        }
+
+        // A smooth or flat slot read from a per-vertex input: the vertices weighted by the
+        // perspective barycentrics, or vertex 0 (the provoking vertex) for a flat slot.
+        private void EmitPerVertexSourcedInterpolation(Gen5InterpolationControl interpolation, uint input, uint destination, bool flat)
+        {
+            uint LoadVertex(uint vertex)
+            {
+                var pointer = _module.AddInstruction(SpirvOp.AccessChain,
+                    _module.TypePointer(SpirvStorageClass.Input, _floatType),
+                    input, UInt(vertex), UInt(interpolation.Channel));
+                return Load(_floatType, pointer);
+            }
+
+            var value = LoadVertex(0);
+            if (!flat)
+            {
+                var barycentric = Load(_vec3Type, _perspectiveBarycentric);
+                value = _module.AddInstruction(SpirvOp.FMul, _floatType, value,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, barycentric, 0));
+                for (uint vertex = 1; vertex < 3; vertex++)
+                {
+                    var weight = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, barycentric, vertex);
+                    value = _module.AddInstruction(SpirvOp.FAdd, _floatType, value,
+                        _module.AddInstruction(SpirvOp.FMul, _floatType, LoadVertex(vertex), weight));
+                }
+            }
+
+            StoreV(destination, Bitcast(_uintType, value));
         }
 
         private uint LoadBarycentricCoordinates(int bit, uint variable) => bit switch

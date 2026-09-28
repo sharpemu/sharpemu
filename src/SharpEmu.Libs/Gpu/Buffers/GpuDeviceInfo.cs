@@ -16,6 +16,9 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     private int _liveAllocations;
     private int _peakAllocations;
 
+    // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
+    public bool ImageViewMinLodSupported { get; init; }
+
     public GpuDeviceInfo(Vk vk, PhysicalDevice physicalDevice, Device device)
     {
         Vk = vk;

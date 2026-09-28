@@ -171,6 +171,39 @@ public sealed partial class RenderExecutor
 
     private static bool IsSupportedSampleCount(uint samples) => samples is 1 or 2 or 4 or 8;
 
+    // A depth pass can leave a color target bound that it never writes (target mask 0, or a
+    // slot the pixel program does not export). Hardware bounds such a draw only by the
+    // scissor, but a host attachment also bounds the render area: a 1024x1024 color target
+    // left bound by Astro Bot's depth clear kept the clear out of most of a 1080p depth buffer.
+    // The pixel outputs drop the same slots (ShaderPipelineCache.ResolveBoundTargets), so host
+    // locations stay dense and aligned with the remaining attachments.
+    private static void DropUnwrittenColorTargets(ContextRegisters context, ref DrawState state, ShaderProgramInfo? pixelProgram)
+    {
+        if (!state.Depth.HasTarget)
+        {
+            return;
+        }
+
+        var exportMasks = pixelProgram?.PixelColorExportMasks ?? uint.MaxValue;
+        var kept = 0u;
+        for (var i = 0; i < state.ColorCount; i++)
+        {
+            ref readonly var target = ref state.Colors[i];
+            if (IsUnwrittenColorTarget(context, target.Slot, target.Resolution.ExportMapping, exportMasks))
+            {
+                continue;
+            }
+
+            state.Colors[(int)kept++] = target;
+        }
+
+        state.ColorCount = kept;
+    }
+
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
+        exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
+        ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
+
     // Acquires every attachment through the host and assembles the rendering scope.
     private RenderingState AcquireAttachments(ref DrawState state)
     {

@@ -3518,7 +3518,7 @@ public static partial class Gen5SpirvTranslator
 
                 if (!_emulateWave64 && _waveLaneCount != 64)
                 {
-                    newExec = BitwiseAnd(
+                    newExec = BitwiseAnd64(
                         newExec,
                         _module.Constant64(_ulongType, 0xFFFF_FFFFUL));
                 }

@@ -118,7 +118,7 @@ public static partial class ImageRequestBuilders
         var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
         if (shape.Volume)
         {
-            return new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage);
+            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -131,7 +131,21 @@ public static partial class ImageRequestBuilders
         var type = shape.OneDimensional
             ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
             : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D;
-        return new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage);
+        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+    }
+
+    // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
+    // loaded yet; ignoring it sampled the unloaded mip 0 of Astro Bot's stadium sky and bloom spread its
+    // garbage HDR values over the screen. Storage views address levels explicitly and are not clamped.
+    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape)
+    {
+        var minLod = descriptor.MinLod / 256f;
+        if (shape.Storage || minLod <= view.BaseLevel)
+        {
+            return view;
+        }
+
+        return view with { MinLod = Math.Min(minLod, view.BaseLevel + view.LevelCount - 1) };
     }
 
     public static uint DestinationSwizzle(in TextureDescriptorWords descriptor) =>

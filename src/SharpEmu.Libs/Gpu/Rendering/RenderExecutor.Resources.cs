@@ -223,6 +223,7 @@ public sealed partial class RenderExecutor
         var indirectArguments = emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
+        DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(ref state);
         // Nothing after the pipeline touches guest memory.
         var pipeline = _pipelines.CreateGraphicsPipeline(

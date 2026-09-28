@@ -20,15 +20,20 @@ public readonly record struct ImageViewDescription(
 {
     public static ImageViewDescription Default => new(Format.Undefined, ImageViewType.Type2D, ImageAspectFlags.ColorBit, 0, 1, 0, 1, default, ImageUsageFlags.SampledBit);
 
+    // The texture descriptor's MIN_LOD in absolute mip levels; 0 leaves the view unclamped.
+    // Streamed textures raise it until their larger mips are resident.
+    public float MinLod { get; init; }
+
     public bool Equals(ImageViewDescription other) =>
         Format == other.Format && Type == other.Type && Aspect == other.Aspect &&
         BaseLevel == other.BaseLevel && LevelCount == other.LevelCount &&
         BaseLayer == other.BaseLayer && LayerCount == other.LayerCount &&
         Mapping.R == other.Mapping.R && Mapping.G == other.Mapping.G &&
-        Mapping.B == other.Mapping.B && Mapping.A == other.Mapping.A && Usage == other.Usage;
+        Mapping.B == other.Mapping.B && Mapping.A == other.Mapping.A && Usage == other.Usage &&
+        MinLod == other.MinLod;
 
     public override int GetHashCode() =>
-        HashCode.Combine(Format, Type, Aspect, BaseLevel, LevelCount, BaseLayer, LayerCount, HashCode.Combine(Mapping.R, Mapping.G, Mapping.B, Mapping.A, Usage));
+        HashCode.Combine(Format, Type, Aspect, BaseLevel, LevelCount, BaseLayer, LayerCount, HashCode.Combine(Mapping.R, Mapping.G, Mapping.B, Mapping.A, Usage, MinLod));
 }
 
 // Which host formats may view which image formats, and which guest swizzles are legal.

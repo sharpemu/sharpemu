@@ -64,6 +64,21 @@ internal static unsafe partial class VulkanVideoPresenter
         // Wave64 compute runs natively when the device's subgroup is that wide; smaller devices emulate it.
         bool IShaderPipelineHost.ComputeWave64Supported => Volatile.Read(ref _nativeSubgroupSize) >= 64;
 
+        // Only a 64-invocation wave64 workgroup is translated for either host subgroup width. Every
+        // other compute translation maps a guest wave to 32-lane host subgroups, and a 64-lane host
+        // subgroup (AMD's default) left lanes 32..63 inactive: a wave64 8x8x8 group lost rows 4..7.
+        private const uint RdnaSubgroupSize = 32;
+        private bool _canRequireComputeSubgroup32;
+        private uint _maxComputeWorkgroupSubgroups;
+
+        private bool RequiresComputeSubgroup32(ComputeInputInfo input)
+        {
+            var invocations = (ulong)Math.Max(input.ThreadsX, 1) * Math.Max(input.ThreadsY, 1) * Math.Max(input.ThreadsZ, 1);
+            return _canRequireComputeSubgroup32 &&
+                   !(input.WaveSize == 64 && invocations == 64) &&
+                   invocations <= (ulong)_maxComputeWorkgroupSubgroups * RdnaSubgroupSize;
+        }
+
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
         bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
@@ -776,9 +791,15 @@ internal static unsafe partial class VulkanVideoPresenter
             Pipeline pipeline;
             try
             {
+                var requiredSubgroupSize = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                    RequiredSubgroupSize = RdnaSubgroupSize,
+                };
                 var stageInfo = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
+                    PNext = RequiresComputeSubgroup32(description.Input) ? &requiredSubgroupSize : null,
                     Stage = ShaderStageFlags.ComputeBit,
                     Module = computeModule,
                     PName = entryPoint,
