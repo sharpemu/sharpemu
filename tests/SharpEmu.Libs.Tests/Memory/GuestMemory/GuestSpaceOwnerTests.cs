@@ -15,12 +15,41 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     private const ulong Page = GuestSpaceOwner.GuestPage;
 
     [Fact]
+    public void ReservationSearchHandlesOutOfOrderRangesAndMappedBoundaries()
+    {
+        if (!Supported) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var granularity = Math.Max(host.Granularity, Page);
+        var address = ProbeGuestAddress(host, 7 * granularity);
+        Assert.True(owner.TryReserveAddressRange(address + 5 * granularity, granularity));
+        Assert.True(owner.TryReserveAddressRange(address + granularity, granularity));
+        Assert.True(owner.TryReserveAddressRange(address + 3 * granularity, granularity));
+        Assert.True(owner.OwnsReservedRange(address + granularity, granularity));
+        Assert.False(owner.OwnsReservedRange(address + 2 * granularity, granularity));
+        Assert.False(owner.TryReserveAddressRange(address, 2 * granularity));
+        Assert.True(owner.MapShared(address + 3 * granularity, granularity, 0,
+            HostPageProtection.ReadWrite, out _));
+
+        host.Log.Clear();
+        Assert.False(owner.TryReserveFreeRange(address, 4 * granularity));
+        Assert.Empty(host.Log);
+        Assert.True(owner.TryReserveFreeRange(address, 3 * granularity));
+        Assert.True(owner.TryReserveFreeRange(address + 4 * granularity, 3 * granularity));
+        Assert.Equal(address + 4 * granularity,
+            owner.FindFreeAddress(address + 3 * granularity, address + 7 * granularity, granularity, granularity));
+        Assert.Equal(0UL,
+            owner.FindFreeAddress(address + 3 * granularity, address + 4 * granularity, granularity, granularity));
+    }
+
+    [Fact]
     public void StartupReservation_SurvivesClearAndIsReleasedOnDispose()
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
         var size = HoleSize(host);
-        var address = ReserveFreeHole(host, size);
+        var address = ProbeGuestAddress(host, size);
+        Assert.Equal(address, host.ReserveHole(address, size));
         using var owner = new GuestSpaceOwner(host, BackingSize,
             startupReservation: new HostAddressRange(address, size));
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));

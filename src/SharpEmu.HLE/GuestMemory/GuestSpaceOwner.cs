@@ -28,8 +28,8 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly object _mappingLock = new();
     private readonly object[] _protectionLocks = CreateProtectionLocks();
     private readonly SortedList<ulong, ulong> _free = new();
-    private readonly SortedList<ulong, OwnedRange> _mapped = new();
-    private readonly List<(ulong Address, ulong Size)> _owned = new();
+    private readonly OwnedRangeTree _mapped = new();
+    private readonly SortedList<ulong, ulong> _owned = new();
     private readonly bool _preReserveGuestAddressSpace;
     private bool _disposed;
     private readonly HostAddressRange? _startupReservation;
@@ -44,9 +44,6 @@ public sealed class GuestSpaceOwner : IDisposable
              reservation.Address % Granularity != 0 || reservation.Size % Granularity != 0))
             throw new ArgumentOutOfRangeException(nameof(startupReservation));
         _startupReservation = startupReservation;
-        // Create lookup views before concurrent fault handlers can read the range table.
-        _ = _mapped.Keys;
-        _ = _mapped.Values;
         _preReserveGuestAddressSpace = preReserveGuestAddressSpace;
         PreReserveGuestAddressSpace();
         _views = new SharedBackingViews(host, backingSize);
@@ -105,7 +102,7 @@ public sealed class GuestSpaceOwner : IDisposable
             }
 
             AddFreeRange(address, size);
-            _owned.Add((address, size));
+            _owned.Add(address, size);
             return true;
         }
     }
@@ -129,21 +126,25 @@ public sealed class GuestSpaceOwner : IDisposable
                     return false;
                 if (FindFreeRangeIndex(address, size) >= 0)
                     return true;
-                if (_mapped.Values.Any(range => range.Address < end && address < range.Address + range.Size))
+                var mappedRange = FindMappedRangeAtOrBelow(end - 1);
+                if (mappedRange.Size != 0 && mappedRange.Address + mappedRange.Size > address)
                     return false;
 
                 // Keep owned placeholders. Reserve only the gaps between them.
                 additions = new List<(ulong Address, ulong Size)>();
                 var current = address - address % Granularity;
-                foreach (var range in _owned.OrderBy(range => range.Address))
+                var ownedIndex = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_owned, current));
+                for (; ownedIndex < _owned.Count; ownedIndex++)
                 {
-                    if (range.Address + range.Size <= current)
+                    var rangeAddress = _owned.Keys[ownedIndex];
+                    var rangeEnd = rangeAddress + _owned.Values[ownedIndex];
+                    if (rangeEnd <= current)
                         continue;
-                    if (range.Address >= reservationEnd)
+                    if (rangeAddress >= reservationEnd)
                         break;
-                    if (current < range.Address)
-                        additions.Add((current, range.Address - current));
-                    current = Math.Max(current, Math.Min(reservationEnd, range.Address + range.Size));
+                    if (current < rangeAddress)
+                        additions.Add((current, rangeAddress - current));
+                    current = Math.Max(current, Math.Min(reservationEnd, rangeEnd));
                 }
                 if (current < reservationEnd)
                     additions.Add((current, reservationEnd - current));
@@ -171,7 +172,7 @@ public sealed class GuestSpaceOwner : IDisposable
             {
                 foreach (var range in additions)
                 {
-                    _owned.Add(range);
+                    _owned.Add(range.Address, range.Size);
                     AddFreeRange(range.Address, range.Size);
                 }
                 return FindFreeRangeIndex(address, size) >= 0;
@@ -188,7 +189,8 @@ public sealed class GuestSpaceOwner : IDisposable
 
         lock (_mappingLock)
         {
-            return _owned.Any(range => address >= range.Address && address + size <= range.Address + range.Size);
+            var index = RangeSearch.FindLastIndexAtOrBelow(_owned, address);
+            return index >= 0 && address + size <= _owned.Keys[index] + _owned.Values[index];
         }
     }
 
@@ -386,11 +388,15 @@ public sealed class GuestSpaceOwner : IDisposable
                 return false;
             }
 
-            if (!_views.Unmap(address, size, out var holePreserved) || !holePreserved)
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BackingUnmapHost))
             {
-                return false;
+                if (!_views.Unmap(address, size, out var holePreserved) || !holePreserved)
+                {
+                    return false;
+                }
             }
 
+            using var bookkeepingProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BackingUnmapBookkeeping);
             if (!TryRemoveMappedRanges(address, size, RangeKind.Backed))
             {
                 OnFatal($"No shared backing record exists at 0x{address:X16}.");
@@ -449,7 +455,7 @@ public sealed class GuestSpaceOwner : IDisposable
             var pieces = new List<(ulong Address, ulong Size)>();
             while (current < end)
             {
-                var range = _mapped.Values[FindMappedRangeIndex(current)];
+                var range = FindMappedRangeAtOrBelow(current);
                 var pieceEnd = Math.Min(end, range.Address + range.Size);
                 pieces.Add((current, pieceEnd - current));
                 current = pieceEnd;
@@ -488,7 +494,7 @@ public sealed class GuestSpaceOwner : IDisposable
                 return;
             }
 
-            foreach (var range in _mapped.Values.ToArray())
+            foreach (var range in _mapped.ToArray())
             {
                 var released = range.Kind == RangeKind.Backed
                     ? _views.Unmap(range.Address, range.Size, out _)
@@ -525,7 +531,7 @@ public sealed class GuestSpaceOwner : IDisposable
     {
         if (_startupReservation is { } retainedRange)
         {
-            _owned.Add((retainedRange.Address, retainedRange.Size));
+            _owned.Add(retainedRange.Address, retainedRange.Size);
             AddFreeRange(retainedRange.Address, retainedRange.Size);
             return;
         }
@@ -537,7 +543,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
         foreach (var range in _host.ReserveFreeAddressRanges(UserAddressStart, UserAddressEnd, MinimumPreReservedRange))
         {
-            _owned.Add((range.Address, range.Size));
+            _owned.Add(range.Address, range.Size);
             AddFreeRange(range.Address, range.Size);
         }
     }
@@ -586,17 +592,22 @@ public sealed class GuestSpaceOwner : IDisposable
         return increment <= ulong.MaxValue - value ? value + increment : 0;
     }
 
-    private bool OverlapsOwnedLocked(ulong address, ulong size) =>
-        _owned.Any(range => address < range.Address + range.Size && range.Address < address + size);
+    private bool OverlapsOwnedLocked(ulong address, ulong size)
+    {
+        var index = RangeSearch.FindLastIndexAtOrBelow(_owned, address + size - 1);
+        return index >= 0 && _owned.Keys[index] + _owned.Values[index] > address;
+    }
 
     private bool SetAccessLocked(ulong address, ulong size, HostPageProtection protection)
     {
         if (_disposed) return false;
         var end = address + size;
-        var index = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_mapped, address));
-        for (; index < _mapped.Count && _mapped.Values[index].Address < end; index++)
+        if (size == 0) return true;
+        var range = FindMappedRangeAtOrBelow(address);
+        if (range.Size == 0 || range.Address + range.Size <= address)
+            range = _mapped.FindAtOrAbove(address);
+        while (range.Size != 0 && range.Address < end)
         {
-            var range = _mapped.Values[index];
             var start = Math.Max(address, range.Address);
             var stop = Math.Min(end, range.Address + range.Size);
             if (start < stop)
@@ -604,6 +615,7 @@ public sealed class GuestSpaceOwner : IDisposable
                 using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(stop - start);
                 if (!_host.ChangeAccess(start, stop - start, protection)) return false;
             }
+            range = _mapped.FindAtOrAbove(range.Address + range.Size);
         }
 
         return true;
@@ -665,6 +677,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     private void AddFreeRange(ulong address, ulong size)
     {
+        using var publicationProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.FreeRangePublication);
         if (address == 0 || size == 0)
         {
             return;
@@ -689,7 +702,13 @@ public sealed class GuestSpaceOwner : IDisposable
         }
 
         // Keep adjacent entries separate when the host cannot join their free ranges.
-        if ((first != index || last != index) && _host.JoinHoles(start, end - start))
+        var joined = false;
+        if (first != index || last != index)
+        {
+            using var joinProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.FreeRangeHostJoin);
+            joined = _host.JoinHoles(start, end - start);
+        }
+        if (joined)
         {
             for (var remove = last; remove >= first; remove--)
             {
@@ -720,8 +739,12 @@ public sealed class GuestSpaceOwner : IDisposable
             return 0;
         }
 
-        foreach (var (start, length) in _free)
+        var index = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_free, searchStart));
+        for (; index < _free.Count; index++)
         {
+            var start = _free.Keys[index];
+            if (start >= searchEnd) break;
+            var length = _free.Values[index];
             var candidate = AlignUp(Math.Max(start, searchStart), alignment);
             if (candidate != 0 && candidate < searchEnd && size <= searchEnd - candidate &&
                 candidate >= start && candidate <= start + length && size <= start + length - candidate)
@@ -733,17 +756,8 @@ public sealed class GuestSpaceOwner : IDisposable
         return 0;
     }
 
-    private int FindMappedRangeIndex(ulong address)
-    {
-        var index = RangeSearch.FindLastIndexAtOrBelow(_mapped, address);
-        if (index < 0)
-        {
-            return -1;
-        }
-
-        var range = _mapped.Values[index];
-        return address < range.Address + range.Size ? index : -1;
-    }
+    private OwnedRange FindMappedRangeAtOrBelow(ulong address) =>
+        _mapped.FindAtOrBelow(address);
 
     private bool HasOnlyRangeKind(ulong address, ulong size, RangeKind kind)
     {
@@ -751,13 +765,13 @@ public sealed class GuestSpaceOwner : IDisposable
         var current = address;
         while (current < end)
         {
-            var index = FindMappedRangeIndex(current);
-            if (index < 0 || _mapped.Values[index].Kind != kind)
+            var range = FindMappedRangeAtOrBelow(current);
+            if (range.Size == 0 || current >= range.Address + range.Size || range.Kind != kind)
             {
                 return false;
             }
 
-            current = Math.Min(end, _mapped.Values[index].Address + _mapped.Values[index].Size);
+            current = Math.Min(end, range.Address + range.Size);
         }
 
         return true;
@@ -766,46 +780,47 @@ public sealed class GuestSpaceOwner : IDisposable
     private bool TryAddMappedRange(ulong address, ulong size, RangeKind kind)
     {
         var end = address + size;
-        var index = RangeSearch.FindLastIndexAtOrBelow(_mapped, address);
-        if (index >= 0 && _mapped.Values[index].Address + _mapped.Values[index].Size > address)
+        var preceding = FindMappedRangeAtOrBelow(end - 1);
+        if (preceding.Size != 0 && preceding.Address + preceding.Size > address)
         {
             return false;
         }
 
-        if (index + 1 < _mapped.Count && _mapped.Keys[index + 1] < end)
-        {
-            return false;
-        }
-
-        _mapped[address] = new OwnedRange(address, size, kind);
-        return true;
+        return _mapped.Add(new OwnedRange(address, size, kind));
     }
 
     private bool TryRemoveMappedRanges(ulong address, ulong size, RangeKind kind)
     {
-        if (!HasOnlyRangeKind(address, size, kind))
+        using var removalProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeRemoval);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeRemovalValidation))
         {
-            return false;
+            if (!HasOnlyRangeKind(address, size, kind))
+                return false;
         }
 
         var end = address + size;
+        if (size == 0)
+            return true;
         var current = address;
         while (current < end)
         {
-            var index = FindMappedRangeIndex(current);
-            var original = _mapped.Values[index];
+            OwnedRange original;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeRemovalSearch))
+                original = FindMappedRangeAtOrBelow(current);
             var partEnd = Math.Min(end, original.Address + original.Size);
-            _mapped.RemoveAt(index);
-            if (original.Address < current)
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeTreeRemoval))
+                _mapped.Remove(original);
+            if (original.Address < address)
             {
-                _mapped[original.Address] = original with { Size = current - original.Address };
+                using var splitProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeSplitPublication);
+                _mapped.Add(original with { Size = address - original.Address });
             }
 
             if (partEnd < original.Address + original.Size)
             {
-                _mapped[partEnd] = original with { Address = partEnd, Size = original.Address + original.Size - partEnd };
+                using var splitProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappedRangeSplitPublication);
+                _mapped.Add(original with { Address = partEnd, Size = original.Address + original.Size - partEnd });
             }
-
             current = partEnd;
         }
 
