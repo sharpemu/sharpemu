@@ -363,7 +363,7 @@ public sealed partial class GuestImageCache
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
         GpuMemoryAccessProfile.CountImageCpuWrite();
-        if (!IsValidRange(address, size))
+        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
         {
             return false;
         }

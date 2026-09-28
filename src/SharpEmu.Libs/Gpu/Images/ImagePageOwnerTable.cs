@@ -107,6 +107,7 @@ public sealed class ImagePageOwnerTable
     public const ulong AddressSpaceSize = 1UL << AddressSpaceBits;
 
     private readonly PageOwnerList?[]?[] _firstLevel = new PageOwnerList?[]?[1 << FirstLevelBits];
+    private readonly long[] _everOwnedPages = new long[PageCount / 64];
 
     public int AllocatedBucketCount { get; private set; }
 
@@ -129,7 +130,28 @@ public sealed class ImagePageOwnerTable
             AllocatedBucketCount++;
         }
 
-        return bucket[page & (BucketEntries - 1)] ??= new PageOwnerList();
+        var owners = bucket[page & (BucketEntries - 1)] ??= new PageOwnerList();
+        Interlocked.Or(ref _everOwnedPages[page / 64], 1L << (int)(page % 64));
+        return owners;
+    }
+
+    // Bits are never cleared: a false result can safely bypass the image-cache lock.
+    public bool MayHaveOwners(ulong address, ulong size)
+    {
+        if (!TryGetPageRange(address, size, out var first, out var lastExclusive))
+        {
+            return false;
+        }
+
+        for (var page = first; page < lastExclusive; page++)
+        {
+            if ((Volatile.Read(ref _everOwnedPages[page / 64]) & (1L << (int)(page % 64))) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // The half-open page interval of a non-empty byte range inside the address space.

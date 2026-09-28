@@ -11,6 +11,19 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class ImagePageOwnerTableTests
 {
+    [Fact]
+    public void OwnerSummaryRejectsOnlyPagesThatNeverHadAnOwner()
+    {
+        var table = new ImagePageOwnerTable();
+        var page = ImagePageOwnerTable.BucketEntries;
+        var address = (ulong)page << ImagePageOwnerTable.PageBits;
+        Assert.False(table.MayHaveOwners(address, 4));
+        table.GetOrCreate((ulong)page).Add(Owner(1));
+        Assert.True(table.MayHaveOwners(address, 4));
+        Assert.True(table.MayHaveOwners(address - 4, 8));
+        Assert.False(table.MayHaveOwners(address - 4, 4));
+    }
+
     private static ResourceSlotIdentifier Owner(uint index) => new(index, 1);
 
     [Fact]
