@@ -441,8 +441,21 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         SDL_QuitSubSystem(InitFlags);
     }
 
+    private long _lastEventPumpTimestamp;
+
     private void PumpEvents()
     {
+        if (RenderPhaseProfile.Enabled)
+        {
+            var timestamp = Stopwatch.GetTimestamp();
+            if (_lastEventPumpTimestamp != 0)
+            {
+                var gap = Stopwatch.GetElapsedTime(_lastEventPumpTimestamp, timestamp).TotalMilliseconds;
+                if (gap >= 1000)
+                    Console.Error.WriteLine($"[PERF][WINDOW_EVENT_GAP] gap_ms={gap:F3}");
+            }
+            _lastEventPumpTimestamp = timestamp;
+        }
         SDL_Event windowEvent;
         while (PollWindowEvent(&windowEvent))
         {
