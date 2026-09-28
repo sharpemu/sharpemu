@@ -22,6 +22,32 @@ public sealed class GuestRedZonePatcherCollection
 public sealed class GuestRedZonePatcherTests
 {
     [Theory]
+    [InlineData("554889E5415741564155415453488B45C0C3", true)]
+    [InlineData("554889E54883EC40488B45C0C3", false)]
+    [InlineData("554889E54883EC20488B45C0C3", true)]
+    [InlineData("554889E54889C4488B45F8C3", false)]
+    [InlineData("554889E574044883EC20488B45F8C3", false)]
+    [InlineData("554889E54883EC0875FA488B45F8C3", false)]
+    [InlineData("554889E5FFE0488B45F8C3", false)]
+    [InlineData("554889E5488D45F8C3", false)]
+    [InlineData("554889E5904883EC40488B45F8C3", false)]
+    [InlineData("554889E55353535353488945D0C3", true)]
+    [InlineData("554889E55353535353488945D8C3", false)]
+    [InlineData("554889E5535353535348898550FFFFFFC3", false)]
+    [InlineData("488945D0C3", false)]
+    [InlineData("554889E5535353535348894424D0C3", false)]
+    [InlineData("554889E5535353535348898558FFFFFFC3", true)]
+    [InlineData("554889E5535353535348898557FFFFFFC3", false)]
+    public void FrameAnalysisRequiresAProvenRedZoneAccess(string bytes, bool expected)
+    {
+        var decoder = Decoder.Create(64, new ByteArrayCodeReader(Convert.FromHexString(bytes)));
+        var instructions = new List<Instruction>();
+        var length = (ulong)(bytes.Length / 2);
+        while (decoder.IP < length) instructions.Add(decoder.Decode());
+        Assert.Equal(expected, GuestStackFrameAnalysis.UsesFrameRedZone(instructions));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void GroupingPreservesIncomingBranchFromAnotherFunction(bool separateSegment)
@@ -70,21 +96,6 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(expected, GuestRedZonePatcher.UsesRedZone(instruction));
     }
 
-    // After 'push rbp; mov rbp, rsp' and five more pushes, RSP = RBP - 0x28: [rbp-0x30] is below
-    // RSP inside the red zone, [rbp-0x28] is the last pushed register, [rbp-0xB0] is below the zone.
-    [Theory]
-    [InlineData(new byte[] { 0x48, 0x89, 0x45, 0xD0 }, 0x28, true)]
-    [InlineData(new byte[] { 0x48, 0x89, 0x45, 0xD8 }, 0x28, false)]
-    [InlineData(new byte[] { 0x48, 0x89, 0x85, 0x50, 0xFF, 0xFF, 0xFF }, 0x28, false)]
-    [InlineData(new byte[] { 0x48, 0x89, 0x45, 0xD0 }, -1, false)]
-    [InlineData(new byte[] { 0x48, 0x89, 0x44, 0x24, 0xD0 }, 0x28, false)]
-    public void RecognizesFramePointerSpillsBelowTheStackPointer(byte[] instructionBytes, int frameDelta, bool expected)
-    {
-        var instruction = Decode(instructionBytes);
-
-        Assert.Equal(expected, GuestRedZonePatcher.UsesFramePointerRedZone(instruction, frameDelta));
-    }
-
     [Fact]
     public void RelocatesOnlyOrdinaryNonStackMemoryInstructions()
     {
@@ -121,8 +132,10 @@ public sealed class GuestRedZonePatcherTests
             targetAddress: 0x1_0000_1000));
     }
 
-    [Fact]
-    public unsafe void PatchesWindowsAndMacOsLeafFunctionWhileLeavingLinuxUnchanged()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void PatchesWindowsAndMacOsLeafFunctionWhileLeavingLinuxUnchanged(bool framePointer)
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
@@ -148,6 +161,14 @@ public sealed class GuestRedZonePatcherTests
             0x48, 0x8B, 0x44, 0x24, 0xF8,
             0xC3,
         ];
+        if (framePointer)
+        {
+            function = [0x55, 0x48, 0x89, 0xE5,
+                0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+                0x48, 0x89, 0x45, 0xF8,
+                0x8B, OperatingSystem.IsWindows() ? (byte)0x81 : (byte)0x87, 0, 1, 0, 0,
+                0x48, 0x8B, 0x45, 0xF8, 0x5D, 0xC3];
+        }
         Assert.True(memory.TryWrite(imageBase, function));
 
         // Define one function with absolute 64-bit pointers in the exception frame header.
@@ -172,17 +193,24 @@ public sealed class GuestRedZonePatcherTests
             Assert.Equal(1, result.RedZoneFunctions);
             Assert.Equal(1, result.PatchedSites);
             Assert.Equal(0, result.FailedSites);
-            Assert.Equal(0xE9, patched[15]);
-            var trampolineAddress = (ulong)((long)imageBase + 20 +
-                BinaryPrimitives.ReadInt32LittleEndian(patched.AsSpan(16)));
-            var trampoline = new byte[24];
-            Assert.True(memory.TryRead(trampolineAddress, trampoline));
-            Assert.Equal(new byte[] { 0x48, 0x8D, 0x64, 0x24, 0x80 }, trampoline[..5]);
-            Assert.Equal(function[15..21], trampoline[5..11]);
-            Assert.Equal(new byte[] { 0x48, 0x8D, 0xA4, 0x24, 0x80, 0, 0, 0 }, trampoline[11..19]);
-            Assert.Equal(0xE9, trampoline[19]);
-            Assert.Equal(imageBase + 21, (ulong)((long)trampolineAddress + 24 +
-                BinaryPrimitives.ReadInt32LittleEndian(trampoline.AsSpan(20))));
+            if (framePointer)
+            {
+                Assert.Equal(0xE9, patched[14]);
+            }
+            else
+            {
+                Assert.Equal(0xE9, patched[15]);
+                var trampolineAddress = (ulong)((long)imageBase + 20 +
+                    BinaryPrimitives.ReadInt32LittleEndian(patched.AsSpan(16)));
+                var trampoline = new byte[24];
+                Assert.True(memory.TryRead(trampolineAddress, trampoline));
+                Assert.Equal(new byte[] { 0x48, 0x8D, 0x64, 0x24, 0x80 }, trampoline[..5]);
+                Assert.Equal(function[15..21], trampoline[5..11]);
+                Assert.Equal(new byte[] { 0x48, 0x8D, 0xA4, 0x24, 0x80, 0, 0, 0 }, trampoline[11..19]);
+                Assert.Equal(0xE9, trampoline[19]);
+                Assert.Equal(imageBase + 21, (ulong)((long)trampolineAddress + 24 +
+                    BinaryPrimitives.ReadInt32LittleEndian(trampoline.AsSpan(20))));
+            }
         }
         else
         {
@@ -480,8 +508,10 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(new byte[] { 0x8B, 0x01 }, retained.ToArray());
     }
 
-    [Fact]
-    public unsafe void GroupedFaultResumesWithoutRepeatingWrites()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void GroupedFaultResumesWithoutRepeatingWrites(bool framePointer)
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
@@ -496,6 +526,12 @@ public sealed class GuestRedZonePatcherTests
             0x48, 0x8B, 0x01,
             0x48, 0x89, 0x02,
             0x48, 0x8B, 0x44, 0x24, 0xF8, 0xC3];
+        if (framePointer)
+            function = [0x55, 0x48, 0x89, 0xE5,
+                0x48, 0xC7, 0x45, 0xF8, 0x2A, 0, 0, 0,
+                0x48, 0x8B, 0x02, 0x49, 0xFF, 0x00,
+                0x48, 0x8B, 0x01, 0x48, 0x89, 0x02,
+                0x48, 0x8B, 0x45, 0xF8, 0x5D, 0xC3];
         var result = PatchFunction(memory, imageBase, function);
         Assert.Equal(1, result.PatchedSites);
         Assert.Equal(0, result.FailedSites);

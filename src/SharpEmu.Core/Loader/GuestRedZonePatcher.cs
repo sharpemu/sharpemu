@@ -215,11 +215,11 @@ internal static class GuestRedZonePatcher
                 functionCount++;
                 instructionCount += decoded.Count;
                 CollectBranchTargets(decoded, branchTargets);
-                var frameDelta = protectRedZone ? ComputeFramePointerDelta(decoded) : -1;
                 var usesRedZone = protectRedZone &&
                     (decoded.Any(static entry => UsesRedZone(entry.Instruction)) ||
-                     decoded.Any(entry => UsesFramePointerRedZone(entry.Instruction, frameDelta)));
-
+                     (decoded.Any(static entry => entry.Instruction.MemoryBase == Register.RBP &&
+                         unchecked((long)entry.Instruction.MemoryDisplacement64) < 0) &&
+                      GuestStackFrameAnalysis.UsesFrameRedZone(decoded.Select(static entry => entry.Instruction).ToArray())));
                 if (!usesRedZone && !splitVectorStores && !rewriteSha)
                 {
                     continue;
@@ -639,83 +639,6 @@ internal static class GuestRedZonePatcher
         return displacement < 0 && displacement >= -GuestRedZoneBytes;
     }
 
-    // Clang spills into the red zone through the frame pointer as often as through
-    // RSP: with a standard 'push rbp; mov rbp, rsp' frame plus N callee-saved
-    // pushes, RSP sits at RBP-N, so every [rbp-d] with d > N is below RSP and a
-    // host exception frame would overwrite it. Matching only RSP-relative use left
-    // those functions unprotected.
-    internal static bool UsesFramePointerRedZone(in Instruction instruction, int frameDelta)
-    {
-        if (frameDelta < 0 || !HasMemoryOperand(instruction) || instruction.MemoryBase != Register.RBP)
-        {
-            return false;
-        }
-
-        var displacement = unchecked((long)instruction.MemoryDisplacement64);
-        return displacement < -frameDelta && displacement >= -(frameDelta + (long)GuestRedZoneBytes);
-    }
-
-    // Distance from the frame pointer down to RSP for a standard prologue, or -1
-    // when the function does not establish one. Only the leading pushes and the
-    // first 'sub rsp, imm' count, which under-estimates frames that grow later:
-    // under-estimating only widens the guarded window, so it stays conservative.
-    private static int ComputeFramePointerDelta(List<DecodedInstruction> decoded)
-    {
-        if (decoded.Count < 2)
-        {
-            return -1;
-        }
-
-        var push = decoded[0].Instruction;
-        if (push.Mnemonic != Mnemonic.Push ||
-            push.OpCount != 1 ||
-            push.GetOpKind(0) != OpKind.Register ||
-            push.GetOpRegister(0) != Register.RBP)
-        {
-            return -1;
-        }
-
-        var move = decoded[1].Instruction;
-        if (move.Mnemonic != Mnemonic.Mov ||
-            move.OpCount != 2 ||
-            move.GetOpKind(0) != OpKind.Register ||
-            move.GetOpRegister(0) != Register.RBP ||
-            move.GetOpKind(1) != OpKind.Register ||
-            move.GetOpRegister(1) != Register.RSP)
-        {
-            return -1;
-        }
-
-        var delta = 0;
-        for (var index = 2; index < decoded.Count; index++)
-        {
-            var instruction = decoded[index].Instruction;
-            if (instruction.Mnemonic == Mnemonic.Push &&
-                instruction.OpCount == 1 &&
-                instruction.GetOpKind(0) == OpKind.Register)
-            {
-                delta += 8;
-                continue;
-            }
-
-            if (instruction.Mnemonic == Mnemonic.Sub &&
-                instruction.OpCount == 2 &&
-                instruction.GetOpKind(0) == OpKind.Register &&
-                instruction.GetOpRegister(0) == Register.RSP &&
-                instruction.GetOpKind(1) is OpKind.Immediate8 or OpKind.Immediate8to64 or OpKind.Immediate32to64 or OpKind.Immediate32)
-            {
-                var immediate = (long)instruction.GetImmediate(1);
-                if (immediate > 0 && immediate < int.MaxValue - delta)
-                {
-                    delta += (int)immediate;
-                }
-            }
-
-            break;
-        }
-
-        return delta;
-    }
 
     private static bool UsesStackMemory(in Instruction instruction)
     {
