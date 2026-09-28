@@ -770,11 +770,12 @@ public sealed partial class DirectExecutionBackend
 			}
 			else if (orbisGen2Result != OrbisGen2Result.ORBIS_GEN2_OK)
 			{
-				if (ShouldLogImportResult(importStubEntry.Nid, orbisGen2Result))
+                if (ShouldLogImportResult(importStubEntry.Nid, orbisGen2Result, out var mutexOccurrence))
 				{
 					Console.Error.WriteLine(
 						$"[LOADER][WARN] Import#{num} result: {orbisGen2Result} ({importStubEntry.Nid}) " +
-						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} ret=0x{num7:X16}");
+                        $"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} ret=0x{num7:X16}" +
+                        (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
 				}
 			}
 			cpuContext[CpuRegister.Rbx] = value3;
@@ -1622,14 +1623,15 @@ public sealed partial class DirectExecutionBackend
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
 		{
 			var returnResult = (OrbisGen2Result)returnValue;
-			if (ShouldLogImportResult(importStubEntry.Nid, returnResult))
+            if (ShouldLogImportResult(importStubEntry.Nid, returnResult, out var mutexOccurrence))
 			{
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Import#{dispatchIndex} result: {returnResult} ({importStubEntry.Nid}) " +
 					$"rdi=0x{arg0:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
 					$"rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} " +
 					$"r8=0x{cpuContext[CpuRegister.R8]:X16} r9=0x{cpuContext[CpuRegister.R9]:X16} " +
-					$"ret=0x{returnRip:X16}");
+                    $"ret=0x{returnRip:X16}" +
+                    (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
 			}
 		}
 
@@ -1775,13 +1777,26 @@ public sealed partial class DirectExecutionBackend
 			"DfivPArhucg" or // memcmp
 			"8zTFvBIAIN8";   // memset
 
-	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
+    private bool ShouldLogImportResult(string nid, OrbisGen2Result result, out int mutexOccurrence)
 	{
+        mutexOccurrence = 0;
 		var resultValue = unchecked((int)result);
 		if (resultValue > 0)
 		{
 			return false;
 		}
+
+        // Preserve the first self-lock warnings and sample repeats without changing the guest result.
+        if (result == OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK && nid is "9UK1vLZQft4" or "7H0iTOciTLo")
+        {
+            return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
+        }
+
+        if ((nid is "2Z+PpY6CaJg" or "tn3VlD0hG60") &&
+            (result is OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT or OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED))
+        {
+            return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
+        }
 
 		var expectedFileProbeMiss =
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND &&
@@ -1848,8 +1863,12 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
+        return ShouldSampleImportResult(nid, resultValue, out _);
+    }
+
+    private bool ShouldSampleImportResult(string nid, int resultValue, out int count)
+    {
 		var key = nid + "\0" + resultValue;
-		int count;
 		lock (_importResultLogSampleGate)
 		{
 			_importResultLogSamples.TryGetValue(key, out count);
