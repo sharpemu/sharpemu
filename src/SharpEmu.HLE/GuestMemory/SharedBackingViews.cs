@@ -286,10 +286,19 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
 
     public bool Unmap(ulong address, ulong size, out bool holePreserved)
     {
-        lock (_lock)
+        var lockTaken = false;
+        try
         {
-            WaitForCopies();
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapLockAcquisition))
+                Monitor.Enter(_lock, ref lockTaken);
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapCopyWait))
+                WaitForCopies();
             return UnmapCore(address, size, out holePreserved);
+        }
+        finally
+        {
+            if (lockTaken)
+                Monitor.Exit(_lock);
         }
     }
 
@@ -303,6 +312,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
 
         var end = address + size;
         var targets = new List<ViewRecord>();
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapTargetLookup))
         lock (_lock)
         {
             var current = address;
@@ -359,7 +369,8 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
                 if (address + size <= record.Address + record.Size)
                 {
                     old = record;
-                    _views.Remove(record);
+                    using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapRecordRemoval))
+                        _views.Remove(record);
                     PublishSnapshot();
                 }
             }
@@ -370,7 +381,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             return false;
         }
 
-        if (!_host.UnmapView(old.Address, old.Size))
+        bool unmapped;
+        GuestMemoryProfile.RecordUnmapSizes(size, old.Size, address - old.Address,
+            old.Address + old.Size - address - size);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapNativeCall))
+            unmapped = _host.UnmapView(old.Address, old.Size);
+        if (!unmapped)
         {
             RestoreViewRecord(old);
             return false;
@@ -382,17 +398,20 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             return true;
         }
 
+        using var restorationProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewUnmapPartialRestoration);
         var leftSize = address - old.Address;
         var rightAddress = address + size;
         var rightSize = old.Address + old.Size - rightAddress;
         var ok = true;
         if (leftSize != 0 && leftSize != old.Size)
         {
+            using var splitProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewRestorationSplit);
             ok = _host.SplitHole(old.Address, leftSize) && ok;
         }
 
         if (rightSize != 0)
         {
+            using var splitProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.SharedViewRestorationSplit);
             ok = _host.SplitHole(address, size) && ok;
         }
 
