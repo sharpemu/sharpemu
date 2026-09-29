@@ -566,6 +566,26 @@ public sealed partial class GuestImageCache
         return expandedImageIdentifier;
     }
 
+    // A compute shader writes the blocks of a compressed image through an
+    // uncompressed view, but the driver could not give that image storage usage.
+    // The blocks move to an uncompressed image of the same memory; the next
+    // compressed request copies them back (the IsBlock branch of ResolveOverlap).
+    private ResourceSlotIdentifier ReplaceCompressedForStorage(in ImageDescription requested, ResourceSlotIdentifier cachedImageIdentifier)
+    {
+        var replacementImageIdentifier = InsertImage(requested);
+        var replacement = _slots[replacementImageIdentifier];
+        var cached = _slots[cachedImageIdentifier];
+        replacement.Uses = cached.Uses;
+        if (cached.Binding.IsBound || cached.Binding.IsTarget)
+        {
+            cached.Binding.NeedsRebind = true;
+        }
+
+        CopyWholeImage(replacementImageIdentifier, cachedImageIdentifier);
+        ReleaseImage(cachedImageIdentifier);
+        return replacementImageIdentifier;
+    }
+
     private void AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil)
     {
         if (!ImageDescription.IsValidRange(stencil))

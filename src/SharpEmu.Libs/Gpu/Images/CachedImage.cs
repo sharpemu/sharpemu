@@ -209,6 +209,21 @@ public sealed unsafe partial class CachedImage : IDisposable
             return true;
         }
 
+        // Some drivers (AMDVLK) refuse storage usage on block-compressed images even
+        // with extended usage. Storage writes to such an image go through an
+        // uncompressed replacement instead (GuestImageCache.ReplaceCompressedForStorage).
+        if ((configuration.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) != 0 &&
+            (configuration.Usage & ImageUsageFlags.StorageBit) != 0)
+        {
+            var withoutStorage = configuration;
+            withoutStorage.Usage &= ~ImageUsageFlags.StorageBit;
+            if (SupportsImageConfiguration(device, withoutStorage))
+            {
+                configuration = withoutStorage;
+                return true;
+            }
+        }
+
         if (!allowCompressedImageFallback || (configuration.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
         {
             return false;
@@ -284,7 +299,18 @@ public sealed unsafe partial class CachedImage : IDisposable
             usage |= ImageUsageFlags.ColorAttachmentBit;
         }
 
-        var storageFormat = ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
+        // Compressed images are written by compute shaders (GPU texture
+        // encoders) through an uncompressed block view; with extended usage the
+        // image may carry storage usage when that block view format supports it.
+        // TrySelectSupportedImageConfiguration drops it again if the driver refuses.
+        var storageFormat = GuestPixelFormats.BlockCompressedBytes(description.GuestFormat) != 0
+            ? ViewFormatRules.BlockBytes(description.PixelFormat) switch
+            {
+                8 => Format.R32G32Uint,
+                16 => Format.R32G32B32A32Uint,
+                _ => Format.Undefined,
+            }
+            : ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
         var storageFeatures = storageFormat == Format.Undefined ? features : device.GetFormatProperties(storageFormat).OptimalTilingFeatures;
         if (description.Samples == 1 && (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0)
         {

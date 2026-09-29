@@ -178,6 +178,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     ? GuestImageType.Color1D : GuestImageType.Color2D;
                 result = GrowImage(replacement, result);
             }
+            else if (request.Role == ImageRole.StorageImage && viewMip < 0 && viewLayer < 0 &&
+                     resolved.Description.IsBlock && !request.Description.IsBlock &&
+                     (resolved.Backing.Usage & ImageUsageFlags.StorageBit) == 0)
+            {
+                result = ReplaceCompressedForStorage(request.Description, result);
+            }
         }
 
         if (!result.IsValid)

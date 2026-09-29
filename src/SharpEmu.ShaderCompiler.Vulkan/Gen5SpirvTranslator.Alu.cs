@@ -2663,14 +2663,15 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBcnt1I32B64")
             {
-                var wideCount = _module.AddInstruction(
-                    SpirvOp.BitCount,
-                    _ulongType,
-                    GetRawSource64(instruction, 0));
-                var bitCountResult = _module.AddInstruction(
-                    SpirvOp.UConvert,
-                    _uintType,
-                    wideCount);
+                // Vulkan only allows OpBitCount on 32-bit operands without
+                // maintenance9, so count each half separately.
+                var wide = GetRawSource64(instruction, 0);
+                var bitCountResult = IAdd(
+                    _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(wide)),
+                    _module.AddInstruction(
+                        SpirvOp.BitCount,
+                        _uintType,
+                        Narrow(ShiftRightLogical64(wide, _module.Constant64(_ulongType, 32)))));
                 StoreS(destination, bitCountResult);
                 Store(_scc, IsNotZero(bitCountResult));
                 return true;
