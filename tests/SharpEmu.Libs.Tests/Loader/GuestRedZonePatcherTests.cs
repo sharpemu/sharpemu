@@ -11,6 +11,13 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Loader;
 
+[CollectionDefinition(GuestRedZonePatcherCollection.Name, DisableParallelization = true)]
+public sealed class GuestRedZonePatcherCollection
+{
+    public const string Name = "GuestRedZonePatcher";
+}
+
+[Collection(GuestRedZonePatcherCollection.Name)]
 public sealed class GuestRedZonePatcherTests
 {
     [Theory]
