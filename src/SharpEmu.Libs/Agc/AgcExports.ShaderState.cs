@@ -496,6 +496,11 @@ public static partial class AgcExports
             backCodeAddress,
             backAddress);
 
+        if (isGeometryPair)
+        {
+            DumpFusedGeometryShader(ctx, frontCodeAddress, frontAddress, backCodeAddress, backAddress);
+        }
+
         TraceAgc(
             $"agc.fuse_shader_halves fused=0x{fusedAddress:X16} front=0x{frontAddress:X16} " +
             $"back=0x{backAddress:X16} scratch=0x{scratchAddress:X16} types={frontType}/{backType} " +
