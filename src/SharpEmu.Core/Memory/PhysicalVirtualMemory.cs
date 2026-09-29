@@ -1319,6 +1319,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, false, out address);
+
+    public bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, true, out address);
+
+    private bool TrySelectBackingRange(ulong searchStart, ulong size, ulong alignment,
+        bool preferOwnedReservation, out ulong address)
     {
         address = 0;
         const ulong limit = 0x0000_00FC_0000_0000;
@@ -1343,6 +1350,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             var start = Math.Max(searchStart, GuestMemoryLayout.GuestPage);
             var reservedCandidate = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
+            if (preferOwnedReservation && reservedCandidate != 0)
+            {
+                address = reservedCandidate;
+                return true;
+            }
 
             while (start < limit && size <= limit - start)
             {
