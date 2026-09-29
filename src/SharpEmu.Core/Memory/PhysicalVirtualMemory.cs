@@ -1327,6 +1327,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private bool TrySelectBackingRange(ulong searchStart, ulong size, ulong alignment,
         bool preferOwnedReservation, out ulong address)
     {
+        using var searchProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationAddressSearch);
         address = 0;
         const ulong limit = 0x0000_00FC_0000_0000;
         if (size == 0 || size % GuestMemoryLayout.GuestPage != 0 || size >= limit)
@@ -1340,7 +1341,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
+        var lockStarted = GuestMemoryProfile.GetTimestamp();
         _gate.EnterWriteLock();
+        var selectionStarted = GuestMemoryProfile.GetTimestamp();
         try
         {
             if (!HasBackingOwner())
@@ -1391,7 +1394,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
-                if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
+                if (OperatingSystem.IsWindows() && QueryReservationAddress(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)
                 {
@@ -1409,18 +1412,33 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
         finally
         {
+            var selectionFinished = GuestMemoryProfile.GetTimestamp();
             _gate.ExitWriteLock();
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.ReservationWriteLockAcquisition,
+                lockStarted, selectionStarted);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.ReservationLockedSelection,
+                selectionStarted, selectionFinished);
         }
+    }
+
+    private bool QueryReservationAddress(ulong address, out HostRegionInfo info)
+    {
+        using var queryProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHostQuery);
+        return _hostMemory.Query(address, out info);
     }
 
     public bool TryMapBacked(ulong address, ulong size, ulong backingOffset,
         GuestPageProtection protection, out HostViewFailure failure)
     {
         failure = HostViewFailure.AddressUnavailable;
-        _gate.EnterWriteLock();
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapWriteLockAcquisition))
+            _gate.EnterWriteLock();
         try
         {
-            if (!TryHoldRange(address, size))
+            bool held;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapHoldRange))
+                held = TryHoldRange(address, size);
+            if (!held)
             {
                 return false;
             }
@@ -1430,6 +1448,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            using var publicationProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualMapBookkeeping);
             var executable = (protection & GuestPageProtection.Execute) != 0;
             InsertRegionSorted(new MemoryRegion
             {
@@ -1450,7 +1469,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryUnmapBacked(ulong address, ulong size)
     {
-        _gate.EnterWriteLock();
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualUnmapWriteLockAcquisition))
+            _gate.EnterWriteLock();
         try
         {
             if (_backedSpace?.UnmapShared(address, size) != true)
@@ -1458,6 +1478,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            using var bookkeepingProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.VirtualUnmapBookkeeping);
             var end = address + size;
             var searchStart = 0;
             var searchEnd = _regions.Count;
@@ -2332,7 +2353,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             _gate.ExitReadLock();
         }
 
-        staged:
+    staged:
         return CopyThroughStaging(destinationAddress, sourceAddress, length);
     }
 
