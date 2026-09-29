@@ -217,8 +217,9 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             yield return testCase;
         }
 
+        // 2_10_10_10 UNORM is R10G10B10A2: X=1023 in bits 0..9, Y=512 in 10..19, Z=0, W=3 in 30..31.
         yield return [50u, (50u << 12) | IdentitySwizzle, 7u, (uint)MemoryOffset,
-            Floats(1f, Half, 0f, 1f), Bytes(0x03, 0x08, 0xC0, 0xFF)];
+            Floats(1f, Half, 0f, 1f), Bytes(0xFF, 0x03, 0x08, 0xC0)];
     }
 
     [Theory]

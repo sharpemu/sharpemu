@@ -535,10 +535,11 @@ public sealed class MslTranslationTests
     {
         var shader = CompileTypedBufferAccess("BufferStoreFormatXyzw", 4, 0, typed: false, descriptorFormat: 50);
 
-        Assert.Contains("sharpemu_format_encode(v[4], 2u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        // 2_10_10_10 is R10G10B10A2: ten-bit X, Y and Z, then the two-bit W.
+        Assert.Contains("sharpemu_format_encode(v[4], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v[5], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("sharpemu_format_encode(v[6], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("sharpemu_format_encode(v[7], 10u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("sharpemu_format_encode(v[7], 2u, 0u, 9u)", shader.Source, StringComparison.Ordinal);
         Assert.Contains("uint4(0xFFFFFFFFu, 0x0u, 0x0u, 0x0u)", shader.Source, StringComparison.Ordinal);
         Assert.DoesNotContain("sharpemu_store_bytes(b", shader.Source, StringComparison.Ordinal);
     }

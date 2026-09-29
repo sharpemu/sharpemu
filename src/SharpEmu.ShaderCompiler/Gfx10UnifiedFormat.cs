@@ -203,6 +203,10 @@ public static class Gfx10UnifiedFormat
 
     // Legacy data-format layouts: a byte offset for naturally aligned components, a bit
     // offset inside the first dword for packed fields. Ordered by component, then format.
+    // AMD names packed formats from the most significant field, so 2_10_10_10 (unified
+    // format 50) is R10G10B10A2 with X in bits 0..9, as the image path maps it
+    // (A2B10G10R10); decoding X from the 2-bit field garbled Demon's Souls' packed
+    // vertex normals and tangents (their W is the handedness sign, 0 or 3).
     public static IReadOnlyList<(uint Component, uint DataFormat, uint ByteOffset, uint BitOffset, uint BitCount)> ComponentLayouts { get; } =
     [
         (0, 1, 0, 0, 8),   // 8
@@ -213,7 +217,7 @@ public static class Gfx10UnifiedFormat
         (0, 6, 0, 0, 10),  // 10_11_11
         (0, 7, 0, 0, 11),  // 11_11_10
         (0, 8, 0, 0, 10),  // 10_10_10_2
-        (0, 9, 0, 0, 2),   // 2_10_10_10
+        (0, 9, 0, 0, 10),  // 2_10_10_10
         (0, 10, 0, 0, 8),  // 8_8_8_8
         (0, 11, 0, 0, 32), // 32_32
         (0, 12, 0, 0, 16), // 16_16_16_16
@@ -224,7 +228,7 @@ public static class Gfx10UnifiedFormat
         (1, 6, 0, 10, 11),
         (1, 7, 0, 11, 11),
         (1, 8, 0, 10, 10),
-        (1, 9, 0, 2, 10),
+        (1, 9, 0, 10, 10),
         (1, 10, 1, 0, 8),
         (1, 11, 4, 0, 32),
         (1, 12, 2, 0, 16),
@@ -233,13 +237,13 @@ public static class Gfx10UnifiedFormat
         (2, 6, 0, 21, 11),
         (2, 7, 0, 22, 10),
         (2, 8, 0, 20, 10),
-        (2, 9, 0, 12, 10),
+        (2, 9, 0, 20, 10),
         (2, 10, 2, 0, 8),
         (2, 12, 4, 0, 16),
         (2, 13, 8, 0, 32),
         (2, 14, 8, 0, 32),
         (3, 8, 0, 30, 2),
-        (3, 9, 0, 22, 10),
+        (3, 9, 0, 30, 2),
         (3, 10, 3, 0, 8),
         (3, 12, 6, 0, 16),
         (3, 14, 12, 0, 32),

@@ -3950,7 +3950,15 @@ public static partial class Gen5SpirvTranslator
             }
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
-            targetLane = BitwiseAnd(targetLane, UInt(31));
+            // Ensure target lane is properly constrained to wave size (32 or 64)
+            if (_waveLaneCount == 64)
+            {
+                targetLane = BitwiseAnd(targetLane, UInt(63));
+            }
+            else
+            {
+                targetLane = BitwiseAnd(targetLane, UInt(31));
+            }
             var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
@@ -3983,7 +3991,10 @@ public static partial class Gen5SpirvTranslator
                 inRange,
                 targetLane,
                 lane);
-            safeTarget = BitwiseAnd(safeTarget, UInt(31));
+            // Mask to guest wave size (32 or 64 lanes) — on Radeon hardware, DPP 
+            // operations are limited to a single half-wave for some encodings, so we 
+            // must not clamp wave64 lanes to 31; use the full lane mask instead.
+            safeTarget = BitwiseAnd(safeTarget, UInt(_waveLaneCount == 64 ? 63u : 31u));
             var shuffled = ShuffleLane(value, safeTarget);
 
             var sourceAvailable = inRange;
@@ -5088,7 +5099,10 @@ public static partial class Gen5SpirvTranslator
             }
 
             var targetLane = IAdd(rowBase, selector);
-            targetLane = BitwiseAnd(targetLane, UInt(31));
+            // Mask to guest wave size — on Radeon hardware DPP is limited to a 
+            // single half-wave for some encodings, but we must not clamp wave64 
+            // lanes to 31; use the full lane mask instead.
+            targetLane = BitwiseAnd(targetLane, UInt(_waveLaneCount == 64 ? 63u : 31u));
             var shuffled = ShuffleLane(value, targetLane);
             var fetchInactive = (control.OperandSelect & 1) != 0;
             if (fetchInactive)

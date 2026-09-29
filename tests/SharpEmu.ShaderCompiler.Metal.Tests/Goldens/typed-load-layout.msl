@@ -27,7 +27,7 @@ static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint
     case 6u: byteOff = 0u; bitOff = 0u; bits = 10u; break;
     case 7u: byteOff = 0u; bitOff = 0u; bits = 11u; break;
     case 8u: byteOff = 0u; bitOff = 0u; bits = 10u; break;
-    case 9u: byteOff = 0u; bitOff = 0u; bits = 2u; break;
+    case 9u: byteOff = 0u; bitOff = 0u; bits = 10u; break;
     case 10u: byteOff = 0u; bitOff = 0u; bits = 8u; break;
     case 11u: byteOff = 0u; bitOff = 0u; bits = 32u; break;
     case 12u: byteOff = 0u; bitOff = 0u; bits = 16u; break;
@@ -38,7 +38,7 @@ static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint
     case 22u: byteOff = 0u; bitOff = 10u; bits = 11u; break;
     case 23u: byteOff = 0u; bitOff = 11u; bits = 11u; break;
     case 24u: byteOff = 0u; bitOff = 10u; bits = 10u; break;
-    case 25u: byteOff = 0u; bitOff = 2u; bits = 10u; break;
+    case 25u: byteOff = 0u; bitOff = 10u; bits = 10u; break;
     case 26u: byteOff = 1u; bitOff = 0u; bits = 8u; break;
     case 27u: byteOff = 4u; bitOff = 0u; bits = 32u; break;
     case 28u: byteOff = 2u; bitOff = 0u; bits = 16u; break;
@@ -47,13 +47,13 @@ static inline void sharpemu_format_layout(uint dfmt, uint component, thread uint
     case 38u: byteOff = 0u; bitOff = 21u; bits = 11u; break;
     case 39u: byteOff = 0u; bitOff = 22u; bits = 10u; break;
     case 40u: byteOff = 0u; bitOff = 20u; bits = 10u; break;
-    case 41u: byteOff = 0u; bitOff = 12u; bits = 10u; break;
+    case 41u: byteOff = 0u; bitOff = 20u; bits = 10u; break;
     case 42u: byteOff = 2u; bitOff = 0u; bits = 8u; break;
     case 44u: byteOff = 4u; bitOff = 0u; bits = 16u; break;
     case 45u: byteOff = 8u; bitOff = 0u; bits = 32u; break;
     case 46u: byteOff = 8u; bitOff = 0u; bits = 32u; break;
     case 56u: byteOff = 0u; bitOff = 30u; bits = 2u; break;
-    case 57u: byteOff = 0u; bitOff = 22u; bits = 10u; break;
+    case 57u: byteOff = 0u; bitOff = 30u; bits = 2u; break;
     case 58u: byteOff = 3u; bitOff = 0u; bits = 8u; break;
     case 60u: byteOff = 6u; bitOff = 0u; bits = 16u; break;
     case 62u: byteOff = 12u; bitOff = 0u; bits = 32u; break;
