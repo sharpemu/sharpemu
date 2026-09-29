@@ -141,10 +141,10 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         var vk = device.Vk;
-        var createResult = vk.CreateImage(device.Device, &create, null, out Backing.Handle);
-        if (createResult != Result.Success)
+        var creationResult = vk.CreateImage(device.Device, &create, null, out Backing.Handle);
+        if (creationResult != Result.Success)
         {
-            throw CreateFailure(create, "vkCreateImage", createResult, 0);
+            throw CreateFailure(create, "vkCreateImage", creationResult);
         }
 
         vk.GetImageMemoryRequirements(device.Device, Backing.Handle, out var requirements);
@@ -154,6 +154,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             AllocationSize = requirements.Size,
         };
         var allocated = Result.ErrorOutOfDeviceMemory;
+        var allocationAttempted = false;
         for (uint index = 0; index < device.MemoryTypeCount; index++)
         {
             if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 ||
@@ -163,6 +164,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
 
             allocateInfo.MemoryTypeIndex = index;
+            allocationAttempted = true;
             allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
             if (allocated == Result.Success)
             {
@@ -170,33 +172,30 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
         }
 
-        if (allocated != Result.Success)
+        var bindingResult = allocated == Result.Success
+            ? vk.BindImageMemory(device.Device, Backing.Handle, Backing.Memory, 0)
+            : allocated;
+        if (bindingResult != Result.Success)
         {
             vk.DestroyImage(device.Device, Backing.Handle, null);
             device.FreeMemory(Backing.Memory);
             Backing.Handle = default;
             Backing.Memory = default;
-            throw CreateFailure(create, "vkAllocateMemory", allocated, requirements.Size);
-        }
-
-        var bindResult = vk.BindImageMemory(device.Device, Backing.Handle, Backing.Memory, 0);
-        if (bindResult != Result.Success)
-        {
-            vk.DestroyImage(device.Device, Backing.Handle, null);
-            device.FreeMemory(Backing.Memory);
-            Backing.Handle = default;
-            Backing.Memory = default;
-            throw CreateFailure(create, "vkBindImageMemory", bindResult, requirements.Size);
+            throw CreateFailure(create, !allocationAttempted ? "select_device_local_memory_type" :
+                allocated != Result.Success ? "vkAllocateMemory" : "vkBindImageMemory",
+                bindingResult, requirements.Size, requirements.MemoryTypeBits);
         }
 
         Backing.AllocationSize = requirements.Size;
     }
 
-    private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result, ulong requiredBytes) =>
+    private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result,
+        ulong allocationSize = 0, uint memoryTypeBits = 0) =>
         SubmissionScheduler.Fatal(
-            $"The image could not be created: operation={operation} result={result} required_bytes={requiredBytes} " +
+            $"The image could not be created: operation={operation} result={result} result_code={(int)result} " +
             $"extent={create.Extent.Width}x{create.Extent.Height}x{create.Extent.Depth} format={create.Format}({(int)create.Format}) " +
-            $"layers={create.ArrayLayers} levels={create.MipLevels} usage=0x{(uint)create.Usage:X} flags=0x{(uint)create.Flags:X}.");
+            $"layers={create.ArrayLayers} levels={create.MipLevels} usage=0x{(uint)create.Usage:X} flags=0x{(uint)create.Flags:X} " +
+            $"samples={create.Samples} allocation_bytes={allocationSize} memory_type_bits=0x{memoryTypeBits:X}.");
 
     internal static bool TrySelectSupportedImageConfiguration(IImageFormatSupport device, ref ImageCreateInfo configuration, bool allowCompressedImageFallback)
     {
