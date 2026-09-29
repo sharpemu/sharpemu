@@ -511,6 +511,20 @@ public sealed partial class ScalarValueGraph
                 case "SMovB64":
                     ApplyMovePair(instruction, state, destinationRegister);
                     return;
+                case "SCmovB64":
+                {
+                    var (sourceLow, sourceHigh) = ReadPair(instruction.Sources[0], state);
+                    var (destinationLow, destinationHigh) = ReadPair(Gen5Operand.Scalar(destinationRegister), state);
+                    var sourceMask = MaskOf(instruction.Sources[0], state);
+                    var destinationMask = MaskOf(Gen5Operand.Scalar(destinationRegister), state);
+                    WriteMaskPair(
+                        state,
+                        destinationRegister,
+                        _graph.Select(state.Scc, sourceLow, destinationLow),
+                        _graph.Select(state.Scc, sourceHigh, destinationHigh),
+                        _graph.Select(state.Scc, sourceMask, destinationMask));
+                    return;
+                }
                 case "SCselectB32":
                     state.WriteScalar(destinationRegister, _graph.Select(state.Scc, Read(instruction.Sources[0], state), Read(instruction.Sources[1], state)));
                     return;

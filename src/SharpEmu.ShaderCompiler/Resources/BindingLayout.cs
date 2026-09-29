@@ -463,19 +463,19 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        // These read the register their destination field names: the bit sets and the SOPK
-        // accumulations modify it, and the SOPK compares only read it.
+        // Include prior destination values for partial updates and conditional moves.
+        // SOPK comparisons read the destination field without writing it.
         var comparesDestination = instruction.Encoding == Gen5ShaderEncoding.Sopk &&
             instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal);
         if (comparesDestination ||
-            instruction.Opcode is "SBitset0B32" or "SBitset1B32" ||
+            instruction.Opcode is "SBitset0B32" or "SBitset1B32" or "SCmovB64" ||
             instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" or "SCmovkI32")
         {
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    Use(destination.Value, 1);
+                    Use(destination.Value, instruction.Opcode == "SCmovB64" ? 2u : 1u);
                 }
             }
         }

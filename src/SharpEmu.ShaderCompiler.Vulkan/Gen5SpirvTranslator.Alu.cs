@@ -3630,6 +3630,15 @@ public static partial class Gen5SpirvTranslator
             {
                 value = left;
             }
+            else if (instruction.Opcode == "SCmovB64")
+            {
+                value = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _ulongType,
+                    Load(_boolType, _scc),
+                    left,
+                    LoadS64(destination));
+            }
             else if (instruction.Opcode == "SWqmB64")
             {
                 var quadAny = _module.AddInstruction(
