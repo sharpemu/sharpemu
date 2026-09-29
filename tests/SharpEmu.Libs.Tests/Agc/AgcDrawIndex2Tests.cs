@@ -247,6 +247,62 @@ public sealed class AgcDrawIndex2Tests
         }
     }
 
+    [Theory]
+    [InlineData(0x40000000UL)]
+    [InlineData(0x80000000UL)]
+    public void AutoDrawRecordsTheDrawForSupportedStageModifiers(ulong modifier)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 28);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 4;
+        context[CpuRegister.Rdx] = modifier;
+        AgcExports.DcbDrawIndexAuto(context);
+        Assert.Equal(CommandAddress, context[CpuRegister.Rax]);
+        Span<byte> packetBytes = stackalloc byte[28];
+        Assert.True(memory.TryRead(CommandAddress, packetBytes));
+        var packet = new uint[7];
+        for (var index = 0; index < packet.Length; index++)
+        {
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(packetBytes[(index * sizeof(uint))..]);
+        }
+
+        var runner = new StreamRunner();
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(packet));
+        var draw = Assert.Single(runner.Host.AutoDraws);
+        Assert.Equal(4u, draw.VertexCount);
+    }
+
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(0x40000100UL)]
+    [InlineData(0x80000100UL)]
+    [InlineData(0x140000000UL)]
+    [InlineData(0xC0000000UL)]
+    public void AutoDrawRejectsOtherModifiersWithoutWritingCommands(ulong modifier)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 28);
+        var before = new byte[0x1000];
+        Assert.True(memory.TryRead(BaseAddress, before));
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 4;
+        context[CpuRegister.Rdx] = modifier;
+
+        AgcExports.DcbDrawIndexAuto(context);
+
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        var after = new byte[before.Length];
+        Assert.True(memory.TryRead(BaseAddress, after));
+        Assert.Equal(before, after);
+    }
+
     private static void WriteUInt32(FakeCpuMemory memory, ulong address, uint value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
