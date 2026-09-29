@@ -1245,6 +1245,18 @@ public static partial class Gen5MslTranslator
                     Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SBitreplicateB64B32":
+                {
+                    var source = Temp("uint", left);
+                    for (uint half = 0; half < 2; half++)
+                    {
+                        var expanded = Temp("uint", "0u");
+                        for (uint bit = 0; bit < 16; bit++)
+                            Line($"{expanded} |= ((({source} >> {half * 16 + bit}u) & 1u) * 3u) << {bit * 2}u;");
+                        StoreScalar(destination + half, expanded);
+                    }
+                    return true;
+                }
                 case "SBcnt1I32B32":
                 {
                     var result = Temp("uint", $"popcount({left})");
@@ -1253,10 +1265,11 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "SFF1I32B32":
+                case "SFlbitI32B32":
                 {
                     var result = Temp(
                         "uint",
-                        $"{left} == 0u ? 0xFFFFFFFFu : (uint)ctz({left})");
+                        $"{left} == 0u ? 0xFFFFFFFFu : (uint){(instruction.Opcode == "SFlbitI32B32" ? "clz" : "ctz")}({left})");
                     StoreScalar(destination, result);
                     return true;
                 }
