@@ -9,6 +9,21 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed class TileGeometryTests
 {
+    [Fact]
+    public void RenderTargetTextures_SelectGen5AddressEquations()
+    {
+        Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bits11_11_10Float,
+            GuestTileMode.RenderTarget, true, out var volume));
+        Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bits11_11_10Float,
+            GuestTileMode.RenderTarget, false, out var surface));
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, volume.Block.Kind);
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, surface.Block.Kind);
+        Assert.True(TileGeometry.TryGetBlockOffset(volume.Block, 4, 0, 0, out var volumeOffset));
+        Assert.True(TileGeometry.TryGetBlockOffset(surface.Block, 4, 0, 0, out var surfaceOffset));
+        Assert.Equal(128u, volumeOffset);
+        Assert.Equal(128u, surfaceOffset);
+    }
+
     private static uint DepthOffset(uint bytes, uint x, uint y)
     {
         Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.Depth64KB, bytes, out var layout));
