@@ -362,9 +362,15 @@ internal static unsafe partial class VulkanVideoPresenter
             Check(_vk.CreateBuffer(_device, &bufferInfo, null, out var buffer), "vkCreateBuffer");
 
             _vk.GetBufferMemoryRequirements(_device, buffer, out var requirements);
+            var allocationFlags = new MemoryAllocateFlagsInfo
+            {
+                SType = StructureType.MemoryAllocateFlagsInfo,
+                Flags = MemoryAllocateFlags.DeviceAddressBit,
+            };
             var memoryInfo = new MemoryAllocateInfo
             {
                 SType = StructureType.MemoryAllocateInfo,
+                PNext = (usage & BufferUsageFlags.ShaderDeviceAddressBit) != 0 ? &allocationFlags : null,
                 AllocationSize = requirements.Size,
                 MemoryTypeIndex = FindMemoryType(
                     requirements.MemoryTypeBits,
