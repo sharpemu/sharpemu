@@ -88,6 +88,8 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
             device.CommandProfile!.PerCommandMarkers = true;
             device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw, 1, 3, 1);
+            device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.MeshDraw, 2, 3, 2, 1,
+                new VulkanCommandProfile.MeshDrawState(1, 1, 1, 1, 1, 1, true, false));
             vulkan.Vk.CmdEndRendering(command);
             device.EndBuffer(buffer);
             SubmitAndWait(device, buffer, 1);
