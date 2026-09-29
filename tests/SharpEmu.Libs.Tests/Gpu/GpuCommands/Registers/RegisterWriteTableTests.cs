@@ -16,6 +16,20 @@ public sealed class RegisterWriteTableTests
 {
     private const ulong PacketAddress = 0x1_0000_1000;
 
+    [Fact]
+    public void GeometryUserDataPointerPreservesBothWordsAndSubmissionCopy()
+    {
+        var banks = NewBanks();
+        WriteShader(banks, SpiShaderUserDataAddrLoGs, 0x12345678, 0x20);
+        Assert.Equal(0x2012345678UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        var copy = banks.Shader.Vertex.Copy();
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderUserDataAddrHiGs, 0x31, PacketAddress);
+        Assert.Equal(0x3112345678UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderUserDataAddrLoGs, 0x87654321, PacketAddress);
+        Assert.Equal(0x3187654321UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        Assert.Equal(0x2012345678UL, copy.GeometryUserDataAddress);
+    }
+
     private static RegisterBanks NewBanks() => new(static message => new InvalidOperationException(message));
 
     private static PacketContext Packet(uint opcode, int valueCount) =>
