@@ -1447,17 +1447,36 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions.Where(r => r.IsBackedView && r.VirtualAddress < end &&
-                         address < r.VirtualAddress + r.Size).ToArray())
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress < end)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Reverse order keeps earlier indices valid when a region is split.
+            for (var index = searchStart - 1; index >= 0; index--)
+            {
+                var region = _regions[index];
                 var oldEnd = region.VirtualAddress + region.Size;
-                _regions.Remove(region);
+                if (oldEnd <= address)
+                    break;
+                if (!region.IsBackedView)
+                    continue;
+                _regions.RemoveAt(index);
                 if (region.VirtualAddress < address)
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = region.VirtualAddress, Size = address - region.VirtualAddress,
-                        IsBackedView = true, IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = region.VirtualAddress,
+                        Size = address - region.VirtualAddress,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
 
@@ -1465,8 +1484,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = end, Size = oldEnd - end, IsBackedView = true,
-                        IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = end,
+                        Size = oldEnd - end,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
             }
@@ -1512,8 +1534,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions)
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress <= address)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Regions do not overlap. Only the preceding region can contain the start.
+            for (var index = Math.Max(0, searchStart - 1); index < _regions.Count; index++)
+            {
+                var region = _regions[index];
                 if (region.VirtualAddress >= end)
                 {
                     break;
