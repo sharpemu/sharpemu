@@ -482,13 +482,6 @@ public sealed partial class ScalarValueGraph
                 case "SMovB32":
                     state.WriteScalar(destinationRegister, Read(instruction.Sources[0], state));
                     return;
-                case "SBitreplicateB64B32":
-                {
-                    var replicated = Read(instruction.Sources[0], state);
-                    state.WriteScalar(destinationRegister, replicated);
-                    state.WriteScalar(destinationRegister + 1, replicated);
-                    return;
-                }
                 case "SMovkI32":
                     state.WriteScalar(destinationRegister, _graph.Constant(unchecked((uint)(short)instruction.Sources[0].Value)));
                     return;
@@ -671,12 +664,32 @@ public sealed partial class ScalarValueGraph
                 case "SBrevB32":
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.BitReverse32, left));
                     return;
+                case "SBitreplicateB64B32":
+                    for (uint half = 0; half < 2; half++)
+                    {
+                        var expanded = _graph.Constant(0u);
+                        for (uint bit = 0; bit < 16; bit++)
+                        {
+                            var selected = Binary(ScalarOperation.And32,
+                                Binary(ScalarOperation.ShiftRightLogical32, left, _graph.Constant(half * 16 + bit)), _graph.Constant(1u));
+                            var pair = Binary(ScalarOperation.IMul32, selected, _graph.Constant(3u));
+                            expanded = Binary(ScalarOperation.Or32, expanded,
+                                Binary(ScalarOperation.ShiftLeft32, pair, _graph.Constant(bit * 2)));
+                        }
+                        state.WriteScalar(destinationRegister + half, expanded);
+                    }
+                    return;
                 case "SBcnt1I32B32":
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.BitCount32, left));
                     state.Scc = NotZero(state.Scalars[destinationRegister]);
                     return;
                 case "SFF1I32B32":
                     state.WriteScalar(destinationRegister, _graph.FindLowestSetBit(left, instruction.Pc));
+                    return;
+                case "SFlbitI32B32":
+                    state.WriteScalar(destinationRegister, _graph.Select(NotZero(left),
+                        Binary(ScalarOperation.ISub32, _graph.Constant(31u), Unary(ScalarOperation.FindHighestBit32, left)),
+                        _graph.Constant(uint.MaxValue)));
                     return;
                 case "SBitset0B32":
                 {

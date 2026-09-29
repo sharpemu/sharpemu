@@ -2732,15 +2732,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             var left = GetRawSource(instruction, 0);
-            if (instruction.Opcode == "SBitreplicateB64B32")
-            {
-                // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
-                // halves of its 64-bit SGPR destination and does not update SCC.
-                StoreS(destination, left);
-                StoreS(destination + 1, left);
-                return true;
-            }
-
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
             {
                 var oldExec64 = BooleanToWaveMask(Load(_boolType, _exec));
@@ -2836,6 +2827,21 @@ public static partial class Gen5SpirvTranslator
                     StoreS(destination, result);
                     Store(_scc, IsNotZero(result));
                     return true;
+                case "SBitreplicateB64B32":
+                {
+                    for (uint half = 0; half < 2; half++)
+                    {
+                        var expanded = UInt(0);
+                        for (uint bit = 0; bit < 16; bit++)
+                        {
+                            var selected = BitwiseAnd(ShiftRightLogical(left, UInt(half * 16 + bit)), UInt(1));
+                            var pair = BitwiseOr(selected, ShiftLeftLogical(selected, UInt(1)));
+                            expanded = BitwiseOr(expanded, ShiftLeftLogical(pair, UInt(bit * 2)));
+                        }
+                        StoreS(destination + half, expanded);
+                    }
+                    return true;
+                }
                 case "SBcnt1I32B32":
                     result = _module.AddInstruction(SpirvOp.BitCount, _uintType, left);
                     StoreS(destination, result);
@@ -2846,15 +2852,10 @@ public static partial class Gen5SpirvTranslator
                     StoreS(destination, result);
                     return true;
                 case "SFlbitI32B32":
-                {
-                    // Count leading zero bits, 0xFFFFFFFF when the source is zero.
-                    var msb = Ext(74, _uintType, left);
-                    var clz = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), msb);
-                    result = _module.AddInstruction(
-                        SpirvOp.Select, _uintType, IsNotZero(left), clz, UInt(0xFFFFFFFFu));
-                    StoreS(destination, result);
+                    result = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), Ext(75, _uintType, left));
+                    StoreS(destination, _module.AddInstruction(SpirvOp.Select, _uintType,
+                        IsNotZero(left), result, UInt(uint.MaxValue)));
                     return true;
-                }
                 case "SBitset0B32":
                 case "SBitset1B32":
                     // S_BITSET*_B32 is a read-modify-write of the destination:
