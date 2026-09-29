@@ -56,6 +56,24 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void FlbitI32B64CompilesWithWordSizedScansAndZeroFallback()
+    {
+        var scan = new Gen5ShaderInstruction(
+            0, Gen5ShaderEncoding.Sop1, "SFlbitI32B64", [0xBE821600],
+            [Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(2)], null);
+        var end = new Gen5ShaderInstruction(
+            4, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [scan, end]), ShaderStage.Compute, localSizeX: 1);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains("clz(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 32", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("32u + clz(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("0xFFFFFFFFu", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void F16CompareUsesHalfOperands()
     {
         var compare = new Gen5ShaderInstruction(
