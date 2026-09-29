@@ -443,6 +443,8 @@ public sealed partial class GpuCommandInterpreter
                     WriteQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result);
                 }
 
+                if (VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Published(QueueId, SubmitId, eventAddress, result, _host.Memory as SharpEmu.HLE.IGuestBackedSpace);
                 SyntheticOcclusionCounter = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
                 break;
             }

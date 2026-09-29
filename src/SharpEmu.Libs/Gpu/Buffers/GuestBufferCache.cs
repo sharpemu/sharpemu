@@ -1829,6 +1829,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var offset = baseOffset + placement.DataOffset;
             _download.Invalidate(offset, placement.DataSize);
             GpuWritebackEpoch.Advance();
+            if (GpuCommands.VisibilityResultTrace.Enabled)
+                GpuCommands.VisibilityResultTrace.Download(copy.Address,
+                    _download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
             if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
