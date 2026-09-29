@@ -6,6 +6,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class OwnedRangeTreeTests
 {
     [Theory]
@@ -48,13 +49,14 @@ public sealed class OwnedRangeTreeTests
             tree.Remove(new OwnedRange(address, 1, RangeKind.Backed));
         for (ulong address = 2; address <= 10000; address += 2)
             Assert.Equal(address - 1, tree.FindAtOrBelow(address).Address);
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (ulong address = 1; address < 10000; address++)
+        var allocated = AllocationMeasurementCollection.Measure(() =>
         {
-            _ = tree.FindAtOrBelow(address);
-            _ = tree.FindAtOrAbove(address);
-        }
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            for (ulong address = 1; address < 10000; address++)
+            {
+                _ = tree.FindAtOrBelow(address);
+                _ = tree.FindAtOrAbove(address);
+            }
+        });
         Assert.Equal(0, allocated);
         for (ulong address = 9999; address > 0; address -= 2)
         {
