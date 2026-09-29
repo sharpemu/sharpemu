@@ -28,6 +28,10 @@ internal static unsafe partial class VulkanVideoPresenter
     private const string DepthClipControlExtensionName = "VK_EXT_depth_clip_control";
     private const string DepthClipEnableExtensionName = "VK_EXT_depth_clip_enable";
     private const int DrawsPerBatch = 64;
+    // A full batch does not split an open render pass: ending it there flushed and
+    // restarted Demon's Souls' 1440p G-buffer pass (five targets + depth) every 64 draws.
+    // The pass still ends at this cap so a long pass cannot hold the batch forever.
+    private const int DrawsPerBatchInRenderPass = 512;
     private const uint SingleRectangleVertexCount = 4;
 
     private static void RequireRenderingFeature(bool supported, string feature, string deviceName)
@@ -360,7 +364,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // Acquire the decoded frame before any stage selects its movie texture planes.
             PumpHostMovieFrame();
 
-            if (_batchDrawCount >= DrawsPerBatch)
+            if (_batchDrawCount >= (_renderingActive ? DrawsPerBatchInRenderPass : DrawsPerBatch))
             {
                 EndRendering();
                 FlushBatchedGuestCommands();

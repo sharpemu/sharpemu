@@ -189,6 +189,37 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void PossiblyCpuDirtyRangesSkipOnlyBlocksKnownClean()
+    {
+        var address = AllocateAligned(Region * 3, Region);
+        List<(ulong Address, ulong Size)> Runs(ulong start, ulong size)
+        {
+            var runs = new List<(ulong Address, ulong Size)>();
+            _tracker.ForEachPossiblyCpuDirtyRange(start, size, (runAddress, runSize) => runs.Add((runAddress, runSize)));
+            return runs;
+        }
+
+        // Blocks without a region start all dirty.
+        Assert.Equal([(address, Region * 3)], Runs(address, Region * 3));
+
+        _tracker.ForEachUploadRange(address, Region * 3, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Runs(address, Region * 3));
+
+        _tracker.MarkCpuDirtyPages(address + Region + Page * 2, 8);
+        Assert.Equal([(address + Region, Region)], Runs(address, Region * 3));
+        // A run is clipped to the requested range.
+        Assert.Equal([(address + Region + Page, Region - Page)], Runs(address + Region + Page, Region * 2 - Page));
+
+        _tracker.MarkCpuDirtyPages(address + Region * 2, 8);
+        Assert.Equal([(address + Region, Region * 2)], Runs(address, Region * 3));
+
+        _tracker.ForEachUploadRange(address, Region * 3, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Runs(address, Region * 3));
+        _tracker.UntrackMemory(address, Region * 3);
+        Release(address, Region * 3);
+    }
+
+    [NativePageProtectionFact]
     public void RangeInvalidationBatchesOwnershipTransferAcrossRegions()
     {
         const ulong size = Region * 2;

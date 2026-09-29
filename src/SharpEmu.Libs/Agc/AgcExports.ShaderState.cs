@@ -128,10 +128,7 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        lock (_submitTraceGate)
-        {
-            _shaderHeadersByCode[codeAddress] = headerAddress;
-        }
+        _shaderHeadersByCode[codeAddress] = headerAddress;
 
         TryRegisterEmbeddedFusedProgram(ctx, codeAddress, headerAddress);
 

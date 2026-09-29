@@ -349,10 +349,25 @@ public sealed unsafe partial class GuestImageCache
                 ? (image.IsCpuDirty ? "buffer-and-cpu-dirty" : "buffer-dirty")
                 : (image.IsMaybeCpuDirty ? "maybe-cpu-dirty" : "cpu-dirty");
             var sourceStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
-            var sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             dataImported = true;
-            UploadFromBuffer(image, request, source, sourceOffset);
+            long sourceFinished;
+            if (TryUploadChangedPieces(image, request))
+            {
+                sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            }
+            else
+            {
+                // Hash before staging: a write racing the copy then shows up as a changed piece next time.
+                var piecePlan = !image.IsBufferModified && !_bufferCache.HasGpuDirtyBytes(image.Description.Data.Address, image.Description.Data.Size)
+                    ? PieceHashPlan(image, request)
+                    : null;
+                var pieceHashes = piecePlan != null ? HashGuestPieces(image.Description.Data, piecePlan.Tiles) : null;
+                var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
+                sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                UploadFromBuffer(image, request, source, sourceOffset);
+                image.SetGuestPieceHashes(pieceHashes);
+            }
+
             if (measureUpload)
             {
                 RenderPhaseProfile.RecordImageUpload(image.Description, reason,

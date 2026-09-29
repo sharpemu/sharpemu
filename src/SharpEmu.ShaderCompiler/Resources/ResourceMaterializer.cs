@@ -111,6 +111,12 @@ public static class ResourceMaterializer
         return true;
     }
 
+    // Evaluates only the flattened table, laid out as a full materialization lays it out
+    // before specialization; the written device-address slots are left zero for the caller.
+    public static bool TryEvaluateTable(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] table) =>
+        RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots, evaluateTable: true, out _, out table, out _,
+            additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount));
+
     // ---- snapshot ----
 
     private static bool MaterializeSnapshot(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,

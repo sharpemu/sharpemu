@@ -10,13 +10,8 @@ public static partial class AgcExports
 {
     // This partial exposes the shader headers the create export registered.
 
-    internal static ulong GetShaderHeaderAddress(ulong codeAddress)
-    {
-        lock (_submitTraceGate)
-        {
-            return _shaderHeadersByCode.TryGetValue(codeAddress, out var header) ? header : 0;
-        }
-    }
+    internal static ulong GetShaderHeaderAddress(ulong codeAddress) =>
+        _shaderHeadersByCode.TryGetValue(codeAddress, out var header) ? header : 0;
 
     internal static ShaderHeaderRegistry CreateShaderHeaderRegistry(CpuContext context) =>
         new(

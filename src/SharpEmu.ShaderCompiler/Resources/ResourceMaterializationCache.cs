@@ -36,6 +36,7 @@ public sealed class ResourceMaterializationCache
     public long Hits { get; private set; }
     public long Misses { get; private set; }
     public long Uncacheable { get; private set; }
+    public long TableRefreshes { get; private set; }
 
     // Process-wide counters since the previous call, for the periodic render report.
     public static string TakeReport()
@@ -57,14 +58,26 @@ public sealed class ResourceMaterializationCache
         out ResourceMaterializationFailure failure)
     {
         var key = KeyOf(plan, inputs);
-        if (TryFind(key, plan, inputs, out var cached) && Validate(cached, residentReader))
+        if (TryFind(key, plan, inputs, out var cached))
         {
-            Hits++;
-            Interlocked.Increment(ref _totalHits);
-            snapshot = cached.Snapshot;
-            specialization = cached.Specialization;
-            failure = default;
-            return true;
+            if (Validate(cached, residentReader))
+            {
+                Hits++;
+                Interlocked.Increment(ref _totalHits);
+                snapshot = cached.Snapshot;
+                specialization = cached.Specialization;
+                failure = default;
+                return true;
+            }
+
+            if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
+            {
+                TableRefreshes++;
+                snapshot = refreshed.Snapshot;
+                specialization = refreshed.Specialization;
+                failure = default;
+                return true;
+            }
         }
 
         Misses++;
@@ -77,6 +90,7 @@ public sealed class ResourceMaterializationCache
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
             ComputeState = inputs.ComputeState,
+            TablePhase = recorder.SetTablePhase,
         };
         if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
             return false;
@@ -89,6 +103,121 @@ public sealed class ResourceMaterializationCache
         }
 
         Store(key, recorder.Build(plan, inputs, snapshot, specialization));
+        return true;
+    }
+
+    // Most stale entries in Demon's Souls differ only in words the shader reads through scalar
+    // loads (inline constants rewritten every frame); the descriptors, device ranges and
+    // specialization are unchanged. When every changed word was read only while evaluating the
+    // flattened table, only the table is evaluated again. It is refused when the plan's
+    // specialization reads or extends the table (indirect or candidate tables), when the table
+    // now reads a word the entry did not validate, or when a word moved between the two reads.
+    private bool TryRefreshTable(ulong key, Entry cached, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ResidentGuestBytesReader residentReader, out Entry refreshed)
+    {
+        refreshed = null!;
+        if (!cached.TableRefreshable)
+            return false;
+
+        var current = new byte[cached.Bytes.Length];
+        for (var index = 0; index < cached.RangeAddresses.Length; index++)
+        {
+            if (!residentReader(cached.RangeAddresses[index], current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index]))
+                return false;
+        }
+
+        var changed = false;
+        for (var offset = 0; offset < current.Length; offset += sizeof(uint))
+        {
+            if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
+                continue;
+            if (!cached.WordTableOnly[offset / sizeof(uint)])
+                return false;
+            changed = true;
+        }
+
+        if (!changed)
+            return false;
+
+        var recorder = new ReadRecorder();
+        var recording = new ResourceRuntimeInputs
+        {
+            UserData = inputs.UserData,
+            ShaderBase = inputs.ShaderBase,
+            ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
+            ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+            ComputeState = inputs.ComputeState,
+        };
+        var cachedTable = cached.Snapshot.FlattenedResourceTable;
+        if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
+            return false;
+
+        foreach (var (address, word, _, _) in recorder.Reads)
+        {
+            if (!TryFindWord(cached, address, out var offset) ||
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
+                return false;
+        }
+
+        // The written device-address slots come from reads validated unchanged above.
+        foreach (var slot in plan.WrittenRangeSlotByHandle.Values)
+            cachedTable.AsSpan((int)slot, ShaderResourcePlan.WrittenRangeDwordCount).CopyTo(table.AsSpan((int)slot));
+
+        var previous = cached.Snapshot;
+        refreshed = new Entry
+        {
+            Plan = cached.Plan,
+            UserData = cached.UserData,
+            ShaderBase = cached.ShaderBase,
+            ComputeState = cached.ComputeState,
+            RangeAddresses = cached.RangeAddresses,
+            RangeOffsets = cached.RangeOffsets,
+            RangeLengths = cached.RangeLengths,
+            RangeClean = cached.RangeClean,
+            WordTableOnly = cached.WordTableOnly,
+            TableRefreshable = true,
+            Bytes = current,
+            Snapshot = new ResourceSnapshot
+            {
+                Buffers = previous.Buffers,
+                Images = previous.Images,
+                Samplers = previous.Samplers,
+                FlattenedResourceTable = table,
+                UserData = previous.UserData,
+                DeviceAddressRanges = previous.DeviceAddressRanges,
+            },
+            Specialization = cached.Specialization,
+        };
+        Store(key, refreshed);
+        return true;
+    }
+
+    // The byte offset of a recorded dword in the entry's bytes, found by its address.
+    private static bool TryFindWord(Entry entry, ulong address, out int offset)
+    {
+        offset = 0;
+        var addresses = entry.RangeAddresses;
+        int low = 0, high = addresses.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = (low + high) >>> 1;
+            if (addresses[middle] <= address)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (found < 0)
+            return false;
+        var delta = address - addresses[found];
+        if (delta % sizeof(uint) != 0 || delta >= (ulong)entry.RangeLengths[found])
+            return false;
+        offset = entry.RangeOffsets[found] + (int)delta;
         return true;
     }
 
@@ -158,6 +287,10 @@ public sealed class ResourceMaterializationCache
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
         public required bool[] RangeClean { get; init; }
+        // Per recorded dword: read only while the flattened table was evaluated.
+        public required bool[] WordTableOnly { get; init; }
+        // The table has the plan's plain layout, so no specialization read or extended it.
+        public required bool TableRefreshable { get; init; }
         public required byte[] Bytes { get; init; }
         public required ResourceSnapshot Snapshot { get; init; }
         public required ResourceSpecialization Specialization { get; init; }
@@ -176,9 +309,14 @@ public sealed class ResourceMaterializationCache
 
     private sealed class ReadRecorder
     {
-        private readonly List<(ulong Address, uint Word, bool Clean)> _reads = new();
+        private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private bool _inTable;
 
         public bool Failed { get; private set; }
+
+        public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
+
+        public void SetTablePhase(bool inTable) => _inTable = inTable;
 
         public GuestWordReader? Wrap(GuestWordReader? inner, bool clean)
         {
@@ -192,7 +330,7 @@ public sealed class ResourceMaterializationCache
                     return false;
                 }
 
-                _reads.Add((address, word, clean));
+                _reads.Add((address, word, clean, _inTable));
                 return true;
             };
         }
@@ -206,15 +344,19 @@ public sealed class ResourceMaterializationCache
             var lengths = new List<int>();
             var clean = new List<bool>();
             var bytes = new List<byte>(_reads.Count * sizeof(uint));
+            var tableOnly = new List<bool>(_reads.Count);
             ulong end = 0;
             var previous = ulong.MaxValue;
-            foreach (var (address, word, wordClean) in _reads)
+            foreach (var (address, word, wordClean, table) in _reads)
             {
                 if (address == previous)
                 {
                     clean[^1] |= wordClean;
+                    tableOnly[^1] &= table;
                     continue;
                 }
+
+                tableOnly.Add(table);
 
                 previous = address;
                 if (addresses.Count == 0 || address != end)
@@ -247,6 +389,9 @@ public sealed class ResourceMaterializationCache
                 RangeOffsets = [.. offsets],
                 RangeLengths = [.. lengths],
                 RangeClean = [.. clean],
+                WordTableOnly = [.. tableOnly],
+                TableRefreshable = snapshot.FlattenedResourceTable.Length ==
+                    plan.TableReads.Count + plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount,
                 Bytes = [.. bytes],
                 Snapshot = snapshot,
                 Specialization = specialization,

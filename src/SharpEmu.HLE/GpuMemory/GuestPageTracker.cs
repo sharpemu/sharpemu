@@ -398,6 +398,49 @@ public sealed class GuestPageTracker
 
     // True when every block of the range is tracked and has no CPU-dirty page. A missing
     // region is not known clean: the precise path creates it, fully dirty.
+    // Visits the maximal runs of the range whose 4 MiB blocks may hold CPU-dirty pages: a block
+    // with no region yet starts all dirty, and a region's summary bit is set while any of its
+    // pages is dirty. Known-clean blocks are skipped without a lock, the same test
+    // HasCpuDirtyPages starts with, so a caller that only uploads dirty pages loses nothing.
+    public void ForEachPossiblyCpuDirtyRange(ulong vaddr, ulong size, Action<ulong, ulong> visit)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (!new GuestSpan(vaddr, size).IsValid)
+        {
+            // Outside the tracked space nothing is known clean; the caller decides as before.
+            visit(vaddr, size);
+            return;
+        }
+
+        var end = vaddr + size;
+        var last = (end - 1) / BlockBytes;
+        var runStart = 0UL;
+        var inRun = false;
+        for (var index = vaddr / BlockBytes; index <= last; index++)
+        {
+            var possiblyDirty = Volatile.Read(ref _regions[index]) == null || _cpuDirtySummary.IsDirty(index);
+            if (possiblyDirty && !inRun)
+            {
+                runStart = Math.Max(vaddr, index * BlockBytes);
+                inRun = true;
+            }
+            else if (!possiblyDirty && inRun)
+            {
+                visit(runStart, index * BlockBytes - runStart);
+                inRun = false;
+            }
+        }
+
+        if (inRun)
+        {
+            visit(runStart, end - runStart);
+        }
+    }
+
     private bool IsKnownCpuClean(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);

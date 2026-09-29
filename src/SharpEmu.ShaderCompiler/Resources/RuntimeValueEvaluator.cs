@@ -373,16 +373,24 @@ public sealed class RuntimeValueEvaluator
         if (evaluateTable)
         {
             flattened = new uint[checked(plan.TableReads.Count + additionalTableWords)];
-            foreach (var read in plan.TableReads)
+            inputs.TablePhase?.Invoke(true);
+            try
             {
-                var clean = read.FlatOffset < cleanFlatSlots.Count && cleanFlatSlots[(int)read.FlatOffset] != 0;
-                var selected = clean ? cleanEvaluator : evaluator;
-                if (read.FlatOffset >= plan.TableReads.Count || !selected.Evaluate(read.Value, out var word))
+                foreach (var read in plan.TableReads)
                 {
-                    return false;
-                }
+                    var clean = read.FlatOffset < cleanFlatSlots.Count && cleanFlatSlots[(int)read.FlatOffset] != 0;
+                    var selected = clean ? cleanEvaluator : evaluator;
+                    if (read.FlatOffset >= plan.TableReads.Count || !selected.Evaluate(read.Value, out var word))
+                    {
+                        return false;
+                    }
 
-                flattened[(int)read.FlatOffset] = word;
+                    flattened[(int)read.FlatOffset] = word;
+                }
+            }
+            finally
+            {
+                inputs.TablePhase?.Invoke(false);
             }
         }
 

@@ -399,12 +399,26 @@ public sealed unsafe partial class CachedImage : IDisposable
         LastCpuWriteSize = 0;
     }
 
+    // Guest-byte hashes of each tile transfer piece at the last upload from guest memory; null
+    // once the image holds anything else, so a refresh falls back to a full upload.
+    private ulong[]? _guestPieceHashes;
+    private GuestSpan _guestPieceRange;
+
+    internal ulong[]? GuestPieceHashes => _guestPieceHashes != null && _guestPieceRange == Description.Data ? _guestPieceHashes : null;
+
+    internal void SetGuestPieceHashes(ulong[]? hashes)
+    {
+        _guestPieceHashes = hashes;
+        _guestPieceRange = Description.Data;
+    }
+
     public bool IsGpuModified => _gpuModified;
 
     public void MarkGpuModified()
     {
         _gpuModified = true;
         _bufferHoldsGpuContents = false;
+        _guestPieceHashes = null;
     }
 
     public void ClearGpuModified() => _gpuModified = false;

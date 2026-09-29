@@ -479,21 +479,75 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public void ProcessFaultBuffer() => _faults.ProcessFaultBuffer();
 
     // Uploads every mapped range before a BDA draw; the fault pass runs at the next collection.
+    // Every device-address program prepares all GPU-mapped memory; visiting each registered
+    // buffer per dispatch cost ~17 % of the Demon's Souls render thread. The same work is done
+    // in two cheaper parts: the recency touch, a no-op after the first one in a retirement tick,
+    // runs once per tick (and when the mapping changes; new buffers register with the current
+    // tick), and uploads only visit buffers in blocks the tracker does not know to be clean.
+    // Hot pages stay dirty and writable, so every preparation still re-uploads them.
+    private ulong _bdaTouchTick = ulong.MaxValue;
+    private ulong _bdaTouchMapping;
+
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
     {
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
-        foreach (var span in mapped)
+        if (traceAddress != 0)
         {
-            if (traceAddress != 0 && GuestGpuMemoryHook.Traces(span.Address, span.Size))
-                traceCovered = true;
-            SynchronizeBuffersInRange(span.Address, span.Size);
+            foreach (var span in mapped)
+            {
+                if (traceAddress != 0 && GuestGpuMemoryHook.Traces(span.Address, span.Size))
+                    traceCovered = true;
+                SynchronizeBuffersInRange(span.Address, span.Size);
+            }
+        }
+        else
+        {
+            var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
+            var mapping = (ulong)spans.Count;
+            foreach (var span in spans)
+                mapping = (mapping ^ span.Address ^ (span.Size << 17)) * 0x100000001B3UL;
+            if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
+            {
+                foreach (var span in spans)
+                    TouchBuffersInRange(span.Address, span.Size);
+                _bdaTouchTick = _retirementPolicy.CurrentTick;
+                _bdaTouchMapping = mapping;
+            }
+
+            foreach (var span in spans)
+                _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
         }
 
         if (traceAddress != 0)
             GuestGpuMemoryHook.Trace(traceAddress, 1,
                 $"device-address-preparation covered={traceCovered} registered={IsRegionRegistered(traceAddress, 1)} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
         _faultProcessPending = true;
+    }
+
+    private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
+
+    private void TouchBuffersInRange(ulong guestAddress, ulong size)
+    {
+        var end = guestAddress + size;
+        var index = _registry.FindFirstOverlappingIndex(guestAddress);
+        for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end; index++)
+            TouchBuffer(_registry.GetRegisteredIdentifier(index));
+    }
+
+    // The upload half of SynchronizeBuffersInRange, for a range that may hold CPU-dirty pages.
+    private void UploadDirtyBuffersInRange(ulong guestAddress, ulong size)
+    {
+        var end = guestAddress + size;
+        var index = _registry.FindFirstOverlappingIndex(guestAddress);
+        for (; index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end; index++)
+        {
+            var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
+            var start = Math.Max(buffer.CpuAddress, guestAddress);
+            var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
+            if (start < finish && _tracker.HasCpuDirtyPages(start, finish - start))
+                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+        }
     }
 
     public void SynchronizeBuffersInRange(ulong guestAddress, ulong size)

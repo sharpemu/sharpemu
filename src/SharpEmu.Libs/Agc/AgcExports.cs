@@ -201,10 +201,10 @@ public static partial class AgcExports
     private const ulong CommandBufferCallbackOffset = 0x20;
     private const ulong CommandBufferUserDataOffset = 0x28;
     private const ulong CommandBufferReservedDwOffset = 0x30;
-    private static readonly object _submitTraceGate = new();
     // Every PM4 opcode with no handler, logged once with its first two
     // payload dwords as a possible target address.
-    private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
+    // Read by the render thread for every draw; written by guest threads creating shaders.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, ulong> _shaderHeadersByCode = new();
     private static readonly bool _traceAgc = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
         "1",

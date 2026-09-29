@@ -36,6 +36,12 @@ public sealed unsafe partial class CachedImage
     {
         var barriers = new List<ImageMemoryBarrier2>();
         PipelineStageFlags sourceStages = 0;
+        if ((access & (WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit)) != 0)
+        {
+            // Any GPU write, the guest upload included, leaves contents the piece hashes do not describe.
+            _guestPieceHashes = null;
+        }
+
         if (range is { } && Description.IsVolume)
         {
             range = range.Value with { BaseLayer = 0, LayerCount = 1 };
