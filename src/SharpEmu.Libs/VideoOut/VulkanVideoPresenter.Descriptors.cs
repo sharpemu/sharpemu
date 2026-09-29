@@ -503,6 +503,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier);
+            TraceBufferParameter(program.Hash, slot, address, size, buffer.Handle.Handle, offset, resource.Written);
             var alignedOffset = offset - offset % alignment;
             var adjustment = offset - alignedOffset;
             if (adjustment % sizeof(uint) != 0 || adjustment >= MaxMemoryOffsetAdjustment || size > maxRange - adjustment)
