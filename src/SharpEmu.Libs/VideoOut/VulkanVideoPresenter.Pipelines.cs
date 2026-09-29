@@ -3,8 +3,8 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
-using SharpEmu.HLE.GpuMemory;
 using System.Diagnostics;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -937,13 +937,25 @@ internal static unsafe partial class VulkanVideoPresenter
                         PDynamicState = &dynamicState,
                         Layout = layout,
                     };
-                    var graphicsStart = Stopwatch.GetTimestamp();
+                    var reportStart = Stopwatch.GetTimestamp();
                     var cache = GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
                         description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
-                    Check(_vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out var pipeline),
+                    var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
+                    Result creationResult;
+                    Pipeline pipeline;
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
+                    {
+                        creationResult = _vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                    }
+                    if (RenderPhaseProfile.Enabled)
+                    {
+                        var creationMilliseconds = Stopwatch.GetElapsedTime(creationStart).TotalMilliseconds;
+                        Console.Error.WriteLine($"[PERF][PIPELINE_DRIVER] kind=graphics stage={description.VertexStage.Stage} vertex=0x{description.VertexStage.Hash:X16} pixel=0x{description.PixelStage?.Hash ?? 0:X16} topology={topology} driver_ms={creationMilliseconds:F3} result={creationResult}");
+                    }
+                    Check(creationResult,
                         $"vkCreateGraphicsPipelines(rendering vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16})");
                     ReportPipelineCreation(
-                        (long)Stopwatch.GetElapsedTime(graphicsStart).TotalMilliseconds,
+                        (long)Stopwatch.GetElapsedTime(reportStart).TotalMilliseconds,
                         "graphics",
                         $"vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16}",
                         string.Join(
@@ -1002,11 +1014,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                var computeStart = Stopwatch.GetTimestamp();
+                var reportStart = Stopwatch.GetTimestamp();
                 var cache = GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
-                Check(_vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline), $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
+                var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
+                Result creationResult;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineDriver))
+                {
+                    creationResult = _vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                }
+                if (RenderPhaseProfile.Enabled)
+                {
+                    var creationMilliseconds = Stopwatch.GetElapsedTime(creationStart).TotalMilliseconds;
+                    Console.Error.WriteLine($"[PERF][PIPELINE_DRIVER] kind=compute compute=0x{description.Stage.Hash:X16} driver_ms={creationMilliseconds:F3} result={creationResult}");
+                }
+                Check(creationResult, $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
                 ReportPipelineCreation(
-                    (long)Stopwatch.GetElapsedTime(computeStart).TotalMilliseconds,
+                    (long)Stopwatch.GetElapsedTime(reportStart).TotalMilliseconds,
                     "compute",
                     $"cs=0x{description.Stage.Hash:X16}",
                     SpirvBytesOf(computeModule.Handle).ToString());
