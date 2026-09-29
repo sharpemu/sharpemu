@@ -856,7 +856,7 @@ internal sealed class ShaderProgramCache
 // Writes each compiled module and its decoded listing when the dump switch is on.
 internal static class CompiledShaderDump
 {
-    internal static bool ShouldWrite(ulong shaderAddress, ulong shaderHash)
+    internal static bool ShouldWrite(ulong shaderAddress, ulong? shaderHash)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV"), "1", StringComparison.Ordinal))
         {
