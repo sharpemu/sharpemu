@@ -15,6 +15,16 @@ public sealed class Gen5Float16ArithmeticTests
     private const uint SEndpgm = 0xBF810000;
 
     [Fact]
+    public void LogicalLeftShift64DecodesAndCompilesBothBackends()
+    {
+        var program = Decode([0xD6FF0021u, 0x00010303u, SEndpgm]);
+        Assert.Equal("VLshlrevB64", program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.True(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out error), error);
+    }
+
+    [Fact]
     public void CompactFloat16ArithmeticDecodesAndCompilesWithoutNativeFloat16()
     {
         var program = Decode(

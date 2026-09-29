@@ -355,7 +355,7 @@ public static partial class Gen5MslTranslator
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
-                "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
+                "VLshlrevB64" or "VLshrrevB64" => EmitLogicalShift64(instruction, destination),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
@@ -497,10 +497,11 @@ public static partial class Gen5MslTranslator
             return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
         }
 
-        private string EmitLshrrevB64(Gen5ShaderInstruction instruction, uint destination)
+        private string EmitLogicalShift64(Gen5ShaderInstruction instruction, uint destination)
         {
             var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
-            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) >> {shift}");
+            var operation = instruction.Opcode == "VLshlrevB64" ? "<<" : ">>";
+            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) {operation} {shift}");
             StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
             return $"(uint){shifted}";
         }
