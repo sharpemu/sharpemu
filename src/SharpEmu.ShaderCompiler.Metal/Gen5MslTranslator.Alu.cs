@@ -1079,7 +1079,6 @@ public static partial class Gen5MslTranslator
                     {
                         immediate = instruction.Words[0] & 0xFFFF;
                     }
-
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
