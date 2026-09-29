@@ -35,6 +35,18 @@ public static class NpWebApi2Exports
     }
 
     [SysAbiExport(
+        Nid = "3Tt9zL3tkoc",
+        ExportName = "sceNpWebApi2CheckTimeout",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2CheckTimeout()
+    {
+        // This void API has no timeout work until web requests are supported.
+        // The return value serves the export bridge, not a guest status contract.
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "+o9816YQhqQ",
         ExportName = "sceNpWebApi2Initialize",
         Target = Generation.Gen4 | Generation.Gen5,
