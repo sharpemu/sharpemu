@@ -609,6 +609,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // MoltenVK reports a zero OpArrayLength for storage buffers bound through push
             // descriptors, which turns every bounds-checked load into zero and drops every store.
             _maxPushDescriptors = Gpu.Vulkan.VulkanPushDescriptorPolicy.UsableCount(_vk, _physicalDevice, pushDescriptorProperties.MaxPushDescriptors);
+            _shaderDescriptorLimits = properties.Limits;
             _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];

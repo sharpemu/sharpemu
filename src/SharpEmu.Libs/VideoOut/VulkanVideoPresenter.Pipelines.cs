@@ -530,8 +530,11 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The set is pushed when its descriptors fit the device limit, else it comes from the heap.
+        private PhysicalDeviceLimits _shaderDescriptorLimits;
+
         private DescriptorSetLayout CreateDescriptorSetLayout(List<DescriptorSetLayoutBinding> bindings, out bool usesPushDescriptors, out DescriptorSetDemand demand)
         {
+            ShaderDescriptorLimits.Validate(bindings, _shaderDescriptorLimits);
             var descriptorCount = 0u;
             demand = default;
             foreach (var binding in bindings)
