@@ -309,6 +309,26 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void AvailableRangeReusesOwnedSpaceWithoutHostQueries()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory);
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var lowerAddress = ProbeGuestAddress(host, 4 * size);
+        var higherAddress = lowerAddress + 2 * size;
+        Assert.True(memory.TryHoldRange(higherAddress, 2 * size));
+        Assert.True(memory.TryMapBacked(higherAddress, size, 0, GuestPageProtection.Read, out _));
+        memoryHost.QueryCount = 0;
+
+        Assert.True(memory.TryHoldAvailableRange(lowerAddress, size, host.Granularity, out var selectedAddress));
+        Assert.Equal(higherAddress + size, selectedAddress);
+        Assert.Equal(0, memoryHost.QueryCount);
+        Assert.Equal(0UL, selectedAddress % host.Granularity);
+    }
+
+    [Fact]
     public void PartialUnmapPreservesTheRemainingRegions()
     {
         if (!Supported) return;

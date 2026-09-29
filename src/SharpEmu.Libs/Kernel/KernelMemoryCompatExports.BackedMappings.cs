@@ -306,7 +306,12 @@ public static partial class KernelMemoryCompatExports
                 MappingsCoverRange(hintedRegions, requested, length) && hintedRegions.All(region => region.IsReserved);
             if (!reusableHint)
                 desired = FindAvailableMappingAddress(desired, length, alignment);
-            if (desired == 0 || !space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+            if (desired == 0)
+                return false;
+            var held = requested == 0
+                ? space.TryHoldAvailableRange(desired, length, alignment, out address)
+                : space.TryHoldRangeAtOrAbove(desired, length, alignment, out address);
+            if (!held)
                 return false;
             var overlap = GetMappingSlices(address, length, clip: false);
             if (overlap.Length == 0 || (reuseReservation && address == requested &&
