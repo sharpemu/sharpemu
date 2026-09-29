@@ -79,6 +79,7 @@ public sealed partial class GpuCommandInterpreter
                     1 => value == 0,
                     _ => throw _host.Fatal($"The predication condition is unknown: condition=0x{condition:X8} address=0x{address:X16}."),
                 };
+                VisibilityResultTrace.Predicate(QueueId, SubmitId, address, value, condition, waitOperation, PredicateSkip);
                 break;
             }
 
