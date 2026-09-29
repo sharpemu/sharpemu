@@ -15,6 +15,93 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5PixelOutputMappingTests
 {
     [Theory]
+    [InlineData(Gen5PixelOutputKind.Uint, 3u)]
+    [InlineData(Gen5PixelOutputKind.Uint, 12u)]
+    [InlineData(Gen5PixelOutputKind.Uint, 15u)]
+    [InlineData(Gen5PixelOutputKind.Sint, 3u)]
+    [InlineData(Gen5PixelOutputKind.Sint, 12u)]
+    [InlineData(Gen5PixelOutputKind.Sint, 15u)]
+    public void CompressedIntegerExportExtractsFieldsAndPreservesDisabledComponents(
+        Gen5PixelOutputKind kind, uint enableMask)
+    {
+        var request = CompressedPixelRequest(kind, enableMask);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = ReadInstructions(shader.Spirv);
+        var constants = instructions.Where(instruction => instruction.Opcode == SpirvOp.Constant)
+            .ToDictionary(instruction => instruction.Operands[1], instruction => instruction.Operands[2]);
+        var signed = kind == Gen5PixelOutputKind.Sint;
+        var extracts = instructions.Where(instruction => instruction.Opcode ==
+            (signed ? SpirvOp.BitFieldSExtract : SpirvOp.BitFieldUExtract)).ToArray();
+        var enabledComponents = Enumerable.Range(0, 4)
+            .Where(component => (enableMask & (1u << component)) != 0).ToArray();
+        Assert.Equal(enabledComponents.Length, extracts.Length);
+        for (var index = 0; index < extracts.Length; index++)
+        {
+            var extract = extracts[index];
+            var component = enabledComponents[index];
+            Assert.Equal((uint)(component & 1) * 16, constants[extract.Operands[3]]);
+            Assert.Equal(16u, constants[extract.Operands[4]]);
+            var integerType = Assert.Single(instructions, instruction =>
+                instruction.Opcode == SpirvOp.TypeInt && instruction.Operands[0] == extract.Operands[0]);
+            Assert.Equal([32u, signed ? 1u : 0u], integerType.Operands[1..]);
+            var packedValue = extract.Operands[2];
+            if (signed)
+            {
+                packedValue = Assert.Single(instructions, instruction =>
+                    instruction.Opcode == SpirvOp.Bitcast && instruction.Operands[1] == packedValue).Operands[2];
+            }
+            var load = Assert.Single(instructions, instruction =>
+                instruction.Opcode == SpirvOp.Load && instruction.Operands[1] == packedValue);
+            var address = Assert.Single(instructions, instruction =>
+                instruction.Opcode == SpirvOp.AccessChain && instruction.Operands[1] == load.Operands[2]);
+            Assert.Equal((uint)(component >> 1), constants[address.Operands[^1]]);
+        }
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode is SpirvOp.ConvertFToU or SpirvOp.ConvertFToS);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62);
+        var preserved = instructions.Where(instruction => instruction.Opcode == SpirvOp.CompositeExtract)
+            .Select(instruction => instruction.Operands[^1]).ToArray();
+        Assert.Equal(Enumerable.Range(0, 4).Where(component => (enableMask & (1u << component)) == 0)
+            .Select(component => (uint)component), preserved);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
+        var componentType = signed ? "int" : "uint";
+        var packedType = signed ? "short2" : "ushort2";
+        var components = Enumerable.Range(0, 4).Select(component =>
+            (enableMask & (1u << component)) != 0
+                ? $"{componentType}(as_type<{packedType}>(v[{component >> 1}])[{component & 1}])"
+                : $"sharpemu_out.mrt0[{component}]");
+        Assert.Contains($"vec<{componentType}, 4>({string.Join(", ", components)})", metal.Source);
+        Assert.DoesNotContain("as_type<half2>(v[", metal.Source);
+    }
+
+    [Fact]
+    public void CompressedFloatExportStillUnpacksHalfFloats()
+    {
+        var request = CompressedPixelRequest(Gen5PixelOutputKind.Float, 15);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = ReadInstructions(shader.Spirv);
+        Assert.Equal(4, instructions.Count(instruction =>
+            instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62));
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
+        Assert.Contains("(float)as_type<half2>(v[0])[0]", metal.Source);
+        Assert.Contains("(float)as_type<half2>(v[1])[1]", metal.Source);
+    }
+
+    private static ShaderCompileRequest CompressedPixelRequest(Gen5PixelOutputKind kind, uint enableMask)
+    {
+        var export = new Gen5ShaderInstruction(
+            0, Gen5ShaderEncoding.Exp, "Exp", [],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)],
+            [], new Gen5ExportControl(0, enableMask, true, true, true));
+        var program = ResourceTestProgram.Program(export, ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel);
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs = [new(0, 0, kind)],
+        };
+    }
+
+    [Theory]
     [InlineData(0u, 7u, false)]
     [InlineData(1u, 2u, false)]
     [InlineData(0u, 0u, false)]

@@ -6371,21 +6371,21 @@ public static partial class Gen5SpirvTranslator
 
                     if (export.Compressed)
                     {
-                        var value = LoadCompressedExportComponent(
-                            instruction,
-                            component);
-                        values[component] = output.Kind switch
+                        if (output.Kind == Gen5PixelOutputKind.Float)
                         {
-                            Gen5PixelOutputKind.Uint => _module.AddInstruction(
-                                SpirvOp.ConvertFToU,
-                                _uintType,
-                                value),
-                            Gen5PixelOutputKind.Sint => _module.AddInstruction(
-                                SpirvOp.ConvertFToS,
-                                _intType,
-                                value),
-                            _ => value,
-                        };
+                            values[component] = LoadCompressedExportComponent(instruction, component);
+                        }
+                        else
+                        {
+                            var packed = LoadV(instruction.Sources[component >> 1].Value);
+                            var signed = output.Kind == Gen5PixelOutputKind.Sint;
+                            values[component] = _module.AddInstruction(
+                                signed ? SpirvOp.BitFieldSExtract : SpirvOp.BitFieldUExtract,
+                                signed ? _intType : _uintType,
+                                signed ? Bitcast(_intType, packed) : packed,
+                                UInt((uint)(component & 1) * 16),
+                                UInt(16));
+                        }
                         continue;
                     }
 
