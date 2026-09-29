@@ -9,11 +9,13 @@ namespace SharpEmu.Libs.Tests.Np;
 
 public sealed class NpWebApi2ExportRegistrationTests
 {
-    [Fact]
-    public void TimeoutMaintenanceIsRegisteredWithoutGuestArguments()
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void TimeoutMaintenanceIsRegisteredWithoutGuestArguments(Generation generation)
     {
         var manager = new ModuleManager();
-        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
         Assert.True(manager.TryGetExport("3Tt9zL3tkoc", out var export));
         Assert.Equal("sceNpWebApi2CheckTimeout", export.Name);
         Assert.Equal("libSceNpWebApi2", export.LibraryName);
