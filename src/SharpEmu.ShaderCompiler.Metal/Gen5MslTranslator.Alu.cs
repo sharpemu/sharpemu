@@ -1600,6 +1600,10 @@ public static partial class Gen5MslTranslator
                     value = left;
                     setsScc = false;
                     break;
+                case "SCmovB64":
+                    value = $"(scc ? {left} : {Scalar64Expression(destination)})";
+                    setsScc = false;
+                    break;
                 case "SNotB64":
                     value = $"~{left}";
                     break;

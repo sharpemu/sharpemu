@@ -180,6 +180,13 @@ public static class EmbeddedVertexFetchDetector
                     }
 
                     break;
+                case "SCmovB64":
+                    if (IsTrackedScalarRegister(destination))
+                    {
+                        ClearScalars(scalars, destination!.Value, 2);
+                    }
+
+                    break;
                 case "SMovkI32":
                     if (IsTrackedScalarRegister(destination))
                     {
