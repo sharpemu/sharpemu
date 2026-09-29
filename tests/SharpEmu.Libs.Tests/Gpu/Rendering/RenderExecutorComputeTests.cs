@@ -98,14 +98,36 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertDispatched(13, 3, 1);
     }
 
-    [Fact]
-    public void ZeroSizedDispatch_IsSkippedWithoutEndingRenderingOrResettingBindings()
+    [Theory]
+    [InlineData(0u, 1u, 1u, 0x41u, 0ul)]
+    [InlineData(4u, 0u, 1u, 0x41u, 0ul)]
+    [InlineData(4u, 1u, 0u, 0x41u, 0ul)]
+    [InlineData(0u, 1u, 1u, 0x61u, 0ul)]
+    [InlineData(4u, 0u, 1u, 0x61u, 0ul)]
+    [InlineData(4u, 1u, 0u, 0x61u, 0ul)]
+    [InlineData(0u, 1u, 1u, 0x61u, 0x1000ul)]
+    public void ZeroSizedDispatch_IsSkippedBeforeProgramLookupAndClearOperations(
+        uint groupsX, uint groupsY, uint groupsZ, uint initiator, ulong indirectArgumentsAddress)
     {
-        _executor.Dispatch(1, Banks(), 4, 0, 1, 0x41);
+        ConfigureClearKernel(0);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        _executor.Dispatch(1, Banks(), groupsX, groupsY, groupsZ, initiator, indirectArgumentsAddress);
 
         AssertNotDispatched();
+        Assert.Empty(_pipelines.Calls);
+        Assert.Equal(2, _host.Calls.Count);
+        Assert.Equal("pending", _host.Calls[0]);
+        Assert.StartsWith("debug DispatchDirect", _host.Calls[1]);
         Assert.DoesNotContain("end_rendering", _host.Calls);
         Assert.DoesNotContain("reset_bindings", _host.Calls);
+    }
+
+    [Fact]
+    public void IndirectGroupDispatch_DoesNotTreatPlaceholderCountsAsAnEmptyDispatch()
+    {
+        _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, 0x1000);
+
+        Assert.Contains("create_compute_pipeline", _pipelines.Calls);
     }
 
     [Fact]
