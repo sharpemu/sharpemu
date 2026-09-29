@@ -565,8 +565,8 @@ public static partial class Gen5MslTranslator
                     var half = $"(float)as_type<half2>({packed})[{component & 1}]";
                     values[component] = binding.Value.Kind switch
                     {
-                        Gen5PixelOutputKind.Uint => $"(uint)({half})",
-                        Gen5PixelOutputKind.Sint => $"(int)({half})",
+                        Gen5PixelOutputKind.Uint => $"uint(as_type<ushort2>({packed})[{component & 1}])",
+                        Gen5PixelOutputKind.Sint => $"int(as_type<short2>({packed})[{component & 1}])",
                         _ => half,
                     };
                     continue;
