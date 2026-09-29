@@ -32,6 +32,7 @@ public enum TileBlockKind : uint
     Prt64KB3D,
     RenderTarget64KB,
     Depth64KB,
+    VolumeRenderTarget64KB,
 }
 
 public readonly record struct TileBlockLayout(TileBlockKind Kind, uint BytesPerElement, uint BlockSize, uint BlockWidth, uint BlockHeight, uint BlockDepth)
@@ -109,6 +110,7 @@ public static partial class TileGeometry
         new(65536, Thick64KB, 16),
         new(65536, Thin64KB, 16),
         new(65536, Thin64KB, 8),
+        new(65536, Thin64KB, 16),
     ];
 
     private static readonly Log2BlockDimensions[][] MsaaBlocks =
@@ -247,6 +249,7 @@ public static partial class TileGeometry
             case TileBlockKind.Standard64KB:
             case TileBlockKind.Prt64KB:
             case TileBlockKind.RenderTarget64KB:
+            case TileBlockKind.VolumeRenderTarget64KB:
                 rule = new MipTailRule(TailThin64KB[index], block.BlockWidth >> 1, block.BlockHeight);
                 return true;
             default:
@@ -297,7 +300,7 @@ public static partial class TileGeometry
                 kind = TileBlockKind.Depth64KB;
                 break;
             case GuestTileMode.RenderTarget:
-                kind = TileBlockKind.RenderTarget64KB;
+                kind = volume ? TileBlockKind.VolumeRenderTarget64KB : TileBlockKind.RenderTarget64KB;
                 break;
             default:
                 return false;
@@ -308,7 +311,7 @@ public static partial class TileGeometry
             return false;
         }
 
-        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB &&
+        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB or TileBlockKind.VolumeRenderTarget64KB &&
             GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes)
         {
             return false;
