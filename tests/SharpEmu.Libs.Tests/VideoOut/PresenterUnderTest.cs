@@ -68,6 +68,8 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
         SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
         SetField("_maxPushDescriptors", vulkan.MaxPushDescriptors);
+        vulkan.Vk.GetPhysicalDeviceProperties(vulkan.Physical, out var deviceProperties);
+        SetField("_shaderDescriptorLimits", deviceProperties.Limits);
         SetField("_noAttachmentSampleCounts", SampleCountFlags.Count1Bit);
         HostBuffers = new VulkanHostBufferPool(128UL * 1024 * 1024, allocation => InvokeMethod("DestroyHostBufferAllocation", allocation));
         SetField("_hostBufferPool", HostBuffers);
