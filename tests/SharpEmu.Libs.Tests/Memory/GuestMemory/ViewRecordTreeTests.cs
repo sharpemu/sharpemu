@@ -6,6 +6,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class ViewRecordTreeTests
 {
     [Theory]
@@ -51,13 +52,14 @@ public sealed class ViewRecordTreeTests
             tree.Remove(new ViewRecord(address, 1, 0, SharpEmu.HLE.Host.HostPageProtection.ReadWrite));
         for (ulong address = 2; address <= 10000; address += 2)
             Assert.Equal(address - 1, tree.FindAtOrBelow(address).Address);
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (ulong address = 1; address < 10000; address++)
+        var allocated = AllocationMeasurementCollection.Measure(() =>
         {
-            _ = tree.FindAtOrBelow(address);
-            _ = tree.FindAtOrAbove(address);
-        }
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            for (ulong address = 1; address < 10000; address++)
+            {
+                _ = tree.FindAtOrBelow(address);
+                _ = tree.FindAtOrAbove(address);
+            }
+        });
         Assert.Equal(0, allocated);
         for (ulong address = 9999; address > 0; address -= 2)
         {
