@@ -149,23 +149,10 @@ public static partial class KernelMemoryCompatExports
 
     private static MappedRegion[] GetMappingSlices(ulong address, ulong size, bool clip = true)
     {
-        var lowerIndex = 0;
-        var upperIndex = _mappedRegions.Count;
-        while (lowerIndex < upperIndex)
-        {
-            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
-            if (_mappedRegions.Keys[middleIndex] <= address)
-                lowerIndex = middleIndex + 1;
-            else
-                upperIndex = middleIndex;
-        }
-
-        // Mappings do not overlap. Only the preceding entry can extend across the start.
         var end = address + size;
         List<MappedRegion>? slices = null;
-        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        foreach (var region in _mappedRegions.FromAddress(address))
         {
-            var region = _mappedRegions.Values[index];
             if (region.Address >= end)
                 break;
             if (address >= region.Address + region.Length)
@@ -333,21 +320,10 @@ public static partial class KernelMemoryCompatExports
         if (padding > ulong.MaxValue - desired)
             return 0;
         var candidate = desired + padding;
-        var lowerIndex = 0;
-        var upperIndex = _mappedRegions.Count;
-        while (lowerIndex < upperIndex)
-        {
-            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
-            if (_mappedRegions.Keys[middleIndex] <= candidate)
-                lowerIndex = middleIndex + 1;
-            else
-                upperIndex = middleIndex;
-        }
-        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        foreach (var region in _mappedRegions.FromAddress(candidate))
         {
             if (length > ulong.MaxValue - candidate)
                 return 0;
-            var region = _mappedRegions.Values[index];
             if (region.Address >= candidate + length)
                 break;
             var regionEnd = region.Address + region.Length;
@@ -542,8 +518,7 @@ public static partial class KernelMemoryCompatExports
         if (!HasPhysicalSpan(start, length))
             return false;
         var end = start + length;
-        var aliases = _mappedRegions.Values.Where(region => region.IsDirect &&
-            region.DirectStart < end && start < region.DirectStart + region.Length)
+        var aliases = _mappedRegions.FindDirectOverlaps(start, length)
             .Select(region => SliceMapping(region,
                 region.Address + Math.Max(start, region.DirectStart) - region.DirectStart,
                 region.Address + Math.Min(end, region.DirectStart + region.Length) - region.DirectStart)).ToArray();
