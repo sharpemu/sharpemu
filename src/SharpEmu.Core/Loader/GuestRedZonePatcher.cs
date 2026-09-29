@@ -854,81 +854,18 @@ internal static class GuestRedZonePatcher
         out ulong address)
     {
         var minimumSite = sites.Min(static site => site.Address);
-        var maximumSite = sites.Max(static site => site.Address);
-        var alignedImageEnd = AlignUp(imageBase + imageSize, AllocationAlignment);
-        var candidates = new List<ulong>(34) { alignedImageEnd };
-        for (var step = 1UL; step <= 16; step++)
-        {
-            var distance = step * 0x0200_0000UL;
-            if (imageBase > distance + requiredBytes)
-            {
-                candidates.Add(AlignDown(imageBase - distance - requiredBytes, AllocationAlignment));
-            }
-
-            if (alignedImageEnd <= ulong.MaxValue - distance)
-            {
-                candidates.Add(AlignUp(alignedImageEnd + distance, AllocationAlignment));
-            }
-        }
-
-        foreach (var candidate in candidates)
-        {
-            if (!CanReach(candidate, minimumSite) ||
-                !CanReach(candidate + requiredBytes - 1, maximumSite))
-            {
-                continue;
-            }
-
-            try
-            {
-                address = memory.AllocateAt(candidate, requiredBytes, executable: true, allowAlternative: false);
-                if (address == candidate)
-                {
-                    return true;
-                }
-            }
-            catch (InvalidOperationException)
-            {
-                // Try another address inside the relative-jump window.
-            }
-        }
-
-        // The image can sit among dense host allocations (the runtime's own heaps) where
-        // every fixed step above is taken. Look for any free range in reach instead.
-        var low = Math.Max(maximumSite > MaximumRelativeJumpDistance ? maximumSite - MaximumRelativeJumpDistance : 0, AllocationAlignment);
-        var highExclusive = minimumSite <= ulong.MaxValue - MaximumRelativeJumpDistance - 1
-            ? minimumSite + MaximumRelativeJumpDistance + 1
-            : ulong.MaxValue;
-        foreach (var candidate in memory.EnumerateFreeHostRanges(low, highExclusive, requiredBytes, AllocationAlignment))
-        {
-            if (!CanReach(candidate, minimumSite) ||
-                !CanReach(candidate + requiredBytes - 1, maximumSite))
-            {
-                continue;
-            }
-
-            try
-            {
-                address = memory.AllocateAt(candidate, requiredBytes, executable: true, allowAlternative: false);
-                if (address == candidate)
-                {
-                    return true;
-                }
-            }
-            catch (InvalidOperationException)
-            {
-                // Taken since it was listed; keep looking.
-            }
-        }
-
+        var maximumReturn = sites.Max(static site => checked(site.Address + (ulong)site.ByteLength));
+        // Keep the complete allocation in reach of every site and return address.
+        // Leave room for the five-byte jump when calculating either displacement.
+        var distance = MaximumRelativeJumpDistance - MinimumJumpBytes;
+        var start = maximumReturn > distance ? maximumReturn - distance : AllocationAlignment;
+        var end = minimumSite > ulong.MaxValue - distance ? ulong.MaxValue : minimumSite + distance;
         address = 0;
-        return false;
-    }
-
-    private static bool CanReach(ulong left, ulong right)
-    {
-        var distance = left >= right ? left - right : right - left;
-        return distance <= MaximumRelativeJumpDistance;
+        if (start >= end) return false;
+        var imageEnd = checked(imageBase + imageSize);
+        var preferred = Math.Clamp(imageEnd, start, end);
+        return memory.TryAllocateWithinRange(preferred, end, requiredBytes, out address) ||
+            memory.TryAllocateWithinRange(start, preferred, requiredBytes, out address);
     }
 
     private static bool TryDecodeFunctionStarts(
@@ -962,8 +899,6 @@ internal static class GuestRedZonePatcher
     }
 
     private static ulong AlignUp(ulong value, ulong alignment) => checked((value + alignment - 1) & ~(alignment - 1));
-
-    private static ulong AlignDown(ulong value, ulong alignment) => value & ~(alignment - 1);
 
     private readonly record struct DecodedInstruction(Instruction Instruction);
 

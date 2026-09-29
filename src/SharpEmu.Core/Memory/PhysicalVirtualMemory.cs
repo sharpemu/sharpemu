@@ -412,6 +412,44 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    internal bool TryAllocateWithinRange(ulong start, ulong end, ulong size, out ulong address)
+    {
+        address = 0;
+        if (size == 0 || size > ulong.MaxValue - (PageSize - 1) ||
+            start > ulong.MaxValue - (HostAllocationGranularity - 1)) return false;
+        var alignedSize = AlignUp(size, PageSize);
+        var cursor = AlignUp(Math.Max(start, HostAllocationGranularity), HostAllocationGranularity);
+        if (cursor >= end || alignedSize > end - cursor) return false;
+        if (TryAllocateAtExact(cursor, alignedSize, executable: true, out address)) return true;
+        if (cursor > ulong.MaxValue - HostAllocationGranularity) return false;
+        cursor += HostAllocationGranularity;
+
+        foreach (var candidate in EnumerateFreeHostRanges(cursor, end, alignedSize, HostAllocationGranularity))
+        {
+            if (TryAllocateAtExact(candidate, alignedSize, executable: true, out address)) return true;
+        }
+
+        // A host query can fail, or a listed range can be taken before allocation.
+        // Keep exact-address checks for the remaining aligned candidates.
+        while (cursor < end && alignedSize <= end - cursor)
+        {
+            // Try owned reservations before skipping occupied host regions.
+            if (TryAllocateAtExact(cursor, alignedSize, executable: true, out address)) return true;
+            var next = cursor + HostAllocationGranularity;
+            if (next <= cursor) break;
+            if (_hostMemory.Query(cursor, out var region) && region.State != HostRegionState.Free &&
+                region.BaseAddress <= cursor && region.RegionSize <= ulong.MaxValue - region.BaseAddress)
+            {
+                var regionEnd = region.BaseAddress + region.RegionSize;
+                if (regionEnd > ulong.MaxValue - (HostAllocationGranularity - 1)) break;
+                next = Math.Max(next, AlignUp(regionEnd, HostAllocationGranularity));
+            }
+            cursor = next;
+        }
+        address = 0;
+        return false;
+    }
+
     public string DescribeAddressForDiagnostics(ulong address)
     {
         if (!_hostMemory.Query(address, out var info))
