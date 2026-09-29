@@ -16,6 +16,7 @@ using System.Runtime.InteropServices;
 using System.Linq;
 using System.Globalization;
 using System.Security.Cryptography;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -3278,6 +3279,7 @@ public static partial class KernelMemoryCompatExports
     private static int MapDirectMemoryTransaction(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
     {
+        using var mapProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelDirectMap);
         if (inOutAddressPointer == 0)
             return MemoryFault;
         if (!IsValidMapRange(length, alignment) || (long)directMemoryStart < 0 ||
@@ -3297,7 +3299,10 @@ public static partial class KernelMemoryCompatExports
 
         lock (_memoryGate)
         {
-            if (!HasPhysicalSpan(directMemoryStart, length))
+            bool physicalSpanValid;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelMapPhysicalValidation))
+                physicalSpanValid = HasPhysicalSpan(directMemoryStart, length);
+            if (!physicalSpanValid)
             {
                 if (ShouldTraceDirectMemory())
                     Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=physical-span address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X}");
@@ -3455,13 +3460,16 @@ public static partial class KernelMemoryCompatExports
 
     private static int UnmapMemoryCore(CpuContext ctx)
     {
+        using var unmapProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelMemoryUnmap);
         var address = ctx[CpuRegister.Rdi];
         var length = ctx[CpuRegister.Rsi];
         if (length == 0 || address > ulong.MaxValue - length)
             return MemoryInvalidArgument;
         lock (_memoryGate)
         {
-            var regions = GetMappingSlices(address, length);
+            MappedRegion[] regions;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapRangeLookup))
+                regions = GetMappingSlices(address, length);
             if (!MappingsCoverRange(regions, address, length))
                 return MemoryAccessDenied;
             var space = ResolveBackingSpace(ctx);
@@ -6198,6 +6206,7 @@ public static partial class KernelMemoryCompatExports
     /// </remarks>
     private static void ReplaceMappedRegionRangeLocked(MappedRegion replacement)
     {
+        using var publicationProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingPublication);
         if (replacement.Length == 0 ||
             !TryAddU64(replacement.Address, replacement.Length, out var replacementEnd))
         {
