@@ -1725,14 +1725,15 @@ public sealed partial class DirectExecutionBackend
 			cpuContext[CpuRegister.Rax] = unchecked((ulong)returnValue);
 		}
 
-		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
-			ShouldLogImportResult(importStubEntry.Nid, (OrbisGen2Result)returnValue))
-		{
-			Console.Error.WriteLine(
-				$"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
-				$"rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
-				$"ret=0x{*(ulong*)(argPackPtr + 96):X16}");
-		}
+        if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
+            ShouldLogImportResult(importStubEntry.Nid, (OrbisGen2Result)returnValue, out var mutexOccurrence))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
+                $"rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
+                $"ret=0x{*(ulong*)(argPackPtr + 96):X16}" +
+                (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
+        }
 
 		return cpuContext[CpuRegister.Rax];
 	}

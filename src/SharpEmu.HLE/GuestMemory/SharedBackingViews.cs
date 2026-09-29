@@ -18,7 +18,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     private readonly IHostViewMemory _host;
     private readonly HostBackingObject? _backing;
     private readonly object _lock = new();
-    private readonly SortedList<ulong, ViewRecord> _views = new();
+    private readonly ViewRecordTree _views = new();
     // Small copies stay under the metadata lock to avoid reservation overhead.
     private const ulong ConcurrentCopyMinimumBytes = 64 * 1024;
     private CopyReservation[]? _copyReservations;
@@ -371,14 +371,13 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
         var old = default(ViewRecord);
         lock (_lock)
         {
-            var index = RangeSearch.FindLastIndexAtOrBelow(_views, address);
-            if (index >= 0)
+            var record = _views.FindAtOrBelow(address);
+            if (record.Size != 0)
             {
-                var record = _views.Values[index];
                 if (address + size <= record.Address + record.Size)
                 {
                     old = record;
-                    _views.RemoveAt(index);
+                    _views.Remove(record);
                     PublishSnapshot();
                 }
             }
@@ -539,7 +538,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             }
 
             _disposed = true;
-            views = new List<ViewRecord>(_views.Values);
+            views = new List<ViewRecord>(_views);
             _views.Clear();
             PublishSnapshot();
         }
@@ -644,13 +643,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             return false;
         }
 
-        var index = RangeSearch.FindLastIndexAtOrBelow(_views, address);
-        if (index < 0)
+        var candidate = _views.FindAtOrBelow(address);
+        if (candidate.Size == 0)
         {
             return false;
         }
 
-        var candidate = _views.Values[index];
         if (address + size > candidate.Address + candidate.Size)
         {
             return false;
@@ -663,8 +661,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     // Must be called under _lock after every change to _views.
     private void PublishSnapshot()
     {
-        var snapshot = new ViewRecord[_views.Count];
-        _views.Values.CopyTo(snapshot, 0);
+        var snapshot = _views.ToArray();
         Volatile.Write(ref _snapshot, snapshot);
     }
 
