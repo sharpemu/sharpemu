@@ -8,6 +8,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class BufferUploadProfileTests
 {
     [Fact]
@@ -134,6 +135,12 @@ public sealed class BufferUploadProfileTests
                 for (var end = index + 1000; index < end; index++)
                     counters.Record(default, 0x1000, 4096, 0, 0, 0, index, recordSlowSample: true);
             });
+        Assert.Equal(0, allocated);
+        allocated = AllocationMeasurementCollection.Measure(() =>
+        {
+            for (var end = index + 1000; index < end; index++)
+                counters.Record(default, 0x1000, 4096, 0, 0, 0, index, recordSlowSample: true);
+        });
         Assert.Equal(0, allocated);
     }
 
