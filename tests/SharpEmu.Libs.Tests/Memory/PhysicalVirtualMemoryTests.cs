@@ -35,6 +35,57 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.Empty(memory.EnumerateFreeHostRanges(0x72000, 0x91000, 0x2000, 0x10000));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AllocationAndClearWaitForMemoryBeforeTakingAllocationGate(bool clear)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+        const System.Reflection.BindingFlags fields =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var memoryGate = (ReaderWriterLockSlim)typeof(PhysicalVirtualMemory)
+            .GetField("_gate", fields)!.GetValue(memory)!;
+        var allocationGate = typeof(PhysicalVirtualMemory)
+            .GetField("_fixedAllocationGate", fields)!.GetValue(memory)!;
+        Exception? workerError = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                if (clear)
+                    memory.Clear();
+                else
+                    Assert.True(memory.TryAllocateAtExact(0x10000, 0x1000, false, out _));
+            }
+            catch (Exception error)
+            {
+                workerError = error;
+            }
+        }) { IsBackground = true };
+
+        memoryGate.EnterWriteLock();
+        try
+        {
+            worker.Start();
+            Assert.True(SpinWait.SpinUntil(
+                () => memoryGate.WaitingReadCount + memoryGate.WaitingWriteCount != 0,
+                TimeSpan.FromSeconds(10)));
+            var entered = Monitor.TryEnter(allocationGate);
+            if (entered)
+                Monitor.Exit(allocationGate);
+            Assert.True(entered, "A memory-lock waiter must not hold the allocation gate.");
+        }
+        finally
+        {
+            memoryGate.ExitWriteLock();
+            Assert.True(worker.Join(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Null(workerError);
+    }
+
     // 1. Lazy commit: a reserve-only region has its pages committed on demand
     //    when read; freshly committed pages read as zero.
     [Fact]
