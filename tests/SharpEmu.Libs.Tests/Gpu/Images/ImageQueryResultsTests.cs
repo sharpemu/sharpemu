@@ -7,6 +7,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
 
+[Collection(AllocationMeasurementCollection.Name)]
 public sealed class ImageQueryResultsTests
 {
     [Theory]
@@ -43,6 +44,13 @@ public sealed class ImageQueryResultsTests
                 sum = 0;
                 for (var iteration = 0; iteration < 1000; iteration++) sum += Sum(count);
             });
+        Assert.Equal(0, allocated);
+        Assert.Equal((ulong)(count * (count - 1) / 2) * 1000, sum);
+        sum = 0;
+        allocated = AllocationMeasurementCollection.Measure(() =>
+        {
+            for (var iteration = 0; iteration < 1000; iteration++) sum += Sum(count);
+        });
         Assert.Equal(0, allocated);
         Assert.Equal((ulong)(count * (count - 1) / 2) * 1000, sum);
     }
