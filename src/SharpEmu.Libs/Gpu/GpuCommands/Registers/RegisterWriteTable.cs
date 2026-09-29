@@ -104,8 +104,20 @@ public static class RegisterWriteTable
             $"value=0x{value:X8} shader=0x{banks.Shader.Pixel.Address:X16}");
     }
 
-    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
-        WriteEntry(banks, offset, value, UserConfigIndirect, "user-config", tableAddress);
+    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress,
+        PacketContext packet = default, uint entryIndex = 0, uint entryCount = 0, uint rawOffset = 0,
+        ReadOnlySpan<uint> payload = default)
+    {
+        if (offset >= UserConfigIndirect.Length || UserConfigIndirect[offset] is null)
+        {
+            throw banks.Fatal($"The user-config table register is not supported: offset=0x{offset:X4} value=0x{value:X8} " +
+                $"table=0x{tableAddress:X16} raw=0x{rawOffset:X8} entry={entryIndex} count={entryCount} " +
+                $"header=0x{packet.Header:X8} packet=0x{packet.PacketAddress:X16} " +
+                $"payload={string.Join(',', payload.ToArray().Select(word => word.ToString("X8")))}.");
+        }
+
+        UserConfigIndirect[offset]!(banks, offset, value);
+    }
 
     private static uint WritePacket(
         RegisterBanks banks,
