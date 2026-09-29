@@ -1158,10 +1158,11 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Opcode == "SFlbitI32B64")
             {
-                var wide = Temp("ulong", RawSource64(instruction, 0));
-                var result = Temp(
-                    "uint",
-                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)clz({wide})");
+                var source = Temp("ulong", RawSource64(instruction, 0));
+                var low = Temp("uint", $"(uint){source}");
+                var high = Temp("uint", $"(uint)({source} >> 32)");
+                var result = Temp("uint",
+                    $"{high} != 0u ? clz({high}) : ({low} != 0u ? 32u + clz({low}) : 0xFFFFFFFFu)");
                 StoreScalar(destination, result);
                 return true;
             }
