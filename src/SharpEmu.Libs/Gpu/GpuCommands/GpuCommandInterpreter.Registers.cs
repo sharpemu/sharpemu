@@ -12,6 +12,8 @@ public sealed partial class GpuCommandInterpreter
     private const uint RegisterTableSentinel = 0xFFFF_FFFFu;
 
     private static int _contextTableSkipWarnings;
+    private static readonly bool TraceRegisterTables =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC") == "1";
 
     private enum RegisterBank
     {
@@ -199,12 +201,13 @@ public sealed partial class GpuCommandInterpreter
 
         var tableAddress = (payload[0] & 0xFFFF_FFFCu) | ((ulong)payload[1] << 32);
         var count = payload[3] & 0x3FFFu;
-        ApplyRegisterTable(bank, tableAddress, count, packet);
+        ApplyRegisterTable(bank, tableAddress, count, packet, payload);
         return 4;
     }
 
     // Read bounded blocks when the packet executes. Apply entries in table order.
-    private void ApplyRegisterTable(RegisterBank bank, ulong tableAddress, uint count, in PacketContext packet)
+    private void ApplyRegisterTable(RegisterBank bank, ulong tableAddress, uint count, in PacketContext packet,
+        ReadOnlySpan<uint> payload)
     {
         if (count == 0)
         {
@@ -224,6 +227,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         Span<byte> tableBlock = stackalloc byte[entriesPerBlock * entryBytes];
+        Span<byte> beforeSynchronization = stackalloc byte[entriesPerBlock * entryBytes];
         for (var index = 0u; index < count; index++)
         {
             var blockEntry = (int)(index % entriesPerBlock);
@@ -232,9 +236,17 @@ public sealed partial class GpuCommandInterpreter
                 var blockBytes = (int)Math.Min(count - index, entriesPerBlock) * entryBytes;
                 var blockAddress = tableAddress + (ulong)index * entryBytes;
                 RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.RegisterTable, blockBytes);
+                var capturedBeforeSynchronization = TraceRegisterTables &&
+                    _host.Memory.TryRead(blockAddress, beforeSynchronization[..blockBytes]);
                 if (!_host.TryReadGuest(blockAddress, tableBlock[..blockBytes]))
                 {
                     throw _host.Fatal($"The register table cannot be read: address=0x{blockAddress:X16} size={blockBytes}.");
+                }
+                if (TraceRegisterTables)
+                {
+                    TraceRegisterTableRead(bank, packet, tableAddress, count, index,
+                        capturedBeforeSynchronization ? beforeSynchronization[..blockBytes] : default,
+                        tableBlock[..blockBytes]);
                 }
             }
 
@@ -242,6 +254,16 @@ public sealed partial class GpuCommandInterpreter
             var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[entryOffset..]);
             var value = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[(entryOffset + sizeof(uint))..]);
             var offset = RegisterBankLayout.Normalize(rawOffset);
+            if (bank == RegisterBank.Context && offset == 0 && (value & 0xCu) != 0)
+            {
+                var blockStart = index - (uint)blockEntry;
+                var capturedBytes = (int)Math.Min(count - blockStart, 16u) * entryBytes;
+                Console.Error.WriteLine($"[GPU][ERROR] Register table before unsupported depth copy: " +
+                    $"header=0x{packet.Header:X8} packet=0x{packet.PacketAddress:X16} table=0x{tableAddress:X16} " +
+                    $"entry={index} count={count} raw=0x{rawOffset:X8} value=0x{value:X8} " +
+                    $"payload={string.Join(',', payload.ToArray().Select(word => word.ToString("X8")))} " +
+                    $"block_start={blockStart} bytes={Convert.ToHexString(tableBlock[..capturedBytes])}");
+            }
             switch (bank)
             {
                 case RegisterBank.Context:
@@ -297,10 +319,43 @@ public sealed partial class GpuCommandInterpreter
                     }
 
                     WriteUserConfigRegister(offset, value);
-                    RegisterWriteTable.WriteUserConfigEntry(TypedRegisters, offset, value, tableAddress);
+                    RegisterWriteTable.WriteUserConfigEntry(TypedRegisters, offset, value, tableAddress,
+                        packet, index, count, rawOffset, payload);
                     break;
             }
         }
+    }
+
+    private void TraceRegisterTableRead(RegisterBank bank, in PacketContext packet, ulong tableAddress,
+        uint count, uint blockStart, ReadOnlySpan<byte> before, ReadOnlySpan<byte> after)
+    {
+        var suspicious = false;
+        for (var entry = 0; entry < after.Length; entry += 8)
+        {
+            var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(after[entry..]);
+            var offset = RegisterBankLayout.Normalize(rawOffset);
+            var value = BinaryPrimitives.ReadUInt32LittleEndian(after[(entry + 4)..]);
+            suspicious |= bank switch
+            {
+                RegisterBank.Context => rawOffset != RegisterTableSentinel &&
+                    (offset >= RegisterBankLayout.ContextRegisterCount || (offset == 0 && (value & 0xCu) != 0)),
+                RegisterBank.Shader => rawOffset != RegisterTableSentinel && offset >= RegisterBankLayout.ShaderRegisterCount,
+                _ => offset == 0 || offset >= RegisterBankLayout.UserConfigRegisterCount,
+            };
+        }
+
+        var changed = !before.IsEmpty && !before.SequenceEqual(after);
+        if (!suspicious && !changed && !before.IsEmpty)
+        {
+            return;
+        }
+
+        var blockAddress = tableAddress + blockStart * 8UL;
+        Console.Error.WriteLine($"[GPU][INFO] command_stream.register_table_read bank={bank} " +
+            $"packet=0x{packet.PacketAddress:X16} header=0x{packet.Header:X8} table=0x{tableAddress:X16} " +
+            $"count={count} block_start={blockStart} before_read={!before.IsEmpty} changed={changed} " +
+            $"before={Convert.ToHexString(before)} after={Convert.ToHexString(after)} " +
+            $"mapping={_host.Memory.DescribeReadRange(blockAddress, (ulong)after.Length)}");
     }
 
     // Wrapped table form: a count, then the 64-bit table address.
@@ -317,7 +372,7 @@ public sealed partial class GpuCommandInterpreter
             PacketCustomCode.ShaderRegisterTable => RegisterBank.Shader,
             _ => RegisterBank.UserConfig,
         };
-        ApplyRegisterTable(bank, Address(payload[1], payload[2]), payload[0], packet);
+        ApplyRegisterTable(bank, Address(payload[1], payload[2]), payload[0], packet, payload);
         return packet.Length - 1;
     }
 }
