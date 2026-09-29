@@ -66,15 +66,15 @@ public sealed unsafe partial class SharedBackingViews
 
             // A caller buffer can span views with different backing offsets.
             var end = address + size;
-            var index = Math.Max(0, RangeSearch.FindLastIndexAtOrBelow(_views, address));
-            for (; index < _views.Count; index++)
+            var record = _views.FindAtOrBelow(address);
+            if (record.Size == 0 || record.Address + record.Size <= address)
+                record = _views.FindAtOrAbove(address);
+            while (record.Size != 0 && record.Address < end)
             {
-                var record = _views.Values[index];
-                if (record.Address >= end) break;
                 var start = Math.Max(address, record.Address);
                 var partEnd = Math.Min(end, record.Address + record.Size);
-                if (start >= partEnd) continue;
-                if (WaitForCopyConflict(record.Offset + start - record.Address, partEnd - start)) return true;
+                if (start < partEnd && WaitForCopyConflict(record.Offset + start - record.Address, partEnd - start)) return true;
+                record = _views.FindAtOrAbove(record.Address + record.Size);
             }
 
             return false;
