@@ -199,7 +199,7 @@ public sealed class IndirectSelectorValues
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
                 register.Kind == Gen5OperandKind.ScalarRegister && register.Value >= scalarDestination && register.Value - scalarDestination < 2) return true;
             return instruction.Destinations.Any(destination => destination == register ||
-                (destination.Kind == register.Kind && instruction.Opcode.Contains("64", StringComparison.Ordinal) &&
+                (destination.Kind == register.Kind && instruction.DestinationWidth > 1 &&
                     register.Value > destination.Value && register.Value - destination.Value == 1));
         }
     }
