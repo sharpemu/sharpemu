@@ -390,10 +390,63 @@ public sealed partial class ResourceTracker
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
         handle.Operands.All(dword =>
             dword.Type == ScalarValueType.U32 &&
-            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarBufferWord(dword))) &&
-        handle.Operands.Any(DependsOnScalarBufferWord);
+            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarMemoryWord(dword))) &&
+        handle.Operands.Any(DependsOnScalarMemoryWord);
 
-    private static bool DependsOnScalarBufferWord(ScalarValue value)
+    private bool HasDeviceRecordCount(ScalarValue? handle) =>
+        handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+        !_plan.ValidateRuntimeValue(handle.Operands[2]) &&
+        IsLaneDerivedRecordCount(handle.Operands[2]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[0]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[1]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[3]);
+
+    private bool IsLaneDerivedRecordCount(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        var grounded = new HashSet<ScalarValue>();
+        var merges = new List<ScalarValue>();
+        var hasLaneValue = false;
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current)) continue;
+            if (current.Type != ScalarValueType.U32) return false;
+            if (current.Kind == ScalarValueKind.Phi)
+            {
+                if (current.Operands.Length == 0) return false;
+                merges.Add(current);
+                foreach (var incoming in current.Operands) pending.Push(incoming);
+            }
+            else if (current.Kind == ScalarValueKind.FirstLane)
+            {
+                hasLaneValue = true;
+                grounded.Add(current);
+            }
+            else if (_plan.ValidateRuntimeValue(current))
+            {
+                grounded.Add(current);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        // A loop must have an incoming value, not only a cycle of merge nodes.
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var merge in merges)
+                if (!grounded.Contains(merge) && merge.Operands.Any(grounded.Contains))
+                    changed |= grounded.Add(merge);
+        } while (changed);
+        return hasLaneValue && merges.All(grounded.Contains);
+    }
+
+    private bool DependsOnScalarMemoryWord(ScalarValue value)
     {
         var pending = new Stack<ScalarValue>();
         var visited = new HashSet<ScalarValue>();
@@ -405,7 +458,8 @@ public sealed partial class ResourceTracker
                 continue;
             }
 
-            if (current.Kind == ScalarValueKind.ScalarBufferWord)
+            if (current.Kind == ScalarValueKind.ScalarBufferWord ||
+                current.Kind == ScalarValueKind.ScalarAddressWord && !_plan.ValidateRuntimeValue(current))
             {
                 return true;
             }
@@ -951,7 +1005,8 @@ public sealed partial class ResourceTracker
             // Scalar loads can address buffers that have no host descriptor binding, while
             // vector buffer descriptors loaded from scalar-buffer data must stay device-side.
             if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
-                (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
+                (memory.Kind == MemoryResourceKind.Buffer &&
+                    (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
             {
                 memory.DeviceDescriptor = true;
                 _info.UsesDeviceAddresses = true;
