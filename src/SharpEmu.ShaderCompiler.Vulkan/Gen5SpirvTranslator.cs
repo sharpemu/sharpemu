@@ -3311,47 +3311,6 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
             {
                 var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
-                if (atomicSuffix is "SwapX2" or "OrX2")
-                {
-                    var wideAtomicOp = atomicSuffix == "SwapX2"
-                        ? SpirvOp.AtomicExchange
-                        : SpirvOp.AtomicOr;
-                    EmitExecConditional(() =>
-                    {
-                        var secondAddress = IAdd(dwordAddress, UInt(1));
-                        var inRange = _module.AddInstruction(
-                            SpirvOp.LogicalAnd,
-                            _boolType,
-                            IsBufferWordInRange(bindingIndex, dwordAddress),
-                            IsBufferWordInRange(bindingIndex, secondAddress));
-                        EmitConditional(inRange, () =>
-                        {
-                            var originalLow = EmitAtomic(
-                                wideAtomicOp,
-                                _uintType,
-                                BufferWordPointer(bindingIndex, dwordAddress),
-                                scope: 1,
-                                semantics: 0x48,
-                                value: () => LoadV(control.VectorData),
-                                comparator: () => UInt(0));
-                            var originalHigh = EmitAtomic(
-                                wideAtomicOp,
-                                _uintType,
-                                BufferWordPointer(bindingIndex, secondAddress),
-                                scope: 1,
-                                semantics: 0x48,
-                                value: () => LoadV(control.VectorData + 1),
-                                comparator: () => UInt(0));
-                            if (control.Glc)
-                            {
-                                StoreV(control.VectorData, originalLow);
-                                StoreV(control.VectorData + 1, originalHigh);
-                            }
-                        });
-                    });
-
-                    return true;
-                }
 
                 if (atomicSuffix is "Fmin" or "Fmax")
                 {
