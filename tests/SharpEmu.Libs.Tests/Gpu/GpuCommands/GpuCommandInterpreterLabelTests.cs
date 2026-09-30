@@ -167,12 +167,13 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Fact]
-    public void ReleaseMemoryNative_DataSelectionOne_WritesFlushesAndFollowsTheGcrBarrierRule()
+    public void ReleaseMemoryNative_DataSelectionOne_WritesSubmitsOnlyForAnInterruptAndFollowsTheGcrBarrierRule()
     {
         var runner = new StreamRunner();
 
+        // Without an interrupt the label rides in the open batch; the slice's own submit carries it.
         runner.Run(ReleaseMemoryNative(0x28, 5, 0, 0, 1, 0, Label, 0x77, 0));
-        Assert.Equal(new[] { "eop Write32", "flush" }, runner.Host.Calls);
+        Assert.Equal(new[] { "eop Write32" }, runner.Host.Calls);
         Assert.Equal(0x77u, runner.Host.ReadDword(Label));
 
         runner.Host.Calls.Clear();
@@ -253,7 +254,7 @@ public sealed class GpuCommandInterpreterLabelTests
         runner.Host.Calls.Clear();
         runner.Run(ReleaseMemoryWrapped(0x2F, 1u << 9, 1, 0, Label, 0x9, 0));
         Assert.Equal(0x9u, runner.Host.ReadDword(Label));
-        Assert.Equal(new[] { "barrier", "eop WriteBack32", "flush" }, runner.Host.Calls);
+        Assert.Equal(new[] { "barrier", "eop WriteBack32" }, runner.Host.Calls);
     }
 
     [Fact]

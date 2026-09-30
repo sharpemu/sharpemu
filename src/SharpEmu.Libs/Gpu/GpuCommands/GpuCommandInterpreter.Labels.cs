@@ -327,7 +327,16 @@ public sealed partial class GpuCommandInterpreter
         if (dataSelection == 1)
         {
             WriteEndOfPipe(false, cachePolicy, 0, 0x2F, cacheAction, 6, 2, destination, (uint)value, interruptSelector, interruptContextId);
-            _host.Flush();
+            // The label lands when the batch holding it completes. Without an interrupt nothing waits
+            // for it inside the slice, and every slice that makes progress ends with a flush - also
+            // when it stops at a WAIT_REG_MEM on this label - so the write cannot be held back.
+            // Submitting here instead split Superliminal's frames into ~35 extra command buffers, each
+            // ending the render pass and storing the attachments on a tile-based GPU.
+            if (interruptSelector != 0)
+            {
+                _host.Flush();
+            }
+
             return;
         }
 
