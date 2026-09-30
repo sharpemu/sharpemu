@@ -50,6 +50,28 @@ public sealed class ShaderHeaderRegistry
         _fusedPartsOf = fusedPartsOf;
     }
 
+    internal (ulong Address, byte[] Code)[] ReadDiagnosticCode(ulong codeAddress)
+    {
+        var ranges = new List<(ulong Address, byte[] Code)>();
+        void ReadRange(ulong address, ulong header)
+        {
+            Span<byte> sizeBytes = stackalloc byte[4];
+            if (header == 0 || !_context.Memory.TryRead(checked(header + ShaderSizeOffset), sizeBytes))
+                throw new InvalidDataException("The shader header is not readable.");
+            var size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(sizeBytes);
+            if (size == 0 || size > 16 * 1024 * 1024)
+                throw new InvalidDataException("The diagnostic shader size is outside the supported range.");
+            var code = new byte[size];
+            if (!_context.Memory.TryRead(address, code))
+                throw new InvalidDataException("The shader code is not readable.");
+            ranges.Add((address, code));
+        }
+        ReadRange(codeAddress, _headerOf(codeAddress));
+        if (_fusedPartsOf(codeAddress) is { } parts)
+            ReadRange(parts.ContinuationAddress, parts.ContinuationHeaderAddress);
+        return ranges.ToArray();
+    }
+
     public RegisteredShader Require(ulong codeAddress, string label)
     {
         var headerAddress = _headerOf(codeAddress);
