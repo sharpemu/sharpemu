@@ -15,6 +15,47 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 public sealed partial class GuestImageCacheTests
 {
     [Fact]
+    public void GarbageCollector_KeepsReusableImagesBelowDefaultPressure()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x12345678u));
+        var request = Color32(address);
+        var identifier = harness.Acquire(ref request);
+        harness.Worker.Run(() =>
+        {
+            for (var pass = 0; pass < 100; pass++)
+                harness.Images.RunGarbageCollector();
+        });
+        Assert.True(harness.Images.Contains(identifier));
+        Assert.Equal(identifier, harness.Acquire(ref request));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void GarbageCollector_StopsWhenUsageFallsBelowCollectionThreshold()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var first = Color32(address);
+        var second = Color32(address + 0x8000);
+        var firstIdentifier = harness.Acquire(ref first);
+        var secondIdentifier = harness.Acquire(ref second);
+        var threshold = harness.Image(firstIdentifier).AccountedSize + 1;
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(threshold, threshold, ulong.MaxValue, 81);
+            harness.Images.ResetRecency(new[] { firstIdentifier, secondIdentifier }, 81);
+            harness.Images.RunGarbageCollector();
+        });
+        Assert.False(harness.Images.Contains(firstIdentifier));
+        Assert.True(harness.Images.Contains(secondIdentifier));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void GarbageCollector_RetiresUnderPressureAndPublishesInOneTick()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
