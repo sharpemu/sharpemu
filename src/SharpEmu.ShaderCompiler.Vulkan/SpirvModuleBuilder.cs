@@ -182,6 +182,7 @@ public enum SpirvOp : ushort
     GroupNonUniformShuffleUp = 347,
     GroupNonUniformShuffleDown = 348,
     GroupNonUniformUMin = 354,
+    SetMeshOutputsExt = 5295,
 }
 
 public enum SpirvCapability : uint
@@ -217,6 +218,7 @@ public enum SpirvCapability : uint
     RuntimeDescriptorArray = 5302,
     PhysicalStorageBufferAddresses = 5347,
     SignedZeroInfNanPreserve = 4466,
+    MeshShadingExt = 5283,
 }
 
 public enum SpirvStorageClass : uint
@@ -239,6 +241,7 @@ public enum SpirvExecutionModel : uint
     Vertex = 0,
     Fragment = 4,
     GLCompute = 5,
+    MeshExt = 5365,
 }
 
 public enum SpirvExecutionMode : uint
@@ -247,6 +250,9 @@ public enum SpirvExecutionMode : uint
     DepthReplacing = 12,
     LocalSize = 17,
     SignedZeroInfNanPreserve = 4461,
+    OutputVertices = 26,
+    OutputPrimitivesExt = 5270,
+    OutputTrianglesExt = 5298,
 }
 
 public enum SpirvDecoration : uint
@@ -264,6 +270,7 @@ public enum SpirvDecoration : uint
     Offset = 35,
     NoContraction = 42,
     NonWritable = 24,
+    PerPrimitiveExt = 5271,
 }
 
 public enum SpirvBuiltIn : uint
@@ -291,6 +298,8 @@ public enum SpirvBuiltIn : uint
     SampleId = 18,
     SampleMask = 20,
     FragDepth = 22,
+    PrimitiveTriangleIndicesExt = 5296,
+    CullPrimitiveExt = 5299,
 }
 
 public enum SpirvImageDim : uint

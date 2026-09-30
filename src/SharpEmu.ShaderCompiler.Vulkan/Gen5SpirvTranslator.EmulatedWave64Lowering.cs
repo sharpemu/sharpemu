@@ -67,7 +67,7 @@ public static partial class Gen5SpirvTranslator
                     return;
                 }
 
-                if (context._lds != 0)
+                if (context._lds != 0 && context._stage != Gen5SpirvStage.Mesh)
                 {
                     // Metal exposes 32 KiB of threadgroup memory on the Apple
                     // GPUs we target. Reuse the tail of guest LDS so the
