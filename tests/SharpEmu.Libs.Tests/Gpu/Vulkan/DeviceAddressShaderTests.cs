@@ -27,6 +27,29 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     private const uint AddressHigh = 1;
     private const uint OffsetRegister = 3;
 
+    [Theory]
+    [InlineData("VPkAddI16", false, 0x80008000u)]
+    [InlineData("VPkAddI16", true, 0x7FFF7FFFu)]
+    [InlineData("VPkSubI16", false, 0x7FFE7FFEu)]
+    public void PackedSignedArithmetic_HandlesBothHalves(string opcode, bool clamp, uint expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            MoveVector(0, 3, 0),
+            GlobalMemory(8, "GlobalLoadDword", AddressLow, 3, 1, 1, 0),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Vop3p, opcode, [0u, 0u],
+                [Operand(0x7FFF7FFF), Operand(0x00010001)], [Gen5Operand.Vector(1)],
+                new Gen5Vop3pControl(0, 3, 0, 0, clamp)),
+            BufferAccess(24, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 1),
+            EndProgram(32));
+        var run = new Run(vulkan, program);
+        run.MapPage(GuestBase, new byte[16]);
+        run.Dispatch(GuestBase);
+        Assert.Equal(expected, run.ResultWord(0));
+        run.Finish(output, nameof(PackedSignedArithmetic_HandlesBothHalves));
+    }
+
     [Fact]
     public void PageBits_MatchTheHostCache() =>
         Assert.Equal(GuestBufferCache.CachingPageBits, Gen5SpirvTranslator.DeviceAddressPageBits);
