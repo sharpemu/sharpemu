@@ -10,6 +10,34 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class ScalarGraphDiskCacheTests
 {
     [Fact]
+    public void CachePreservesExcludedRegistersAcrossReloads()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var program = Program(ScalarLoad(0, 2, 8), EndProgram(8));
+            foreach (var mask in new[] { 0UL, 0xFCUL })
+            {
+                var direct = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, "0", mask);
+                var fresh = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory, mask);
+                var path = Path.Combine(directory, ScalarGraphDiskCache.Key(program, 0, 16, null, 64, mask) + ".graph");
+                var timestamp = File.GetLastWriteTimeUtc(path);
+                var restored = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory, mask);
+                Assert.Equal(timestamp, File.GetLastWriteTimeUtc(path));
+                foreach (var graph in new[] { direct, fresh, restored })
+                {
+                    Assert.Equal(mask, graph.ExcludedUserDataRegisters);
+                    Assert.Equal(mask != 0, graph.Accesses[0]!.Handle!.Operands[0].IsUndefined);
+                    Assert.Equal(mask == 0 ? new uint[] { 2, 3 } : Array.Empty<uint>(),
+                        BindingLayout.CollectUserDataRegisters(program, 0, 16, graph.ExcludedUserDataRegisters));
+                }
+            }
+            Assert.Equal(2, Directory.GetFiles(directory, "*.graph").Length);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void SnapshotPreservesCyclesInterningAndInstructionProvenance()
     {
         var program = Program(ScalarLoad(0, 0, 4), EndProgram(8));

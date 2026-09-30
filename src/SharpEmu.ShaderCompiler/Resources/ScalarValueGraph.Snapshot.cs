@@ -59,11 +59,11 @@ public sealed partial class ScalarValueGraph
     }
 
     internal static ScalarValueGraph ReadSnapshot(BinaryReader reader, Gen5ShaderProgram program,
-        uint userDataBase, uint userDataCount, IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize)
+        uint userDataBase, uint userDataCount, IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0)
     {
         var graph = new ScalarValueGraph(program,
             IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance),
-            MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount, waveSize);
+            MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount, waveSize, excludedUserDataRegisters);
         int Count(int maximum = 1_000_000)
         {
             var count = reader.ReadInt32();

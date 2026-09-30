@@ -708,7 +708,7 @@ internal sealed class ShaderProgramCache
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
         BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
