@@ -326,7 +326,7 @@ public sealed class DirectImageTableTests
 
         var success = ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read),
             ref snapshot, ref specialization, out var failure);
-        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxImages, success);
+        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxIndirectImageCandidates, success);
         if (success)
         {
             Assert.Equal(ResourceMaterializationFailure.None, failure);
