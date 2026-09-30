@@ -23,6 +23,22 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
     public void Dispose() => _fatal.Dispose();
 
+    [Fact]
+    public void IeeeModeChangesEveryStageKey()
+    {
+        var ordinary = new List<uint>();
+        var ieee = new List<uint>();
+        StageStaticKey.Build(new VertexInputInfo(), 0, ordinary);
+        StageStaticKey.Build(new VertexInputInfo { IeeeMode = true }, 0, ieee);
+        Assert.False(ordinary.SequenceEqual(ieee));
+        StageStaticKey.Build(new PixelInputInfo(), ordinary);
+        StageStaticKey.Build(new PixelInputInfo { IeeeMode = true }, ieee);
+        Assert.False(ordinary.SequenceEqual(ieee));
+        StageStaticKey.Build(new ComputeInputInfo(), ordinary);
+        StageStaticKey.Build(new ComputeInputInfo { IeeeMode = true }, ieee);
+        Assert.False(ordinary.SequenceEqual(ieee));
+    }
+
     // Forwards each pipeline request to the static builder and keeps the description.
     private sealed class DescribingProvider : IShaderPipelineProvider
     {

@@ -33,6 +33,7 @@ public static class ComputeStageInputResolver
             DispatchThreadsY = threadDimensions ? dispatchY : 0,
             DispatchThreadsZ = threadDimensions ? dispatchZ : 0,
             LocalDataShareDwords = (uint)compute.LocalDataShareSize * LocalDataShareGranuleDwords,
+            IeeeMode = compute.IeeeMode,
             ScratchDwords = shader.ScratchDwords,
             GroupIdX = compute.ThreadGroupIdXEnable,
             GroupIdY = compute.ThreadGroupIdYEnable,

@@ -166,6 +166,7 @@ public sealed class ShaderCompileRequest
     public bool HostWave64Supported { get; init; }
     public bool HostComputeSubgroup32 { get; init; }
     public bool EnableExecGuardElision { get; init; } = true;
+    public bool IeeeMode { get; init; }
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 
