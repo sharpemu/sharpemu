@@ -17,6 +17,39 @@ public sealed class GraphicsRejectionPolicyTests
     private const ulong PixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
     private const ulong TableAddress = PipelineTestGuest.MemoryBase + 0x40000;
 
+    [Fact]
+    public void RejectedGraphicsDumpSavesCodeAndRegistersWithoutCompilation()
+    {
+        var variables = new[] { "SHARPEMU_DUMP_SPIRV", "SHARPEMU_SHADER_SPIRV_DUMP_DIR", "SHARPEMU_DUMP_SPIRV_ADDRESS" };
+        var previous = variables.Select(Environment.GetEnvironmentVariable).ToArray();
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-rejected-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable(variables[0], "1");
+            Environment.SetEnvironmentVariable(variables[1], directory);
+            Environment.SetEnvironmentVariable(variables[2], null);
+            var guest = new PipelineTestGuest();
+            guest.RegisterProgram(VertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram);
+            var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+            var banks = new RegisterBanks(message => new InvalidOperationException(message));
+            banks.Shader.Vertex.ExportAddress = VertexAddress;
+            banks.Context.ShaderStages = 0x2000;
+            cache.DumpRejectedGraphics(banks, false);
+            cache.DumpRejectedGraphics(banks, false);
+            var json = Assert.Single(Directory.GetFiles(directory, "*.json"));
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(json));
+            Assert.Equal(0x2000u, document.RootElement.GetProperty("ShaderStages").GetUInt32());
+            Assert.Equal(VertexAddress, document.RootElement.GetProperty("Vertex").GetProperty("ExportAddress").GetUInt64());
+            Assert.Equal(PipelineTestGuest.EndProgram.Length * 4, File.ReadAllBytes(Assert.Single(Directory.GetFiles(directory, "*.bin"))).Length);
+            Assert.Empty(guest.Compiler.Requests);
+        }
+        finally
+        {
+            for (var index = 0; index < variables.Length; index++) Environment.SetEnvironmentVariable(variables[index], previous[index]);
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+    }
+
     [Theory]
     [InlineData(null, false)]
     [InlineData("0", false)]
