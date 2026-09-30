@@ -28,6 +28,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private KhrSwapchain _swapchainApi = null!;
         private delegate* unmanaged<Device, DebugUtilsObjectNameInfoEXT*, Result> _setDebugUtilsObjectName;
         private delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void> _cmdBeginDebugUtilsLabel;
+        private delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void> _cmdInsertDebugUtilsLabel;
         private delegate* unmanaged<CommandBuffer, void> _cmdEndDebugUtilsLabel;
         private Instance _instance;
         private SurfaceKHR _surface;
@@ -179,6 +180,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var setObjectName = _vk.GetDeviceProcAddr(_device, "vkSetDebugUtilsObjectNameEXT");
             var beginLabel = _vk.GetDeviceProcAddr(_device, "vkCmdBeginDebugUtilsLabelEXT");
+            var insertLabel = _vk.GetDeviceProcAddr(_device, "vkCmdInsertDebugUtilsLabelEXT");
             var endLabel = _vk.GetDeviceProcAddr(_device, "vkCmdEndDebugUtilsLabelEXT");
             _setDebugUtilsObjectName =
                 (delegate* unmanaged<Device, DebugUtilsObjectNameInfoEXT*, Result>)
@@ -186,6 +188,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _cmdBeginDebugUtilsLabel =
                 (delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void>)
                 beginLabel.Handle;
+            _cmdInsertDebugUtilsLabel =
+                (delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void>)
+                insertLabel.Handle;
             _cmdEndDebugUtilsLabel =
                 (delegate* unmanaged<CommandBuffer, void>)
                 endLabel.Handle;
@@ -216,6 +221,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     PObjectName = namePointer,
                 };
                 _ = _setDebugUtilsObjectName(_device, &info);
+            }
+        }
+
+        private void InsertDebugLabel(CommandBuffer commandBuffer, string name)
+        {
+            if (_cmdInsertDebugUtilsLabel is null || commandBuffer.Handle == 0) return;
+            var bytes = NullTerminatedUtf8(name);
+            fixed (byte* namePointer = bytes)
+            {
+                var label = new DebugUtilsLabelEXT
+                {
+                    SType = StructureType.DebugUtilsLabelExt,
+                    PLabelName = namePointer,
+                };
+                _cmdInsertDebugUtilsLabel(commandBuffer, &label);
             }
         }
 

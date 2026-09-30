@@ -31,6 +31,11 @@ public sealed partial class GpuCommandInterpreter
             instanceCount = InstanceCount;
         }
 
+        if (IndexedDrawTrace.Enabled)
+        {
+            var sample = IndexedDrawTrace.Capture(indexCount, IndexTypeAndSize, indexAddress, _host.Memory.TryRead);
+            IndexedDrawTrace.Write(sample, "command", SubmitId, packetAddress);
+        }
         _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource));
     }
 

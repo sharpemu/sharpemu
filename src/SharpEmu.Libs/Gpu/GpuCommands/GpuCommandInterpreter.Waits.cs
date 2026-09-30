@@ -168,7 +168,9 @@ public sealed partial class GpuCommandInterpreter
                 $"address=0x{address:X16} count={executeCount} remaining={packet.Remaining}.");
         }
 
-        return ReadDword(address) == 0 ? payloadDwords + executeCount : payloadDwords;
+        if (ReadDword(address) != 0) return payloadDwords;
+        TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
+        return payloadDwords + executeCount;
     }
 
     internal uint SetPredicationPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
