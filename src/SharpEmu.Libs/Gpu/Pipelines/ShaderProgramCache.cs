@@ -106,6 +106,7 @@ internal sealed class ProgramSourceEntry
 // the permutation whose specialization and push-data start match, else compiles one more.
 internal sealed class ShaderProgramCache
 {
+    private readonly ImageDescriptorTrace _imageDescriptorTrace = new();
     private const uint MaxInstructionScan = 16384;
 
     private readonly CpuContext _context;
@@ -286,6 +287,7 @@ internal sealed class ShaderProgramCache
             }
         }
 
+        _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
             foreach (var candidate in entry.Permutations)
