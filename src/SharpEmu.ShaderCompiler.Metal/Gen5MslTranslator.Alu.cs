@@ -1558,15 +1558,6 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
 
-            // S_SWAPPC_B64 is a dynamic call/return operation.  The Gen5
-            // translator has already linearized the reachable shader body,
-            // so there is no host program counter to exchange here.  Its
-            // single pair operand must not be treated as a binary 64-bit op.
-            if (instruction.Opcode == "SSwappcB64")
-            {
-                return true;
-            }
-
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {

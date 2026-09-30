@@ -19,6 +19,12 @@ public static partial class Gen5MslTranslator
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5MslShader shader, out string error)
     {
         shader = default!;
+        if (request.Program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64" ||
+            instruction.Control is ShaderCallMatchControl or ShaderCallEntryControl or ShaderCallFaultControl))
+        {
+            error = "Metal does not support linked shader calls.";
+            return false;
+        }
         try
         {
             BindingLayoutValidator.Validate(

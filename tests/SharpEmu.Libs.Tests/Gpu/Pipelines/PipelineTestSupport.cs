@@ -125,6 +125,8 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
 
     public string BackendName => "Fake";
 
+    public bool LinkedShaderCallsSupported { get; set; } = true;
+
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {

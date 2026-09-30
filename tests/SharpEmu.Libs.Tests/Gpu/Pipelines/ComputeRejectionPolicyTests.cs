@@ -18,6 +18,34 @@ public sealed class ComputeRejectionPolicyTests
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnsupportedShaderCallsRespectTheRejectionPolicy(bool strict)
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest();
+        guest.Compiler.LinkedShaderCallsSupported = false;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, [0xBE8E2100, 0xBF810000]);
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, []);
+        var cursor = 0u;
+        if (strict)
+        {
+            var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
+                source, PipelineTestGuest.ComputeOptions(32), true, ref cursor, out _, out _, out _));
+            Assert.Contains("does not support linked shader calls", failure.Message);
+        }
+        else
+        {
+            Assert.False(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32),
+                false, ref cursor, out _, out _, out var rejection));
+            Assert.Contains("does not support linked shader calls", rejection);
+        }
+        Assert.Empty(guest.Compiler.Requests);
+        Assert.Empty(guest.Host.Modules);
+        Assert.Equal(0u, cursor);
+    }
+
+    [Theory]
     [InlineData(null, false)]
     [InlineData("0", false)]
     [InlineData("1", false)]
