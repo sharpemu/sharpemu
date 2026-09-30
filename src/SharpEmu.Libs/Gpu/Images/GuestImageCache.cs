@@ -100,6 +100,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         _disposed = true;
+        if (ImageClearTrace.Enabled) _volumeTraceStates.WriteTo(Console.Error, "VolumeImageHistory");
+        PrintRangeResourceHistory();
         _slots.ForEach((_, image) => image.Dispose());
         _backingPool?.Dispose();
         _tiler.Dispose();
@@ -179,13 +181,30 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         using var held = _lock.Hold();
         if (TryReuseLookup(ref request, exactFormat, out var reused))
         {
+            if (ImageClearTrace.Enabled) ImageTraceRange.NoteImageLookup(request.Description.Data.Address, request.Description.Data.Size);
+            PrintResourceHistory(request);
+            TraceVolumeState("lookup", _slots[reused], request);
             return reused;
         }
 
         var original = request;
         var generation = _lookupGeneration;
         var result = ResourceSlotIdentifier.Invalid;
+        if (ImageClearTrace.Enabled) ImageTraceRange.NoteImageLookup(request.Description.Data.Address, request.Description.Data.Size);
+        PrintResourceHistory(request);
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        if (ImageClearTrace.Enabled && request.TraceTextureMetadataAddress != 0)
+        {
+            ImageClearTrace.Write($"texture-owner-search image=0x{request.Description.Data.Address:X16} candidates={candidates.Count}");
+            foreach (var candidate in candidates)
+            {
+                var cached = _slots[candidate];
+                ImageClearTrace.Write($"texture-owner-candidate request=0x{request.Description.Data.Address:X16} " +
+                    $"cached=0x{cached.Description.Data.Address:X16} size=0x{cached.Description.Data.Size:X} " +
+                    $"format={cached.Description.PixelFormat} host=0x{cached.Backing.Handle.Handle:X} " +
+                    $"cpuDirty={cached.IsCpuDirty} bufferDirty={cached.IsBufferModified} gpuDirty={cached.IsGpuModified} target={cached.Uses.RenderTarget}");
+            }
+        }
         foreach (var imageIdentifier in candidates)
         {
             if (HasSameBacking(_slots[imageIdentifier].Description, request.Description, exactFormat))
@@ -305,6 +324,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             RememberLookup(original, exactFormat, request.View, result);
         }
 
+        TraceVolumeState("lookup", image, request);
         return result;
     }
 
@@ -377,6 +397,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 throw SubmissionScheduler.Fatal($"The texture role is invalid: role={request.Role}.");
         }
 
+        TraceVolumeState("acquire", image, request);
         return image.GetOrCreateView(request.View);
     }
 
@@ -398,7 +419,9 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         TouchImage(image);
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
+        TraceVolumeState("color-acquire", image, request);
         RefreshFromGuest(imageIdentifier, request);
+        TraceMetadataBinding(request);
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
             image.Description.Metadata = request.Description.Metadata;
@@ -448,7 +471,9 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         TouchImage(image);
         image.MarkGpuModified();
         image.Uses.DepthTarget = true;
+        TraceVolumeState("depth-acquire", image, request);
         RefreshFromGuest(imageIdentifier, request);
+        TraceMetadataBinding(request);
         if (request.Description.HasMetadata)
         {
             image.Description.Metadata = request.Description.Metadata;
@@ -568,6 +593,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     {
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
+        RecordResourceHistory("gpu-image-written", image.Description.Data.Address, image.Description.Data.Size,
+            image.Description.PixelFormat, image.Description.Extent);
         if (!image.Registered || image.DepthOwner.IsValid)
         {
             throw SubmissionScheduler.Fatal($"An image that is not available cannot be marked GPU-written: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid}.");
@@ -670,6 +697,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             _imageCreationTotals.TryGetValue(creationPath, out var totals);
             _imageCreationTotals[creationPath] = (totals.Count + 1, totals.Bytes + _slots[imageIdentifier].Backing.AllocationSize);
         }
+        TraceVolumeState("create", _slots[imageIdentifier], ImageRequest.Refresh(description, ImageRole.Texture));
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
             AddToIndex(imageIdentifier);
